@@ -23,7 +23,9 @@ use tokio::task::JoinHandle;
 use tracing::info;
 use tracing::log::warn;
 
-pub const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.8;
+// KAJI (ADR-03): proactive context engineering — trigger compaction at the
+// low bound of the AIAD budget band [0.6, 0.7] instead of goose's reactive 0.8.
+pub const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.6;
 
 pub(crate) const TOOLCALL_SUMMARIZATION_BATCH_SIZE: usize = 10;
 

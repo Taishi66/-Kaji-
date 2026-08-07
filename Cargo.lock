@@ -4966,6 +4966,7 @@ dependencies = [
  "insta",
  "jsonschema",
  "jsonwebtoken",
+ "kaji-core",
  "keyring",
  "libc",
  "lru 0.18.0",
