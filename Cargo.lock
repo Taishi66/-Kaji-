@@ -4952,7 +4952,6 @@ dependencies = [
  "gethostname",
  "goose-acp-macros",
  "goose-download-manager",
- "goose-mcp",
  "goose-providers",
  "goose-sdk-types",
  "goose-test-support",
