@@ -12,7 +12,6 @@
 //! state-machine path — that doc handles parity concerns across both agent-loop
 //! implementations.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use kaji_core::memory::{Memory, RecallResult};
@@ -20,9 +19,12 @@ use kaji_core::memory::{Memory, RecallResult};
 use crate::config::paths::Paths;
 
 /// A session-scoped, file-backed memory handle.
+///
+/// Persistence is delegated to the SQLite + FTS5 store in kaji-core: every
+/// read/write hits the file directly, so there is no serialization step and no
+/// explicit save. One DB file per session, kept under the goose data dir.
 pub struct SessionMemory {
     store: Memory,
-    path: PathBuf,
 }
 
 impl SessionMemory {
@@ -30,12 +32,9 @@ impl SessionMemory {
     pub fn load(session_id: &str) -> Self {
         let dir = Paths::in_data_dir("kaji/memory");
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join(format!("{session_id}.json"));
-        let store = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default();
-        SessionMemory { store, path }
+        let path = dir.join(format!("{session_id}.db"));
+        let store = Memory::open(&path).unwrap_or_default();
+        SessionMemory { store }
     }
 
     /// Retrieve the top-k facts relevant to `query`. Zero LLM tokens spent.
@@ -46,18 +45,11 @@ impl SessionMemory {
     /// Persist a fact with its entities; optional TTL for volatile facts.
     pub fn remember(&mut self, text: &str, entities: &[&str], ttl: Option<Duration>) {
         self.store.remember(text, entities, ttl);
-        self.save();
     }
 
     /// True when the caller's usage ratio crossed the AIAD budget band.
     pub fn should_compact(&self, usage_ratio: f64) -> bool {
         self.store.should_compact(usage_ratio)
-    }
-
-    fn save(&self) {
-        if let Ok(raw) = serde_json::to_string_pretty(&self.store) {
-            let _ = std::fs::write(&self.path, raw);
-        }
     }
 }
 

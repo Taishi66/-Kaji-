@@ -1,13 +1,13 @@
 use std::time::Duration;
 
-use kaji_core::memory::Memory;
+use kaji_core::memory::{Memory, RecallHit};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
 }
 
 #[test]
-fn recall_ranks_entity_hits_first() {
+fn recall_excludes_off_topic_and_ranks_relevant() {
     let mut m = Memory::new();
     m.remember(
         "extract the onboarding checklist for the PO dashboard",
@@ -20,17 +20,29 @@ fn recall_ranks_entity_hits_first() {
         None,
     );
 
-    let hits = m.recall("aiad toggle session", 2);
-    assert_eq!(hits.hits.len(), 2);
-    assert!(
-        hits.hits[0].body.contains("AIAD"),
-        "AIAD entry should rank top"
-    );
-    assert!(hits.hits[0].score > hits.hits[1].score);
+    let hits = m.recall("aiad toggle session", 5);
+    // The AIAD entry matches query terms (toggle, session); the onboarding
+    // entry matches none and is excluded by MATCH.
+    assert_eq!(hits.hits.len(), 1);
+    assert!(hits.hits[0].body.contains("AIAD"));
 }
 
 #[test]
-fn recall_returns_top_k_and_default_0_tokens() {
+fn entity_weight_boosts_matching_entity() {
+    let mut m = Memory::new();
+    // Same query term in both; only the first declares it as an entity.
+    m.remember("the proxy handles requests", &["proxy"], None);
+    m.remember("proxy appears in comments only", &["other"], None);
+    m.remember("unrelated filler here", &["other"], None);
+
+    let hits = m.recall("proxy", 2);
+    assert_eq!(hits.hits.len(), 2);
+    // The entity-declared entry must outrank the plain-text one.
+    assert!(hits.hits[0].body.contains("handles"));
+}
+
+#[test]
+fn recall_returns_top_k() {
     let mut m = Memory::new();
     for i in 0..10 {
         m.remember(
@@ -49,8 +61,6 @@ fn ttl_expired_entries_are_swept_on_remember() {
     let id = m.remember("this fact expires fast", &["transient"], Some(secs(1)));
     assert_eq!(m.len(), 1);
 
-    // Force age past the TTL.
-    m.forget_where(|_| false); // no-op, keep structure explicit
     std::thread::sleep(secs(2));
     // Sweep happens on next remember.
     m.remember("replacement fact", &["replacement"], None);
@@ -85,17 +95,31 @@ fn should_compact_bounds_the_aiad_band() {
 }
 
 #[test]
-fn persists_and_loads_roundtrip() {
-    let mut m = Memory::new();
-    m.remember("remember me", &["note"], None);
+fn persists_and_reopens_from_disk() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mem.json");
-    std::fs::write(&path, serde_json::to_string(&m).unwrap()).unwrap();
+    let path = dir.path().join("mem.db");
+    {
+        let mut m = Memory::open(&path).unwrap();
+        m.remember("remember me", &["note"], None);
+    }
 
-    let raw = std::fs::read_to_string(&path).unwrap();
-    let loaded: kaji_core::memory::Memory = serde_json::from_str(&raw).unwrap();
-    assert_eq!(loaded.len(), 1);
-    let hits = loaded.recall("remember", 1);
+    let m = Memory::open(&path).unwrap();
+    assert_eq!(m.len(), 1);
+    let hits = m.recall("remember", 1);
     assert_eq!(hits.hits.len(), 1);
     assert_eq!(hits.hits[0].body, "remember me");
+}
+
+#[test]
+fn fts_query_with_special_chars_is_safe() {
+    let mut m = Memory::new();
+    m.remember("kaji-core uses serde + rusqlite", &["rust"], None);
+    // Parens/colons would break a raw MATCH; must be quoted away.
+    let res = m.recall("kaji-core: (rust)", 5);
+    assert_eq!(res.hits.len(), 1, "special chars must not break recall");
+}
+
+#[test]
+fn hit_type_is_exported() {
+    let _: Option<RecallHit> = None;
 }

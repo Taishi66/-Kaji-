@@ -4,7 +4,7 @@ use goose::kaji::SessionMemory;
 
 fn init() {
     static ONCE: Once = Once::new();
-ONCE.call_once(|| {
+    ONCE.call_once(|| {
         let root = std::env::temp_dir().join("kaji-goose-test");
         std::env::set_var("GOOSE_PATH_ROOT", root);
     });
