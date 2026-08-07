@@ -6386,6 +6386,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaji-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "keyring"
 version = "3.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
