@@ -1,8 +1,8 @@
-import type { GooseMcpHostCapabilities } from "./mcp-apps.js";
+import type { KajiMcpHostCapabilities } from "./mcp-apps.js";
 
-export interface GooseClientCapabilitiesMeta {
-  goose?: {
-    mcpHostCapabilities?: GooseMcpHostCapabilities;
+export interface KajiClientCapabilitiesMeta {
+  kaji?: {
+    mcpHostCapabilities?: KajiMcpHostCapabilities;
     customNotifications?: boolean;
   };
 }

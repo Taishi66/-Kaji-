@@ -26,12 +26,12 @@ export function hasLocalInferenceCapability(
     return false;
   }
 
-  const goose = meta.goose;
-  if (!isRecord(goose)) {
+  const kaji = meta.kaji;
+  if (!isRecord(kaji)) {
     return false;
   }
 
-  return 'localInference' in goose;
+  return 'localInference' in kaji;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

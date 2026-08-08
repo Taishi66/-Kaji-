@@ -1,0 +1,28 @@
+{
+  "name": "@aaif/kaji-binary-darwin-arm64",
+  "version": "0.20.2",
+  "description": "Kaji binary for macOS ARM64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aaif-goose/goose.git"
+  },
+  "bin": {
+    "kaji": "bin/kaji"
+  },
+  "keywords": [
+    "kaji",
+    "ai",
+    "agent",
+    "binary"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/kaji"
+  ]
+}

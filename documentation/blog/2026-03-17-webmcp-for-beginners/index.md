@@ -52,7 +52,7 @@ WebMCP takes a different approach. It only works on websites that implement it, 
 
 In practice, that difference changes the interaction model. With browser automation, the agent follows a sequence of steps that approximate what a user would do. With WebMCP, the agent skips that process and directly invokes the underlying action.
 
-If you are using goose, Chrome DevTools MCP is still useful because it connects goose to the browser. It acts as the bridge. The improvement in how the agent interacts with the site comes from WebMCP itself.
+If you are using kaji, Chrome DevTools MCP is still useful because it connects kaji to the browser. It acts as the bridge. The improvement in how the agent interacts with the site comes from WebMCP itself.
 
 ## WebMCP in Practice
 
@@ -148,9 +148,9 @@ You can define tools in JavaScript, which works well for dynamic behavior and ap
 
 In this case, the browser turns the form into a tool automatically. This approach works well for simple use cases where you do not need custom logic.
 
-## Connecting goose to WebMCP
+## Connecting kaji to WebMCP
 
-Because WebMCP runs in the browser, you need a way for goose to interact with it. That is where Chrome DevTools MCP comes in. It acts as a bridge between goose and the browser, allowing the agent to access WebMCP tools.
+Because WebMCP runs in the browser, you need a way for kaji to interact with it. That is where Chrome DevTools MCP comes in. It acts as a bridge between kaji and the browser, allowing the agent to access WebMCP tools.
 
 One thing I noticed while testing this is that the prompt alone was not always enough to get the agent to use WebMCP. I had to provide hints that explained how to discover and execute tools:
 
@@ -182,7 +182,7 @@ Right now, WebMCP only works on sites that choose to implement it, which limits 
   <meta property="og:description" content="WebMCP lets websites expose structured actions that AI agents can call directly. This guide explains how it works, how it differs from MCP and browser automation, and how to build your own WebMCP-enabled site." />
   <meta property="og:image" content="https://goose-docs.ai/assets/images/webmcp-for-beginners-f12da638fe0f49acf924c720a7d1243a.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta property="twitter:domain" content="goose-docs.ai" />
+  <meta property="twitter:domain" content="kaji-docs.ai" />
   <meta name="twitter:title" content="WebMCP for Beginners" />
   <meta name="twitter:description" content="WebMCP lets websites expose structured actions that AI agents can call directly. This guide explains how it works, how it differs from MCP and browser automation, and how to build your own WebMCP-enabled site." />
   <meta name="twitter:image" content="https://goose-docs.ai/assets/images/webmcp-for-beginners-f12da638fe0f49acf924c720a7d1243a.png" />

@@ -57,7 +57,7 @@ function permissionRequest(sessionId: string, toolCallId = 'tool-1'): RequestPer
         },
       ],
       _meta: {
-        goose: {
+        kaji: {
           toolCall: {
             toolName: 'edit_file',
           },
@@ -147,7 +147,7 @@ function userSteerChunkNotification(
         text,
       },
       _meta: {
-        goose: {
+        kaji: {
           messageId,
           steer: true,
         },
@@ -162,7 +162,7 @@ function activeRunNotification(sessionId: string, activeRunId: string | null): S
     update: {
       sessionUpdate: 'session_info_update',
       _meta: {
-        goose: {
+        kaji: {
           activeRunId,
         },
       },
@@ -176,7 +176,7 @@ function queuedSteerNotification(sessionId: string, messageId: string): SessionN
     update: {
       sessionUpdate: 'session_info_update',
       _meta: {
-        goose: {
+        kaji: {
           queuedSteer: { messageId, runId: 'run-1' },
         },
       },

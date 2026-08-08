@@ -19,7 +19,7 @@ import { Gavel } from './Gavel';
 import { GlassWater } from './GlassWater';
 import { Grape } from './Grape';
 import { Gear } from './Gear';
-import { Goose } from './Goose';
+import { Kaji } from './Kaji';
 import { Microphone } from './Microphone';
 import { Watch0 } from './Watch0';
 import { Watch1 } from './Watch1';
@@ -59,5 +59,5 @@ export {
   Watch4,
   Watch5,
   Watch6,
-  Goose,
+  Kaji,
 };

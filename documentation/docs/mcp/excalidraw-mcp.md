@@ -1,24 +1,24 @@
 ---
 title: Excalidraw Extension
-description: Add Excalidraw MCP App as a goose Extension
+description: Add Excalidraw MCP App as a kaji Extension
 ---
 
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 import YouTubeShortEmbed from '@site/src/components/YouTubeShortEmbed';
 import CLIExtensionInstructions from '@site/src/components/CLIExtensionInstructions';
-import GooseDesktopInstaller from '@site/src/components/GooseDesktopInstaller';
+import KajiDesktopInstaller from '@site/src/components/KajiDesktopInstaller';
 
 <YouTubeShortEmbed videoUrl="https://www.youtube.com/embed/REc5IvWvI5s" />
 
-This tutorial covers how to add the [Excalidraw MCP App](https://github.com/excalidraw/excalidraw-mcp) as a goose extension that enables goose to draw hand sketched Excalidraw diagrams in real time.
+This tutorial covers how to add the [Excalidraw MCP App](https://github.com/excalidraw/excalidraw-mcp) as a kaji extension that enables kaji to draw hand sketched Excalidraw diagrams in real time.
 
 :::tip Quick Install
 <Tabs groupId="interface">
-  <TabItem value="ui" label="goose Desktop" default>
-   [Launch the installer](goose://extension?cmd=http&id=excalidraw&name=Excalidraw&url=https%3A%2F%2Fexcalidraw-mcp-app.vercel.app%2Fmcp&description=Excalidraw%20MCP%20App%20for%20AI-powered%20diagramming)
+  <TabItem value="ui" label="kaji Desktop" default>
+   [Launch the installer](kaji://extension?cmd=http&id=excalidraw&name=Excalidraw&url=https%3A%2F%2Fexcalidraw-mcp-app.vercel.app%2Fmcp&description=Excalidraw%20MCP%20App%20for%20AI-powered%20diagramming)
   </TabItem>
-  <TabItem value="cli" label="goose CLI">
+  <TabItem value="cli" label="kaji CLI">
   Add a `Remote Extension (Streamable HTTP)` extension type with:
 
   **Endpoint URL**
@@ -33,8 +33,8 @@ This tutorial covers how to add the [Excalidraw MCP App](https://github.com/exca
 These steps configure the Remote MCP Server. For other deployment options, see the [Excalidraw MCP App documentation](https://github.com/excalidraw/excalidraw-mcp).
 
 <Tabs groupId="interface">
-  <TabItem value="ui" label="goose Desktop" default>
-    <GooseDesktopInstaller
+  <TabItem value="ui" label="kaji Desktop" default>
+    <KajiDesktopInstaller
       extensionId="Excalidraw"
       extensionName="Excalidraw MCP App"
       description="Excalidraw MCP App for diagramming"
@@ -44,7 +44,7 @@ These steps configure the Remote MCP Server. For other deployment options, see t
     />
 
   </TabItem>
-  <TabItem value="cli" label="goose CLI">
+  <TabItem value="cli" label="kaji CLI">
     <CLIExtensionInstructions
       name="Excalidraw"
       description="Excalidraw MCP App for diagramming"
@@ -58,14 +58,14 @@ These steps configure the Remote MCP Server. For other deployment options, see t
 
 ## Example Usage
 
-In this example, we use the Excalidraw MCP App to have Goose visualize its own automation pipeline in real time. This demonstrates how Goose can connect to live tools, reason about workflows, and generate structured diagrams element by element.
+In this example, we use the Excalidraw MCP App to have Kaji visualize its own automation pipeline in real time. This demonstrates how Kaji can connect to live tools, reason about workflows, and generate structured diagrams element by element.
 
-### goose Prompt
+### kaji Prompt
 ```
-Hey Goose review my video automation recipe and create a visual of the automation pipeline for me. I want clean lines and clear labels.
+Hey Kaji review my video automation recipe and create a visual of the automation pipeline for me. I want clean lines and clear labels.
 ```
 
-### goose Output
+### kaji Output
 
 ```
 

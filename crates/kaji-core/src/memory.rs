@@ -9,12 +9,12 @@
 //!   `memory_entries` keeps the text (no duplication), kept in sync by
 //!   triggers — incremental writes, crash-safe in WAL mode (ADR-004).
 //! - **Budget**: compaction triggers at the AIAD band low bound [0.6, 0.7]
-//!   instead of goose's reactive 0.8 (proactive context engineering).
+//!   instead of kaji's reactive 0.8 (proactive context engineering).
 //! - **Temporal invalidation**: every entry carries a timestamp and an optional
 //!   ttl; expired entries are swept on `remember` and excluded from `recall`,
 //!   plugging the ADR-03 "temporal invalidation" gap.
 //!
-//! `rusqlite` links the system SQLite shared by `sqlx-sqlite` (goose session),
+//! `rusqlite` links the system SQLite shared by `sqlx-sqlite` (kaji session),
 //! so no vendored C is compiled and both crates share one library.
 
 use std::path::Path;
@@ -23,11 +23,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::Connection;
 
 /// AIAD-prescribed compaction budget band. Compaction is triggered when the
-/// context fill ratio reaches the low end, not goose's reactive 0.8.
+/// context fill ratio reaches the low end, not kaji's reactive 0.8.
 pub const BUDGET_MIN: f64 = 0.6;
 pub const BUDGET_MAX: f64 = 0.7;
-/// Borrowed from the retained goose context_mgmt constant for parity.
-pub const GOOSE_LEGACY_THRESHOLD: f64 = 0.8;
+/// Borrowed from the retained kaji context_mgmt constant for parity.
+pub const KAJI_LEGACY_THRESHOLD: f64 = 0.8;
 
 /// FTS5 column weights passed to `bm25()`; the entities column outranks plain
 /// text (mirrors the POC's entity IDF boost, now at query time).
@@ -324,7 +324,7 @@ impl Memory {
 
     /// True when the aggregate historical context fill has crossed the AIAD
     /// low bound. Callers pass the ratio of used tokens to context limit
-    /// (as goose's `check_if_compaction_needed` computes).
+    /// (as kaji's `check_if_compaction_needed` computes).
     pub fn should_compact(&self, usage_ratio: f64) -> bool {
         usage_ratio >= BUDGET_MIN
     }

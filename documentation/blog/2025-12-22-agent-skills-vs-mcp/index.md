@@ -85,7 +85,7 @@ That's progress, not replacement.
   <meta property="og:description" content="An overview of Agent Skills vs MCP" />
   <meta property="og:image" content="https://goose-docs.ai/assets/images/skills-vs-mcp-f2d83cbf65b3ddb4f9294470ab653355.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta property="twitter:domain" content="goose-docs.ai" />
+  <meta property="twitter:domain" content="kaji-docs.ai" />
   <meta name="twitter:title" content="Did Skills Kill MCP?" />
   <meta name="twitter:description" content="An overview of Agent Skills vs MCP" />
   <meta name="twitter:image" content="https://goose-docs.ai/assets/images/skills-vs-mcp-f2d83cbf65b3ddb4f9294470ab653355.png" />

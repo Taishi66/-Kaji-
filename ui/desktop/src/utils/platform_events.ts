@@ -1,4 +1,4 @@
-import type { GooseApp } from '../types/apps';
+import type { KajiApp } from '../types/apps';
 import { listMcpApps } from '../acp/mcp-apps';
 
 interface PlatformEventData {
@@ -24,7 +24,7 @@ async function handleAppsEvent(eventType: string, eventData: PlatformEventData):
 
   const apps = await listMcpApps(sessionId);
 
-  const targetApp = apps.find((app: GooseApp) => app.name === app_name);
+  const targetApp = apps.find((app: KajiApp) => app.name === app_name);
 
   switch (eventType) {
     case 'app_created':

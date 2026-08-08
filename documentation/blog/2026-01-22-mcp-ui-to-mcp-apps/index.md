@@ -54,7 +54,7 @@ So the natural question is:
 
 The short answer: portability.
 
-As powerful as MCP-UI is, it’s still very much **host-specific**. It works beautifully inside goose, but the question that kept sitting in the back of everyone's mind was:
+As powerful as MCP-UI is, it’s still very much **host-specific**. It works beautifully inside kaji, but the question that kept sitting in the back of everyone's mind was:
 
 > What happens when I want this same UI to work somewhere else?  
 > Like inside ChatGPT Apps? Or another agent host entirely?
@@ -135,7 +135,7 @@ Instead of returning UI, I now:
 
 - Store the generated HTML under a `ui://` URI  
 - Return a pointer to that UI using `_meta.ui.resourceUri`  
-- Let the host (like goose) come back and fetch it separately  
+- Let the host (like kaji) come back and fetch it separately  
 
 Here’s what that looks like in my server:
 
@@ -223,7 +223,7 @@ That combination of declaring `resources: {}` and implementing these handlers, i
 
 This one caught me off guard.
 
-When I first wired my Cloudinary MCP App into goose, everything looked perfect… except the images.  
+When I first wired my Cloudinary MCP App into kaji, everything looked perfect… except the images.  
 Layout? Fine. Buttons? Working. UI? Beautiful.  
 But every image was broken.
 
@@ -344,7 +344,7 @@ As a reminder, MCP Apps run sandboxed with CSP restrictions, so it’s worth und
   <meta property="og:description" content="I migrated a real MCP-UI server to MCP Apps. Here’s what actually changed, what broke, and why this shift matters." />
   <meta property="og:image" content="https://goose-docs.ai/assets/images/blogbanner-1d2185a745552379fe543020a901e8cc.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta property="twitter:domain" content="goose-docs.ai" />
+  <meta property="twitter:domain" content="kaji-docs.ai" />
   <meta name="twitter:title" content="From MCP-UI to MCP Apps: Evolving Interactive Agent UIs" />
   <meta name="twitter:description" content="I migrated a real MCP-UI server to MCP Apps. Here’s what actually changed, what broke, and why this shift matters.." />
   <meta name="twitter:image" content="https://goose-docs.ai/assets/images/blogbanner-1d2185a745552379fe543020a901e8cc.png" />

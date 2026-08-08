@@ -12,7 +12,7 @@ const i18n = defineMessages({
   },
   errorWithVersion: {
     id: 'errorBoundary.errorWithVersion',
-    defaultMessage: 'An error occurred in Goose v{version}.',
+    defaultMessage: 'An error occurred in Kaji v{version}.',
   },
   errorGeneric: {
     id: 'errorBoundary.errorGeneric',
@@ -63,7 +63,7 @@ export function ErrorUI({ error }: { error: string }) {
     window.electron.reloadApp();
   };
 
-  const version = window?.appConfig?.get('GOOSE_VERSION') as string | undefined;
+  const version = window?.appConfig?.get('KAJI_VERSION') as string | undefined;
 
   return (
     <div className="fixed inset-0 w-full h-full flex flex-col items-center justify-center gap-6 bg-background">

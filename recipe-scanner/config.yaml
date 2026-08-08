@@ -1,5 +1,5 @@
-GOOSE_MODEL: gpt-4o
-GOOSE_PROVIDER: openai
+KAJI_MODEL: gpt-4o
+KAJI_PROVIDER: openai
 extensions:
   developer:
     bundled: true

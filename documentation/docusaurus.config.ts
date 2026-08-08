@@ -19,7 +19,7 @@ type SidebarItem = {
 };
 
 const config: Config = {
-  title: "goose | Your open source AI agent",
+  title: "kaji | Your open source AI agent",
   tagline: "your local AI agent, automating engineering tasks seamlessly",
   favicon: "img/favicon.ico",
 
@@ -31,8 +31,8 @@ const config: Config = {
 
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
-  organizationName: "aaif-goose", // Usually your GitHub org/user name.
-  projectName: "goose", // Usually your repo name.
+  organizationName: "aaif-kaji", // Usually your GitHub org/user name.
+  projectName: "kaji", // Usually your repo name.
 
   onBrokenLinks: "throw",
 
@@ -150,8 +150,8 @@ const config: Config = {
       {
         redirects: [
           {
-            from: "/docs/getting-started/using-goose-free",
-            to: "/docs/getting-started/providers#using-goose-for-free",
+            from: "/docs/getting-started/using-kaji-free",
+            to: "/docs/getting-started/providers#using-kaji-for-free",
           },
           {
             from: "/v1/docs/getting-started/providers",
@@ -186,7 +186,7 @@ const config: Config = {
             to: "/docs/mcp/computer-controller-mcp",
           },
           {
-            from: "/docs/guides/managing-goose-sessions",
+            from: "/docs/guides/managing-kaji-sessions",
             to: "/docs/guides/sessions/session-management",
           },
           {
@@ -194,7 +194,7 @@ const config: Config = {
             to: "/docs/guides/sessions/smart-context-management",
           },
           {
-            from: "/docs/guides/share-goose-sessions",
+            from: "/docs/guides/share-kaji-sessions",
             to: "/docs/guides/recipes/session-recipes",
           },
           {
@@ -222,8 +222,8 @@ const config: Config = {
             to: "/docs/guides/managing-tools/adjust-tool-output",
           },
           {
-            from: "/docs/guides/goose-in-docker",
-            to: "/docs/tutorials/goose-in-docker",
+            from: "/docs/guides/kaji-in-docker",
+            to: "/docs/tutorials/kaji-in-docker",
           },
           {
             from: "/docs/guides/multi-model/creating-plans",
@@ -250,12 +250,12 @@ const config: Config = {
             to: "/docs/guides/context-engineering/prompt-templates",
           },
           {
-            from: "/docs/guides/goose-permissions",
-            to: "/docs/guides/managing-tools/goose-permissions",
+            from: "/docs/guides/kaji-permissions",
+            to: "/docs/guides/managing-tools/kaji-permissions",
           },
           {
-            from: "/docs/guides/using-goosehints",
-            to: "/docs/guides/context-engineering/using-goosehints",
+            from: "/docs/guides/using-kajihints",
+            to: "/docs/guides/context-engineering/using-kajihints",
           },
           {
             from: "/docs/guides/managing-tools/hooks",
@@ -431,7 +431,7 @@ const config: Config = {
     navbar: {
       title: "",
       logo: {
-        alt: "goose Logo", // TODO: replace logo assets with AAIF branding
+        alt: "kaji Logo", // TODO: replace logo assets with AAIF branding
         src: "img/logo_light.png",
         srcDark: "img/logo_dark.png",
       },
@@ -490,7 +490,7 @@ const config: Config = {
           title: "Quick Links",
           items: [
             {
-              label: "Install goose",
+              label: "Install kaji",
               to: "docs/getting-started/installation",
             },
             {
@@ -561,9 +561,9 @@ const config: Config = {
       },
     },
     announcementBar: {
-      id: 'goose-aaif-announcement', // Increment on new announcements to reuse the bar
+      id: 'kaji-aaif-announcement', // Increment on new announcements to reuse the bar
       content:
-        '✨ goose has moved to the Agentic AI Foundation (AAIF): <a href="/blog/2026/04/07/goose-moves-to-aaif">Learn more</a>! ✨',
+        '✨ kaji has moved to the Agentic AI Foundation (AAIF): <a href="/blog/2026/04/07/kaji-moves-to-aaif">Learn more</a>! ✨',
       backgroundColor: '#20232a',
       textColor: '#fff',
       isCloseable: true,

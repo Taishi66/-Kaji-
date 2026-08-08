@@ -1,13 +1,13 @@
 import {
-  DEFAULT_GOOSE_MCP_HOST_CAPABILITIES,
-  GooseClient,
-  type GooseClientCallbacks,
-} from '@aaif/goose-sdk';
+  DEFAULT_KAJI_MCP_HOST_CAPABILITIES,
+  KajiClient,
+  type KajiClientCallbacks,
+} from '@aaif/kaji-sdk';
 import { PROTOCOL_VERSION, type InitializeResponse } from '@agentclientprotocol/sdk';
 import packageJson from '../../package.json';
-import { GOOSE_SERVE_EXITED_USER_MESSAGE } from '../gooseServeLeaseRegistry';
+import { KAJI_SERVE_EXITED_USER_MESSAGE } from '../kajiServeLeaseRegistry';
 import {
-  handleAcpGooseSessionNotification,
+  handleAcpKajiSessionNotification,
   handleAcpSessionNotification,
 } from './chatNotifications';
 import { createWebSocketStream } from './createWebSocketStream';
@@ -16,7 +16,7 @@ import { requestAcpPermission } from './permissionRequests';
 import { requestAcpRecipeParams } from './recipeParamRequests';
 
 type AcpConnection = {
-  client: GooseClient;
+  client: KajiClient;
   stream: ReturnType<typeof createWebSocketStream>;
   initializeResponse: InitializeResponse;
 };
@@ -33,7 +33,7 @@ let connectionGeneration = 0;
 let recovering = false;
 const recoveryListeners = new Set<AcpRecoveryListener>();
 
-export async function getAcpClient(): Promise<GooseClient> {
+export async function getAcpClient(): Promise<KajiClient> {
   return (await getConnection()).client;
 }
 
@@ -82,7 +82,7 @@ function recoverConnection(immediate: boolean): void {
   const generation = connectionGeneration;
   const recoveryAttempt = immediate
     ? openConnection(generation).catch((error) => {
-        if (generation !== connectionGeneration || isGooseServeExitedError(error)) {
+        if (generation !== connectionGeneration || isKajiServeExitedError(error)) {
           throw error;
         }
         return retryWithBackoff(generation);
@@ -133,20 +133,20 @@ async function openConnection(generation: number): Promise<AcpConnection> {
   }
 
   const stream = createWebSocketStream(wsUrl);
-  const client = new GooseClient(createClientCallbacks(), stream);
+  const client = new KajiClient(createClientCallbacks(), stream);
 
   try {
     const initializeResponse = await withTimeout(
       client.initialize({
         protocolVersion: PROTOCOL_VERSION,
         _meta: {
-          'goose/useLoginShellPath': true,
+          'kaji/useLoginShellPath': true,
         },
         clientCapabilities: {
           elicitation: { form: {} },
           _meta: {
-            goose: {
-              mcpHostCapabilities: DEFAULT_GOOSE_MCP_HOST_CAPABILITIES,
+            kaji: {
+              mcpHostCapabilities: DEFAULT_KAJI_MCP_HOST_CAPABILITIES,
               customNotifications: true,
               recipeParameterRequests: true,
             },
@@ -195,7 +195,7 @@ async function retryWithBackoff(generation: number): Promise<AcpConnection> {
     try {
       return await openConnection(generation);
     } catch (error) {
-      if (generation !== connectionGeneration || isGooseServeExitedError(error)) {
+      if (generation !== connectionGeneration || isKajiServeExitedError(error)) {
         throw error;
       }
     }
@@ -204,21 +204,21 @@ async function retryWithBackoff(generation: number): Promise<AcpConnection> {
   throw new Error('ACP connection attempt is no longer current');
 }
 
-function isGooseServeExitedError(error: unknown): boolean {
-  return error instanceof Error && error.message.includes(GOOSE_SERVE_EXITED_USER_MESSAGE);
+function isKajiServeExitedError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes(KAJI_SERVE_EXITED_USER_MESSAGE);
 }
 
 function delay(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
-function createClientCallbacks(): () => GooseClientCallbacks {
+function createClientCallbacks(): () => KajiClientCallbacks {
   return () => ({
     requestPermission: requestAcpPermission,
     unstable_createElicitation: requestAcpElicitation,
     unstable_sessionRecipeRequestParams: requestAcpRecipeParams,
     sessionUpdate: handleAcpSessionNotification,
-    unstable_sessionUpdate: handleAcpGooseSessionNotification,
+    unstable_sessionUpdate: handleAcpKajiSessionNotification,
   });
 }
 

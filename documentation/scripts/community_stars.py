@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Community Stars Analysis Script for aaif-goose/goose repository
+Community Stars Analysis Script for aaif-kaji/kaji repository
 
 # TODO: Update BLOCK_ORGS, is_block_employee(), and team categorization logic
-# for the AAIF org structure after the transfer from block/goose.
+# for the AAIF org structure after the transfer from block/kaji.
 
 This script analyzes GitHub contributor statistics and generates rankings for:
 - Top 5 Community All-Stars (External contributors)
-- Top 5 Team Stars (Block employees, non-goose team)
+- Top 5 Team Stars (Block employees, non-kaji team)
 - Monthly Leaderboard (all eligible contributors)
 
 The script automatically:
@@ -102,9 +102,9 @@ def load_team_lists():
             sys.exit(1)
 
     # Parse the team lists
-    goose_maintainers = set()
-    block_non_goose = set()
-    external_goose = set()
+    kaji_maintainers = set()
+    block_non_kaji = set()
+    external_kaji = set()
     bots = set()
 
     current_section = None
@@ -114,28 +114,28 @@ def load_team_lists():
         # Skip comments and empty lines
         if not line or line.startswith("#"):
             # Check for section headers in comments
-            if "# Goose Maintainers" in line:
-                current_section = "goose_maintainers"
-            elif "# Block, non-goose" in line:
-                current_section = "block_non_goose"
-            elif "# External, goose" in line:
-                current_section = "external_goose"
+            if "# Kaji Maintainers" in line:
+                current_section = "kaji_maintainers"
+            elif "# Block, non-kaji" in line:
+                current_section = "block_non_kaji"
+            elif "# External, kaji" in line:
+                current_section = "external_kaji"
             elif "# Bots" in line:
                 current_section = "bots"
             continue
 
         # Add username to appropriate set (lowercase for case-insensitive matching)
         username = line.lower()
-        if current_section == "goose_maintainers":
-            goose_maintainers.add(username)
-        elif current_section == "block_non_goose":
-            block_non_goose.add(username)
-        elif current_section == "external_goose":
-            external_goose.add(username)
+        if current_section == "kaji_maintainers":
+            kaji_maintainers.add(username)
+        elif current_section == "block_non_kaji":
+            block_non_kaji.add(username)
+        elif current_section == "external_kaji":
+            external_kaji.add(username)
         elif current_section == "bots":
             bots.add(username)
 
-    return goose_maintainers, block_non_goose, external_goose, bots
+    return kaji_maintainers, block_non_kaji, external_kaji, bots
 
 
 def parse_date_range(date_input):
@@ -201,7 +201,7 @@ def main():
         sys.exit(1)
 
     # Load team lists
-    goose_maintainers, block_non_goose, external_goose, bots = load_team_lists()
+    kaji_maintainers, block_non_kaji, external_kaji, bots = load_team_lists()
 
     # Load GitHub data
     github_data_file = "/tmp/github_contributors.json"
@@ -305,8 +305,8 @@ def main():
         # Skip excluded categories (case-insensitive matching)
         if (
             username_lower in bots
-            or username_lower in goose_maintainers
-            or username_lower in external_goose
+            or username_lower in kaji_maintainers
+            or username_lower in external_kaji
         ):
             continue
 
@@ -326,9 +326,9 @@ def main():
         if period_commits > 0:
             total_lines = period_additions + period_deletions
 
-            # Categorize (only Block non-goose and External now)
-            if username_lower in block_non_goose:
-                category = "block_non_goose"
+            # Categorize (only Block non-kaji and External now)
+            if username_lower in block_non_kaji:
+                category = "block_non_kaji"
             else:
                 # Check if user is in a Block org (with caching)
                 if username not in checked_orgs:
@@ -337,7 +337,7 @@ def main():
                     time.sleep(0.1)
 
                 if checked_orgs[username]:
-                    category = "block_non_goose"
+                    category = "block_non_kaji"
                     print(f"  ✓ Detected Block employee: @{username}", file=sys.stderr)
                 else:
                     category = "external"
@@ -358,7 +358,7 @@ def main():
     contributor_stats.sort(key=lambda x: x["score"], reverse=True)
 
     # Separate by category
-    block_list = [c for c in contributor_stats if c["category"] == "block_non_goose"]
+    block_list = [c for c in contributor_stats if c["category"] == "block_non_kaji"]
     external_list = [c for c in contributor_stats if c["category"] == "external"]
 
     # Get top 5 from each
@@ -385,7 +385,7 @@ def main():
         print("No external contributors found for this period.")
 
     print()
-    print("⭐ TOP 5 TEAM STARS (Block, non-goose)")
+    print("⭐ TOP 5 TEAM STARS (Block, non-kaji)")
     print("-" * 70)
     if top_internal:
         for i, contrib in enumerate(top_internal, 1):
@@ -410,10 +410,10 @@ def main():
     print()
     print("=" * 70)
     print(
-        f"Total contributors (excluding bots, goose maintainers, external goose): {len(contributor_stats)}"
+        f"Total contributors (excluding bots, kaji maintainers, external kaji): {len(contributor_stats)}"
     )
     print(f"  External: {len(external_list)}")
-    print(f"  Block (non-goose): {len(block_list)}")
+    print(f"  Block (non-kaji): {len(block_list)}")
     print("=" * 70)
 
 

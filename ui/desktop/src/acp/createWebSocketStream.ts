@@ -1,4 +1,4 @@
-import type { Stream } from '@aaif/goose-sdk';
+import type { Stream } from '@aaif/kaji-sdk';
 
 export type ClosableAcpStream = Stream & {
   close: () => void;

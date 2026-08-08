@@ -2,10 +2,10 @@
 title: Telegram Gateway
 sidebar_position: 2
 sidebar_label: Telegram Gateway
-description: Chat with goose through Telegram from any device.
+description: Chat with kaji through Telegram from any device.
 ---
 
-The Telegram Gateway lets you interact with goose through Telegram, enabling remote access from any device where Telegram is available.
+The Telegram Gateway lets you interact with kaji through Telegram, enabling remote access from any device where Telegram is available.
 
 :::warning Experimental Feature
 The Gateway feature is experimental and in active development. Behavior and configuration may change in future releases.
@@ -13,7 +13,7 @@ The Gateway feature is experimental and in active development. Behavior and conf
 
 ## How It Works
 
-The Gateway connects your Telegram account to goose through a secure pairing process. Once paired, you can send messages to a Telegram bot that forwards them to goose, and receive formatted responses back in Telegram.
+The Gateway connects your Telegram account to kaji through a secure pairing process. Once paired, you can send messages to a Telegram bot that forwards them to kaji, and receive formatted responses back in Telegram.
 
 **Key details:**
 - Uses a Telegram bot that you create and configure
@@ -38,7 +38,7 @@ Keep your bot token secure. Anyone with the token can control your bot.
 
 ### Desktop App
 
-1. Open goose Desktop
+1. Open kaji Desktop
 2. Go to **Settings** > **Gateways**
 3. In the Telegram section, enter your bot token
 4. Click **Start** to activate the gateway
@@ -50,7 +50,7 @@ Keep your bot token secure. Anyone with the token can control your bot.
 2. Send the pairing code to the bot
 3. The bot will confirm the pairing is complete
 
-You can now chat with goose through Telegram!
+You can now chat with kaji through Telegram!
 
 ### CLI Usage
 
@@ -58,25 +58,25 @@ You can also manage the gateway from the command line:
 
 ```bash
 # Check gateway status
-goose gateway status
+kaji gateway status
 
 # Start the Telegram gateway
-goose gateway start telegram --bot-token YOUR_BOT_TOKEN
+kaji gateway start telegram --bot-token YOUR_BOT_TOKEN
 
 # Generate a pairing code
-goose gateway pair telegram
+kaji gateway pair telegram
 
 # Stop the gateway
-goose gateway stop telegram
+kaji gateway stop telegram
 ```
 
 ## What You Can Do
 
 Once paired, you can:
-- Send messages to goose and receive responses
+- Send messages to kaji and receive responses
 - Get formatted code blocks with syntax highlighting
 - Continue conversations across multiple sessions
-- Access all your configured goose extensions
+- Access all your configured kaji extensions
 
 ## Managing Paired Users
 
@@ -89,15 +89,15 @@ From the Desktop app's Gateway settings, you can:
 
 ### Bot not responding
 - Verify the bot token is correct
-- Check that the gateway is running in goose Desktop
-- Ensure your computer is awake and goose Desktop is open
+- Check that the gateway is running in kaji Desktop
+- Ensure your computer is awake and kaji Desktop is open
 
 ### Pairing code not working
 - Pairing codes expire after a few minutes—generate a new one
 - Make sure you're sending the code to the correct bot
 
 ### Messages not formatting correctly
-- The gateway converts goose's markdown to Telegram-compatible formatting
+- The gateway converts kaji's markdown to Telegram-compatible formatting
 - Some complex formatting may be simplified for Telegram compatibility
 
 ## Additional Resources

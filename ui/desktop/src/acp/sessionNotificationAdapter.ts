@@ -1,4 +1,4 @@
-import type { GooseSessionNotification_unstable } from '@aaif/goose-sdk';
+import type { KajiSessionNotification_unstable } from '@aaif/kaji-sdk';
 import type { RequestPermissionRequest, SessionNotification } from '@agentclientprotocol/sdk';
 import type { Message } from '../types/message';
 import {
@@ -6,15 +6,15 @@ import {
   applyElicitationStatus as applyElicitationStatusToState,
   type ElicitationStatus,
 } from './adapter/elicitations';
-import { applyGooseSessionNotification } from './adapter/gooseSessionNotifications';
+import { applyKajiSessionNotification } from './adapter/kajiSessionNotifications';
 import { applyContentChunk, applyThoughtChunk } from './adapter/messages';
 import { applyPermissionRequest as applyPermissionRequestToState } from './adapter/permissions';
 import {
   type AcpChatStateChange,
   type AdapterState,
   cloneMessage,
-  getGooseActiveRunId,
-  getGooseQueuedSteer,
+  getKajiActiveRunId,
+  getKajiQueuedSteer,
 } from './adapter/shared';
 import { applyToolCall, applyToolCallUpdate } from './adapter/tools';
 import type { AcpElicitationRequest } from './elicitationRequests';
@@ -23,7 +23,7 @@ export type { AcpChatStateChange } from './adapter/shared';
 
 export interface AcpSessionNotificationAdapter {
   apply(notification: SessionNotification): AcpChatStateChange[];
-  applyGoose(notification: GooseSessionNotification_unstable): AcpChatStateChange[];
+  applyKaji(notification: KajiSessionNotification_unstable): AcpChatStateChange[];
   applyPermissionRequest(request: RequestPermissionRequest): AcpChatStateChange[];
   applyElicitationRequest(request: AcpElicitationRequest): AcpChatStateChange[];
   applyElicitationStatus(elicitationId: string, status: ElicitationStatus): AcpChatStateChange[];
@@ -44,8 +44,8 @@ export function createAcpSessionNotificationAdapter(
     apply(notification) {
       return applyAcpSessionNotification(state, notification);
     },
-    applyGoose(notification) {
-      return applyGooseSessionNotification(state, notification);
+    applyKaji(notification) {
+      return applyKajiSessionNotification(state, notification);
     },
     applyPermissionRequest(request) {
       return applyPermissionRequestToState(state, request);
@@ -80,8 +80,8 @@ function applyAcpSessionNotification(
     case 'tool_call_update':
       return applyToolCallUpdate(state, update);
     case 'session_info_update': {
-      const activeRunId = getGooseActiveRunId(update);
-      const queuedSteerMessageId = getGooseQueuedSteer(update);
+      const activeRunId = getKajiActiveRunId(update);
+      const queuedSteerMessageId = getKajiQueuedSteer(update);
       const changes: AcpChatStateChange[] = [];
 
       if (update.title || activeRunId !== undefined) {

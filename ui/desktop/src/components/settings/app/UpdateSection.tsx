@@ -12,12 +12,12 @@ const i18n = defineMessages({
   disableAutoDownloadDesc: {
     id: 'updateSection.disableAutoDownloadDesc',
     defaultMessage:
-      'When enabled, Goose will notify you of new versions but will not download them automatically.',
+      'When enabled, Kaji will notify you of new versions but will not download them automatically.',
   },
   autoDownloadDisabledByEnv: {
     id: 'updateSection.autoDownloadDisabledByEnv',
     defaultMessage:
-      'Automatic downloads are disabled via the GOOSE_DISABLE_AUTO_DOWNLOAD environment variable.',
+      'Automatic downloads are disabled via the KAJI_DISABLE_AUTO_DOWNLOAD environment variable.',
   },
   downloadNow: {
     id: 'updateSection.downloadNow',
@@ -82,7 +82,7 @@ const i18n = defineMessages({
   autoDownload: {
     id: 'updateSection.autoDownload',
     defaultMessage:
-      'Goose will download the update in the background and install it the next time you quit or restart.',
+      'Kaji will download the update in the background and install it the next time you quit or restart.',
   },
   manualInstallNote: {
     id: 'updateSection.manualInstallNote',
@@ -103,7 +103,7 @@ const i18n = defineMessages({
   readyInstallAuto: {
     id: 'updateSection.readyInstallAuto',
     defaultMessage:
-      "✓ Update is ready. Restart Goose to finish installing it, or quit when you're done.",
+      "✓ Update is ready. Restart Kaji to finish installing it, or quit when you're done.",
   },
   installNowHint: {
     id: 'updateSection.installNowHint',

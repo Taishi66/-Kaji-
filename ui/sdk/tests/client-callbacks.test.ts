@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  installGooseExtAgentRequestDispatcher,
-  installGooseExtNotificationDispatcher,
+  installKajiExtAgentRequestDispatcher,
+  installKajiExtNotificationDispatcher,
 } from "../src/generated/client.gen.ts";
 import type {
-  GooseSessionNotification_unstable,
+  KajiSessionNotification_unstable,
   RecipeParamsResponse_unstable,
   RequestRecipeParams_unstable,
 } from "../src/generated/types.gen.ts";
@@ -41,7 +41,7 @@ class ClassBackedCallbacks {
   }
 
   async unstable_sessionUpdate(
-    notification: GooseSessionNotification_unstable,
+    notification: KajiSessionNotification_unstable,
   ): Promise<void> {
     this.#events.push(
       `unstable_sessionUpdate:${notification.update.sessionUpdate}`,
@@ -109,11 +109,11 @@ const recipeParamRequestParams = recipeParamRequest as unknown as Record<
 
 test("dispatcher preserves class-backed callback receivers", async () => {
   const callbacks = new ClassBackedCallbacks();
-  const client = installGooseExtNotificationDispatcher(callbacks);
+  const client = installKajiExtNotificationDispatcher(callbacks);
 
   await client.requestPermission({} as RequestPermissionRequest);
   await client.sessionUpdate({} as SessionNotification);
-  await client.extNotification!("_goose/unstable/session/update", {
+  await client.extNotification!("_kaji/unstable/session/update", {
     sessionId: "session-1",
     update: {
       sessionUpdate: "status_message",
@@ -134,17 +134,17 @@ test("dispatcher preserves class-backed callback receivers", async () => {
 });
 
 test("raw extNotification is optional", async () => {
-  const client = installGooseExtNotificationDispatcher(new MinimalCallbacks());
+  const client = installKajiExtNotificationDispatcher(new MinimalCallbacks());
 
   await client.extNotification!("example/unknown", {});
 });
 
 test("agent request dispatcher prefers typed callbacks", async () => {
   const callbacks = new AgentRequestCallbacks();
-  const client = installGooseExtAgentRequestDispatcher(callbacks);
+  const client = installKajiExtAgentRequestDispatcher(callbacks);
 
   const response = await client.extMethod!(
-    "_goose/unstable/session/recipe/request-params",
+    "_kaji/unstable/session/recipe/request-params",
     recipeParamRequestParams,
   );
 
@@ -154,28 +154,28 @@ test("agent request dispatcher prefers typed callbacks", async () => {
 
 test("agent request dispatcher falls back to raw extMethod", async () => {
   const callbacks = new GenericAgentRequestCallbacks();
-  const client = installGooseExtAgentRequestDispatcher(callbacks);
+  const client = installKajiExtAgentRequestDispatcher(callbacks);
 
   const response = await client.extMethod!(
-    "_goose/unstable/session/recipe/request-params",
+    "_kaji/unstable/session/recipe/request-params",
     recipeParamRequestParams,
   );
 
   assert.deepEqual(response, { action: "cancel" });
   assert.deepEqual(callbacks.events, [
-    "extMethod:_goose/unstable/session/recipe/request-params",
+    "extMethod:_kaji/unstable/session/recipe/request-params",
   ]);
 });
 
 test("agent request dispatcher throws when a request is unhandled", async () => {
-  const client = installGooseExtAgentRequestDispatcher(new MinimalCallbacks());
+  const client = installKajiExtAgentRequestDispatcher(new MinimalCallbacks());
 
   await assert.rejects(
     () =>
       client.extMethod!(
-        "_goose/unstable/session/recipe/request-params",
+        "_kaji/unstable/session/recipe/request-params",
         recipeParamRequestParams,
       ),
-    /unhandled ext method: _goose\/unstable\/session\/recipe\/request-params/,
+    /unhandled ext method: _kaji\/unstable\/session\/recipe\/request-params/,
   );
 });

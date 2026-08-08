@@ -1,18 +1,18 @@
-# @aaif/goose-sdk
+# @aaif/kaji-sdk
 
-TypeScript client library for the Goose Agent Client Protocol (ACP).
+TypeScript client library for the Kaji Agent Client Protocol (ACP).
 
 This package provides:
-- TypeScript types and Zod validators for Goose ACP extension methods
-- A client for communicating with the Goose ACP server
+- TypeScript types and Zod validators for Kaji ACP extension methods
+- A client for communicating with the Kaji ACP server
 
 ## Installation
 
 ```bash
-npm install @aaif/goose-sdk
+npm install @aaif/kaji-sdk
 ```
 
-The native `goose` binaries are distributed as optional dependencies
+The native `kaji` binaries are distributed as optional dependencies
 and will be automatically installed for your platform.
 
 ## Development
@@ -52,12 +52,12 @@ npm run build
 npm link
 
 # In the consuming project
-npm link @aaif/goose-sdk
+npm link @aaif/kaji-sdk
 ```
 
 ### Schema Generation
 
-The TypeScript types are generated from Rust schemas defined in `crates/goose`.
+The TypeScript types are generated from Rust schemas defined in `crates/kaji`.
 The build process:
 
 1. Builds the `generate-acp-schema` Rust binary
@@ -73,18 +73,18 @@ npm run build:schema
 
 ## Native Binary Packages
 
-Platform-specific npm packages for the `goose` binary are located in
-`ui/goose-binary/`:
+Platform-specific npm packages for the `kaji` binary are located in
+`ui/kaji-binary/`:
 
 | Package | Platform |
 |---------|----------|
-| `@aaif/goose-binary-darwin-arm64` | macOS Apple Silicon |
-| `@aaif/goose-binary-darwin-x64` | macOS Intel |
-| `@aaif/goose-binary-linux-arm64` | Linux ARM64 |
-| `@aaif/goose-binary-linux-x64` | Linux x64 |
-| `@aaif/goose-binary-win32-x64` | Windows x64 |
+| `@aaif/kaji-binary-darwin-arm64` | macOS Apple Silicon |
+| `@aaif/kaji-binary-darwin-x64` | macOS Intel |
+| `@aaif/kaji-binary-linux-arm64` | Linux ARM64 |
+| `@aaif/kaji-binary-linux-x64` | Linux x64 |
+| `@aaif/kaji-binary-win32-x64` | Windows x64 |
 
-These are published separately from `@aaif/goose-sdk`.
+These are published separately from `@aaif/kaji-sdk`.
 
 ### Building Native Binaries
 
@@ -111,15 +111,15 @@ For manual publishing:
 ```
 
 This will:
-1. Build and publish `@aaif/goose-sdk`
+1. Build and publish `@aaif/kaji-sdk`
 2. Publish all native binary packages
 
 ## Usage
 
 ```typescript
-import { GooseClient } from "@aaif/goose-sdk";
+import { KajiClient } from "@aaif/kaji-sdk";
 
-const client = new GooseClient({
+const client = new KajiClient({
   // ... configuration
 });
 

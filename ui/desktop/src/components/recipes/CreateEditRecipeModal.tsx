@@ -137,8 +137,8 @@ export default function CreateEditRecipeModal({
         jsonSchema: recipe.response?.json_schema
           ? JSON.stringify(recipe.response.json_schema, null, 2)
           : '',
-        model: recipe.settings?.goose_model ?? undefined,
-        provider: recipe.settings?.goose_provider ?? undefined,
+        model: recipe.settings?.kaji_model ?? undefined,
+        provider: recipe.settings?.kaji_provider ?? undefined,
         extensions: recipe.extensions || undefined,
         subRecipes: (recipe.sub_recipes || []).map((sr) => ({
           name: sr.name,
@@ -273,14 +273,14 @@ export default function CreateEditRecipeModal({
       ...(recipe?.settings || {}),
     };
     if (model !== undefined) {
-      mergedSettings.goose_model = model || null;
-    } else if ('goose_model' in mergedSettings) {
-      delete mergedSettings.goose_model;
+      mergedSettings.kaji_model = model || null;
+    } else if ('kaji_model' in mergedSettings) {
+      delete mergedSettings.kaji_model;
     }
     if (provider !== undefined) {
-      mergedSettings.goose_provider = provider || null;
-    } else if ('goose_provider' in mergedSettings) {
-      delete mergedSettings.goose_provider;
+      mergedSettings.kaji_provider = provider || null;
+    } else if ('kaji_provider' in mergedSettings) {
+      delete mergedSettings.kaji_provider;
     }
     const settings = Object.values(mergedSettings).some(
       (value) => value !== undefined && value !== null

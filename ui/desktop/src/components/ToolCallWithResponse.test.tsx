@@ -26,7 +26,7 @@ const liveOutputNotification: NotificationEvent = {
   type: 'Notification',
   request_id: 'tool-1',
   message: {
-    method: 'goose/live_output',
+    method: 'kaji/live_output',
     params: {
       sequence: 1,
       chunks: [

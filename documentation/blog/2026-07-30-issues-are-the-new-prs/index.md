@@ -1,13 +1,13 @@
 ---
 title: "Moving to issues as the new PRs"
-description: "We’re changing how people contribute to goose by moving design and discussion into issues before agents turn ready issues into code."
+description: "We’re changing how people contribute to kaji by moving design and discussion into issues before agents turn ready issues into code."
 authors:
   - douwe
 featured: true
 image: /img/blog/issues-are-the-new-prs.png
 ---
 
-![The goose GitHub repository showing 184 open pull requests, with the list fading into a blur](/img/blog/issues-are-the-new-prs.png)
+![The kaji GitHub repository showing 184 open pull requests, with the list fading into a blur](/img/blog/issues-are-the-new-prs.png)
 
 In the olden days, [contributing your first PR to an open source project](https://opensource.guide/how-to-contribute/) was rather involved. Even with great instructions, getting the project to build, the app to run and the tests to pass took real work. And even if you knew exactly which bug to fix, you needed a rough understanding of the project’s architecture and more detailed knowledge of the code you were changing.
 
@@ -23,7 +23,7 @@ Taken to its conclusion, this would leave open source projects with public code 
 
 To preserve that value, we have to let go of the PR as the main contribution mechanism and move outside contribution upstream. The valuable place to contribute is no longer primarily in writing the code, but in filing good issues and, more importantly, taking part in the discussion that turns those issues into well-considered solutions.
 
-We’re moving goose to this model with a public [Goose Issues board](https://github.com/orgs/aaif-goose/projects/1). As before, if you find a bug or want a new feature, you [file a GitHub issue](https://github.com/aaif-goose/goose/issues/new/choose). New issues enter the Inbox. During triage we may ask for more information or close the issue with an explanation. Problems we want to solve move to Accepted / design, where contributors and the core team work out the intended design, architectural constraints and how the result will be verified.
+We’re moving kaji to this model with a public [Kaji Issues board](https://github.com/orgs/aaif-goose/projects/1). As before, if you find a bug or want a new feature, you [file a GitHub issue](https://github.com/aaif-goose/goose/issues/new/choose). New issues enter the Inbox. During triage we may ask for more information or close the issue with an explanation. Problems we want to solve move to Accepted / design, where contributors and the core team work out the intended design, architectural constraints and how the result will be verified.
 
 When that discussion has settled, the issue moves to Ready. At that point an agent can write the code. The issue moves to In progress while implementation is underway and Verification when the result is ready for a human to confirm that it works. Only then is it Done. PRs that do not implement a ready issue will be closed, as will PRs where [feedback is left unaddressed](https://github.com/aaif-goose/goose/blob/main/CONTRIBUTING.md#ai-code-reviews).
 

@@ -1,24 +1,24 @@
 ---
-title: Quick goose Tips
+title: Quick kaji Tips
 sidebar_position: 30
 sidebar_label: Quick Tips
-description: Best practices for working with goose
+description: Best practices for working with kaji
 ---
 
-### goose works on your behalf
-goose is an AI agent, which means you can prompt goose to perform tasks for you like opening applications, running shell commands, automating workflows, writing code, browsing the web, and more.
+### kaji works on your behalf
+kaji is an AI agent, which means you can prompt kaji to perform tasks for you like opening applications, running shell commands, automating workflows, writing code, browsing the web, and more.
 
-### Prompt goose using natural language
-You don't need fancy language or special syntax to prompt goose. Talk with goose like you would talk to a friend. You can even use slang or say please and thank you; goose will understand.
+### Prompt kaji using natural language
+You don't need fancy language or special syntax to prompt kaji. Talk with kaji like you would talk to a friend. You can even use slang or say please and thank you; kaji will understand.
 
-### Extend goose's capabilities to any application
-goose's capabilities are extensible. As an [MCP](https://modelcontextprotocol.io/) client, goose can connect to your apps and services through [extensions](/extensions), allowing it to work across your entire workflow.
+### Extend kaji's capabilities to any application
+kaji's capabilities are extensible. As an [MCP](https://modelcontextprotocol.io/) client, kaji can connect to your apps and services through [extensions](/extensions), allowing it to work across your entire workflow.
 
-### Choose how much control goose has
-You can customize how much [supervision](/docs/guides/managing-tools/goose-permissions) goose needs. Choose between full autonomy, requiring approval before actions, or simply chatting without any actions.
+### Choose how much control kaji has
+You can customize how much [supervision](/docs/guides/managing-tools/kaji-permissions) kaji needs. Choose between full autonomy, requiring approval before actions, or simply chatting without any actions.
 
 ### Choose the right LLM
-Your experience with goose is shaped by your [choice of LLM](/blog/2025/03/31/goose-benchmark), as it handles all the planning while goose manages the execution. When choosing an LLM, consider its tool support, specific capabilities, and associated costs.
+Your experience with kaji is shaped by your [choice of LLM](/blog/2025/03/31/kaji-benchmark), as it handles all the planning while kaji manages the execution. When choosing an LLM, consider its tool support, specific capabilities, and associated costs.
 
 ### Keep sessions short
 LLMs have context windows, which are limits on how much conversation history they can retain. Once exceeded, they may forget earlier parts of the conversation. Monitor your token usage and [start new sessions](/docs/guides/sessions/session-management) as needed.
@@ -33,17 +33,17 @@ Turning on too many extensions can degrade performance. Enable only essential [e
 Consider enabling [Code Mode](/docs/guides/managing-tools/code-mode), an alternative approach to tool calling that discovers tools on demand.
 :::
 
-### Teach goose your preferences
-Help goose remember how you like to work by using [`.goosehints` or other context files](/docs/guides/context-engineering/using-goosehints) or [skills](/docs/guides/context-engineering/using-skills) for permanent project preferences and the [Memory extension](/docs/mcp/memory-mcp) for things you want goose to dynamically recall later. Both can help save valuable context window space while keeping your preferences available.
+### Teach kaji your preferences
+Help kaji remember how you like to work by using [`.kajihints` or other context files](/docs/guides/context-engineering/using-kajihints) or [skills](/docs/guides/context-engineering/using-skills) for permanent project preferences and the [Memory extension](/docs/mcp/memory-mcp) for things you want kaji to dynamically recall later. Both can help save valuable context window space while keeping your preferences available.
 
 ### Protect sensitive files
-Use [permission modes](/docs/guides/managing-tools/goose-permissions) and [tool permissions](/docs/guides/managing-tools/tool-permissions) when working around files you do not want goose to change.
+Use [permission modes](/docs/guides/managing-tools/kaji-permissions) and [tool permissions](/docs/guides/managing-tools/tool-permissions) when working around files you do not want kaji to change.
 
 ### Version Control
 Commit your code changes early and often. This allows you to rollback any unexpected changes.
 
-### Control which extensions goose can use
-Administrators can use an [allowlist](/docs/guides/allowlist) to restrict goose to approved extensions only. This helps prevent risky installs from unknown MCP servers.
+### Control which extensions kaji can use
+Administrators can use an [allowlist](/docs/guides/allowlist) to restrict kaji to approved extensions only. This helps prevent risky installs from unknown MCP servers.
 
 ### Set up starter templates
 You can turn a successful session into a reusable "[recipe](/docs/guides/recipes/session-recipes)" to share with others or use again later—no need to start from scratch.
@@ -52,10 +52,10 @@ You can turn a successful session into a reusable "[recipe](/docs/guides/recipes
 You don’t need to get it right the first time. Iterating on prompts and tools is part of the workflow.
 
 ### Customize the sidebar
-goose Desktop lets you [customize the sidebar](/docs/guides/desktop-navigation) to match how you like to work. Adjust its position, appearance, and which items are visible.
+kaji Desktop lets you [customize the sidebar](/docs/guides/desktop-navigation) to match how you like to work. Adjust its position, appearance, and which items are visible.
 
-### Keep goose updated
-Regularly [update](/docs/guides/updating-goose) goose to benefit from the latest features, bug fixes, and performance improvements.
+### Keep kaji updated
+Regularly [update](/docs/guides/updating-kaji) kaji to benefit from the latest features, bug fixes, and performance improvements.
 
 ### Use a Dedicated Planner Model
 Use [planning mode](/docs/guides/context-engineering/creating-plans) with a dedicated planner model for complex reasoning, while keeping a faster default model for everyday execution.

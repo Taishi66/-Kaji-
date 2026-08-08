@@ -1,0 +1,28 @@
+{
+  "name": "@aaif/kaji-binary-linux-x64",
+  "version": "0.20.2",
+  "description": "Kaji binary for Linux x64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aaif-goose/goose.git"
+  },
+  "bin": {
+    "kaji": "bin/kaji"
+  },
+  "keywords": [
+    "kaji",
+    "ai",
+    "agent",
+    "binary"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/kaji"
+  ]
+}

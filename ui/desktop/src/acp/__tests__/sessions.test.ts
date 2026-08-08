@@ -49,7 +49,7 @@ describe('ACP sessions', () => {
       },
     });
     const client = {
-      goose: {
+      kaji: {
         sessionInfo_unstable: vi
           .fn()
           .mockResolvedValueOnce({ session: sessionInfo() })
@@ -68,7 +68,7 @@ describe('ACP sessions', () => {
       cwd: '/tmp',
       mcpServers: [],
     });
-    expect(client.goose.sessionInfo_unstable).toHaveBeenCalledTimes(2);
+    expect(client.kaji.sessionInfo_unstable).toHaveBeenCalledTimes(2);
     expect(result.sessionInfo).toBe(loadedSessionInfo);
     expect(sessionInfoToSession(result.sessionInfo).provider_name).toBe('anthropic');
     expect(sessionInfoToSession(result.sessionInfo).model_config?.model_name).toBe(
@@ -78,7 +78,7 @@ describe('ACP sessions', () => {
 
   it('returns a list item from ACP session info', async () => {
     const client = {
-      goose: {
+      kaji: {
         sessionInfo_unstable: vi.fn().mockResolvedValue({
           session: sessionInfo({
             title: 'Subagent session',
@@ -100,7 +100,7 @@ describe('ACP sessions', () => {
 
     const item = await acpGetSessionListItem('session-1');
 
-    expect(client.goose.sessionInfo_unstable).toHaveBeenCalledWith({ sessionId: 'session-1' });
+    expect(client.kaji.sessionInfo_unstable).toHaveBeenCalledWith({ sessionId: 'session-1' });
     expect(item).toMatchObject({
       id: 'session-1',
       name: 'Subagent session',

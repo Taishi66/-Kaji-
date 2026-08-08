@@ -16,7 +16,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { defineMessages, useIntl } from '../i18n';
-import GooseMessage from './GooseMessage';
+import KajiMessage from './KajiMessage';
 import UserMessage from './UserMessage';
 import {
   SystemNotificationInline,
@@ -32,7 +32,7 @@ import type {
   NotificationEvent,
   SystemNotificationContent,
 } from '../types/message';
-import LoadingGoose from './LoadingGoose';
+import LoadingKaji from './LoadingKaji';
 import { ChatType } from '../types/chat';
 import { identifyConsecutiveToolCalls, isInChain } from '../utils/toolCallChaining';
 import { getModelDisplayName } from './settings/models/predefinedModelsUtils';
@@ -301,7 +301,7 @@ export default function ProgressiveMessageList({
                   <UserMessage message={message} onMessageUpdate={onMessageUpdate} />
                 )
               ) : (
-                <GooseMessage
+                <KajiMessage
                   sessionId={chat.sessionId}
                   message={message}
                   messages={messages}
@@ -345,7 +345,7 @@ export default function ProgressiveMessageList({
       {/* Loading indicator when progressively rendering */}
       {isLoading && (
         <div className="flex flex-col items-center justify-center py-8">
-          <LoadingGoose
+          <LoadingKaji
             message={intl.formatMessage(i18n.loadingMessages, {
               renderedCount,
               totalCount: messages.length,

@@ -1,0 +1,28 @@
+{
+  "name": "@aaif/kaji-binary-win32-x64",
+  "version": "0.20.2",
+  "description": "Kaji binary for Windows x64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aaif-goose/goose.git"
+  },
+  "bin": {
+    "kaji": "bin/kaji.exe"
+  },
+  "keywords": [
+    "kaji",
+    "ai",
+    "agent",
+    "binary"
+  ],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/kaji.exe"
+  ]
+}

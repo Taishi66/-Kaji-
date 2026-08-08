@@ -117,7 +117,7 @@ This is research, assumptions, domain knowledge, edge cases, terminology, anythi
 Now save it somewhere accessible:
 
 - a file in the project  
-- a context file (goosehints, Cursor rules, etc)
+- a context file (kajihints, Cursor rules, etc)
 - a memory extension   
 
 Anything that outlives the chat window.
@@ -152,7 +152,7 @@ And honestly, that’s progress.
   <meta property="og:description" content="Practical steps and mental models for building context-engineered workflows instead of clever prompts." />
   <meta property="og:image" content="https://goose-docs.ai/assets/images/blogbanner-2fa90c93a49496447d38217739242dec.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta property="twitter:domain" content="goose-docs.ai" />
+  <meta property="twitter:domain" content="kaji-docs.ai" />
   <meta name="twitter:title" content="One Shot Prompting is Dead" />
   <meta name="twitter:description" content="Practical steps and mental models for building context-engineered workflows instead of clever prompts.." />
   <meta name="twitter:image" content="https://goose-docs.ai/assets/images/blogbanner-2fa90c93a49496447d38217739242dec.png" />

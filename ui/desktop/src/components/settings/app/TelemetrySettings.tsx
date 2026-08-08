@@ -26,7 +26,7 @@ const i18n = defineMessages({
   },
   toggleDescription: {
     id: 'telemetrySettings.toggleDescription',
-    defaultMessage: 'Help improve goose by sharing anonymous usage statistics.',
+    defaultMessage: 'Help improve kaji by sharing anonymous usage statistics.',
   },
   learnMore: {
     id: 'telemetrySettings.learnMore',
@@ -46,7 +46,7 @@ const i18n = defineMessages({
   },
 });
 
-const TELEMETRY_CONFIG_KEY = 'GOOSE_TELEMETRY_ENABLED';
+const TELEMETRY_CONFIG_KEY = 'KAJI_TELEMETRY_ENABLED';
 
 export default function TelemetrySettings() {
   const intl = useIntl();

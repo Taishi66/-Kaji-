@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # Builds and publishes all @aaif npm packages:
-#   @aaif/goose-sdk            — ACP TypeScript SDK
-#   @aaif/goose-binary-*       — platform-specific goose CLI binaries
+#   @aaif/kaji-sdk            — ACP TypeScript SDK
+#   @aaif/kaji-binary-*       — platform-specific kaji CLI binaries
 #
-# NOTE: @aaif/goose (the terminal TUI, formerly ui/text) is DEPRECATED and no
+# NOTE: @aaif/kaji (the terminal TUI, formerly ui/text) is DEPRECATED and no
 # longer built or published. See ui/text/README.md.
 #
 # Linux binaries are built inside Docker containers on their native arch.
@@ -23,7 +23,7 @@ set -euo pipefail
 #   - NPM_PUBLISH_TOKEN env var (or ~/.npm-publish-token file)
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-NATIVE_DIR="${REPO_ROOT}/ui/goose-binary"
+NATIVE_DIR="${REPO_ROOT}/ui/kaji-binary"
 SDK_DIR="${REPO_ROOT}/ui/sdk"
 REGISTRY="https://registry.npmjs.org"
 DOCKER_IMAGE="rust:1.92-bookworm"
@@ -54,15 +54,15 @@ fi
 # ---------------------------------------------------------------------------
 build_macos() {
   local platform="$1" target="$2"
-  local pkg_dir="${NATIVE_DIR}/goose-binary-${platform}/bin"
+  local pkg_dir="${NATIVE_DIR}/kaji-binary-${platform}/bin"
 
-  echo "==> Building goose for ${platform} (${target}) natively"
-  cargo build --release --target "${target}" --bin goose --manifest-path "${REPO_ROOT}/Cargo.toml"
+  echo "==> Building kaji for ${platform} (${target}) natively"
+  cargo build --release --target "${target}" --bin kaji --manifest-path "${REPO_ROOT}/Cargo.toml"
 
   mkdir -p "${pkg_dir}"
-  cp "${REPO_ROOT}/target/${target}/release/goose" "${pkg_dir}/goose"
-  chmod +x "${pkg_dir}/goose"
-  echo "    ✅ ${pkg_dir}/goose"
+  cp "${REPO_ROOT}/target/${target}/release/kaji" "${pkg_dir}/kaji"
+  chmod +x "${pkg_dir}/kaji"
+  echo "    ✅ ${pkg_dir}/kaji"
 }
 
 build_macos darwin-arm64 aarch64-apple-darwin
@@ -78,17 +78,17 @@ apt-get install -y -qq --no-install-recommends \
   build-essential cmake pkg-config libssl-dev libdbus-1-dev \
   libclang-dev protobuf-compiler libprotobuf-dev ca-certificates \
   libvulkan-dev libvulkan1 glslc >/dev/null 2>&1
-echo "==> Compiling goose (this takes a while)..."
-cargo build --release --bin goose --features vulkan
-cp /build/target/release/goose /output/goose
+echo "==> Compiling kaji (this takes a while)..."
+cargo build --release --bin kaji --features vulkan
+cp /build/target/release/kaji /output/kaji
 echo "==> Done"
 '
 
 build_linux_docker() {
   local platform="$1" docker_platform="$2"
-  local pkg_dir="${NATIVE_DIR}/goose-binary-${platform}/bin"
+  local pkg_dir="${NATIVE_DIR}/kaji-binary-${platform}/bin"
 
-  echo "==> Building goose for ${platform} in Docker (${docker_platform})"
+  echo "==> Building kaji for ${platform} in Docker (${docker_platform})"
 
   mkdir -p "${pkg_dir}"
 
@@ -105,7 +105,7 @@ build_linux_docker() {
     --exclude='node_modules/' \
     --exclude='documentation/' \
     --exclude='ui/desktop/' \
-    --exclude='ui/goose-binary/*/bin/' \
+    --exclude='ui/kaji-binary/*/bin/' \
     --exclude='evals/' \
     --exclude='.hermit/' \
     --exclude='*.jsonl' \
@@ -124,12 +124,12 @@ RUN apt-get update -qq && \
 WORKDIR /build
 COPY . .
 RUN mkdir -p /output && \
-    cargo build --release --bin goose --features vulkan && \
-    cp target/release/goose /output/goose
+    cargo build --release --bin kaji --features vulkan && \
+    cp target/release/kaji /output/kaji
 DEOF
 
   # Build in Docker and extract the binary
-  local iid="goose-npm-build-${platform}-$$"
+  local iid="kaji-npm-build-${platform}-$$"
   docker build \
     --platform "${docker_platform}" \
     -f "${ctx}/Dockerfile.npm-build" \
@@ -139,13 +139,13 @@ DEOF
   # Extract binary from the image
   local cid
   cid="$(docker create --platform "${docker_platform}" "${iid}" /bin/true)"
-  docker cp "${cid}:/output/goose" "${pkg_dir}/goose"
+  docker cp "${cid}:/output/kaji" "${pkg_dir}/kaji"
   docker rm "${cid}" >/dev/null
   docker rmi "${iid}" >/dev/null 2>&1 || true
 
   rm -rf "${ctx}"
 
-  echo "    ✅ ${pkg_dir}/goose"
+  echo "    ✅ ${pkg_dir}/kaji"
 }
 
 build_linux_docker linux-x64   linux/amd64
@@ -157,7 +157,7 @@ build_linux_docker linux-arm64 linux/arm64
 echo ""
 echo "==> Verifying binaries"
 for plat in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
-  bin="${NATIVE_DIR}/goose-binary-${plat}/bin/goose"
+  bin="${NATIVE_DIR}/kaji-binary-${plat}/bin/kaji"
   if [[ ! -f "${bin}" ]]; then
     echo "    ❌ MISSING: ${bin}"
     exit 1
@@ -172,7 +172,7 @@ done
 # Step 4: Build TypeScript packages
 # ---------------------------------------------------------------------------
 echo ""
-echo "==> Building @aaif/goose-sdk"
+echo "==> Building @aaif/kaji-sdk"
 (cd "${SDK_DIR}" && pnpm run build:ts)
 
 # ---------------------------------------------------------------------------
@@ -208,13 +208,13 @@ cleanup_npmrc() {
 trap cleanup_npmrc EXIT
 
 # Publish order matters: dependencies first
-echo "==> Publishing @aaif/goose-sdk"
+echo "==> Publishing @aaif/kaji-sdk"
 (cd "${REPO_ROOT}/ui" && pnpm publish "${PUBLISH_ARGS[@]}" acp)
 
 echo "==> Publishing native binary packages"
 for plat in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
-  pkg="goose-binary/goose-binary-${plat}"
-  echo "    Publishing @aaif/goose-binary-${plat}"
+  pkg="kaji-binary/kaji-binary-${plat}"
+  echo "    Publishing @aaif/kaji-binary-${plat}"
   (cd "${REPO_ROOT}/ui" && pnpm publish "${PUBLISH_ARGS[@]}" "${pkg}")
 done
 

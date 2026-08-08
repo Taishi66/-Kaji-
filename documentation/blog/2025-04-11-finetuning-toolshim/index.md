@@ -8,17 +8,17 @@ authors:
 
 ![blog cover](toolshim-header.png)
 
-Our recently published [Goose benchmark](https://goose-docs.ai/blog/2025/03/31/goose-benchmark) revealed significant performance limitations in models where tool calling is not straightforwardly supported (e.g., Gemma3, Deepseek-r1, phi4). These models often fail to invoke tools at appropriate times or produce malformed or inconsistently formatted tool calls. With the most recent releases of Llama4 and Deepseek v3 (0324), we are again observing challenges with effective tool calling performance, even on these flagship openweight models.
+Our recently published [Kaji benchmark](https://goose-docs.ai/blog/2025/03/31/goose-benchmark) revealed significant performance limitations in models where tool calling is not straightforwardly supported (e.g., Gemma3, Deepseek-r1, phi4). These models often fail to invoke tools at appropriate times or produce malformed or inconsistently formatted tool calls. With the most recent releases of Llama4 and Deepseek v3 (0324), we are again observing challenges with effective tool calling performance, even on these flagship openweight models.
 
 <!--truncate-->
 
 ## Why tool calling is important
 
-Tool calling is a critical capability for agents like goose. It allows models to go beyond text and image generation and take concrete actions, such as executing code, querying databases, searching the web, or interacting with design tools like Figma. Equipping agents with a broad set of tools empowers them to discover and interface with external systems, much like a human would. While this might be overkill for narrow, more deterministic applications of LLMs, it is essential for general-purpose agents like goose. Without reliable tool calling, we limit what models can do to help us automate, remove toil and navigate complex systems. Pure generation–of text, images, speech, and video–is just the first step on the path to more powerful agentic capabilities. There is so much more that models can do if we give them the legs to run.
+Tool calling is a critical capability for agents like kaji. It allows models to go beyond text and image generation and take concrete actions, such as executing code, querying databases, searching the web, or interacting with design tools like Figma. Equipping agents with a broad set of tools empowers them to discover and interface with external systems, much like a human would. While this might be overkill for narrow, more deterministic applications of LLMs, it is essential for general-purpose agents like kaji. Without reliable tool calling, we limit what models can do to help us automate, remove toil and navigate complex systems. Pure generation–of text, images, speech, and video–is just the first step on the path to more powerful agentic capabilities. There is so much more that models can do if we give them the legs to run.
 
 ## Background: using a local model as a "toolshim"
 
-The goal is to allow goose to work with the widest variety of models possible. A "toolshim" in this case is a thin layer which sits between the main model doing the agent work, and the tools that can perform actual actions (making the agent take action, vs being a chatbot). Previously we have been trying this approach with open models including in this [past benchmark](https://goose-docs.ai/blog/2025/03/31/goose-benchmark) post. A toolshim, if it can work, unlocks both powerful cutting edge models (open weight and closed) which while may perform well on various benchmarks, fall well short when tool calling for agents is required (or perhaps don't, by design, support tool calling at all, such as the case with some reasoning models).
+The goal is to allow kaji to work with the widest variety of models possible. A "toolshim" in this case is a thin layer which sits between the main model doing the agent work, and the tools that can perform actual actions (making the agent take action, vs being a chatbot). Previously we have been trying this approach with open models including in this [past benchmark](https://goose-docs.ai/blog/2025/03/31/goose-benchmark) post. A toolshim, if it can work, unlocks both powerful cutting edge models (open weight and closed) which while may perform well on various benchmarks, fall well short when tool calling for agents is required (or perhaps don't, by design, support tool calling at all, such as the case with some reasoning models).
 
 ## Proposal: Fine-tune a lightweight toolshim model (up to 12b)
 
@@ -65,7 +65,7 @@ The 12B model also outputs valid JSON tool calls reasonably well:
 
 ### Data Collection
 
-* Extract user messages from historical Goose sessions, and for messages followed by tool calls from Anthropic/OpenAI (all tool calls up to today):  
+* Extract user messages from historical Kaji sessions, and for messages followed by tool calls from Anthropic/OpenAI (all tool calls up to today):  
   * **Regenerate tool calls with open models:** Regenerate the tool calls with the most capable open models that have supported tool calling capabilities (e.g., QwQ, Qwen, deepseek chat v3)  
   * **Generate json/markdown-formatted tool calls to parse:** Instruct the most capable open models (e.g., DeepSeek-r1, Llama4, Gemma3), that don't necessarily have strong tool calling to output tool calls in the correct schema (JSON/markdown). Parse the output into the appropriate tool calls.  
   * **Discard any malformed tool calls, tool calls that fail to properly execute, or tool calls that meet other rejection criteria**  
@@ -77,7 +77,7 @@ Fine tune small models like mistral-nemo (14b), gemma 4-12b, qwen2.5-coder 7-14b
 
 ### Evaluations
 
-Test with Goosebench evals run in the benchmarking blogpost. We can directly compare performance of models with and without the finetuned toolshim models supporting them.
+Test with Kajibench evals run in the benchmarking blogpost. We can directly compare performance of models with and without the finetuned toolshim models supporting them.
 
 ## Future approaches
 
@@ -90,7 +90,7 @@ On top of local models, we would like to consider parsers, parser combinators, c
   <meta property="og:description" content="Addressing performance limitations in models without native tool calling support" />
   <meta property="og:image" content="https://goose-docs.ai/assets/images/toolshim-header-42611f614e7722f90cf83991debe3046.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta property="twitter:domain" content="goose-docs.ai" />
+  <meta property="twitter:domain" content="kaji-docs.ai" />
   <meta name="twitter:title" content="Finetuning Toolshim Models for Tool Calling" />
   <meta name="twitter:description" content="Addressing performance limitations in models without native tool calling support" />
   <meta name="twitter:image" content="https://goose-docs.ai/assets/images/toolshim-header-42611f614e7722f90cf83991debe3046.png" />

@@ -90,7 +90,7 @@ fn should_compact_bounds_the_aiad_band() {
     assert!(m.should_compact(0.65), "mid band : plan compaction");
     assert!(
         m.should_compact(0.8),
-        "goose legacy threshold now inside scope"
+        "kaji legacy threshold now inside scope"
     );
 }
 

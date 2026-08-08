@@ -3,15 +3,15 @@ import { createSession } from '../sessions';
 import type { ExtensionConfig } from '../types/extensions';
 import type { Session } from '../types/session';
 import type { FixedExtensionEntry } from '../components/ConfigContext';
-import type { GooseExtension, GooseExtensionEntry } from '@aaif/goose-sdk';
-import { getConfiguredGooseExtensions } from '../acp/extensions';
+import type { KajiExtension, KajiExtensionEntry } from '@aaif/kaji-sdk';
+import { getConfiguredKajiExtensions } from '../acp/extensions';
 import { acpChatSessionController } from '../acp/chatSessionController';
 
 vi.mock('../acp/extensions', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../acp/extensions')>();
   return {
     ...actual,
-    getConfiguredGooseExtensions: vi.fn(),
+    getConfiguredKajiExtensions: vi.fn(),
   };
 });
 
@@ -42,26 +42,26 @@ const configuredExtension = (name: string, enabled: boolean): FixedExtensionEntr
   enabled,
 });
 
-const gooseExtension = (name: string): GooseExtension => ({
+const kajiExtension = (name: string): KajiExtension => ({
   type: 'builtin',
   name,
   description: `${name} extension`,
 });
 
-const gooseExtensionEntry = (name: string): GooseExtensionEntry => ({
-  extension: gooseExtension(name),
+const kajiExtensionEntry = (name: string): KajiExtensionEntry => ({
+  extension: kajiExtension(name),
   enabled: true,
 });
 
-const mockedGetConfiguredGooseExtensions = vi.mocked(getConfiguredGooseExtensions);
+const mockedGetConfiguredKajiExtensions = vi.mocked(getConfiguredKajiExtensions);
 const mockedCreateAcpSession = vi.mocked(acpChatSessionController.createSession);
 
 describe('createSession ACP session extensions', () => {
   beforeEach(() => {
-    mockedGetConfiguredGooseExtensions.mockReset();
-    mockedGetConfiguredGooseExtensions.mockResolvedValue([
-      gooseExtensionEntry('developer'),
-      gooseExtensionEntry('memory'),
+    mockedGetConfiguredKajiExtensions.mockReset();
+    mockedGetConfiguredKajiExtensions.mockResolvedValue([
+      kajiExtensionEntry('developer'),
+      kajiExtensionEntry('memory'),
     ]);
     mockedCreateAcpSession.mockReset();
     mockedCreateAcpSession.mockResolvedValue(testSession);
@@ -72,8 +72,8 @@ describe('createSession ACP session extensions', () => {
       extensionConfigs: [extensionConfig('developer')],
     });
 
-    expect(mockedGetConfiguredGooseExtensions).toHaveBeenCalledOnce();
-    expect(mockedCreateAcpSession).toHaveBeenCalledWith('/tmp', [gooseExtension('developer')], {
+    expect(mockedGetConfiguredKajiExtensions).toHaveBeenCalledOnce();
+    expect(mockedCreateAcpSession).toHaveBeenCalledWith('/tmp', [kajiExtension('developer')], {
       recipeDeeplink: undefined,
       recipeId: undefined,
     });
@@ -85,8 +85,8 @@ describe('createSession ACP session extensions', () => {
       allExtensions: [configuredExtension('developer', true), configuredExtension('memory', false)],
     });
 
-    expect(mockedGetConfiguredGooseExtensions).toHaveBeenCalledOnce();
-    expect(mockedCreateAcpSession).toHaveBeenCalledWith('/tmp', [gooseExtension('developer')], {
+    expect(mockedGetConfiguredKajiExtensions).toHaveBeenCalledOnce();
+    expect(mockedCreateAcpSession).toHaveBeenCalledWith('/tmp', [kajiExtension('developer')], {
       recipeDeeplink: undefined,
       recipeId: undefined,
     });
@@ -97,7 +97,7 @@ describe('createSession ACP session extensions', () => {
       allExtensions: [configuredExtension('developer', false)],
     });
 
-    expect(mockedGetConfiguredGooseExtensions).not.toHaveBeenCalled();
+    expect(mockedGetConfiguredKajiExtensions).not.toHaveBeenCalled();
     expect(mockedCreateAcpSession).toHaveBeenCalledWith('/tmp', [], {
       recipeDeeplink: undefined,
       recipeId: undefined,

@@ -1,16 +1,16 @@
 ---
 unlisted: true
 ---
-# Writing Blog Posts for goose
+# Writing Blog Posts for kaji
 
-This guide explains how to write and structure blog posts for the goose documentation site.
+This guide explains how to write and structure blog posts for the kaji documentation site.
 
 ## Getting Started
 
-1. Clone the goose repository:
+1. Clone the kaji repository:
 ```bash
 git clone https://github.com/aaif-goose/goose.git
-cd goose
+cd kaji
 ```
 
 2. Install dependencies:
@@ -110,7 +110,7 @@ At the end of your post, include the following meta tags for social media sharin
   <meta property="og:description" content="Your blog post description" />
   <meta property="og:image" content="https://goose-docs.ai/assets/images/your-image.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta property="twitter:domain" content="goose-docs.ai" />
+  <meta property="twitter:domain" content="kaji-docs.ai" />
   <meta name="twitter:title" content="Your Blog Post Title" />
   <meta name="twitter:description" content="Your blog post description" />
   <meta name="twitter:image" content="https://goose-docs.ai/assets/images/your-image.png" />

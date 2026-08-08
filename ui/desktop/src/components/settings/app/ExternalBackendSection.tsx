@@ -15,7 +15,7 @@ const i18n = defineMessages({
   description: {
     id: 'externalBackendSection.description',
     defaultMessage:
-      'By default Goose starts a local backend. Use this to connect to an external ACP-compatible backend.',
+      'By default Kaji starts a local backend. Use this to connect to an external ACP-compatible backend.',
   },
   useExternalServer: {
     id: 'externalBackendSection.useExternalServer',
@@ -32,7 +32,7 @@ const i18n = defineMessages({
   serverUrlHelp: {
     id: 'externalBackendSection.serverUrlHelp',
     defaultMessage:
-      'Enter the HTTP(S) base URL. Goose checks /status and connects to /acp under this base.',
+      'Enter the HTTP(S) base URL. Kaji checks /status and connects to /acp under this base.',
   },
   secretKey: {
     id: 'externalBackendSection.secretKey',
@@ -44,7 +44,7 @@ const i18n = defineMessages({
   },
   secretKeyHelp: {
     id: 'externalBackendSection.secretKeyHelp',
-    defaultMessage: 'The secret key configured on the external backend (GOOSE_SERVER__SECRET_KEY).',
+    defaultMessage: 'The secret key configured on the external backend (KAJI_SERVER__SECRET_KEY).',
   },
   certFingerprint: {
     id: 'externalBackendSection.certFingerprint',
@@ -61,7 +61,7 @@ const i18n = defineMessages({
   },
   restartNote: {
     id: 'externalBackendSection.restartNote',
-    defaultMessage: 'Changes apply to new chat windows. Restart Goose to update existing windows.',
+    defaultMessage: 'Changes apply to new chat windows. Restart Kaji to update existing windows.',
   },
   urlProtocolError: {
     id: 'externalBackendSection.urlProtocolError',
@@ -84,14 +84,14 @@ const i18n = defineMessages({
 
 export default function ExternalBackendSection() {
   const intl = useIntl();
-  const [config, setConfig] = useState<ExternalBackendConfig>(defaultSettings.externalGoosed);
+  const [config, setConfig] = useState<ExternalBackendConfig>(defaultSettings.externalKajid);
   const [isSaving, setIsSaving] = useState(false);
   const [urlError, setUrlError] = useState<string | null>(null);
 
   useEffect(() => {
     const loadSettings = async () => {
-      const externalGoosed = await window.electron.getSetting('externalGoosed');
-      setConfig(externalGoosed);
+      const externalKajid = await window.electron.getSetting('externalKajid');
+      setConfig(externalKajid);
     };
     loadSettings();
   }, []);
@@ -129,7 +129,7 @@ export default function ExternalBackendSection() {
   const saveConfig = async (newConfig: ExternalBackendConfig): Promise<void> => {
     setIsSaving(true);
     try {
-      await window.electron.setSetting('externalGoosed', newConfig);
+      await window.electron.setSetting('externalKajid', newConfig);
     } catch (error) {
       console.error('Failed to save external backend settings:', error);
     } finally {

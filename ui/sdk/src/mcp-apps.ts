@@ -10,63 +10,63 @@ import type {
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 
-export const GOOSE_MCP_UI_EXTENSION_ID = "io.modelcontextprotocol/ui" as const;
+export const KAJI_MCP_UI_EXTENSION_ID = "io.modelcontextprotocol/ui" as const;
 
-export interface GooseMcpUiExtensionSettings {
+export interface KajiMcpUiExtensionSettings {
   mimeTypes: string[];
 }
 
-export interface GooseMcpHostCapabilities {
-  extensions: Record<string, GooseMcpUiExtensionSettings>;
+export interface KajiMcpHostCapabilities {
+  extensions: Record<string, KajiMcpUiExtensionSettings>;
 }
 
-export type GooseToolUiMetadata = Extract<
+export type KajiToolUiMetadata = Extract<
   McpUiAppToolConfig["_meta"],
   { ui: unknown }
 >["ui"];
 
-export type GooseToolMetadata = NonNullable<Tool["_meta"]> & {
-  ui?: GooseToolUiMetadata;
-  goose_extension?: string;
+export type KajiToolMetadata = NonNullable<Tool["_meta"]> & {
+  ui?: KajiToolUiMetadata;
+  kaji_extension?: string;
 };
 
-export type GooseSessionTool = Tool & {
-  meta?: GooseToolMetadata;
-  _meta?: GooseToolMetadata;
+export type KajiSessionTool = Tool & {
+  meta?: KajiToolMetadata;
+  _meta?: KajiToolMetadata;
 };
 
-export type GooseTextResourceContents = TextResourceContents;
+export type KajiTextResourceContents = TextResourceContents;
 
-export type GooseBlobResourceContents = BlobResourceContents;
+export type KajiBlobResourceContents = BlobResourceContents;
 
-export type GooseResourceContents = TextResourceContents | BlobResourceContents;
+export type KajiResourceContents = TextResourceContents | BlobResourceContents;
 
-export type GooseReadResourceResult = ReadResourceResult;
+export type KajiReadResourceResult = ReadResourceResult;
 
-export type GooseResourceMetadata = NonNullable<
+export type KajiResourceMetadata = NonNullable<
   Extract<NonNullable<McpUiAppResourceConfig["_meta"]>, { ui?: unknown }>["ui"]
 >;
 
-export interface GooseMcpAppToolPayload {
+export interface KajiMcpAppToolPayload {
   toolName: string;
   extensionName: string;
   resourceUri: string;
-  toolMeta?: GooseToolMetadata;
-  resourceResult?: GooseReadResourceResult | null;
+  toolMeta?: KajiToolMetadata;
+  resourceResult?: KajiReadResourceResult | null;
   readError?: string;
 }
 
-export interface GooseToolCallUpdateMeta {
-  goose?: {
-    mcpApp?: GooseMcpAppToolPayload;
+export interface KajiToolCallUpdateMeta {
+  kaji?: {
+    mcpApp?: KajiMcpAppToolPayload;
     [key: string]: unknown;
   };
   [key: string]: unknown;
 }
 
-export const DEFAULT_GOOSE_MCP_HOST_CAPABILITIES: GooseMcpHostCapabilities = {
+export const DEFAULT_KAJI_MCP_HOST_CAPABILITIES: KajiMcpHostCapabilities = {
   extensions: {
-    [GOOSE_MCP_UI_EXTENSION_ID]: {
+    [KAJI_MCP_UI_EXTENSION_ID]: {
       mimeTypes: [RESOURCE_MIME_TYPE],
     },
   },

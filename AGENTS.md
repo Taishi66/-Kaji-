@@ -1,10 +1,10 @@
 # AGENTS Instructions
 
-goose is an AI agent framework in Rust with CLI and Electron desktop interfaces.
+kaji is an AI agent framework in Rust with CLI and Electron desktop interfaces.
 
 ## Contribution Workflow
 
-The issue is the source of truth for work intended for an upstream pull request. Track issue status on the [Goose Issues board](https://github.com/orgs/aaif-goose/projects/1).
+The issue is the source of truth for work intended for an upstream pull request. Track issue status on the [Kaji Issues board](https://github.com/orgs/aaif-goose/projects/1).
 
 - Before implementing an issue for a pull request, confirm that it is on the board with Status **Ready**.
 - Do not implement issues in **Inbox**, **Needs info**, or **Accepted / design**. Help resolve the issue discussion instead.
@@ -18,7 +18,7 @@ Maintainer-directed work, urgent security fixes, release automation, and local o
 
 ## Agent Loop Migration
 
-We are replacing the legacy agent loop in `crates/goose/src/agents/agent.rs` with the state machine in `crates/goose/src/agents/state_machine/`. The state-machine path is enabled with `GOOSE_STATE_MACHINE=1`.
+We are replacing the legacy agent loop in `crates/kaji/src/agents/agent.rs` with the state machine in `crates/kaji/src/agents/state_machine/`. The state-machine path is enabled with `KAJI_STATE_MACHINE=1`.
 
 Until the migration is complete, changes to agent-loop behavior must be implemented and tested in both paths. When reviewing code, check whether a change to either path also applies to the other and flag missing parity.
 
@@ -40,8 +40,8 @@ just release-binary           # release binary
 ### Test
 ```bash
 cargo test                   # all tests
-cargo test -p goose          # specific crate
-cargo test --package goose --test mcp_integration_test
+cargo test -p kaji          # specific crate
+cargo test --package kaji --test mcp_integration_test
 just record-mcp-tests        # record MCP
 ```
 
@@ -61,12 +61,12 @@ cd ui/desktop && pnpm test   # test UI
 ## Structure
 ```
 crates/
-├── goose              # core logic
-├── goose-acp-macros   # ACP proc macros
-├── goose-cli          # CLI entry
-├── goose-mcp          # MCP extensions
-├── goose-test         # test utilities
-└── goose-test-support # test helpers
+├── kaji              # core logic
+├── kaji-acp-macros   # ACP proc macros
+├── kaji-cli          # CLI entry
+├── kaji-mcp          # MCP extensions
+├── kaji-test         # test utilities
+└── kaji-test-support # test helpers
 
 ui/desktop/            # Electron app
 ```
@@ -87,11 +87,11 @@ ui/desktop/            # Electron app
 
 ## Rules
 
-- Test: Prefer tests/ folder, e.g. crates/goose/tests/
-- Test: When adding features, update goose-self-test.yaml, rebuild, then run `goose run --recipe goose-self-test.yaml` to validate
+- Test: Prefer tests/ folder, e.g. crates/kaji/tests/
+- Test: When adding features, update kaji-self-test.yaml, rebuild, then run `kaji run --recipe kaji-self-test.yaml` to validate
 - Error: Use anyhow::Result
 - Provider: Implement Provider trait see providers/base.rs
-- MCP: Extensions in crates/goose-mcp/
+- MCP: Extensions in crates/kaji-mcp/
 - UI Desktop: Use ACP SDK types or local `src/types/*` types. Do not import generated OpenAPI types/client code from `ui/desktop/src/api`
 
 ## Code Quality
@@ -116,6 +116,6 @@ ui/desktop/            # Electron app
 - Never: Overwrite a live binary in place (e.g. `cp`/`fs.copyFileSync` onto an existing executable) - unlink or atomic-rename the destination first, otherwise macOS SIGKILLs running processes with "Code Signature Invalid"
 
 ## Entry Points
-- CLI: crates/goose-cli/src/main.rs
+- CLI: crates/kaji-cli/src/main.rs
 - UI: ui/desktop/src/main.ts
-- Agent: crates/goose/src/agents/agent.rs
+- Agent: crates/kaji/src/agents/agent.rs

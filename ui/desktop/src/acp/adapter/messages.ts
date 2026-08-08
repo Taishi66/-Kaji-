@@ -7,7 +7,7 @@ import {
   type AcpChatStateChange,
   type AdapterState,
   DEFAULT_VISIBLE_MESSAGE_METADATA,
-  getGooseMessageMeta,
+  getKajiMessageMeta,
   messagesChange,
 } from './shared';
 
@@ -26,50 +26,50 @@ export function applyContentChunk(
     return [];
   }
 
-  const gooseMeta = getGooseMessageMeta(update);
-  const messageId = update.messageId ?? gooseMeta.messageId;
-  const existing = findMessageForChunk(state, role, messageId, gooseMeta.created);
+  const kajiMeta = getKajiMessageMeta(update);
+  const messageId = update.messageId ?? kajiMeta.messageId;
+  const existing = findMessageForChunk(state, role, messageId, kajiMeta.created);
 
   if (existing) {
     const isOutputLimitFallbackChunk =
-      gooseMeta.outputTokenLimitReached === true && gooseMeta.fallbackContent === true;
+      kajiMeta.outputTokenLimitReached === true && kajiMeta.fallbackContent === true;
     const existingMessageHasContent = existing.content.length > 0;
     const shouldSkipFallbackChunk = isOutputLimitFallbackChunk && existingMessageHasContent;
 
-    existing.metadata.outputTokenLimitReached = gooseMeta.outputTokenLimitReached;
+    existing.metadata.outputTokenLimitReached = kajiMeta.outputTokenLimitReached;
     existing.metadata.fallbackContent = shouldSkipFallbackChunk
       ? undefined
-      : gooseMeta.fallbackContent;
+      : kajiMeta.fallbackContent;
 
     if (shouldSkipFallbackChunk) {
-      return messagesChangeWithLocalSteerConfirmation(state, existing, gooseMeta.steer);
+      return messagesChangeWithLocalSteerConfirmation(state, existing, kajiMeta.steer);
     }
 
     const lastContent = existing.content[existing.content.length - 1];
-    if (reconcileLocalSteerTextChunk(state, existing, content, gooseMeta.steer)) {
-      return messagesChangeWithLocalSteerConfirmation(state, existing, gooseMeta.steer);
+    if (reconcileLocalSteerTextChunk(state, existing, content, kajiMeta.steer)) {
+      return messagesChangeWithLocalSteerConfirmation(state, existing, kajiMeta.steer);
     }
 
     if (lastContent?.type === 'text' && content.type === 'text') {
       lastContent.text += content.text;
     } else if (content.type === 'image' && hasImageContent(existing, content)) {
-      return messagesChangeWithLocalSteerConfirmation(state, existing, gooseMeta.steer);
+      return messagesChangeWithLocalSteerConfirmation(state, existing, kajiMeta.steer);
     } else {
       existing.content.push(content);
     }
 
-    return messagesChangeWithLocalSteerConfirmation(state, existing, gooseMeta.steer);
+    return messagesChangeWithLocalSteerConfirmation(state, existing, kajiMeta.steer);
   } else {
     state.messages.push({
       ...(messageId ? { id: messageId } : {}),
       role,
-      created: gooseMeta.created ?? Math.floor(Date.now() / 1000),
+      created: kajiMeta.created ?? Math.floor(Date.now() / 1000),
       content: [content],
       metadata: {
         ...DEFAULT_VISIBLE_MESSAGE_METADATA,
-        ...(gooseMeta.steer ? { steer: true } : {}),
-        outputTokenLimitReached: gooseMeta.outputTokenLimitReached,
-        fallbackContent: gooseMeta.fallbackContent,
+        ...(kajiMeta.steer ? { steer: true } : {}),
+        outputTokenLimitReached: kajiMeta.outputTokenLimitReached,
+        fallbackContent: kajiMeta.fallbackContent,
       },
     });
   }
@@ -85,22 +85,22 @@ export function applyThoughtChunk(
     return [];
   }
 
-  const gooseMeta = getGooseMessageMeta(update);
-  const messageId = update.messageId ?? gooseMeta.messageId;
-  let message = findMessageForChunk(state, 'assistant', messageId, gooseMeta.created);
+  const kajiMeta = getKajiMessageMeta(update);
+  const messageId = update.messageId ?? kajiMeta.messageId;
+  let message = findMessageForChunk(state, 'assistant', messageId, kajiMeta.created);
 
   if (!message) {
     message = {
       ...(messageId ? { id: messageId } : {}),
       role: 'assistant',
-      created: gooseMeta.created ?? Math.floor(Date.now() / 1000),
+      created: kajiMeta.created ?? Math.floor(Date.now() / 1000),
       content: [],
       metadata: { ...DEFAULT_VISIBLE_MESSAGE_METADATA },
     };
     state.messages.push(message);
   }
 
-  message.metadata.outputTokenLimitReached = gooseMeta.outputTokenLimitReached;
+  message.metadata.outputTokenLimitReached = kajiMeta.outputTokenLimitReached;
 
   const lastContent = message.content[message.content.length - 1];
   if (lastContent?.type === 'thinking') {

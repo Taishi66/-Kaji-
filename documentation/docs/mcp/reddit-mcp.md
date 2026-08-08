@@ -1,26 +1,26 @@
 ---
 title: Reddit Extension
 
-description: Add Reddit MCP Server as a goose Extension
+description: Add Reddit MCP Server as a kaji Extension
 ---
 
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 import YouTubeShortEmbed from '@site/src/components/YouTubeShortEmbed';
 import CLIExtensionInstructions from '@site/src/components/CLIExtensionInstructions';
-import GooseDesktopInstaller from '@site/src/components/GooseDesktopInstaller';
+import KajiDesktopInstaller from '@site/src/components/KajiDesktopInstaller';
 
 <YouTubeShortEmbed videoUrl="https://www.youtube.com/embed/VBtFinHieHA" /> 
 
 
-This tutorial covers how to add the [Reddit MCP Server](https://github.com/adhikasp/mcp-reddit) as a goose extension to fetch trending threads, analyze Reddit post content, and explore subreddit discussions.
+This tutorial covers how to add the [Reddit MCP Server](https://github.com/adhikasp/mcp-reddit) as a kaji extension to fetch trending threads, analyze Reddit post content, and explore subreddit discussions.
 
 :::tip Quick Install
 <Tabs groupId="interface">
-  <TabItem value="ui" label="goose Desktop" default>
-  [Launch the installer](goose://extension?cmd=uvx&arg=--from&arg=git%2Bhttps%3A%2F%2Fgithub.com%2Fadhikasp%2Fmcp-reddit.git&arg=mcp-reddit&id=reddit-mcp&name=Reddit&description=Fetch%20and%20analyze%20Reddit%20content)
+  <TabItem value="ui" label="kaji Desktop" default>
+  [Launch the installer](kaji://extension?cmd=uvx&arg=--from&arg=git%2Bhttps%3A%2F%2Fgithub.com%2Fadhikasp%2Fmcp-reddit.git&arg=mcp-reddit&id=reddit-mcp&name=Reddit&description=Fetch%20and%20analyze%20Reddit%20content)
   </TabItem>
-  <TabItem value="cli" label="goose CLI">
+  <TabItem value="cli" label="kaji CLI">
   **Command**
   ```sh
   uvx --from git+https://github.com/adhikasp/mcp-reddit.git mcp-reddit
@@ -36,8 +36,8 @@ Note that you'll need [uv](https://docs.astral.sh/uv/#installation) installed on
 :::
 
 <Tabs groupId="interface">
-  <TabItem value="ui" label="goose Desktop" default>
-    <GooseDesktopInstaller
+  <TabItem value="ui" label="kaji Desktop" default>
+    <KajiDesktopInstaller
       extensionId="reddit-mcp"
       extensionName="Reddit"
       description="Fetch and analyze Reddit content"
@@ -46,7 +46,7 @@ Note that you'll need [uv](https://docs.astral.sh/uv/#installation) installed on
     />
   </TabItem>
 
-  <TabItem value="cli" label="goose CLI">
+  <TabItem value="cli" label="kaji CLI">
     <CLIExtensionInstructions
       name="Reddit MCP"
       description="Fetch and analyze Reddit content"
@@ -59,17 +59,17 @@ Note that you'll need [uv](https://docs.astral.sh/uv/#installation) installed on
 
 ## Example Usage
 
-In this example, I’ll use goose with the Reddit MCP Server to build a custom news feed for AI topics. goose will pull top AI threads from Reddit and turn them into a scrollable, social media-style feed with images and highlights.
+In this example, I’ll use kaji with the Reddit MCP Server to build a custom news feed for AI topics. kaji will pull top AI threads from Reddit and turn them into a scrollable, social media-style feed with images and highlights.
 
 It’s like Reddit, but curated just for you.
 
-### goose Prompt
+### kaji Prompt
 
-> goose using the reddit MCP server, create a personalized social feed of the latest AI threads. Include images and format it like a real social media app.
+> kaji using the reddit MCP server, create a personalized social feed of the latest AI threads. Include images and format it like a real social media app.
 
 
 
-### goose Output
+### kaji Output
 
 :::note Desktop
 

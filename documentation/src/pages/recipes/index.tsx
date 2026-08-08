@@ -98,7 +98,7 @@ export default function RecipePage() {
           <p className="text-textProminent">
             Save time and skip setup. Launch any{" "}
             <Link to="/docs/guides/recipes/session-recipes" className="text-purple-600 hover:underline">
-              goose recipe
+              kaji recipe
             </Link>{" "}
             shared by the community with a single click.
           </p>

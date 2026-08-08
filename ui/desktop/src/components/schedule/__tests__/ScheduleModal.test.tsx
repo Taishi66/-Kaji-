@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, type RenderOptions, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ScheduledJobDto } from '@aaif/goose-sdk';
+import type { ScheduledJobDto } from '@aaif/kaji-sdk';
 import { ScheduleModal } from '../ScheduleModal';
 import { IntlTestWrapper } from '../../../i18n/test-utils';
 

@@ -30,7 +30,7 @@ Ask the AI that's already connected to do the thinking for you. No extra API key
 
 ## How Sampling Works
 
-When an MCP client like goose connects to an MCP server, it establishes a two-way channel. The server can expose tools for the AI to call, but it can also *request* that the AI generate text on its behalf.
+When an MCP client like kaji connects to an MCP server, it establishes a two-way channel. The server can expose tools for the AI to call, but it can also *request* that the AI generate text on its behalf.
 
 Here's what that looks like in code (using Python with FastMCP):
 
@@ -193,7 +193,7 @@ This isn't bulletproof, but it raises the bar significantly.
 
 ## Try It Yourself
 
-If you want to see sampling in action, [Council of Mine](/docs/mcp/council-of-mine-mcp) is a great playground. Ask goose to start a council debate on any topic and watch as nine distinct perspectives emerge, vote on each other, and synthesize into a conclusion all powered by sampling.
+If you want to see sampling in action, [Council of Mine](/docs/mcp/council-of-mine-mcp) is a great playground. Ask kaji to start a council debate on any topic and watch as nine distinct perspectives emerge, vote on each other, and synthesize into a conclusion all powered by sampling.
 
 
 
@@ -204,7 +204,7 @@ If you want to see sampling in action, [Council of Mine](/docs/mcp/council-of-mi
   <meta property="og:description" content="Learn how MCP Sampling lets your tools call the AI instead of the other way around." />
   <meta property="og:image" content="https://goose-docs.ai/assets/images/mcp-sampling-4e857d422eb4fcbfbf474003069ba732.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta property="twitter:domain" content="goose-docs.ai" />
+  <meta property="twitter:domain" content="kaji-docs.ai" />
   <meta name="twitter:title" content="MCP Sampling: When Your Tools Need to Think" />
   <meta name="twitter:description" content="Learn how MCP Sampling lets your tools call the AI instead of the other way around." />
   <meta name="twitter:image" content="https://goose-docs.ai/assets/images/mcp-sampling-4e857d422eb4fcbfbf474003069ba732.png" />

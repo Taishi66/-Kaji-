@@ -44,7 +44,7 @@ Without sampling, the tool mostly acts like a messenger. It fetches data, return
 ![with sampling](with-mcp.png)
 
 
-With sampling, the behavior changes. The tool gathers its data, then uses the same LLM you already configured in Goose to ask a targeted question from its own context before returning anything. Instead of just passing information upward, it’s now contributing to the thinking.
+With sampling, the behavior changes. The tool gathers its data, then uses the same LLM you already configured in Kaji to ask a targeted question from its own context before returning anything. Instead of just passing information upward, it’s now contributing to the thinking.
 
 It’s the same model and the same agent, but the behavior changes completely.
 
@@ -77,7 +77,7 @@ If this helped make things click, I’d recommend trying the [Council of Mine ex
   <meta property="og:description" content="I thought better tool descriptions would solve everything. They didn’t. Here’s what finally made MCP sampling click for me." />
   <meta property="og:image" content="https://goose-docs.ai/assets/images/blogbanner-97fb5e20248b53e838888082ac9f5860.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta property="twitter:domain" content="goose-docs.ai" />
+  <meta property="twitter:domain" content="kaji-docs.ai" />
   <meta name="twitter:title" content="Why Tool Descriptions Aren’t Enough" />
   <meta name="twitter:description" content="I thought better tool descriptions would solve everything. They didn’t. Here’s what finally made MCP sampling click for me." />
   <meta name="twitter:image" content="https://goose-docs.ai/assets/images/blogbanner-97fb5e20248b53e838888082ac9f5860.png" />

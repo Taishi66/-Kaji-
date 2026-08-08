@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { GooseSessionNotification_unstable } from '@aaif/goose-sdk';
+import type { KajiSessionNotification_unstable } from '@aaif/kaji-sdk';
 import type { RequestPermissionRequest, SessionNotification } from '@agentclientprotocol/sdk';
 import type { TokenState } from '../types/chat';
 import { ChatState } from '../types/chatState';
@@ -62,8 +62,8 @@ export interface AcpChatSessionActions {
   deleteSnapshot(sessionId: string): void;
 
   applyAcpSessionNotification(notification: SessionNotification): AcpChatSessionSnapshot;
-  applyAcpGooseSessionNotification(
-    notification: GooseSessionNotification_unstable
+  applyAcpKajiSessionNotification(
+    notification: KajiSessionNotification_unstable
   ): AcpChatSessionSnapshot;
   applyPermissionRequest(request: RequestPermissionRequest): AcpChatSessionSnapshot;
   applyElicitationRequest(request: AcpElicitationRequest): AcpChatSessionSnapshot;
@@ -468,10 +468,10 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
     return notify(notification.sessionId, entry);
   };
 
-  const applyAcpGooseSessionNotification: AcpChatSessionActions['applyAcpGooseSessionNotification'] =
+  const applyAcpKajiSessionNotification: AcpChatSessionActions['applyAcpKajiSessionNotification'] =
     (notification) => {
       const entry = getOrCreateEntry(notification.sessionId);
-      const changes = entry.adapter.applyGoose(notification);
+      const changes = entry.adapter.applyKaji(notification);
       // Same session-load replay fast path as applyAcpSessionNotification.
       if (entry.chatState === ChatState.LoadingConversation && entry.lastSnapshot) {
         applyChatStateChanges(
@@ -545,7 +545,7 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
     clearActivePromptAttempt,
     isCurrentPromptAttempt,
     applyAcpSessionNotification,
-    applyAcpGooseSessionNotification,
+    applyAcpKajiSessionNotification,
     applyPermissionRequest,
     applyElicitationRequest,
     setElicitationStatus,
@@ -601,7 +601,7 @@ function actionsFromStore(store: AcpChatSessionStoreInternal): AcpChatSessionAct
   return {
     deleteSnapshot: store.deleteSnapshot,
     applyAcpSessionNotification: store.applyAcpSessionNotification,
-    applyAcpGooseSessionNotification: store.applyAcpGooseSessionNotification,
+    applyAcpKajiSessionNotification: store.applyAcpKajiSessionNotification,
     applyPermissionRequest: store.applyPermissionRequest,
     applyElicitationRequest: store.applyElicitationRequest,
     setElicitationStatus: store.setElicitationStatus,
