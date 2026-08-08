@@ -123,3 +123,33 @@ fn fts_query_with_special_chars_is_safe() {
 fn hit_type_is_exported() {
     let _: Option<RecallHit> = None;
 }
+
+#[test]
+fn anchored_reattaches_temporal_context() {
+    let mut m = Memory::new();
+    m.remember("opening goal: onboard PO users", &["goal"], None);
+    m.remember("stub a", &["filler"], None);
+    m.remember("stub b", &["filler"], None);
+    m.remember("the crucial fact about the toggle", &["toggle"], None);
+    m.remember("stub c", &["filler"], None);
+    m.remember("stub d", &["filler"], None);
+    m.remember("resolution: toggle shipped", &["outcome"], None);
+
+    let hits = m.recall("crucial turn", 1);
+    assert_eq!(hits.hits.len(), 1);
+    let view = m.anchored(&hits.hits[0], 2, 1).expect("view");
+
+    assert_eq!(view.hit.body, "the crucial fact about the toggle");
+    // window = 2 entries with closest ts around the hit (either side).
+    assert_eq!(view.window.len(), 2);
+    assert!(
+        view.window.iter().all(|e| !e.body.contains("crucial")),
+        "hit must not appear in its own window"
+    );
+
+    // opening = earliest entry; resolution = latest entry.
+    assert_eq!(view.opening.len(), 1);
+    assert!(view.opening[0].body.contains("opening"));
+    assert_eq!(view.resolution.len(), 1);
+    assert!(view.resolution[0].body.contains("resolution"));
+}

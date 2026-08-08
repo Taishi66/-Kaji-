@@ -49,3 +49,21 @@ fn session_memory_reloads_from_disk() {
     assert_eq!(hits.hits.len(), 1);
     assert!(hits.hits[0].body.contains("persisted"));
 }
+
+#[test]
+fn session_memory_anchored_view() {
+    init();
+    let mut mem = SessionMemory::load("anchored-session");
+    mem.remember("goal: ship the toggle", &["goal"], None);
+    mem.remember("filler before", &["filler"], None);
+    mem.remember("the toggle fact", &["toggle"], None);
+    mem.remember("filler after", &["filler"], None);
+    mem.remember("outcome: toggle live", &["outcome"], None);
+
+    let hits = mem.recall("toggle", 1);
+    assert_eq!(hits.hits.len(), 1);
+    let view = mem.anchored(&hits.hits[0], 2, 1).expect("anchored");
+    assert!(view.opening.iter().any(|e| e.body.contains("goal")));
+    assert!(view.resolution.iter().any(|e| e.body.contains("outcome")));
+    assert_eq!(view.window.len(), 2);
+}

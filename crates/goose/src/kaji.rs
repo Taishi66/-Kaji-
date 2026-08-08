@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use kaji_core::memory::{Memory, RecallResult};
+use kaji_core::memory::{Anchored, Memory, RecallHit, RecallResult};
 
 use crate::config::paths::Paths;
 
@@ -40,6 +40,11 @@ impl SessionMemory {
     /// Retrieve the top-k facts relevant to `query`. Zero LLM tokens spent.
     pub fn recall(&self, query: &str, k: usize) -> RecallResult {
         self.store.recall(query, k)
+    }
+
+    /// Attach temporal context (window + bookends) around a recall hit.
+    pub fn anchored(&self, hit: &RecallHit, window: usize, bookend: usize) -> Option<Anchored> {
+        self.store.anchored(hit, window, bookend)
     }
 
     /// Persist a fact with its entities; optional TTL for volatile facts.

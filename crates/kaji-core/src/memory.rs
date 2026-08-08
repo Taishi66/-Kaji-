@@ -85,6 +85,24 @@ pub struct RecallResult {
     pub stale_dropped: usize,
 }
 
+/// Context surrounding one recall hit, mirroring Hermes-Agent's
+/// `get_anchored_view(hit, window, bookend)` (`hermes_state_search.py`).
+///
+/// A bare hit loses the narrative: the agent reads facts out of order. The
+/// anchored view re-attaches temporally adjacent entries (the window) plus the
+/// session's opening and resolution (the bookends), so the prompt gets the arc
+/// around a fact — opening = goal, end = outcome — at zero LLM cost.
+#[derive(Debug, Clone)]
+pub struct Anchored {
+    pub hit: RecallHit,
+    /// `window` entries with the closest timestamps around the hit (excluded).
+    pub window: Vec<Entry>,
+    /// First `bookend` entries (session opening / goal).
+    pub opening: Vec<Entry>,
+    /// Last `bookend` entries (session resolution / outcome).
+    pub resolution: Vec<Entry>,
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS memory_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -167,6 +185,76 @@ impl Memory {
     /// relevance, ties broken by id.
     pub fn recall(&self, query: &str, k: usize) -> RecallResult {
         self.recall_at(query, k, now_secs())
+    }
+
+    /// Enrich one hit with its temporal neighborhood : `window` entries closest
+    /// in time around it, plus the store's opening and resolution.
+    ///
+    /// Mirrors Hermes' `get_anchored_view(hit, window, bookend)` : a recalled
+    /// fact alone loses the narrative arc, so the surrounding facts (before,
+    /// after) + bookends (goal / outcome) are attached for the prompt. All pure
+    /// SQL (no LLM tokens). Returns `None` when the entry is gone (swept).
+    pub fn anchored(&self, hit: &RecallHit, window: usize, bookend: usize) -> Option<Anchored> {
+        let ts = self.get(hit.id)?.ts;
+        let sql_window = "SELECT id, text, entities, body, ts, ttl_ms
+                          FROM memory_entries
+                          WHERE id != ?1
+                            AND (ttl_ms IS NULL OR ts + ttl_ms >= ?2)
+                          ORDER BY ABS(ts - ?3) ASC, id ASC
+                          LIMIT ?4";
+        let w = self
+            .conn
+            .prepare(sql_window)
+            .ok()?
+            .query_map(
+                rusqlite::params![
+                    hit.id as i64,
+                    as_of_ms(now_secs()),
+                    (ts as i64) * 1000,
+                    window as i64
+                ],
+                row_to_entry,
+            )
+            .ok()?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+
+        let sql_side = "SELECT id, text, entities, body, ts, ttl_ms
+                        FROM memory_entries
+                        WHERE ttl_ms IS NULL OR ts + ttl_ms >= ?1
+                        ORDER BY {dir} LIMIT ?2";
+        let opening = self
+            .conn
+            .prepare(&sql_side.replace("{dir}", "ts ASC, id ASC"))
+            .ok()?
+            .query_map(
+                rusqlite::params![as_of_ms(now_secs()), bookend as i64],
+                row_to_entry,
+            )
+            .ok()?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        let mut stmt = self
+            .conn
+            .prepare(&sql_side.replace("{dir}", "ts DESC, id DESC"))
+            .ok()?;
+        let mut resolution_raw = stmt
+            .query_map(
+                rusqlite::params![as_of_ms(now_secs()), bookend as i64],
+                row_to_entry,
+            )
+            .ok()?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        resolution_raw.reverse();
+        let resolution = resolution_raw;
+
+        Some(Anchored {
+            hit: hit.clone(),
+            window: w,
+            opening,
+            resolution,
+        })
     }
 
     fn recall_at(&self, query: &str, k: usize, as_of: u64) -> RecallResult {
