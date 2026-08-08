@@ -51,6 +51,25 @@ fn session_memory_reloads_from_disk() {
 }
 
 #[test]
+fn recall_prompt_renders_block_with_anchored_context() {
+    init();
+    let mem = SessionMemory::load("prompt-session");
+    let empty = mem.recall_prompt("nothing relevant stored", 3);
+    assert!(empty.is_none(), "empty store yields no block");
+
+    let mut mem = SessionMemory::load("prompt-block-session");
+    mem.remember("goal: ship the toggle", &["goal"], None);
+    mem.remember("the toggle fact lives in config.rs", &["toggle"], None);
+    mem.remember("outcome: toggle shipped", &["outcome"], None);
+
+    let block = mem.recall_prompt("toggle config", 1).expect("block");
+    assert!(block.contains("KAJI memory"));
+    assert!(block.contains("toggle fact"));
+    assert!(block.contains("opening"));
+    assert!(block.contains("resolution"));
+}
+
+#[test]
 fn session_memory_anchored_view() {
     init();
     let mut mem = SessionMemory::load("anchored-session");
