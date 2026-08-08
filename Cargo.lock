@@ -6361,6 +6361,7 @@ dependencies = [
  "futures",
  "indicatif",
  "kaji",
+ "kaji-core",
  "kaji-mcp",
  "kaji-providers",
  "open",
