@@ -187,7 +187,7 @@ async fn load_url_bytes(url: url::Url) -> Result<Vec<u8>, String> {
         .user_agent(concat!(
             "kaji/",
             env!("CARGO_PKG_VERSION"),
-            " (+https://github.com/aaif-goose/goose)"
+            " (+https://github.com/Taishi66/-Kaji-)"
         ))
         .timeout(Duration::from_secs(30))
         .build()
