@@ -2,6 +2,7 @@ pub mod configure;
 pub mod doctor;
 pub mod gateway;
 pub mod info;
+pub mod memory;
 pub mod plugin;
 pub mod recipe;
 pub mod review;

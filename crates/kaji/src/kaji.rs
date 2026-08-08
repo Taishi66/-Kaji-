@@ -16,7 +16,9 @@
 use std::path::Path;
 use std::time::Duration;
 
-use kaji_core::memory::{Anchored, Memory, RecallHit, RecallResult};
+use kaji_core::memory::{Anchored, Entry, Memory, RecallHit, RecallResult};
+
+pub use kaji_core::memory::Entry as MemoryEntry;
 
 use crate::config::paths::Paths;
 
@@ -126,6 +128,22 @@ impl SessionMemory {
             }
         }
         Some(parts.join("\n"))
+    }
+
+    /// Owned snapshot of all entries in the shared store, newest first. Backed
+    /// by SQLite; used by the `kaji memory` inspection CLI.
+    pub fn list(&self) -> Vec<Entry> {
+        self.store.iter()
+    }
+
+    /// Drop entries from the shared store. When `session_id` is `Some`, only
+    /// that session's entries are removed ("" targets legacy/global entries);
+    /// `None` clears the whole store. Returns how many entries were removed.
+    pub fn clear(&mut self, session_id: Option<&str>) -> usize {
+        match session_id {
+            Some(sid) => self.store.forget_where(|e| e.session_id == sid),
+            None => self.store.forget_where(|_| true),
+        }
     }
 }
 

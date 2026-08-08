@@ -732,6 +732,43 @@ enum SkillsCommand {
 }
 
 #[derive(Subcommand)]
+pub enum MemoryCommand {
+    /// List entries in the shared memory store, newest first
+    #[command(about = "List entries in the shared memory store")]
+    List {
+        /// Filter entries to a single session
+        #[arg(
+            long = "session",
+            value_name = "SESSION_ID",
+            help = "Only show entries recorded by this session"
+        )]
+        session: Option<String>,
+
+        #[arg(short = 'l', long = "limit", help = "Limit the number of results")]
+        limit: Option<usize>,
+
+        /// Output format (text, json)
+        #[arg(
+            long = "format",
+            value_name = "FORMAT",
+            help = "Output format (text, json)",
+            default_value = "text"
+        )]
+        format: String,
+    },
+    /// Remove entries from the shared memory store
+    #[command(about = "Remove entries from the shared memory store")]
+    Clear {
+        /// Session whose entries to remove ("" = legacy/global entries)
+        #[arg(help = "Session ID whose entries to remove", conflicts_with = "all")]
+        session: Option<String>,
+
+        #[arg(short = 'a', long = "all", help = "Clear the entire shared store")]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum RecipeCommand {
     /// Validate a recipe file
     #[command(about = "Validate a recipe")]
@@ -980,6 +1017,13 @@ enum Command {
     Skills {
         #[command(subcommand)]
         command: SkillsCommand,
+    },
+
+    /// Manage the shared cross-session memory store
+    #[command(about = "Inspect and manage the shared memory store")]
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
     },
 
     /// Manage plugins
@@ -1345,6 +1389,7 @@ fn get_command_name(command: &Option<Command>) -> &'static str {
         Some(Command::Update { .. }) => "update",
         Some(Command::Recipe { .. }) => "recipe",
         Some(Command::Skills { .. }) => "skills",
+        Some(Command::Memory { .. }) => "memory",
         Some(Command::Plugin { .. }) => "plugin",
         Some(Command::Term { .. }) => "term",
         #[cfg(feature = "tui")]
@@ -2009,6 +2054,10 @@ async fn handle_skills_subcommand(command: SkillsCommand) -> Result<()> {
     }
 }
 
+async fn handle_memory_subcommand(command: MemoryCommand) -> Result<()> {
+    crate::commands::memory::handle_memory_subcommand(command).await
+}
+
 async fn handle_term_subcommand(command: TermCommand) -> Result<()> {
     match command {
         TermCommand::Init {
@@ -2318,6 +2367,7 @@ pub async fn cli() -> anyhow::Result<()> {
         }
         Some(Command::Recipe { command }) => handle_recipe_subcommand(command),
         Some(Command::Skills { command }) => handle_skills_subcommand(command).await,
+        Some(Command::Memory { command }) => handle_memory_subcommand(command).await,
         Some(Command::Plugin { command }) => handle_plugin_subcommand(command),
         Some(Command::Term { command }) => handle_term_subcommand(command).await,
         #[cfg(feature = "tui")]
