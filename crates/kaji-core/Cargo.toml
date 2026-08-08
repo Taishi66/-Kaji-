@@ -11,3 +11,4 @@ rusqlite = { version = "0.32.1", default-features = false }
 
 [dev-dependencies]
 tempfile = { version = "3.10.1", default-features = false }
+rusqlite = { version = "0.32.1", default-features = false }

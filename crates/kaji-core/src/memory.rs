@@ -2,13 +2,18 @@
 //!
 //! Design goals (ADR-03, ADR-004):
 //! - **Zero-token recall**: `recall` ranks persisted entries with SQLite's
-//!   native FTS5 BM25 (`MATCH … ORDER BY bm25(...)`). No LLM inference is spent
+//!   native FTS5 BM25 (`ORDER BY bm25(...)`). No LLM inference is spent
 //!   finding relevant memory — the whole point vs. naive "summarize everything
 //!   back in context".
+//! - **Cross-session recall**: entries carry a `session_id`. `recall` queries
+//!   the whole store (all sessions); `anchored` restricts its temporal window
+//!   and bookends to the hit's own session, so the narrative arc doesn't leak
+//!   across sessions. A single shared store keeps BM25 IDF statistics over the
+//!   full corpus instead of per-session fragments.
 //! - **External-content index**: the FTS5 table only holds the inverted index;
 //!   `memory_entries` keeps the text (no duplication), kept in sync by
-//!   triggers — incremental writes, crash-safe in WAL mode (ADR-004).
-//! - **Budget**: compaction triggers at the AIAD band low bound [0.6, 0.7]
+//!   triggers — incremental sync, crash-safe in WAL mode (ADR-004).
+//! - **Budget**: compaction triggers at the `AIAD` band low bound [0.6, 0.7]
 //!   instead of kaji's reactive 0.8 (proactive context engineering).
 //! - **Temporal invalidation**: every entry carries a timestamp and an optional
 //!   ttl; expired entries are swept on `remember` and excluded from `recall`,
@@ -45,6 +50,24 @@ fn ttl_ms(ttl: Option<Duration>) -> Option<i64> {
     ttl.map(|t| t.as_millis().min(i64::MAX as u128) as i64)
 }
 
+/// Add the route column to a v1 (pre-session-tagging) database. `ALTER TABLE
+/// ADD COLUMN … NOT NULL DEFAULT ''` is a metadata-only change in SQLite, so the
+/// table isn't rewritten (M) and indexing is cheap; FTS5 external content is
+/// unaffected since the virtual table doesn't reference the new column.
+fn migrate_session_id(conn: &Connection) -> rusqlite::Result<()> {
+    let mut columns = conn.prepare("PRAGMA table_info(memory_entries)")?;
+    let names = columns
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_column = names.iter().any(|name| name == "session_id");
+    if !has_column {
+        conn.execute_batch(
+            "ALTER TABLE memory_entries ADD COLUMN session_id TEXT NOT NULL DEFAULT ''",
+        )?;
+    }
+    Ok(())
+}
+
 /// `as_of` is in seconds in the API but the DB compares in milliseconds.
 fn as_of_ms(as_of_secs: u64) -> i64 {
     (as_of_secs as i64).saturating_mul(1000)
@@ -61,6 +84,8 @@ pub struct Entry {
     pub ts: u64,
     /// None = never expires.
     pub ttl: Option<Duration>,
+    /// Session that originally recorded this fact ("" = global/pre-session).
+    pub session_id: String,
 }
 
 impl Entry {
@@ -75,6 +100,8 @@ pub struct RecallHit {
     pub id: u64,
     pub body: String,
     pub score: u32,
+    /// Session the hit was recorded in; `anchored` scopes its window to this.
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -110,7 +137,8 @@ CREATE TABLE IF NOT EXISTS memory_entries (
     entities TEXT NOT NULL DEFAULT '',
     body TEXT NOT NULL,
     ts INTEGER NOT NULL,
-    ttl_ms INTEGER
+    ttl_ms INTEGER,
+    session_id TEXT NOT NULL DEFAULT ''
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     text, entities, body,
@@ -152,16 +180,33 @@ impl Memory {
     }
 
     /// Persistent store at `path` (creates schema idempotently, WAL mode).
+    ///
+    /// Migrates pre-session-tagged databases (ADR-004 v1) by adding the
+    /// `session_id` column if missing; existing rows default to the empty
+    /// session ("". known to the caller as "legacy" entries).
     pub fn open<P: AsRef<Path>>(path: P) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
+        migrate_session_id(&conn)?;
         Ok(Memory { conn })
     }
 
     /// Persist a fact + its extracted entities. Sweeps entries past their TTL
     /// first. Returns the new entry id.
     pub fn remember(&mut self, text: &str, entities: &[&str], ttl: Option<Duration>) -> u64 {
+        self.remember_in_session("", text, entities, ttl)
+    }
+
+    /// `remember` tagged with the recording session ("" = global).
+    pub fn remember_in_session(
+        &mut self,
+        session_id: &str,
+        text: &str,
+        entities: &[&str],
+        ttl: Option<Duration>,
+    ) -> u64 {
         self.sweep_stale(now_secs());
         let ts_ms = now_secs() as i64 * 1000;
         let entities_joined = entities
@@ -173,9 +218,9 @@ impl Memory {
         let ttl = ttl_ms(ttl);
         self.conn
             .execute(
-                "INSERT INTO memory_entries (text, entities, body, ts, ttl_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![text, entities_joined, body, ts_ms, ttl],
+                "INSERT INTO memory_entries (text, entities, body, ts, ttl_ms, session_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![text, entities_joined, body, ts_ms, ttl, session_id],
             )
             .expect("memory_entries insert");
         self.conn.last_insert_rowid() as u64
@@ -196,12 +241,15 @@ impl Memory {
     /// SQL (no LLM tokens). Returns `None` when the entry is gone (swept).
     pub fn anchored(&self, hit: &RecallHit, window: usize, bookend: usize) -> Option<Anchored> {
         let ts = self.get(hit.id)?.ts;
-        let sql_window = "SELECT id, text, entities, body, ts, ttl_ms
+        // All temporal neighborhoods are scoped to the hit's own session, so a
+        // cross-session recall doesn't drag in foreign narrative context.
+        let sql_window = "SELECT id, text, entities, body, ts, ttl_ms, session_id
                           FROM memory_entries
                           WHERE id != ?1
-                            AND (ttl_ms IS NULL OR ts + ttl_ms >= ?2)
-                          ORDER BY ABS(ts - ?3) ASC, id ASC
-                          LIMIT ?4";
+                            AND session_id = ?2
+                            AND (ttl_ms IS NULL OR ts + ttl_ms >= ?3)
+                          ORDER BY ABS(ts - ?4) ASC, id ASC
+                          LIMIT ?5";
         let w = self
             .conn
             .prepare(sql_window)
@@ -209,6 +257,7 @@ impl Memory {
             .query_map(
                 rusqlite::params![
                     hit.id as i64,
+                    hit.session_id,
                     as_of_ms(now_secs()),
                     (ts as i64) * 1000,
                     window as i64
@@ -219,16 +268,17 @@ impl Memory {
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
 
-        let sql_side = "SELECT id, text, entities, body, ts, ttl_ms
+        let sql_side = "SELECT id, text, entities, body, ts, ttl_ms, session_id
                         FROM memory_entries
-                        WHERE ttl_ms IS NULL OR ts + ttl_ms >= ?1
-                        ORDER BY {dir} LIMIT ?2";
+                        WHERE session_id = ?1
+                          AND (ttl_ms IS NULL OR ts + ttl_ms >= ?2)
+                        ORDER BY {dir} LIMIT ?3";
         let opening = self
             .conn
             .prepare(&sql_side.replace("{dir}", "ts ASC, id ASC"))
             .ok()?
             .query_map(
-                rusqlite::params![as_of_ms(now_secs()), bookend as i64],
+                rusqlite::params![hit.session_id, as_of_ms(now_secs()), bookend as i64],
                 row_to_entry,
             )
             .ok()?
@@ -240,7 +290,7 @@ impl Memory {
             .ok()?;
         let mut resolution_raw = stmt
             .query_map(
-                rusqlite::params![as_of_ms(now_secs()), bookend as i64],
+                rusqlite::params![hit.session_id, as_of_ms(now_secs()), bookend as i64],
                 row_to_entry,
             )
             .ok()?
@@ -267,7 +317,7 @@ impl Memory {
             };
         }
 
-        let sql = "SELECT e.id, e.body,
+        let sql = "SELECT e.id, e.body, e.session_id,
                           bm25(memory_fts, ?1, ?2, ?3) AS score
                    FROM memory_fts f
                    JOIN memory_entries e ON e.id = f.rowid
@@ -282,7 +332,7 @@ impl Memory {
                 return RecallResult {
                     hits: Vec::new(),
                     stale_dropped,
-                }
+                };
             }
         };
 
@@ -294,9 +344,10 @@ impl Memory {
                     Ok(RecallHit {
                         id: row.get::<_, i64>(0)? as u64,
                         body: row.get(1)?,
+                        session_id: row.get(2)?,
                         // bm25() returns negative (better = more negative);
                         // flip to a positive score where higher = more relevant.
-                        score: (-row.get::<_, f64>(2)? * 1000.0) as u32,
+                        score: (-row.get::<_, f64>(3)? * 1000.0) as u32,
                     })
                 },
             )
@@ -364,7 +415,7 @@ impl Memory {
     pub fn get(&self, id: u64) -> Option<Entry> {
         self.conn
             .query_row(
-                "SELECT id, text, entities, body, ts, ttl_ms
+                "SELECT id, text, entities, body, ts, ttl_ms, session_id
                  FROM memory_entries WHERE id = ?1",
                 [id],
                 row_to_entry,
@@ -392,7 +443,7 @@ impl Memory {
     fn iter_entries(&self) -> Vec<Entry> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, text, entities, body, ts, ttl_ms FROM memory_entries")
+            .prepare("SELECT id, text, entities, body, ts, ttl_ms, session_id FROM memory_entries")
             .expect("prepare memory_entries select");
         stmt.query_map([], row_to_entry)
             .map(|iter| iter.filter_map(Result::ok).collect())
@@ -415,6 +466,7 @@ fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<Entry> {
     let body: String = row.get(3)?;
     let ts: i64 = row.get(4)?;
     let ttl_ms: Option<i64> = row.get(5)?;
+    let session_id: String = row.get(6)?;
     let entities = entities_raw
         .split_whitespace()
         .map(str::to_string)
@@ -427,6 +479,7 @@ fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<Entry> {
         body,
         ts: (ts / 1000) as u64,
         ttl,
+        session_id,
     })
 }
 

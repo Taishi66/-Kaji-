@@ -2,15 +2,18 @@
 //! kernel without touching the two agent-loop hot paths.
 //!
 //! Scope (ADR-03 wiring milestone):
-//! - **Inter-session persistence**: one store file per session, kept under the
-//!   kaji data dir (cross-session recall survives process restarts).
+//! - **Cross-session persistence**: one shared store under the kaji data dir,
+//!   entries tagged with their source `session_id` (cross-session recall
+//!   survives process restarts and spans sessions).
 //! - **Ingestion**: snapshot current session messages into memory via
-//!   `ingest_session` (callers pass the text they want recalled later).
-//! - **Recall**: ranked, zero-token retrieval of prior facts for a prompt.
+//!   `ingest_turn` (callers pass the text they want recalled later).
+//! - **Recall**: ranked, zero-token retrieval of prior facts for a prompt —
+//!   global across sessions, with per-session temporal anchoring.
 //! - **Prompt block**: `recall_prompt` renders the recalled facts + their
 //!   anchored context into a plain-text block ready to splice into a system
 //!   prompt. Still only rendered on demand — callers decide when to inject.
 
+use std::path::Path;
 use std::time::Duration;
 
 use kaji_core::memory::{Anchored, Memory, RecallHit, RecallResult};
@@ -18,40 +21,65 @@ use kaji_core::memory::{Anchored, Memory, RecallHit, RecallResult};
 use crate::config::paths::Paths;
 
 /// Rendered prefix for the memory block in a system prompt.
-const BLOCK_HEADER: &str = "## KAJI memory — recalled from prior sessions";
+const BLOCK_HEADER: &str = "## KAJI memory — recalled across sessions";
 
-/// A session-scoped, file-backed memory handle.
-///
-/// Persistence is delegated to the SQLite + FTS5 store in kaji-core: every
-/// read/write hits the file directly, so there is no serialization step and no
-/// explicit save. One DB file per session, kept under the kaji data dir.
+/// File (relative to the memory dir) holding the shared cross-session store.
+const SHARED_FILE: &str = "shared.db";
+
+/// Dir holding the shared store. Tests override `KAJI_MEMORY_DIR` for
+/// isolation (the state-machine and bridge tests must not touch the real
+/// user store); otherwise the standard data dir is used.
+fn memory_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("KAJI_MEMORY_DIR") {
+        return dir.into();
+    }
+    Paths::in_data_dir("kaji/memory")
+}
+
+/// A file-backed handle over the shared cross-session store, scoped to one
+/// session for writes. Recall is global by design; anchoring is restricted to
+/// each hit's own session by `Memory::anchored`.
 pub struct SessionMemory {
     store: Memory,
+    session_id: String,
 }
 
 impl SessionMemory {
-    /// Load (or create) the store file for `session_id`.
+    /// Load (or create) the shared store and return a handle for `session_id`.
+    /// One-time, idempotent migration folds legacy per-session databases
+    /// (`{session_id}.db`) into the shared store, then renames them to
+    /// `{session_id}.db.legacy` so the import never runs twice.
+    ///
+    /// The store dir resolves through `KAJI_MEMORY_DIR` (test isolation)
+    /// before falling back to the standard data dir.
     pub fn load(session_id: &str) -> Self {
-        let dir = Paths::in_data_dir("kaji/memory");
+        let dir = memory_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join(format!("{session_id}.db"));
-        let store = Memory::open(&path).unwrap_or_default();
-        SessionMemory { store }
+        let path = dir.join(SHARED_FILE);
+        let mut store = Memory::open(&path).unwrap_or_default();
+        migrate_legacy_sessions(&dir, &mut store);
+        SessionMemory {
+            store,
+            session_id: session_id.to_string(),
+        }
     }
 
-    /// Retrieve the top-k facts relevant to `query`. Zero LLM tokens spent.
+    /// Retrieve the top-k facts relevant to `query`, across all sessions.
+    /// Zero LLM tokens spent.
     pub fn recall(&self, query: &str, k: usize) -> RecallResult {
         self.store.recall(query, k)
     }
 
-    /// Attach temporal context (window + bookends) around a recall hit.
+    /// Attach temporal context (window + bookends) around a recall hit, scoped
+    /// to the hit's own session so foreign sessions never leak their arc.
     pub fn anchored(&self, hit: &RecallHit, window: usize, bookend: usize) -> Option<Anchored> {
         self.store.anchored(hit, window, bookend)
     }
 
-    /// Persist a fact with its entities; optional TTL for volatile facts.
+    /// Persist a fact under this handle's session; optional TTL.
     pub fn remember(&mut self, text: &str, entities: &[&str], ttl: Option<Duration>) {
-        self.store.remember(text, entities, ttl);
+        self.store
+            .remember_in_session(&self.session_id, text, entities, ttl);
     }
 
     /// True when the caller's usage ratio crossed the AIAD budget band.
@@ -68,11 +96,12 @@ impl SessionMemory {
         }
         let entities = extract_entities(text);
         let entities: Vec<&str> = entities.iter().map(String::as_str).collect();
-        self.store.remember(text, &entities, None);
+        self.remember(text, &entities, None);
     }
 
     /// Zero-token prompt block : the top-k recalled facts for `query`, each
-    /// followed by its temporal context (anchored window + bookends).
+    /// tagged with its source session and followed by its temporal context
+    /// (anchored window + bookends) scoped to that session.
     ///
     /// Rendered as plain markdown so it can be appended to a system prompt by
     /// either agent-loop path. Returns `None` when nothing relevant is stored.
@@ -83,7 +112,12 @@ impl SessionMemory {
         }
         let mut parts = vec![BLOCK_HEADER.to_string()];
         for (i, hit) in result.hits.iter().enumerate() {
-            parts.push(format!("{i}. {}", hit.body));
+            let source = if hit.session_id.is_empty() {
+                String::new()
+            } else {
+                format!("[{}] ", hit.session_id)
+            };
+            parts.push(format!("{i}. {source}{}", hit.body));
             if let Some(view) = self.anchored(hit, 2, 1) {
                 let context = render_anchored(&view);
                 if !context.is_empty() {
@@ -92,6 +126,40 @@ impl SessionMemory {
             }
         }
         Some(parts.join("\n"))
+    }
+}
+
+/// Import legacy per-session database files (`{session_id}.db`) into the shared
+/// store, tagged with the source session, then rename them to
+/// `{session_id}.db.legacy`. Idempotent by construction: once renamed, a file
+/// no longer matches the `*.db` scan, so a restart cannot double-import.
+fn migrate_legacy_sessions(dir: &Path, shared: &mut Memory) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+        if name == SHARED_FILE || !name.ends_with(".db") || name.ends_with(".legacy") {
+            continue;
+        }
+        let Some(session_id) = name.strip_suffix(".db") else {
+            continue;
+        };
+        let Ok(legacy) = Memory::open(&path) else {
+            continue;
+        };
+        for entry in legacy.iter() {
+            if shared.contains_body(&entry.body) {
+                continue;
+            }
+            let entities: Vec<&str> = entry.entities.iter().map(String::as_str).collect();
+            shared.remember_in_session(session_id, &entry.text, &entities, entry.ttl);
+        }
+        let _ = std::fs::rename(&path, path.with_extension("db.legacy"));
     }
 }
 

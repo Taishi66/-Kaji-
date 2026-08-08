@@ -1,15 +1,17 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use rmcp::model::ElicitationAction;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::calculator_extension::CalculatorExtension;
 use super::dummy_api::{DummyApi, ProviderFeatures};
 use crate::action_required_manager::ElicitationOutcome;
+use crate::agents::AgentEvent;
 use crate::agents::extension::ExtensionConfig;
 use crate::agents::extension_manager::{ExtensionManager, ExtensionManagerCapabilities};
 use crate::agents::mcp_client::McpClientTrait;
@@ -21,14 +23,13 @@ use crate::agents::state_machine::{
     SteerQueue, Step, StopHookOperation, ToolApprovalOperation, ToolExecutionOperation,
     ToolPairCompactionOperation, UnknownToolOperation,
 };
-use crate::agents::AgentEvent;
-use crate::config::permission::{PermissionLevel, PermissionManager};
 use crate::config::KajiMode;
-use crate::conversation::message::{ActionRequiredData, Message, MessageContent};
+use crate::config::permission::{PermissionLevel, PermissionManager};
 use crate::conversation::Conversation;
+use crate::conversation::message::{ActionRequiredData, Message, MessageContent};
 use crate::hooks::HookManager;
-use crate::permission::permission_inspector::PermissionInspector;
 use crate::permission::Permission;
+use crate::permission::permission_inspector::PermissionInspector;
 use crate::providers::base::Provider;
 use crate::security::security_inspector::SecurityInspector;
 use crate::session::extension_data::EnabledExtensionsState;
@@ -649,6 +650,22 @@ pub(super) async fn test_pipeline_with_scheduler() -> Result<(
     Ok((pipeline, api, scheduler.expect("scheduler was requested")))
 }
 
+/// Point the KAJI memory data dir at a throwaway temp root once per test
+/// process, so the state-machine suite never reads or writes the real user
+/// store. The shared cross-session store makes this isolation mandatory:
+/// without it, facts recorded by a real session (or another test) leak into
+/// every pipeline's system prompt via `splice_memory_block`. All pipeline
+/// tests share the same throwaway store; SQLite serializes access and no
+/// assertion depends on memory being empty.
+fn isolate_memory_root() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("tempdir for memory isolation");
+        std::env::set_var("KAJI_MEMORY_DIR", dir.path());
+        std::mem::forget(dir);
+    });
+}
+
 pub(super) async fn test_pipeline_with(
     features: ProviderFeatures,
 ) -> Result<(TestPipeline, Arc<DummyApi>)> {
@@ -664,6 +681,7 @@ async fn test_pipeline_with_components(
     Arc<DummyApi>,
     Option<Arc<crate::scheduler::Scheduler>>,
 )> {
+    isolate_memory_root();
     let api = Arc::new(DummyApi::start(features).await);
     let temp_dir = Arc::new(tempfile::tempdir()?);
     let session_manager = Arc::new(SessionManager::new(temp_dir.path().to_path_buf()));

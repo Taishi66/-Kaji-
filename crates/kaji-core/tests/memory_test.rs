@@ -153,3 +153,109 @@ fn anchored_reattaches_temporal_context() {
     assert_eq!(view.resolution.len(), 1);
     assert!(view.resolution[0].body.contains("resolution"));
 }
+
+#[test]
+fn recall_is_global_across_sessions() {
+    let mut m = Memory::new();
+    m.remember_in_session("sess-a", "the bedroom light stays on", &["light"], None);
+    m.remember_in_session("sess-b", "paint the bedroom wall", &["bedroom"], None);
+
+    let hits = m.recall("bedroom", 5);
+    assert_eq!(
+        hits.hits.len(),
+        2,
+        "a query must surface facts recorded in any session"
+    );
+    let sessions: Vec<&str> = hits.hits.iter().map(|h| h.session_id.as_str()).collect();
+    assert!(sessions.contains(&"sess-a"), "cross-session recall");
+    assert!(sessions.contains(&"sess-b"), "cross-session recall");
+}
+
+#[test]
+fn anchored_is_scoped_to_the_hit_session() {
+    let mut m = Memory::new();
+    m.remember_in_session("sess-a", "opening a: goal", &["a"], None);
+    m.remember_in_session("sess-a", "the crucial fact for a", &["critical"], None);
+    m.remember_in_session("sess-a", "resolution a: done", &["a"], None);
+    // Foreign sessions bookend the store but must not appear in the view.
+    m.remember_in_session("sess-b", "opening b: noise", &["b"], None);
+    m.remember_in_session("sess-b", "resolution b: noise", &["b"], None);
+
+    let hits = m.recall("critical", 1);
+    assert_eq!(hits.hits.len(), 1);
+    let view = m.anchored(&hits.hits[0], 3, 2).expect("view");
+
+    let seen: Vec<String> = view
+        .window
+        .iter()
+        .chain(view.opening.iter())
+        .chain(view.resolution.iter())
+        .map(|e| e.body.clone())
+        .collect();
+    assert!(
+        seen.iter().any(|b| b.contains("goal")),
+        "session-a opening preserved"
+    );
+    assert!(
+        seen.iter().any(|b| b.contains("done")),
+        "session-a resolution preserved"
+    );
+    assert!(
+        seen.iter()
+            .all(|b| !b.contains(": b") && !b.contains("noise")),
+        "session-b context must not leak into the anchored view"
+    );
+}
+
+#[test]
+fn migration_adds_session_column_to_legacy_db() {
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+
+    // Write a v1 database without the session_id column.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memory_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT NOT NULL,
+                entities TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL,
+                ts INTEGER NOT NULL,
+                ttl_ms INTEGER
+            );
+            CREATE VIRTUAL TABLE memory_fts USING fts5(
+                text, entities, body,
+                content='memory_entries',
+                content_rowid='id'
+            );
+            CREATE TRIGGER memory_fts_insert AFTER INSERT ON memory_entries BEGIN
+                INSERT INTO memory_fts(rowid, text, entities, body)
+                VALUES (new.id, new.text, new.entities, new.body);
+            END;
+            INSERT INTO memory_entries (text, entities, body, ts, ttl_ms)
+            VALUES ('legacy fact', 'legacy', 'legacy fact', 0, NULL);",
+        )
+        .unwrap();
+    }
+
+    let mut m = Memory::open(&path).unwrap();
+    assert_eq!(m.len(), 1);
+    let entries = m.iter();
+    assert_eq!(
+        entries[0].session_id, "",
+        "v1 rows default to empty session"
+    );
+
+    // Writes after migration must carry their session.
+    m.remember_in_session("sess-x", "new tagged fact", &["new"], None);
+    let hits = m.recall("legacy new", 5);
+    let sessions: Vec<&str> = hits.hits.iter().map(|h| h.session_id.as_str()).collect();
+    assert!(sessions.contains(&"sess-x"));
+    assert!(
+        sessions.contains(&""),
+        "legacy rows readable post-migration"
+    );
+}

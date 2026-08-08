@@ -1,25 +1,54 @@
-use std::sync::Once;
-
 use kaji::conversation::message::Message;
 use kaji::kaji::{ingest_turn, latest_user_instruction, splice_memory_block, SessionMemory};
 
-#[test]
-fn splice_memory_block_appends_recalled_facts() {
-    init();
-    {
-        let mut mem = SessionMemory::load("splice-session");
-        mem.remember("Onboarding lives on the PO dashboard", &["po"], None);
-    }
-    let prompt = "You are KAJI. You have standard PI.";
-
-    let spliced = splice_memory_block(prompt, "some-session", "po dashboard");
-    assert_eq!(spliced, prompt, "unknown session yields unchanged prompt");
-
-    let spliced = splice_memory_block(prompt, "splice-session", "po dashboard");
-    assert!(spliced.contains("KAJI memory"));
-    assert!(spliced.contains("Onboarding lives"));
+/// Temporarily point the memory data dir at a fresh temp root, serialized
+/// against the rest of the suite (env_lock keeps one process-wide mutex for
+/// env access). A per-test root isolates the shared store between tests.
+fn with_root(f: impl FnOnce()) {
+    let guard = env_lock::lock_env([(
+        "KAJI_PATH_ROOT",
+        Some(tempfile::tempdir().unwrap().path().to_str().unwrap()),
+    )]);
+    f();
+    drop(guard);
 }
 
+#[test]
+fn splice_memory_block_appends_recalled_facts() {
+    with_root(|| {
+        {
+            let mut mem = SessionMemory::load("splice-session");
+            mem.remember("Onboarding lives on the PO dashboard", &["po"], None);
+        }
+        let prompt = "You are KAJI. You have standard PI.";
+
+        let spliced = splice_memory_block(prompt, "some-session", "po dashboard");
+        assert!(
+            spliced.contains("KAJI memory"),
+            "any session recalls facts recorded by another session"
+        );
+        assert!(spliced.contains("Onboarding lives"));
+        assert!(
+            spliced.contains("splice-session"),
+            "hit tagged with its source"
+        );
+
+        let spliced = splice_memory_block(prompt, "splice-session", "po dashboard");
+        assert!(spliced.contains("KAJI memory"));
+        assert!(spliced.contains("Onboarding lives"));
+    })
+}
+
+#[test]
+fn no_relevant_facts_yields_unchanged_prompt() {
+    with_root(|| {
+        let prompt = "You are KAJI.";
+        let spliced = splice_memory_block(prompt, "empty-session", "nothing about this");
+        assert_eq!(spliced, prompt);
+    })
+}
+
+#[test]
 fn latest_user_instruction_extracts_recent_text() {
     let messages = vec![
         Message::user().with_text("setup the workspace"),
@@ -39,111 +68,140 @@ fn latest_user_instruction_extracts_recent_text() {
 
 #[test]
 fn ingest_is_idempotent_and_extracts_entities() {
-    let mut mem = SessionMemory::load("ingest-session");
-    mem.ingest("Network the raspberry pi and deploy the gateway");
-    assert_eq!(mem.recall("raspberry gateway", 5).hits.len(), 1);
+    with_root(|| {
+        let mut mem = SessionMemory::load("ingest-session");
+        mem.ingest("Network the raspberry pi and deploy the gateway");
+        assert_eq!(mem.recall("raspberry gateway", 5).hits.len(), 1);
 
-    mem.ingest("Network the raspberry pi and deploy the gateway");
-    let hits = mem.recall("raspberry gateway", 5);
-    assert_eq!(hits.hits.len(), 1, "same body must be deduplicated");
+        mem.ingest("Network the raspberry pi and deploy the gateway");
+        let hits = mem.recall("raspberry gateway", 5);
+        assert_eq!(hits.hits.len(), 1, "same body must be deduplicated");
+    })
 }
 
 #[test]
 fn ingest_turn_records_user_instructions_without_duplicating() {
-    let messages = vec![
-        Message::user().with_text("Kick off the onboarding pipeline"),
-        Message::assistant().with_text("I've set the pipeline up."),
-        Message::user().with_text("Kick off the onboarding pipeline"),
-    ];
-    ingest_turn("ingest-turn-session", &messages);
+    with_root(|| {
+        let messages = vec![
+            Message::user().with_text("Kick off the onboarding pipeline"),
+            Message::assistant().with_text("I've set the pipeline up."),
+            Message::user().with_text("Kick off the onboarding pipeline"),
+        ];
+        ingest_turn("ingest-turn-session", &messages);
 
-    let mem = SessionMemory::load("ingest-turn-session");
-    let hits = mem.recall("onboarding pipeline", 5);
-    assert_eq!(hits.hits.len(), 1, "duplicate instruction stored once");
-    assert!(hits.hits[0].body.contains("onboarding"));
-}
-
-fn init() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let root = std::env::temp_dir().join("kaji-kaji-test");
-        std::env::set_var("KAJI_PATH_ROOT", root);
-    });
+        let mem = SessionMemory::load("ingest-turn-session");
+        let hits = mem.recall("onboarding pipeline", 5);
+        assert_eq!(hits.hits.len(), 1, "duplicate instruction stored once");
+        assert!(hits.hits[0].body.contains("onboarding"));
+    })
 }
 
 #[test]
 fn session_memory_recall_and_persist() {
-    init();
-    let mut mem = SessionMemory::load("integration-session");
-    mem.remember(
-        "The onboarding checklist lives on the PO dashboard",
-        &["po", "onboarding"],
-        None,
-    );
-    mem.remember(
-        "Toggle switched to AIAD mode this session",
-        &["aiad", "toggle"],
-        None,
-    );
-    mem.remember(
-        "volatile config knob (expired)",
-        &["volatile"],
-        Some(std::time::Duration::from_secs(1)),
-    );
+    with_root(|| {
+        let mut mem = SessionMemory::load("integration-session");
+        mem.remember(
+            "The onboarding checklist lives on the PO dashboard",
+            &["po", "onboarding"],
+            None,
+        );
+        mem.remember(
+            "Toggle switched to AIAD mode this session",
+            &["aiad", "toggle"],
+            None,
+        );
+        mem.remember(
+            "volatile config knob (expired)",
+            &["volatile"],
+            Some(std::time::Duration::from_secs(1)),
+        );
 
-    assert!(mem.should_compact(0.60), "AIAD budget low bound triggers");
-    assert!(!mem.should_compact(0.4), "below band no compaction");
+        assert!(mem.should_compact(0.60), "AIAD budget low bound triggers");
+        assert!(!mem.should_compact(0.4), "below band no compaction");
 
-    let hits = mem.recall("aiad toggle", 2);
-    assert!(hits.hits.iter().any(|h| h.body.contains("AIAD")));
+        let hits = mem.recall("aiad toggle", 2);
+        assert!(hits.hits.iter().any(|h| h.body.contains("AIAD")));
+    })
 }
 
 #[test]
 fn session_memory_reloads_from_disk() {
-    init();
-    {
-        let mut mem = SessionMemory::load("persist-session");
-        mem.remember("persisted across process restarts", &["persist"], None);
-    }
-    let mem = SessionMemory::load("persist-session");
-    let hits = mem.recall("persist", 1);
-    assert_eq!(hits.hits.len(), 1);
-    assert!(hits.hits[0].body.contains("persisted"));
+    with_root(|| {
+        {
+            let mut mem = SessionMemory::load("persist-session");
+            mem.remember("persisted across process restarts", &["persist"], None);
+        }
+        let mem = SessionMemory::load("persist-session");
+        let hits = mem.recall("persist", 1);
+        assert_eq!(hits.hits.len(), 1);
+        assert!(hits.hits[0].body.contains("persisted"));
+    })
 }
 
 #[test]
 fn recall_prompt_renders_block_with_anchored_context() {
-    init();
-    let mem = SessionMemory::load("prompt-session");
-    let empty = mem.recall_prompt("nothing relevant stored", 3);
-    assert!(empty.is_none(), "empty store yields no block");
+    with_root(|| {
+        let mem = SessionMemory::load("prompt-session");
+        let empty = mem.recall_prompt("nothing relevant stored", 3);
+        assert!(empty.is_none(), "empty store yields no block");
 
-    let mut mem = SessionMemory::load("prompt-block-session");
-    mem.remember("goal: ship the toggle", &["goal"], None);
-    mem.remember("the toggle fact lives in config.rs", &["toggle"], None);
-    mem.remember("outcome: toggle shipped", &["outcome"], None);
+        let mut mem = SessionMemory::load("prompt-block-session");
+        mem.remember("goal: ship the toggle", &["goal"], None);
+        mem.remember("the toggle fact lives in config.rs", &["toggle"], None);
+        mem.remember("outcome: toggle shipped", &["outcome"], None);
 
-    let block = mem.recall_prompt("toggle config", 1).expect("block");
-    assert!(block.contains("KAJI memory"));
-    assert!(block.contains("toggle fact"));
-    assert!(block.contains("opening"));
-    assert!(block.contains("resolution"));
+        let block = mem.recall_prompt("toggle config", 1).expect("block");
+        assert!(block.contains("KAJI memory"));
+        assert!(block.contains("toggle fact"));
+        assert!(block.contains("opening"));
+        assert!(block.contains("resolution"));
+    })
 }
 
 #[test]
 fn session_memory_anchored_view() {
-    init();
-    let mut mem = SessionMemory::load("anchored-session");
-    mem.remember("goal: ship the toggle", &["goal"], None);
-    mem.remember("filler before", &["filler"], None);
-    mem.remember("the toggle fact", &["toggle"], None);
-    mem.remember("filler after", &["filler"], None);
-    mem.remember("outcome: toggle live", &["outcome"], None);
+    with_root(|| {
+        let mut mem = SessionMemory::load("anchored-session");
+        mem.remember("goal: ship the toggle", &["goal"], None);
+        mem.remember("filler before", &["filler"], None);
+        mem.remember("the toggle fact", &["toggle"], None);
+        mem.remember("filler after", &["filler"], None);
+        mem.remember("outcome: toggle live", &["outcome"], None);
 
-    let hits = mem.recall("toggle", 1);
-    assert_eq!(hits.hits.len(), 1);
-    let view = mem.anchored(&hits.hits[0], 2, 1).expect("anchored");
-    assert!(view.opening.iter().any(|e| e.body.contains("goal")));
-    assert!(view.resolution.iter().any(|e| e.body.contains("outcome")));
-    assert_eq!(view.window.len(), 2);
+        let hits = mem.recall("toggle", 1);
+        assert_eq!(hits.hits.len(), 1);
+        let view = mem.anchored(&hits.hits[0], 2, 1).expect("anchored");
+        assert!(view.opening.iter().any(|e| e.body.contains("goal")));
+        assert!(view.resolution.iter().any(|e| e.body.contains("outcome")));
+        assert_eq!(view.window.len(), 2);
+    })
+}
+
+/// Migration folds a legacy v1 per-session DB into the shared store, tagged
+/// with the source session, and renames the file so it isn't imported twice.
+#[test]
+fn migration_folds_legacy_session_files_into_shared() {
+    with_root(|| {
+        let memory_dir = kaji::config::paths::Paths::in_data_dir("kaji/memory");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+        let legacy_path = memory_dir.join("old-session.db");
+        {
+            // Create a v1 per-session database (legacy schema without session_id
+            // column) using the raw Memory API at the legacy path.
+            let mut legacy = kaji_core::memory::Memory::open(&legacy_path).unwrap();
+            legacy.remember("legacy fact from an old session", &["legacy"], None);
+        }
+
+        // Loading any brand-new session triggers the one-time migration.
+        let mem = SessionMemory::load("new-session");
+        let hits = mem.recall("legacy fact", 5);
+        assert!(hits.hits.iter().any(|h| h.body.contains("legacy")));
+        assert!(
+            hits.hits.iter().any(|h| h.session_id == "old-session"),
+            "imported entries carry their source session"
+        );
+
+        // The legacy file was renamed away so re-opening cannot double-import.
+        assert!(!legacy_path.exists(), "legacy DB renamed after import");
+    })
 }
