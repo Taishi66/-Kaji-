@@ -82,7 +82,7 @@ async fn event_loop(
         retry_config: None,
     };
     let mut turn: Option<TurnStream<'_>> = None;
-    let mut cancel = CancellationToken::new();
+    let mut cancel: Option<CancellationToken> = None;
 
     loop {
         terminal.draw(|frame| ui::draw(frame, &app))?;
@@ -91,16 +91,27 @@ async fn event_loop(
                 let Some(ev) = ev else { break };
                 match app.on_event(&ev) {
                     Action::Quit => break,
-                    Action::CancelTurn => cancel.cancel(),
+                    Action::CancelTurn => {
+                        if let Some(token) = &cancel {
+                            token.cancel();
+                        }
+                    }
                     Action::Submit(text) => {
                         app.push_user(&text);
-                        cancel = CancellationToken::new();
-                        match start_turn(agent, &session_config, &text, &cancel).await {
+                        app.status = "démarrage du tour…".to_string();
+                        terminal.draw(|frame| ui::draw(frame, &app))?;
+                        let token = CancellationToken::new();
+                        match start_turn(agent, &session_config, &text, &token).await {
                             Ok(stream) => {
                                 app.turn_active = true;
+                                app.status.clear();
                                 turn = Some(stream);
+                                cancel = Some(token);
                             }
-                            Err(e) => app.push_system(&format!("erreur: {e}")),
+                            Err(e) => {
+                                app.status.clear();
+                                app.push_system(&format!("erreur: {e}"));
+                            }
                         }
                     }
                     Action::StartPass | Action::GateApprove | Action::GateReject => {
@@ -115,10 +126,12 @@ async fn event_loop(
                     Some(Err(e)) => {
                         app.push_system(&format!("erreur: {e}"));
                         turn = None;
+                        cancel = None;
                         app.turn_active = false;
                     }
                     None => {
                         turn = None;
+                        cancel = None;
                         app.turn_active = false;
                     }
                 }

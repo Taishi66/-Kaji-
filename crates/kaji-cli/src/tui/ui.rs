@@ -60,9 +60,11 @@ fn wrapped_row_count(line: &str, width: u16) -> usize {
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let title = if app.turn_active {
-        " ⏳ tour en cours (Esc annule) "
+        " ⏳ tour en cours (Esc annule) ".to_string()
+    } else if !app.status.is_empty() {
+        format!(" {} ", app.status)
     } else {
-        " statut "
+        " statut ".to_string()
     };
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);

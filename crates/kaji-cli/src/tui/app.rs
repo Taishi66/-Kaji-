@@ -86,6 +86,10 @@ impl App {
                 Action::None
             }
             KeyCode::Esc if self.turn_active => Action::CancelTurn,
+            KeyCode::Enter if self.turn_active => {
+                self.push_system("tour en cours — Esc pour annuler d'abord");
+                Action::None
+            }
             KeyCode::Enter => {
                 let text = std::mem::take(&mut self.input);
                 let text = text.trim().to_string();
@@ -217,6 +221,21 @@ mod tests {
             state: ratatui::crossterm::event::KeyEventState::NONE,
         });
         assert_eq!(app.on_event(&ctrl_c), Action::Quit);
+    }
+
+    #[test]
+    fn enter_during_active_turn_does_not_submit() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+        app.on_event(&key(KeyCode::Char('h')));
+        app.on_event(&key(KeyCode::Char('i')));
+        let action = app.on_event(&key(KeyCode::Enter));
+        assert_eq!(action, Action::None);
+        assert_eq!(app.input, "hi");
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains("tour en cours") && l.text.contains("Esc")));
     }
 
     #[test]
