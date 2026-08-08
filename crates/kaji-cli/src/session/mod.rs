@@ -334,6 +334,10 @@ impl CliSession {
         &self.session_id
     }
 
+    pub fn into_parts(self) -> (Agent, String, Conversation) {
+        (self.agent, self.session_id, self.messages)
+    }
+
     /// Parse a stdio extension command string into an ExtensionConfig
     /// Format: "ENV1=val1 ENV2=val2 command args..."
     pub fn parse_stdio_extension(extension_command: &str) -> Result<ExtensionConfig> {

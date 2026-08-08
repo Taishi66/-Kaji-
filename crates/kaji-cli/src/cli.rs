@@ -391,7 +391,7 @@ pub struct RunBehavior {
     pub scheduled_job_id: Option<String>,
 }
 
-async fn get_or_create_session_id(
+pub(crate) async fn get_or_create_session_id(
     identifier: Option<Identifier>,
     resume: bool,
     no_session: bool,
