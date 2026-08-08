@@ -372,6 +372,18 @@ impl Memory {
             .ok()
     }
 
+    /// Whether an entry with this exact body already exists. Cheap dedup for
+    /// ingestion loops that would otherwise rewrite the same fact every turn.
+    pub fn contains_body(&self, body: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM memory_entries WHERE body = ?1 LIMIT 1",
+                [body],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
     /// Owned snapshot of all entries (DB-backed, so owned rather than refs).
     pub fn iter(&self) -> Vec<Entry> {
         self.iter_entries()

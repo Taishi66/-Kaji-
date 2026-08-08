@@ -397,6 +397,7 @@ impl Inference for InferenceRunner<'_> {
             // KAJI : splice recalled inter-session facts (parity with the legacy
             // `prepare_reply_context` path).
             let mut system_prompt = system_prompt;
+            crate::kaji::ingest_turn(&session.id, conversation.messages());
             let query = crate::kaji::latest_user_instruction(conversation.messages());
             if let Some(query) = query {
                 system_prompt =

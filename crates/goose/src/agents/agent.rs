@@ -795,10 +795,10 @@ impl Agent {
         // KAJI : splice recalled inter-session facts into the system prompt
         // (zero-token, anchored context). Both agent-loop paths do this so the
         // memory behavior stays in parity.
+        crate::kaji::ingest_turn(session_id, conversation.messages());
         let query = crate::kaji::latest_user_instruction(conversation.messages());
         if let Some(query) = query {
-            system_prompt =
-                crate::kaji::splice_memory_block(&system_prompt, session_id, &query);
+            system_prompt = crate::kaji::splice_memory_block(&system_prompt, session_id, &query);
         }
 
         let goose_mode = *self.current_goose_mode.lock().await;

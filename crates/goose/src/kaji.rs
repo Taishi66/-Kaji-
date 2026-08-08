@@ -59,6 +59,18 @@ impl SessionMemory {
         self.store.should_compact(usage_ratio)
     }
 
+    /// Record a fact about the session, skipping it if already stored. Entity
+    /// extraction is zero-token: content words (length > 3, stopword-filtered)
+    /// become the FTS5-weighted entities column.
+    pub fn ingest(&mut self, text: &str) {
+        if text.trim().is_empty() || self.store.contains_body(text) {
+            return;
+        }
+        let entities = extract_entities(text);
+        let entities: Vec<&str> = entities.iter().map(String::as_str).collect();
+        self.store.remember(text, &entities, None);
+    }
+
     /// Zero-token prompt block : the top-k recalled facts for `query`, each
     /// followed by its temporal context (anchored window + bookends).
     ///
@@ -102,19 +114,52 @@ pub fn splice_memory_block(system_prompt: &str, session_id: &str, query: &str) -
 pub fn latest_user_instruction(
     messages: &[crate::conversation::message::Message],
 ) -> Option<String> {
-    messages
-        .iter()
-        .rev()
-        .find_map(|message| {
-            let role = crate::conversation::effective_role(message);
-            if role == crate::conversation::EffectiveRole::User {
-                let text = message.as_concat_text();
-                if !text.trim().is_empty() {
-                    return Some(text);
-                }
+    messages.iter().rev().find_map(|message| {
+        let role = crate::conversation::effective_role(message);
+        if role == crate::conversation::EffectiveRole::User {
+            let text = message.as_concat_text();
+            if !text.trim().is_empty() {
+                return Some(text);
             }
-            None
+        }
+        None
+    })
+}
+
+fn extract_entities(text: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 3)
+        .map(|w| w.to_ascii_lowercase())
+        .filter(|w| !STOPWORDS.contains(&w.as_str()))
+        .filter(|w| seen.insert(w.clone()))
+        .collect()
+}
+
+const STOPWORDS: &[&str] = &[
+    "that", "this", "with", "from", "have", "will", "your", "what", "when", "then", "them", "they",
+    "were", "been", "would", "which", "there", "vous", "avec", "pour", "dans", "mais", "être",
+    "fait", "tout", "comme", "plus", "pour", "alors",
+];
+
+/// Ingest the latest user instruction(s) of a conversation into session
+/// memory — the write side of the recall loop. Idempotent: already-stored
+/// bodies are skipped.
+pub fn ingest_turn(session_id: &str, messages: &[crate::conversation::message::Message]) {
+    let mut mem = SessionMemory::load(session_id);
+    let instructions = messages
+        .iter()
+        .filter(|message| {
+            crate::conversation::effective_role(message) == crate::conversation::EffectiveRole::User
         })
+        .filter_map(|message| {
+            let text = message.as_concat_text();
+            (!text.trim().is_empty()).then_some(text)
+        })
+        .collect::<Vec<_>>();
+    for instruction in instructions.iter().rev().take(3) {
+        mem.ingest(instruction);
+    }
 }
 
 fn render_anchored(view: &Anchored) -> String {

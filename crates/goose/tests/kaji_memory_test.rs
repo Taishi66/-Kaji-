@@ -1,7 +1,7 @@
 use std::sync::Once;
 
 use goose::conversation::message::Message;
-use goose::kaji::{latest_user_instruction, splice_memory_block, SessionMemory};
+use goose::kaji::{ingest_turn, latest_user_instruction, splice_memory_block, SessionMemory};
 
 #[test]
 fn splice_memory_block_appends_recalled_facts() {
@@ -20,7 +20,6 @@ fn splice_memory_block_appends_recalled_facts() {
     assert!(spliced.contains("Onboarding lives"));
 }
 
-#[test]
 fn latest_user_instruction_extracts_recent_text() {
     let messages = vec![
         Message::user().with_text("setup the workspace"),
@@ -36,6 +35,32 @@ fn latest_user_instruction_extracts_recent_text() {
         None,
         "no user message yields None"
     );
+}
+
+#[test]
+fn ingest_is_idempotent_and_extracts_entities() {
+    let mut mem = SessionMemory::load("ingest-session");
+    mem.ingest("Network the raspberry pi and deploy the gateway");
+    assert_eq!(mem.recall("raspberry gateway", 5).hits.len(), 1);
+
+    mem.ingest("Network the raspberry pi and deploy the gateway");
+    let hits = mem.recall("raspberry gateway", 5);
+    assert_eq!(hits.hits.len(), 1, "same body must be deduplicated");
+}
+
+#[test]
+fn ingest_turn_records_user_instructions_without_duplicating() {
+    let messages = vec![
+        Message::user().with_text("Kick off the onboarding pipeline"),
+        Message::assistant().with_text("I've set the pipeline up."),
+        Message::user().with_text("Kick off the onboarding pipeline"),
+    ];
+    ingest_turn("ingest-turn-session", &messages);
+
+    let mem = SessionMemory::load("ingest-turn-session");
+    let hits = mem.recall("onboarding pipeline", 5);
+    assert_eq!(hits.hits.len(), 1, "duplicate instruction stored once");
+    assert!(hits.hits[0].body.contains("onboarding"));
 }
 
 fn init() {
