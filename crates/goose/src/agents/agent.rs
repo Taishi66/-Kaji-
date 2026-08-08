@@ -788,9 +788,18 @@ impl Agent {
                 )
             );
         }
-        let (tools, toolshim_tools, system_prompt, model_config) = self
+        let (tools, toolshim_tools, mut system_prompt, model_config) = self
             .prepare_tools_and_prompt(session_id, working_dir)
             .await?;
+
+        // KAJI : splice recalled inter-session facts into the system prompt
+        // (zero-token, anchored context). Both agent-loop paths do this so the
+        // memory behavior stays in parity.
+        let query = crate::kaji::latest_user_instruction(conversation.messages());
+        if let Some(query) = query {
+            system_prompt =
+                crate::kaji::splice_memory_block(&system_prompt, session_id, &query);
+        }
 
         let goose_mode = *self.current_goose_mode.lock().await;
 

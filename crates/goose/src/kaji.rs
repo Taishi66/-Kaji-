@@ -83,6 +83,40 @@ impl SessionMemory {
     }
 }
 
+/// Splice the KAJI memory block into a system prompt for `session_id`, using
+/// `query` (usually the latest user instruction) as the recall query.
+///
+/// Shared by both agent-loop paths (legacy `prepare_reply_context` and the
+/// state machine's inference op) so the behavior stays in parity. Returns the
+/// prompt unchanged when nothing relevant is stored.
+pub fn splice_memory_block(system_prompt: &str, session_id: &str, query: &str) -> String {
+    let mem = SessionMemory::load(session_id);
+    match mem.recall_prompt(query, 3) {
+        Some(block) => format!("{system_prompt}\n\n{block}"),
+        None => system_prompt.to_string(),
+    }
+}
+
+/// Extract the latest user instruction from a conversation — the natural query
+/// for a memory recall. Skips tool responses and flagged transcripts.
+pub fn latest_user_instruction(
+    messages: &[crate::conversation::message::Message],
+) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            let role = crate::conversation::effective_role(message);
+            if role == crate::conversation::EffectiveRole::User {
+                let text = message.as_concat_text();
+                if !text.trim().is_empty() {
+                    return Some(text);
+                }
+            }
+            None
+        })
+}
+
 fn render_anchored(view: &Anchored) -> String {
     let mut lines = Vec::new();
     if !view.opening.is_empty() {

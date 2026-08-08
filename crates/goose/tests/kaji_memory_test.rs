@@ -1,6 +1,42 @@
 use std::sync::Once;
 
-use goose::kaji::SessionMemory;
+use goose::conversation::message::Message;
+use goose::kaji::{latest_user_instruction, splice_memory_block, SessionMemory};
+
+#[test]
+fn splice_memory_block_appends_recalled_facts() {
+    init();
+    {
+        let mut mem = SessionMemory::load("splice-session");
+        mem.remember("Onboarding lives on the PO dashboard", &["po"], None);
+    }
+    let prompt = "You are KAJI. You have standard PI.";
+
+    let spliced = splice_memory_block(prompt, "some-session", "po dashboard");
+    assert_eq!(spliced, prompt, "unknown session yields unchanged prompt");
+
+    let spliced = splice_memory_block(prompt, "splice-session", "po dashboard");
+    assert!(spliced.contains("KAJI memory"));
+    assert!(spliced.contains("Onboarding lives"));
+}
+
+#[test]
+fn latest_user_instruction_extracts_recent_text() {
+    let messages = vec![
+        Message::user().with_text("setup the workspace"),
+        Message::assistant().with_text("I'll set that up."),
+        Message::user().with_text("now list the todos"),
+    ];
+    assert_eq!(
+        latest_user_instruction(&messages).as_deref(),
+        Some("now list the todos")
+    );
+    assert_eq!(
+        latest_user_instruction(&[]),
+        None,
+        "no user message yields None"
+    );
+}
 
 fn init() {
     static ONCE: Once = Once::new();
