@@ -1089,22 +1089,16 @@ enum Command {
     /// Launch the kaji terminal UI (TUI)
     #[cfg(feature = "tui")]
     #[command(
-        about = "Launch the kaji terminal UI",
-        long_about = "Launch the kaji terminal UI (the @aaif/kaji npm package).\n\
+        about = "Launch the kaji terminal UI (ratatui, in-process)",
+        long_about = "Interface terminal native de kaji : chat streamé sur le Core in-process\n\
+                      et panneau SPEC pilotant une passe SDD.\n\
                       \n\
-                      Resolution order:\n  \
-                      1. KAJI_TUI_SCRIPT, if set to an existing dist/tui.js\n  \
-                      2. A local checkout's ui/text/dist/tui.js (dev workflow)\n  \
-                      3. `npx --yes --package <spec> -- kaji-tui` (deployed installs)\n\
-                      \n\
-                      Override the npm spec via KAJI_TUI_NPM_SPEC (default: @aaif/kaji@latest).\n\
-                      Local script mode requires `node` on PATH; npx mode requires `npx` on PATH.\n\
-                      Any extra arguments are passed through to the TUI."
+                      --spec <FILE> : fichier SPEC affiché dans le panneau SDD (défaut : ./SPEC.md s'il existe)."
     )]
     Tui {
-        /// Arguments forwarded to the TUI
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        /// Fichier SPEC affiché dans le panneau SDD
+        #[arg(long, value_name = "FILE")]
+        spec: Option<PathBuf>,
     },
 
     /// Manage local inference models
@@ -2371,7 +2365,7 @@ pub async fn cli() -> anyhow::Result<()> {
         Some(Command::Plugin { command }) => handle_plugin_subcommand(command),
         Some(Command::Term { command }) => handle_term_subcommand(command).await,
         #[cfg(feature = "tui")]
-        Some(Command::Tui { args }) => crate::commands::tui::handle_tui(args),
+        Some(Command::Tui { spec }) => crate::commands::tui::handle_tui(spec).await,
         #[cfg(feature = "local-inference")]
         Some(Command::LocalModels { command }) => handle_local_models_command(command).await,
         Some(Command::Review {
@@ -2608,12 +2602,24 @@ mod tests {
 
     #[cfg(feature = "tui")]
     #[test]
-    fn tui_command_accepts_trailing_args() {
-        let cli =
-            Cli::try_parse_from(["kaji", "tui", "--", "--theme", "dark"]).expect("parse failed");
+    fn tui_command_defaults_spec_to_none() {
+        let cli = Cli::try_parse_from(["kaji", "tui"]).expect("parse failed");
 
         match cli.command {
-            Some(Command::Tui { args }) => assert_eq!(args, vec!["--theme", "dark"]),
+            Some(Command::Tui { spec }) => assert_eq!(spec, None),
+            _ => panic!("expected tui command"),
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_command_accepts_spec_flag() {
+        let cli = Cli::try_parse_from(["kaji", "tui", "--spec", "SPEC.md"]).expect("parse failed");
+
+        match cli.command {
+            Some(Command::Tui { spec }) => {
+                assert_eq!(spec, Some(std::path::PathBuf::from("SPEC.md")))
+            }
             _ => panic!("expected tui command"),
         }
     }

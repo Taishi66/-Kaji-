@@ -13,6 +13,8 @@ pub mod recipes;
 pub mod scenario_tests;
 pub mod session;
 pub mod signal;
+#[cfg(feature = "tui")]
+pub mod tui;
 
 // Re-export commonly used types
 pub use cli::Cli;

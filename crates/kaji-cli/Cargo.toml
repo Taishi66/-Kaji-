@@ -67,6 +67,7 @@ sigstore-verify = { version = "0.10", default-features = false, optional = true 
 axum.workspace = true
 axum-server = { version = "0.8", default-features = false, optional = true }
 clap_complete_nushell = { version = "4", default-features = false }
+ratatui = { version = "0.30.2", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 anstream = { version = "1", default-features = false, features = ["wincon"] }
@@ -100,7 +101,7 @@ telemetry = ["kaji/telemetry"]
 nostr = ["kaji/nostr"]
 otel = ["kaji/otel"]
 system-keyring = ["kaji/system-keyring"]
-tui = []
+tui = ["dep:ratatui"]
 update = ["dep:sigstore-verify"]
 portable-default = ["rustls-tls", "aws-providers", "telemetry", "otel", "tui"]
 # disables the update command
@@ -123,6 +124,7 @@ native-tls = [
     "kaji-mcp/native-tls",
     "kaji-providers/native-tls",
 ]
+ratatui = ["dep:ratatui"]
 
 [dev-dependencies]
 env-lock.workspace = true
