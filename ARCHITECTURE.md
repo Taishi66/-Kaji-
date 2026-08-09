@@ -29,8 +29,8 @@ en cours de transformation produit. Quatre exigences pilotent chaque choix :
                  ▼                                              ▼
       ┌─────────────────────┐                       ┌───────────────────────┐
       │   TUI Ratatui        │                       │   protocole ACP        │
-      │   (cible — pas       │                       │   (agent-client-       │
-      │   encore codée)      │                       │   protocol, existant)  │
+      │   (livrée,           │                       │   (agent-client-       │
+      │   in-process)        │                       │   protocol, existant)  │
       │   zéro réseau         │                       └───────────┬───────────┘
       └──────────┬───────────┘                                    │
                  │ appels de fonction directs                     │ secret KAJI_SERVER__SECRET_KEY
@@ -58,11 +58,14 @@ l'atteignent par deux chemins distincts :
 - **TUI Ratatui** — mode du binaire unique, in-process : le terminal appelle
   directement `StateMachine`/`SessionManager`, zéro réseau, zéro sérialisation
   d'état. **État actuel du code** (vérifié) : la commande `kaji tui`
-  (`crates/kaji-cli/src/commands/tui.rs`, feature `tui`) exec un ancien script
-  JS externe (`ui/text/dist/tui.js` ou `npx @aaif/kaji`) — ce module `ui/text`
-  est marqué **déprécié** par son propre README (« no longer maintained »,
-  source retirée). La TUI Ratatui in-process de la cible **n'est pas encore
-  écrite** ; aucune dépendance `ratatui` n'existe dans le workspace à ce jour.
+  (`crates/kaji-cli/src/commands/tui.rs` → `crates/kaji-cli/src/tui/`,
+  feature `tui`, dépendance `ratatui 0.30.2`) est la TUI native in-process
+  livrée — chat streamé in-process sur `Agent::reply` (annulation Esc) et
+  panneau SPEC pilotant une passe SDD (gate humaine, exécution, validation
+  de verdict `VERDICT: VALIDE`/`DRIFT`, verrouillage anti-drift), état pur
+  porté par `kaji_core::sdd`. L'ancien script JS externe
+  (`ui/text/dist/tui.js` / `npx @aaif/kaji`) n'est plus invoqué ; le module
+  `ui/text` reste marqué **déprécié** par son propre README.
 - **Desktop** — parle au Core via le protocole **ACP** (Agent Client Protocol)
   exposé par `kaji serve` : HTTP + WebSocket (`crates/kaji/src/acp/transport/`,
   `crates/kaji/src/acp/server/`), stdio disponible en alternative
