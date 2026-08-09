@@ -65,7 +65,9 @@ l'atteignent par deux chemins distincts :
   de verdict `VERDICT: VALIDE`/`DRIFT`, verrouillage anti-drift), état pur
   porté par `kaji_core::sdd`. L'ancien script JS externe
   (`ui/text/dist/tui.js` / `npx @aaif/kaji`) n'est plus invoqué ; le module
-  `ui/text` reste marqué **déprécié** par son propre README.
+  `ui/text` reste marqué **déprécié** par son propre README. `kaji` sans
+  sous-commande lance la TUI quand stdin/stdout sont des TTY (fallback
+  session CLI sinon).
 - **Desktop** — parle au Core via le protocole **ACP** (Agent Client Protocol)
   exposé par `kaji serve` : HTTP + WebSocket (`crates/kaji/src/acp/transport/`,
   `crates/kaji/src/acp/server/`), stdio disponible en alternative

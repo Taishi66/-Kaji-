@@ -35,7 +35,7 @@ use crate::session::{build_session, SessionBuilderConfig};
 use kaji::agents::Container;
 use kaji::session::session_manager::SessionType;
 use kaji::session::SessionManager;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 const KAJI_SERVER_SECRET_KEY_ENV: &str = "KAJI_SERVER__SECRET_KEY";
 
@@ -2221,6 +2221,11 @@ async fn handle_default_session() -> Result<()> {
     #[cfg(feature = "telemetry")]
     if get_telemetry_choice().is_none() {
         configure_telemetry_consent_dialog()?;
+    }
+
+    #[cfg(feature = "tui")]
+    if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+        return crate::commands::tui::handle_tui(None).await;
     }
 
     let kaji_mode = Config::global().get_kaji_mode().unwrap_or_default();
