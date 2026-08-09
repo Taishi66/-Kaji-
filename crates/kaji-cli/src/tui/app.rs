@@ -216,6 +216,7 @@ impl App {
             sender: Sender::System,
             text: text.to_string(),
         });
+        self.last_agent_msg_id = None;
     }
 
     pub fn apply_agent_event(&mut self, ev: &AgentEvent) {
@@ -472,5 +473,62 @@ mod tests {
             .chat
             .iter()
             .any(|l| l.text.contains("échec du démarrage")));
+    }
+
+    #[test]
+    fn esc_during_pass_aborts_it() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_approve();
+        assert_eq!(app.driver, PassDriver::Executing);
+
+        // Esc → Action::CancelTurn : la boucle annule le token puis appelle
+        // pass_abort (driver != Idle). Le stream cancelled se termine ensuite
+        // proprement (None), et la boucle appelle turn_end() sans effet.
+        app.pass_abort("tour annulé — passe interrompue");
+        assert!(app.turn_end().is_none());
+
+        assert_eq!(app.driver, PassDriver::Idle);
+        assert!(app.pass.drifted());
+        assert!(!app.pass.is_complete());
+    }
+
+    #[test]
+    fn stream_error_during_validating_aborts_pass() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_approve();
+        agent_says(&mut app, "m1", "c'est fait");
+        app.turn_end();
+        assert_eq!(app.driver, PassDriver::Validating);
+        agent_says(&mut app, "m2", "début de verdict tronqué");
+
+        // Some(Err(e)) mid-stream → la boucle appelle pass_abort (driver != Idle).
+        app.pass_abort("erreur pendant la passe — passe interrompue");
+
+        assert_eq!(app.driver, PassDriver::Idle);
+        assert!(app.validate_buffer.is_empty());
+        assert!(app.pass.drifted());
+    }
+
+    #[test]
+    fn push_system_between_same_id_chunks_keeps_them_separate() {
+        let mut app = App::new(None);
+        agent_says(&mut app, "m1", "Bon");
+        app.push_system("⚙ outil");
+        agent_says(&mut app, "m1", "jour");
+
+        let agent_lines: Vec<_> = app
+            .chat
+            .iter()
+            .filter(|l| matches!(l.sender, Sender::Agent))
+            .collect();
+        assert_eq!(agent_lines.len(), 2);
+        assert_eq!(agent_lines[0].text, "Bon");
+        assert_eq!(agent_lines[1].text, "jour");
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| matches!(l.sender, Sender::System) && l.text.contains("outil")));
     }
 }

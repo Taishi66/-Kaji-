@@ -95,6 +95,9 @@ async fn event_loop(
                         if let Some(token) = &cancel {
                             token.cancel();
                         }
+                        if app.driver != PassDriver::Idle {
+                            app.pass_abort("tour annulé — passe interrompue");
+                        }
                     }
                     Action::Submit(text) => {
                         app.push_user(&text);
@@ -143,6 +146,9 @@ async fn event_loop(
                         turn = None;
                         cancel = None;
                         app.turn_active = false;
+                        if app.driver != PassDriver::Idle {
+                            app.pass_abort("erreur pendant la passe — passe interrompue");
+                        }
                     }
                     None => {
                         turn = None;
