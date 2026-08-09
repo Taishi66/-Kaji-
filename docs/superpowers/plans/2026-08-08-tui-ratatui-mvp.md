@@ -1096,6 +1096,17 @@ Expected: fmt/clippy clean ; kaji-core 22 verts ; kaji-cli ≥ 269 verts (258 - 
 
 - [ ] **Step 4: Note self-test** — `kaji-self-test.yaml` (règle AGENTS.md) : la TUI plein-écran n'est pas exerçable par recipe headless ; ne pas modifier le yaml, le noter dans le rapport final.
 
+- [ ] **Step 4bis: Installer `kaji` sur le PATH** (exigence user : `kaji` doit se lancer directement, sans cargo build) — Run:
+
+```bash
+cargo build --release -p kaji-cli --bin kaji
+rm -f ~/.local/bin/kaji
+cp -p target/release/kaji ~/.local/bin/kaji
+kaji --version
+```
+
+Expected: `kaji --version` répond depuis le PATH. Le `rm -f` avant `cp` est obligatoire (règle AGENTS.md : jamais écraser un binaire vivant en place — SIGKILL Code Signature macOS). Build release : ~5-10 min.
+
 - [ ] **Step 5: Commit final (si des fixes ont eu lieu)**
 
 ```bash

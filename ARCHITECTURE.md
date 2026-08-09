@@ -147,7 +147,7 @@ et la même mémoire une fois posés.
 | `providers/` (trait `Provider`) | **Gardé** tel quel | présent (`kaji-provider-types`, `kaji-providers`) |
 | `session/` | **Gardé** | présent (`crates/kaji/src/session/`) |
 | Desktop Electron (`ui/desktop/`) | **Jeté** à terme (cible Tauri v2) | **toujours le client réel aujourd'hui** — dépendances `electron-forge` en place, pas de `tauri` dans le repo |
-| TUI JS (`ui/text/`) | **Jeté**, déjà mort | confirmé : README marque le projet déprécié, source retirée ; la commande `kaji tui` actuelle l'invoque encore comme fallback (node local ou `npx`) faute de remplaçant Ratatui |
+| TUI JS (`ui/text/`) | **Jeté**, déjà mort | confirmé : README marque le projet déprécié, source retirée ; plus aucune invocation node/npx — `kaji tui` est désormais la TUI Ratatui native in-process (`crates/kaji-cli/src/tui/`) |
 | `kaji-mcp` (ex `goose-mcp`) | Élagage partiel | crate toujours présente dans le workspace, pas de suppression totale constatée |
 
 ## Rationale IPC — rejet du daemon
