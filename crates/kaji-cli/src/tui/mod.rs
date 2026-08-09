@@ -2,7 +2,7 @@ pub mod app;
 pub mod ui;
 
 use anyhow::Result;
-use app::{Action, App};
+use app::{Action, App, PassDriver};
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use kaji::agents::{Agent, AgentEvent, SessionConfig};
@@ -98,7 +98,7 @@ async fn event_loop(
                     }
                     Action::Submit(text) => {
                         app.push_user(&text);
-                        send_turn(
+                        let started = send_turn(
                             terminal,
                             &mut app,
                             agent,
@@ -108,12 +108,15 @@ async fn event_loop(
                             &mut cancel,
                         )
                         .await?;
+                        if !started && app.driver != PassDriver::Idle {
+                            app.pass_abort("échec du démarrage du tour — passe interrompue");
+                        }
                     }
                     Action::StartPass => app.start_pass(),
                     Action::GateApprove => {
                         if let Some(prompt) = app.gate_approve() {
                             app.push_system("Exec : envoi de la SPEC à l'agent");
-                            send_turn(
+                            let started = send_turn(
                                 terminal,
                                 &mut app,
                                 agent,
@@ -123,6 +126,9 @@ async fn event_loop(
                                 &mut cancel,
                             )
                             .await?;
+                            if !started {
+                                app.pass_abort("échec du démarrage du tour — passe interrompue");
+                            }
                         }
                     }
                     Action::GateReject => app.gate_reject(),
@@ -143,7 +149,7 @@ async fn event_loop(
                         cancel = None;
                         app.turn_active = false;
                         if let Some(prompt) = app.turn_end() {
-                            send_turn(
+                            let started = send_turn(
                                 terminal,
                                 &mut app,
                                 agent,
@@ -153,6 +159,9 @@ async fn event_loop(
                                 &mut cancel,
                             )
                             .await?;
+                            if !started {
+                                app.pass_abort("échec du démarrage du tour — passe interrompue");
+                            }
                         }
                     }
                 }
@@ -171,7 +180,7 @@ async fn send_turn<'a>(
     prompt: &str,
     turn: &mut Option<TurnStream<'a>>,
     cancel: &mut Option<CancellationToken>,
-) -> Result<()> {
+) -> Result<bool> {
     app.status = "démarrage du tour…".to_string();
     terminal.draw(|frame| ui::draw(frame, app))?;
     let token = CancellationToken::new();
@@ -181,13 +190,14 @@ async fn send_turn<'a>(
             app.status.clear();
             *turn = Some(stream);
             *cancel = Some(token);
+            Ok(true)
         }
         Err(e) => {
             app.status.clear();
             app.push_system(&format!("erreur: {e}"));
+            Ok(false)
         }
     }
-    Ok(())
 }
 
 async fn start_turn<'a>(

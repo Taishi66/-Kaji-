@@ -75,8 +75,11 @@ impl App {
             return;
         }
         if self.pass.is_running() {
-            self.push_system("passe SDD déjà active");
+            self.push_system("passe déjà en cours");
             return;
+        }
+        if self.pass.is_complete() || self.pass.drifted() {
+            self.pass = SddPass::new();
         }
         let title = spec.title.clone();
         self.pass.start();
@@ -95,6 +98,16 @@ impl App {
         Some(format!(
             "Exécute la SPEC suivante. Réponds directement, sans sortir du périmètre.\n\n{body}"
         ))
+    }
+
+    pub fn pass_abort(&mut self, reason: &str) {
+        if self.pass.is_running() {
+            self.pass.fail_current();
+        }
+        self.driver = PassDriver::Idle;
+        self.gate_open = false;
+        self.validate_buffer.clear();
+        self.push_system(reason);
     }
 
     pub fn gate_reject(&mut self) {
@@ -420,5 +433,44 @@ mod tests {
         app.gate_reject();
         assert!(app.pass.drifted());
         assert!(!app.pass.is_running());
+    }
+
+    #[test]
+    fn restart_after_terminated_pass_resets_stages() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_approve();
+        agent_says(&mut app, "m1", "fait autre chose");
+        app.turn_end();
+        agent_says(&mut app, "m2", "VERDICT: DRIFT — hors spec");
+        app.turn_end();
+        assert!(app.pass.drifted());
+
+        app.start_pass();
+        assert!(app.gate_open);
+        assert_eq!(app.pass.current(), Some(kaji_core::sdd::SddStage::Gate));
+        assert!(!app
+            .pass
+            .stages()
+            .iter()
+            .any(|(_, status)| *status == kaji_core::sdd::StageStatus::Failed));
+    }
+
+    #[test]
+    fn pass_abort_from_executing_resets_driver_and_fails_pass() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_approve();
+        assert_eq!(app.driver, PassDriver::Executing);
+
+        app.pass_abort("échec du démarrage du tour — passe interrompue");
+
+        assert_eq!(app.driver, PassDriver::Idle);
+        assert!(app.pass.drifted());
+        assert!(app.validate_buffer.is_empty());
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains("échec du démarrage")));
     }
 }
