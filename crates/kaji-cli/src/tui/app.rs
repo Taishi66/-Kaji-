@@ -5,6 +5,14 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use rmcp::model::Role;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassDriver {
+    Idle,
+    AwaitingGate,
+    Executing,
+    Validating,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sender {
     User,
     Agent,
@@ -36,6 +44,8 @@ pub struct App {
     pub spec: Option<SpecDoc>,
     pub pass: SddPass,
     pub gate_open: bool,
+    pub driver: PassDriver,
+    validate_buffer: String,
     last_agent_msg_id: Option<String>,
 }
 
@@ -49,7 +59,80 @@ impl App {
             spec,
             pass: SddPass::new(),
             gate_open: false,
+            driver: PassDriver::Idle,
+            validate_buffer: String::new(),
             last_agent_msg_id: None,
+        }
+    }
+
+    pub fn start_pass(&mut self) {
+        let Some(spec) = self.spec.as_ref() else {
+            self.push_system("aucune SPEC chargée — /sdd nécessite un fichier SPEC.md");
+            return;
+        };
+        if spec.is_empty() {
+            self.push_system("SPEC vide — rien à exécuter");
+            return;
+        }
+        if self.pass.is_running() {
+            self.push_system("passe SDD déjà active");
+            return;
+        }
+        let title = spec.title.clone();
+        self.pass.start();
+        self.push_system(&format!("Intent : {title}"));
+        self.pass.advance();
+        self.pass.advance();
+        self.gate_open = true;
+        self.driver = PassDriver::AwaitingGate;
+    }
+
+    pub fn gate_approve(&mut self) -> Option<String> {
+        let body = self.spec.as_ref()?.body.clone();
+        self.gate_open = false;
+        self.pass.advance();
+        self.driver = PassDriver::Executing;
+        Some(format!(
+            "Exécute la SPEC suivante. Réponds directement, sans sortir du périmètre.\n\n{body}"
+        ))
+    }
+
+    pub fn gate_reject(&mut self) {
+        self.gate_open = false;
+        self.pass.fail_current();
+        self.driver = PassDriver::Idle;
+        self.push_system("gate refusée — passe interrompue");
+    }
+
+    pub fn turn_end(&mut self) -> Option<String> {
+        self.turn_active = false;
+        match self.driver {
+            PassDriver::Executing => {
+                let body = self.spec.as_ref()?.body.clone();
+                self.pass.advance();
+                self.driver = PassDriver::Validating;
+                self.validate_buffer.clear();
+                Some(format!(
+                    "Vérifie que ta réponse précédente respecte la SPEC ci-dessous. Première ligne : exactement `VERDICT: VALIDE` ou `VERDICT: DRIFT`, puis justifie en une phrase.\n\n{body}"
+                ))
+            }
+            PassDriver::Validating => {
+                self.pass.advance();
+                if self
+                    .validate_buffer
+                    .to_uppercase()
+                    .contains("VERDICT: DRIFT")
+                {
+                    self.pass.fail_current();
+                    self.push_system("⚠ drift détecté — spec non verrouillée");
+                } else {
+                    self.pass.advance();
+                    self.push_system("✓ passe SDD complète — spec verrouillée");
+                }
+                self.driver = PassDriver::Idle;
+                None
+            }
+            _ => None,
         }
     }
 
@@ -136,7 +219,12 @@ impl App {
         }
         for block in &message.content {
             match block {
-                MessageContentBlock::Text(text) => self.merge_agent_text(&message.id, &text.text),
+                MessageContentBlock::Text(text) => {
+                    self.merge_agent_text(&message.id, &text.text);
+                    if self.driver == PassDriver::Validating {
+                        self.validate_buffer.push_str(&text.text);
+                    }
+                }
                 MessageContentBlock::ToolRequest(req) => {
                     let name = req
                         .tool_call
@@ -272,5 +360,65 @@ mod tests {
             kaji::conversation::Conversation::default(),
         ));
         assert!(app.chat.iter().any(|l| l.text.contains("compact")));
+    }
+
+    fn spec() -> SpecDoc {
+        SpecDoc::parse(std::path::PathBuf::from("SPEC.md"), "# Demo\nfaire X")
+    }
+
+    fn agent_says(app: &mut App, id: &str, text: &str) {
+        let mut m = Message::assistant().with_text(text);
+        m.id = Some(id.to_string());
+        app.apply_agent_event(&kaji::agents::AgentEvent::Message(m));
+    }
+
+    #[test]
+    fn start_pass_without_spec_reports_error() {
+        let mut app = App::new(None);
+        app.start_pass();
+        assert!(!app.pass.is_running());
+        assert!(app.chat.iter().any(|l| matches!(l.sender, Sender::System)));
+    }
+
+    #[test]
+    fn happy_path_valide_locks_the_spec() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        assert!(app.gate_open);
+        assert_eq!(app.pass.current(), Some(kaji_core::sdd::SddStage::Gate));
+
+        let exec_prompt = app.gate_approve().expect("prompt exec");
+        assert!(exec_prompt.contains("faire X"));
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "c'est fait");
+        let validate_prompt = app.turn_end().expect("prompt validate");
+        assert!(validate_prompt.contains("VERDICT"));
+
+        app.turn_active = true;
+        agent_says(&mut app, "m2", "VERDICT: VALIDE — conforme");
+        assert!(app.turn_end().is_none());
+        assert!(app.pass.is_complete());
+        assert!(!app.pass.drifted());
+    }
+
+    #[test]
+    fn drift_verdict_fails_drift_lock() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_approve();
+        agent_says(&mut app, "m1", "fait autre chose");
+        app.turn_end();
+        agent_says(&mut app, "m2", "VERDICT: DRIFT — hors spec");
+        app.turn_end();
+        assert!(app.pass.drifted());
+    }
+
+    #[test]
+    fn gate_reject_aborts_the_pass() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_reject();
+        assert!(app.pass.drifted());
+        assert!(!app.pass.is_running());
     }
 }

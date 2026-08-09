@@ -3,7 +3,7 @@ use kaji_core::sdd::StageStatus;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -20,6 +20,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_chat(frame, app, left[0]);
     draw_input(frame, app, left[1]);
     draw_spec(frame, app, cols[1]);
+
+    if app.gate_open {
+        draw_gate_modal(frame);
+    }
 }
 
 fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
@@ -101,4 +105,36 @@ fn draw_spec(frame: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default().borders(Borders::ALL).title(" SPEC ");
     frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+}
+
+fn draw_gate_modal(frame: &mut Frame) {
+    let area = centered_rect(60, 20, frame.area());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Gate — approuver la SPEC ? (y/n) ");
+    let paragraph = Paragraph::new("y = approuver   n / Esc = refuser")
+        .block(block)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
 }

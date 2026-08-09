@@ -98,25 +98,34 @@ async fn event_loop(
                     }
                     Action::Submit(text) => {
                         app.push_user(&text);
-                        app.status = "démarrage du tour…".to_string();
-                        terminal.draw(|frame| ui::draw(frame, &app))?;
-                        let token = CancellationToken::new();
-                        match start_turn(agent, &session_config, &text, &token).await {
-                            Ok(stream) => {
-                                app.turn_active = true;
-                                app.status.clear();
-                                turn = Some(stream);
-                                cancel = Some(token);
-                            }
-                            Err(e) => {
-                                app.status.clear();
-                                app.push_system(&format!("erreur: {e}"));
-                            }
+                        send_turn(
+                            terminal,
+                            &mut app,
+                            agent,
+                            &session_config,
+                            &text,
+                            &mut turn,
+                            &mut cancel,
+                        )
+                        .await?;
+                    }
+                    Action::StartPass => app.start_pass(),
+                    Action::GateApprove => {
+                        if let Some(prompt) = app.gate_approve() {
+                            app.push_system("Exec : envoi de la SPEC à l'agent");
+                            send_turn(
+                                terminal,
+                                &mut app,
+                                agent,
+                                &session_config,
+                                &prompt,
+                                &mut turn,
+                                &mut cancel,
+                            )
+                            .await?;
                         }
                     }
-                    Action::StartPass | Action::GateApprove | Action::GateReject => {
-                        app.push_system("passe SDD : câblée à la tâche 5");
-                    }
+                    Action::GateReject => app.gate_reject(),
                     Action::None => {}
                 }
             }
@@ -133,9 +142,49 @@ async fn event_loop(
                         turn = None;
                         cancel = None;
                         app.turn_active = false;
+                        if let Some(prompt) = app.turn_end() {
+                            send_turn(
+                                terminal,
+                                &mut app,
+                                agent,
+                                &session_config,
+                                &prompt,
+                                &mut turn,
+                                &mut cancel,
+                            )
+                            .await?;
+                        }
                     }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_turn<'a>(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    agent: &'a Agent,
+    session_config: &SessionConfig,
+    prompt: &str,
+    turn: &mut Option<TurnStream<'a>>,
+    cancel: &mut Option<CancellationToken>,
+) -> Result<()> {
+    app.status = "démarrage du tour…".to_string();
+    terminal.draw(|frame| ui::draw(frame, app))?;
+    let token = CancellationToken::new();
+    match start_turn(agent, session_config, prompt, &token).await {
+        Ok(stream) => {
+            app.turn_active = true;
+            app.status.clear();
+            *turn = Some(stream);
+            *cancel = Some(token);
+        }
+        Err(e) => {
+            app.status.clear();
+            app.push_system(&format!("erreur: {e}"));
         }
     }
     Ok(())
