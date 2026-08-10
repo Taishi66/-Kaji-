@@ -37,6 +37,7 @@ pub enum Action {
 }
 
 pub struct App {
+    pub header: String,
     pub input: String,
     pub chat: Vec<ChatLine>,
     pub status: String,
@@ -52,6 +53,7 @@ pub struct App {
 impl App {
     pub fn new(spec: Option<SpecDoc>) -> Self {
         Self {
+            header: String::new(),
             input: String::new(),
             chat: Vec::new(),
             status: String::new(),

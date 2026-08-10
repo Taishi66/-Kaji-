@@ -7,10 +7,17 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 pub fn draw(frame: &mut Frame, app: &App) {
+    let root = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(frame.area());
+
+    draw_header(frame, app, root[0]);
+
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-        .split(frame.area());
+        .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
+        .split(root[1]);
 
     let left = Layout::default()
         .direction(Direction::Vertical)
@@ -26,8 +33,21 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
+fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let paragraph =
+        Paragraph::new(app.header.as_str()).style(Style::default().add_modifier(Modifier::BOLD));
+    frame.render_widget(paragraph, area);
+}
+
 fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title(" chat ");
+    let title = if app.turn_active {
+        " chat — ⏳ tour en cours (Esc annule) ".to_string()
+    } else if !app.status.is_empty() {
+        format!(" chat — {} ", app.status)
+    } else {
+        " chat ".to_string()
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
 
     let mut lines: Vec<Line> = Vec::new();
@@ -63,16 +83,15 @@ fn wrapped_row_count(line: &str, width: u16) -> usize {
 }
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
-    let title = if app.turn_active {
-        " ⏳ tour en cours (Esc annule) ".to_string()
-    } else if !app.status.is_empty() {
-        format!(" {} ", app.status)
-    } else {
-        " statut ".to_string()
-    };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default().borders(Borders::ALL).title(" message ");
     let inner = block.inner(area);
-    frame.render_widget(Paragraph::new(app.input.as_str()).block(block), area);
+
+    let paragraph = if app.input.is_empty() && !app.turn_active {
+        Paragraph::new("écris ici…").style(Style::default().fg(Color::DarkGray))
+    } else {
+        Paragraph::new(app.input.as_str())
+    };
+    frame.render_widget(paragraph.block(block), area);
 
     let cursor_x = inner.x + (app.input.chars().count() as u16).min(inner.width.saturating_sub(1));
     frame.set_cursor_position((cursor_x, inner.y));
@@ -85,13 +104,17 @@ fn draw_spec(frame: &mut Frame, app: &App, area: Rect) {
         .map(|spec| spec.title.clone())
         .unwrap_or_else(|| "aucune SPEC".to_string());
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            title,
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-    ];
+    let mut lines = vec![Line::from(Span::styled(
+        title,
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    if app.spec.is_none() {
+        lines.push(Line::from(Span::styled(
+            "SPEC.md dans le dossier courant ou kaji tui --spec <fichier>",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.push(Line::from(""));
 
     for (stage, status) in app.pass.stages() {
         let symbol = match status {

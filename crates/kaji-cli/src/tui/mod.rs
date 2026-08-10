@@ -6,6 +6,7 @@ use app::{Action, App, PassDriver};
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use kaji::agents::{Agent, AgentEvent, SessionConfig};
+use kaji::config::Config;
 use kaji::conversation::message::{Message, MessageContentBlock};
 use kaji_core::sdd::SpecDoc;
 use ratatui::crossterm::event::{self, Event};
@@ -21,6 +22,7 @@ pub async fn run(
     conversation: kaji::conversation::Conversation,
     spec_path: Option<PathBuf>,
 ) -> Result<()> {
+    let header = build_header(&session_id);
     let (input_tx, input_rx) = mpsc::channel::<Event>(64);
     std::thread::spawn(move || input_thread(input_tx));
     let mut terminal = ratatui::init();
@@ -30,11 +32,28 @@ pub async fn run(
         &session_id,
         conversation,
         spec_path,
+        header,
         input_rx,
     )
     .await;
     ratatui::restore();
     result
+}
+
+fn build_header(session_id: &str) -> String {
+    let config = Config::global();
+    let provider = config
+        .get_kaji_provider()
+        .unwrap_or_else(|_| "?".to_string());
+    let model = config.get_kaji_model().unwrap_or_else(|_| "?".to_string());
+    format!("⚔ kaji · {session_id} · {provider}/{model}")
+}
+
+fn push_welcome(app: &mut App) {
+    app.push_system("⚔ bienvenue dans kaji");
+    app.push_system("tape ton message puis Entrée");
+    app.push_system("/sdd démarre une passe SDD (SPEC.md auto-détecté ou --spec <fichier>)");
+    app.push_system("Esc interrompt · Ctrl+C quitte");
 }
 
 fn input_thread(tx: mpsc::Sender<Event>) {
@@ -65,16 +84,20 @@ async fn next_turn_event(turn: &mut Option<TurnStream<'_>>) -> Option<anyhow::Re
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     agent: &Agent,
     session_id: &str,
     conversation: kaji::conversation::Conversation,
     spec_path: Option<PathBuf>,
+    header: String,
     mut input_rx: mpsc::Receiver<Event>,
 ) -> Result<()> {
     let mut app = App::new(resolve_spec(spec_path));
+    app.header = header;
     seed_chat(&mut app, &conversation);
+    push_welcome(&mut app);
     let session_config = SessionConfig {
         id: session_id.to_string(),
         schedule_id: None,
