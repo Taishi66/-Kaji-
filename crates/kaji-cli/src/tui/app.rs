@@ -35,6 +35,10 @@ pub struct ChatLine {
     pub sender: Sender,
     pub text: String,
     pub tool: Option<ToolLineState>,
+    /// System lines only: render `text` through the markdown subset
+    /// (headings, bullets, bold) instead of the plain dim-italic style —
+    /// used for on-demand report blocks (`/cost`, `/docker`).
+    pub markdown: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +60,8 @@ pub enum Action {
     ToolApprove,
     ToolDeny,
     Help,
+    Cost,
+    Docker,
 }
 
 pub struct App {
@@ -69,6 +75,9 @@ pub struct App {
     pub tokens_turn_out: i64,
     pub tokens_total_in: i64,
     pub tokens_total_out: i64,
+    pub cost_turn: Option<f64>,
+    pub cost_total: Option<f64>,
+    pub git_status: Option<String>,
     pub spec: Option<SpecDoc>,
     pub pass: SddPass,
     pub gate_open: bool,
@@ -94,6 +103,9 @@ impl App {
             tokens_turn_out: 0,
             tokens_total_in: 0,
             tokens_total_out: 0,
+            cost_turn: None,
+            cost_total: None,
+            git_status: None,
             spec,
             pass: SddPass::new(),
             gate_open: false,
@@ -198,6 +210,7 @@ impl App {
         self.turn_started = Some(Instant::now());
         self.tokens_turn_in = 0;
         self.tokens_turn_out = 0;
+        self.cost_turn = None;
     }
 
     /// Effacé à la fin du tour (stream terminé ou erreur) — laisse le
@@ -328,6 +341,10 @@ impl App {
                 } else if text == "/spec" {
                     self.toggle_spec_panel();
                     Action::None
+                } else if text == "/cost" {
+                    Action::Cost
+                } else if text == "/docker" {
+                    Action::Docker
                 } else {
                     Action::Submit(text)
                 }
@@ -352,6 +369,7 @@ impl App {
             sender: Sender::User,
             text: text.to_string(),
             tool: None,
+            markdown: false,
         });
         self.last_agent_msg_id = None;
     }
@@ -361,6 +379,19 @@ impl App {
             sender: Sender::System,
             text: text.to_string(),
             tool: None,
+            markdown: false,
+        });
+        self.last_agent_msg_id = None;
+    }
+
+    /// Same as [`Self::push_system`] but rendered through the markdown
+    /// subset — used for on-demand report blocks (`/cost`, `/docker`).
+    pub fn push_system_markdown(&mut self, text: &str) {
+        self.chat.push(ChatLine {
+            sender: Sender::System,
+            text: text.to_string(),
+            tool: None,
+            markdown: true,
         });
         self.last_agent_msg_id = None;
     }
@@ -385,6 +416,10 @@ impl App {
         self.tokens_turn_out += output;
         self.tokens_total_in += input;
         self.tokens_total_out += output;
+        if let Some(cost) = usage.cost {
+            self.cost_turn = Some(self.cost_turn.unwrap_or(0.0) + cost);
+            self.cost_total = Some(self.cost_total.unwrap_or(0.0) + cost);
+        }
     }
 
     fn apply_message(&mut self, message: &Message) {
@@ -418,6 +453,7 @@ impl App {
                             name,
                             started: Instant::now(),
                         }),
+                        markdown: false,
                     });
                     self.pending_tools
                         .insert(req.id.clone(), self.chat.len() - 1);
@@ -484,6 +520,7 @@ impl App {
             sender: Sender::Agent,
             text: text.to_string(),
             tool: None,
+            markdown: false,
         });
         self.last_agent_msg_id = message_id.clone();
     }
@@ -882,6 +919,44 @@ mod tests {
     }
 
     #[test]
+    fn usage_event_with_cost_accumulates_turn_and_session_cost() {
+        use kaji::providers::base::CostSource;
+
+        let mut app = App::new(None);
+        assert_eq!(app.cost_total, None);
+        app.begin_turn();
+        let usage = ProviderUsage::new(
+            "test-model".to_string(),
+            Usage::new(Some(10), Some(4), None),
+        )
+        .with_cost(0.10, CostSource::Estimated);
+        app.apply_agent_event(&AgentEvent::Usage(usage.clone()));
+        assert_eq!(app.cost_turn, Some(0.10));
+        assert_eq!(app.cost_total, Some(0.10));
+
+        app.apply_agent_event(&AgentEvent::Usage(usage));
+        assert_eq!(app.cost_turn, Some(0.20));
+        assert_eq!(app.cost_total, Some(0.20));
+
+        app.begin_turn();
+        assert_eq!(app.cost_turn, None, "reset per turn");
+        assert_eq!(app.cost_total, Some(0.20), "kept across turns");
+    }
+
+    #[test]
+    fn usage_event_without_cost_leaves_cost_fields_none() {
+        let mut app = App::new(None);
+        app.begin_turn();
+        let usage = ProviderUsage::new(
+            "test-model".to_string(),
+            Usage::new(Some(10), Some(4), None),
+        );
+        app.apply_agent_event(&AgentEvent::Usage(usage));
+        assert_eq!(app.cost_turn, None);
+        assert_eq!(app.cost_total, None);
+    }
+
+    #[test]
     fn message_usage_event_does_not_double_count_tokens() {
         let mut app = App::new(None);
         app.begin_turn();
@@ -941,6 +1016,35 @@ mod tests {
             app.on_event(&key(KeyCode::Char(c)));
         }
         assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::Help);
+    }
+
+    #[test]
+    fn slash_cost_returns_cost_action() {
+        let mut app = App::new(None);
+        for c in "/cost".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::Cost);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn slash_docker_returns_docker_action() {
+        let mut app = App::new(None);
+        for c in "/docker".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::Docker);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn push_system_markdown_marks_the_chat_line_for_markdown_rendering() {
+        let mut app = App::new(None);
+        app.push_system_markdown("**/cost**\n- session : ↑10 ↓2");
+        let line = app.chat.last().expect("chat line pushed");
+        assert!(matches!(line.sender, Sender::System));
+        assert!(line.markdown);
     }
 
     #[test]

@@ -49,14 +49,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(26)])
+        .constraints([Constraint::Min(0), Constraint::Length(34)])
         .split(area);
 
-    let left = Line::from(vec![
+    let mut left_spans = vec![
         Span::styled(theme::KAJI_GLYPH, theme::title()),
         Span::styled(format!(" kaji · {}", app.header), theme::dim()),
-    ]);
-    frame.render_widget(Paragraph::new(left), cols[0]);
+    ];
+    if let Some(git) = &app.git_status {
+        left_spans.push(Span::styled(format!(" · {git}"), theme::dim()));
+    }
+    frame.render_widget(Paragraph::new(Line::from(left_spans)), cols[0]);
 
     let right = Paragraph::new(header_status_text(app))
         .style(theme::dim())
@@ -65,7 +68,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn header_status_text(app: &App) -> String {
-    if app.turn_active {
+    let base = if app.turn_active {
         let elapsed = app.turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         format!(
             "↑{} ↓{} · {elapsed}s",
@@ -73,6 +76,10 @@ fn header_status_text(app: &App) -> String {
         )
     } else {
         format!("↑{} ↓{}", app.tokens_total_in, app.tokens_total_out)
+    };
+    match app.cost_total {
+        Some(cost) => format!("{base} · ${cost:.2}"),
+        None => base,
     }
 }
 
@@ -157,12 +164,32 @@ fn push_system_line(lines: &mut Vec<Line<'static>>, chat_line: &crate::tui::app:
         lines.push(Line::from(Span::styled(content, theme::system())));
         return;
     }
+    if chat_line.markdown {
+        push_system_markdown_lines(lines, &chat_line.text);
+        return;
+    }
     push_plain_lines(
         lines,
         &chat_line.text,
         theme::SYSTEM_PREFIX,
         theme::system(),
     );
+}
+
+/// On-demand report blocks (`/cost`, `/docker`) — rendered through the same
+/// markdown subset as agent messages so headings/bold/bullets survive, kept
+/// dim to stay in the "sobre" system register.
+fn push_system_markdown_lines(lines: &mut Vec<Line<'static>>, text: &str) {
+    let mut md_lines = markdown::render_markdown(text);
+    if md_lines.is_empty() {
+        md_lines.push(Line::from(""));
+    }
+    if let Some(first) = md_lines.first_mut() {
+        let mut spans = vec![Span::styled(theme::SYSTEM_PREFIX, theme::dim())];
+        spans.append(&mut first.spans);
+        *first = Line::from(spans);
+    }
+    lines.extend(md_lines);
 }
 
 fn line_wrapped_rows(line: &Line, width: u16) -> usize {
