@@ -13,8 +13,8 @@ use kaji_providers::{
     base::ProviderDescriptor,
     ollama::{
         self, OllamaOptions, OllamaProvider, OllamaProviderBuilder,
-        OLLAMA_DEFAULT_CHUNK_TIMEOUT_SECS, OLLAMA_DEFAULT_PORT, OLLAMA_HOST, OLLAMA_PROVIDER_NAME,
-        OLLAMA_TIMEOUT,
+        OLLAMA_DEFAULT_CHUNK_TIMEOUT_SECS, OLLAMA_DEFAULT_FIRST_BYTE_TIMEOUT_SECS,
+        OLLAMA_DEFAULT_PORT, OLLAMA_HOST, OLLAMA_PROVIDER_NAME, OLLAMA_TIMEOUT,
     },
 };
 
@@ -129,6 +129,7 @@ pub fn options_from_config() -> OllamaOptions {
         input_limit,
         stream_usage,
         chunk_timeout_secs: resolve_ollama_chunk_timeout(config),
+        first_byte_timeout_secs: resolve_ollama_first_byte_timeout(config),
     }
 }
 
@@ -150,6 +151,17 @@ fn resolve_ollama_chunk_timeout(config: &crate::config::Config) -> u64 {
     match config.get_param::<u64>("OLLAMA_TIMEOUT") {
         Ok(val) if val > 0 => val,
         _ => OLLAMA_DEFAULT_CHUNK_TIMEOUT_SECS,
+    }
+}
+
+/// Resolve the first-byte stream timeout from config.
+/// Priority: OLLAMA_FIRST_BYTE_TIMEOUT > default (45s).
+/// Zero values are treated as invalid and skipped, since a zero timeout would
+/// fail every stream before the first SSE line could ever arrive.
+fn resolve_ollama_first_byte_timeout(config: &crate::config::Config) -> u64 {
+    match config.get_param::<u64>("OLLAMA_FIRST_BYTE_TIMEOUT") {
+        Ok(val) if val > 0 => val,
+        _ => OLLAMA_DEFAULT_FIRST_BYTE_TIMEOUT_SECS,
     }
 }
 
@@ -226,6 +238,33 @@ mod tests {
         assert_eq!(
             resolve_ollama_chunk_timeout(config),
             OLLAMA_DEFAULT_CHUNK_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn test_resolve_ollama_first_byte_timeout_uses_override() {
+        let _guard = env_lock::lock_env([("OLLAMA_FIRST_BYTE_TIMEOUT", Some("20"))]);
+        let config = crate::config::Config::global();
+        assert_eq!(resolve_ollama_first_byte_timeout(config), 20);
+    }
+
+    #[test]
+    fn test_resolve_ollama_first_byte_timeout_uses_default_when_unset() {
+        let _guard = env_lock::lock_env([("OLLAMA_FIRST_BYTE_TIMEOUT", None::<&str>)]);
+        let config = crate::config::Config::global();
+        assert_eq!(
+            resolve_ollama_first_byte_timeout(config),
+            OLLAMA_DEFAULT_FIRST_BYTE_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn test_resolve_ollama_first_byte_timeout_skips_zero_value() {
+        let _guard = env_lock::lock_env([("OLLAMA_FIRST_BYTE_TIMEOUT", Some("0"))]);
+        let config = crate::config::Config::global();
+        assert_eq!(
+            resolve_ollama_first_byte_timeout(config),
+            OLLAMA_DEFAULT_FIRST_BYTE_TIMEOUT_SECS
         );
     }
 }

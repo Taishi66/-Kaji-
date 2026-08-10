@@ -14,10 +14,11 @@ use crate::request_log::{start_log, LoggerHandleExt, RequestLogHandle};
 use anyhow::{Error, Result};
 use async_stream::try_stream;
 use async_trait::async_trait;
-use futures::TryStreamExt;
-use reqwest::{Response, StatusCode};
+use futures::{Stream, TryStreamExt};
+use reqwest::StatusCode;
 use rmcp::model::Tool;
 use serde_json::{json, Value};
+use std::pin::Pin;
 use std::time::Duration;
 use tokio::pin;
 use tokio_stream::StreamExt;
@@ -65,6 +66,9 @@ pub struct OllamaOptions {
     /// `OLLAMA_STREAM_TIMEOUT` > `KAJI_STREAM_TIMEOUT` > `OLLAMA_TIMEOUT` >
     /// default (120s).
     pub chunk_timeout_secs: u64,
+    /// First-byte stream timeout in seconds, resolved from
+    /// `OLLAMA_FIRST_BYTE_TIMEOUT` > default (45s).
+    pub first_byte_timeout_secs: u64,
 }
 
 impl Default for OllamaOptions {
@@ -73,6 +77,7 @@ impl Default for OllamaOptions {
             input_limit: None,
             stream_usage: true,
             chunk_timeout_secs: OLLAMA_DEFAULT_CHUNK_TIMEOUT_SECS,
+            first_byte_timeout_secs: OLLAMA_DEFAULT_FIRST_BYTE_TIMEOUT_SECS,
         }
     }
 }
@@ -238,9 +243,10 @@ fn apply_ollama_options(payload: &mut Value, options: &OllamaOptions, model_conf
     if let Some(obj) = payload.as_object_mut() {
         // Gate stream_options behind OLLAMA_STREAM_USAGE (default: true).
         // Older Ollama builds that don't support stream_options may stall before
-        // emitting any SSE data, blocking until the client timeout (600s).
-        // with_line_timeout() only protects after the first line arrives, so
-        // users on older builds should set OLLAMA_STREAM_USAGE=false.
+        // emitting any SSE data. take_first_line() now bounds that stall to
+        // OLLAMA_FIRST_BYTE_TIMEOUT (~45s, retried) instead of the 600s client
+        // timeout, but users on older builds should still set
+        // OLLAMA_STREAM_USAGE=false to avoid burning through retries.
         if !options.stream_usage {
             obj.remove("stream_options");
         }
@@ -422,7 +428,8 @@ impl Provider for OllamaProvider {
         apply_ollama_options(&mut payload, &self.options, model_config);
         let mut log = start_log(model_config, &payload)?;
 
-        let response = self
+        let first_byte_timeout = self.options.first_byte_timeout_secs;
+        let (first_line, lines) = self
             .with_retry(|| async {
                 let resp = self
                     .api_client
@@ -431,13 +438,23 @@ impl Provider for OllamaProvider {
                     .streaming(true)
                     .response_post(&payload)
                     .await?;
-                handle_status(resp).await
+                let resp = handle_status(resp).await?;
+
+                let byte_stream = resp.bytes_stream().map_err(std::io::Error::other);
+                let stream_reader = StreamReader::new(byte_stream);
+                let framed = FramedRead::new(stream_reader, LinesCodec::new()).map_err(Error::from);
+                take_first_line(Box::pin(framed), first_byte_timeout).await
             })
             .await
             .inspect_err(|e| {
                 let _ = log.error(e);
             })?;
-        stream_ollama(response, self.options.chunk_timeout_secs, log)
+
+        let lines: LineStream = match first_line {
+            Some(line) => Box::pin(futures::stream::iter([Ok(line)]).chain(lines)),
+            None => lines,
+        };
+        stream_ollama(lines, self.options.chunk_timeout_secs, log)
     }
 
     async fn fetch_supported_models(&self) -> Result<Vec<String>, ProviderError> {
@@ -470,6 +487,39 @@ impl Provider for OllamaProvider {
 /// large parameter counts, complex reasoning).
 pub const OLLAMA_DEFAULT_CHUNK_TIMEOUT_SECS: u64 = 120;
 
+/// Default timeout for the first SSE line of an Ollama streaming response
+/// (seconds). Bounds the residual hang left after a POST is accepted by a
+/// zombie pooled connection or a load balancer that never forwards data, so
+/// the retry machinery can replay the request on a fresh connection instead
+/// of waiting out the 600s client timeout. Configurable via
+/// OLLAMA_FIRST_BYTE_TIMEOUT.
+pub const OLLAMA_DEFAULT_FIRST_BYTE_TIMEOUT_SECS: u64 = 45;
+
+type LineStream = Pin<Box<dyn Stream<Item = anyhow::Result<String>> + Send>>;
+
+/// Bounds the wait for the first SSE line of an Ollama streaming response.
+/// Runs inside the retried closure in `stream()` so that a connection that
+/// never delivers data (zombie pooled connection, load balancer routing to a
+/// dead backend) is retried on a fresh connection instead of hanging until
+/// the 600s client timeout.
+async fn take_first_line(
+    mut lines: LineStream,
+    timeout_secs: u64,
+) -> Result<(Option<String>, LineStream), ProviderError> {
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), lines.next()).await {
+        Ok(Some(Ok(line))) => Ok((Some(line), lines)),
+        Ok(Some(Err(e))) => Err(ProviderError::NetworkError(format!(
+            "Connection closed before receiving any SSE data: {e}"
+        ))),
+        Ok(None) => Ok((None, lines)),
+        Err(_) => Err(ProviderError::NetworkError(format!(
+            "no SSE data received within {timeout_secs}s. If this keeps happening, try \
+             increasing OLLAMA_FIRST_BYTE_TIMEOUT; on older Ollama builds that don't support \
+             stream_options, set OLLAMA_STREAM_USAGE=false."
+        ))),
+    }
+}
+
 /// Wraps a line stream with a per-item timeout at the raw SSE level.
 /// This detects dead connections without false-positive stalls during long
 /// tool-call generations where response_to_streaming_message_ollama buffers.
@@ -481,8 +531,9 @@ fn with_line_timeout(
     Box::pin(try_stream! {
         let mut stream = stream;
 
-        // Allow time-to-first-token to be governed by the request timeout.
-        // Only enforce per-chunk timeout after first SSE line arrives.
+        // The first item was already prefetched by take_first_line() under the
+        // first-byte timeout before this stream was built, so this read
+        // resolves immediately rather than waiting on the network.
         match stream.next().await {
             Some(first_item) => yield first_item?,
             None => return,
@@ -512,18 +563,12 @@ fn with_line_timeout(
 /// Timeout is applied at the raw SSE line level via with_line_timeout so that
 /// buffering inside response_to_streaming_message_ollama does not cause false stalls.
 fn stream_ollama(
-    response: Response,
+    lines: LineStream,
     chunk_timeout: u64,
     mut log: Option<Box<dyn RequestLogHandle>>,
 ) -> Result<MessageStream, ProviderError> {
-    let stream = response.bytes_stream().map_err(std::io::Error::other);
-
     Ok(Box::pin(try_stream! {
-        let stream_reader = StreamReader::new(stream);
-        let framed = FramedRead::new(stream_reader, LinesCodec::new())
-            .map_err(Error::from);
-
-        let timed_lines = with_line_timeout(framed, chunk_timeout);
+        let timed_lines = with_line_timeout(lines, chunk_timeout);
         let message_stream = response_to_streaming_message_ollama(timed_lines);
         pin!(message_stream);
 
@@ -743,6 +788,7 @@ mod tests {
             input_limit: None,
             stream_usage: false,
             chunk_timeout_secs: 120,
+            first_byte_timeout_secs: OLLAMA_DEFAULT_FIRST_BYTE_TIMEOUT_SECS,
         };
         let model_config = ModelConfig::new("llama3.1").with_max_tokens(Some(4096));
         let messages = vec![crate::conversation::message::Message::user().with_text("hi")];
@@ -763,5 +809,60 @@ mod tests {
             payload.get("stream_options").is_none(),
             "stream_options should be removed when OLLAMA_STREAM_USAGE=false"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn take_first_line_times_out_when_no_data_arrives() {
+        let lines: LineStream = Box::pin(futures::stream::pending());
+
+        match take_first_line(lines, 5).await {
+            Err(ProviderError::NetworkError(message)) => {
+                assert!(
+                    message.contains("OLLAMA_FIRST_BYTE_TIMEOUT"),
+                    "message should mention OLLAMA_FIRST_BYTE_TIMEOUT: {message}"
+                );
+            }
+            Err(other) => panic!("expected NetworkError, got {other:?}"),
+            Ok(_) => panic!("expected timeout to produce an error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn take_first_line_returns_first_line_and_remaining_stream_in_order() {
+        let lines: LineStream = Box::pin(futures::stream::iter([
+            Ok("a".to_string()),
+            Ok("b".to_string()),
+        ]));
+
+        let (first, mut rest) = take_first_line(lines, 5).await.unwrap();
+
+        assert_eq!(first, Some("a".to_string()));
+        assert_eq!(rest.next().await.unwrap().unwrap(), "b");
+        assert!(rest.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn take_first_line_returns_none_for_empty_stream() {
+        let lines: LineStream = Box::pin(futures::stream::empty());
+
+        let (first, mut rest) = take_first_line(lines, 5).await.unwrap();
+
+        assert!(first.is_none());
+        assert!(rest.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn take_first_line_returns_network_error_when_first_item_errs() {
+        let lines: LineStream = Box::pin(futures::stream::iter([Err(anyhow::anyhow!(
+            "connection reset"
+        ))]));
+
+        match take_first_line(lines, 5).await {
+            Err(err) => assert!(
+                matches!(err, ProviderError::NetworkError(_)),
+                "expected NetworkError, got {err:?}"
+            ),
+            Ok(_) => panic!("expected first-item error to surface"),
+        }
     }
 }
