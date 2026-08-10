@@ -1,0 +1,149 @@
+{
+ "key": "input-wrap-scroll",
+ "item": "Durcissement C — wrap/scroll input TUI (ratatui, crates/kaji-cli/src/tui)",
+ "current": [
+  {
+   "file": "crates/kaji-cli/src/tui/ui.rs",
+   "line": 26,
+   "note": "Layout branche 'panneau SPEC visible' : left = Vertical [Constraint::Min(3), Constraint::Length(3)] — input a une hauteur FIXE de 3 lignes (1 ligne de contenu + 2 bordures)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/ui.rs",
+   "line": 35,
+   "note": "Layout branche 'sans panneau SPEC' : même Constraint::Length(3) pour l'input — les deux branches devraient être touchées si on passait à une hauteur dynamique (Option A rejetée, voir proposal)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/ui.rs",
+   "line": 198,
+   "note": "draw_input(frame, app, area) — fonction complète du rendu de la zone d'input, lignes 198-220."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/ui.rs",
+   "line": 205,
+   "note": "Block bordé + titre dynamique (⏳ Nns pendant un tour actif, sinon ' message '). inner = block.inner(area) calculé ligne 209."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/ui.rs",
+   "line": 211,
+   "note": "Paragraph::new(app.input.as_str()) — AUCUN .wrap(...) et AUCUN .scroll(...) appelé (contraste avec draw_chat ligne 131-132 qui fait .wrap(Wrap{trim:false}).scroll((scroll,0))). Sans .wrap(), ratatui utilise LineTruncator (voir preuve externe ci-dessous) : le texte au-delà de la largeur du widget est simplement tronqué/invisible, jamais wrappé ni scrollé."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/ui.rs",
+   "line": 218,
+   "note": "cursor_x = inner.x + (app.input.chars().count() as u16).min(inner.width.saturating_sub(1)) — le curseur est CLAMPÉ au dernier caractère visible mais rien ne fait défiler le texte sous-jacent : au-delà de la largeur, le curseur reste visuellement collé au bord droit alors que la queue de la saisie n'est jamais affichée (bug racine de l'item C)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/ui.rs",
+   "line": 219,
+   "note": "frame.set_cursor_position((cursor_x, inner.y)) — curseur toujours sur une seule ligne (inner.y fixe), cohérent avec l'absence de notion de ligne logique multiple dans l'input aujourd'hui."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 71,
+   "note": "pub input: String — l'input est une String plate, sans champ de position de curseur (pas de cursor_col/cursor_idx dans App)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 318,
+   "note": "match key.code { KeyCode::Char(c) => self.input.push(c) ... } — le seul point d'insertion est TOUJOURS en fin de chaîne (push), pas d'insertion à une position de curseur arbitraire."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 323,
+   "note": "KeyCode::Backspace => { self.input.pop(); } — suppression toujours en fin de chaîne également."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 318,
+   "note": "Sur la plage 318-355 (match key.code pour l'input) : AUCUNE branche pour Left/Right/Home/End/Delete — il n'existe aujourd'hui aucune gestion de déplacement de curseur dans l'input, le 'curseur' est implicitement toujours à la fin de app.input."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 288,
+   "note": "KeyCode::Home => { self.scroll_home(); return Action::None; } — Home est déjà globalement câblé au scroll du CHAT (avant même d'atteindre le code de saisie), lignes 280-295 (PageUp/PageDown/Home/End tous consommés en premier dans on_event)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 292,
+   "note": "KeyCode::End => { self.scroll_end(); return Action::None; } — même remarque : End est déjà pris par le scroll du chat, donc indisponible pour une future 'fin de ligne d'input' sans conflit de touche."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 88,
+   "note": "pub scroll_offset: u16 — état de scroll du CHAT (pas de l'input), unique champ de scroll existant dans App."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 225,
+   "note": "fn total_chat_lines / fn max_scroll (225-234) puis scroll_page_up/scroll_page_down/scroll_home/scroll_end (236-250) — pattern existant de scroll pour le chat : état (scroll_offset) + méthodes pures bornées par saturating_sub/min, toutes unit-testées."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/ui.rs",
+   "line": 122,
+   "note": "wrapped_rows = somme de line_wrapped_rows(line, inner.width) sur toutes les lignes (192-196) ; base_scroll = wrapped_rows.saturating_sub(inner.height) ; scroll = base_scroll.saturating_sub(app.scroll_offset) — pattern de calcul vertical du chat à répliquer en horizontal pour l'input (même famille de formule saturating_sub)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 165,
+   "note": "fn input_thread(tx) (165-182) — thread OS séparé (std::thread::spawn), poll(50ms) + event::read(), envoie chaque Event via mpsc::Sender<Event> bloquant ; ferme dès que le channel est fermé."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 220,
+   "note": "boucle principale event_loop (220-339) : tokio::select! avec tick.tick() (223, ré-affichage 250ms si turn_active), ev = input_rx.recv() (224, dispatch app.on_event(&ev) -> Action), item = next_turn_event(&mut turn) (302, événements du stream agent)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 226,
+   "note": "match app.on_event(&ev) { Action::Quit, CancelTurn, Submit, StartPass, GateApprove, GateReject, ToolApprove, ToolDeny, Help, Cost, Docker, None } — c'est ici que les touches déjà mappées produisent leurs effets ; aucune Action liée à un déplacement de curseur d'input n'existe (cohérent avec l'absence de handling Left/Right dans app.rs)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 811,
+   "note": "scroll_page_up_and_down_are_bounded (811-827) et page_and_home_end_keys_drive_scroll_state (838-849) — style de test à imiter : construire un App, produire des événements clavier ou appeler les méthodes de scroll directement, asserter sur l'état numérique (scroll_offset)."
+  },
+  {
+   "file": "ratatui-widgets-0.3.2/src/paragraph.rs (~/.cargo/registry, crate externe, pas kaji)",
+   "line": 431,
+   "note": "PREUVE EXTERNE lue directement dans le crate ratatui-widgets 0.3.2 : render_paragraph — si self.wrap.is_some() (branche 431-439, WordWrapper), scroll.x N'EST JAMAIS CONSOMMÉ (seul scroll.y l'est, ligne 434). Si wrap est None (branche else, 440-446), LineTruncator::set_horizontal_offset(self.scroll.x) est appelé (ligne 444) — seul chemin qui honore un scroll horizontal. .wrap() et scroll horizontal sont donc mutuellement exclusifs dans ratatui 0.30 / ratatui-widgets 0.3.2."
+  },
+  {
+   "file": "ratatui-widgets-0.3.2/src/paragraph.rs (~/.cargo/registry, crate externe, pas kaji)",
+   "line": 233,
+   "note": "pub const fn scroll(mut self, offset: (Vertical, Horizontal)) -> Self — Vertical et Horizontal sont de simples alias de u16 (lignes 127-128 : type Horizontal = u16; type Vertical = u16;), donc .scroll((0, scroll_x)) avec scroll_x: u16 se compile directement, même forme que l'appel déjà utilisé en ui.rs:132 (.scroll((scroll, 0)))."
+  },
+  {
+   "file": "crates/kaji-cli/Cargo.toml",
+   "line": 70,
+   "note": "ratatui = { version = \"0.30.2\", optional = true } — confirme la version ; pas de dépendance directe unicode-width dans ce Cargo.toml (uniquement transitive via ratatui, cf Cargo.lock), donc app.input.chars().count() (ui.rs:218) reste une approximation en 'scalar count', pas en largeur d'affichage réelle (limitation préexistante)."
+  }
+ ],
+ "proposal": [
+  "Option retenue : SCROLL HORIZONTAL single-line à curseur suiveur, PAS de wrap multi-ligne. Rationale : (1) zéro changement de layout — Constraint::Length(3) reste identique dans les deux branches (ui.rs:26 et ui.rs:35) ; (2) ratatui 0.30 rend le scroll horizontal trivial via Paragraph::scroll((0, x)) + LineTruncator déjà utilisé (aucun .wrap() actuellement, paragraph.rs:440-446) ; (3) le wrap multi-ligne (Option A) exigerait de répliquer l'algorithme de coupure de WordWrapper pour garder le curseur pixel-exact (aucune API ratatui n'expose les points de coupure calculés), ET nécessiterait un budget de hauteur dynamique touchant les deux layouts (ui.rs:26 et ui.rs:35) — complexité et fragilité disproportionnées face au bug réel ; (4) comme il n'existe aujourd'hui AUCUNE édition en milieu de chaîne (app.rs:318-326 : push/pop toujours en fin), le curseur est structurellement toujours au point d'ajout — un scroll suiveur de curseur suffit à rendre visible tout texte plus long que la largeur, sans exiger de refonte de la gestion du curseur.",
+  "app.rs — ajouter deux méthodes pures à App, à côté du bloc scroll du chat (après max_scroll, ~ligne 234) : `pub fn input_cursor_chars(&self) -> u16 { self.input.chars().count() as u16 }` et `pub fn input_scroll_x(&self, visible_width: u16) -> u16 { self.input_cursor_chars().saturating_sub(visible_width.saturating_sub(1)) }`. Math : scroll_x = max(0, cursor_col - (visible_width - 1)) → garantit par construction cursor_col - scroll_x == min(cursor_col, visible_width - 1), donc le curseur reste toujours sur la dernière colonne visible dès dépassement, jamais hors cadre.",
+  "ui.rs draw_input (198-220) — avant le frame.render_widget de la ligne 216, calculer `let visible_width = inner.width.max(1);` puis `let scroll_x = app.input_scroll_x(visible_width);` et chaîner `.scroll((0, scroll_x))` sur le Paragraph (après .block(block), même ordre que draw_chat ligne 129-132). NE PAS ajouter .wrap(...) sur ce Paragraph (incompatible avec scroll.x, cf paragraph.rs:431 vs :440-446 ci-dessus).",
+  "ui.rs draw_input ligne 218 — remplacer `let cursor_x = inner.x + (app.input.chars().count() as u16).min(inner.width.saturating_sub(1));` par `let cursor_x = inner.x + (app.input_cursor_chars() - scroll_x).min(inner.width.saturating_sub(1));` (réutilise cursor_col/scroll_x déjà calculés — supprime le double comptage de chars().count() implicite, et le .min() final devient une garde défensive à coût nul, l'invariant algébrique du point précédent le rend redondant mais inoffensif).",
+  "Ne PAS toucher app.rs:319-322 (Char push) ni :323-326 (Backspace pop) ni la boucle mod.rs:220-339 — aucun changement d'event loop ou de mapping de touches n'est nécessaire pour ce fix, le scroll est purement dérivé à chaque frame depuis app.input, sans nouvel état mutable ni nouvelle Action.",
+  "Documenter en commentaire bref au-dessus de input_scroll_x (une ligne, 'why' pas 'what', conforme AGENTS.md) : que .wrap() et le scroll horizontal sont mutuellement exclusifs dans ratatui 0.30, pour éviter qu'un futur commit n'ajoute .wrap() à côté sans le savoir et ne casse silencieusement le scroll (scroll.x devient alors mort, cf paragraph.rs:431-439)."
+ ],
+ "tests": [
+  "app.rs #[cfg(test)] mod tests (à côté de scroll_page_up_and_down_are_bounded, ~ligne 811) : input_scroll_x_is_zero_while_input_fits_the_visible_width — App::new(None), app.input = \"short\".to_string(), assert_eq!(app.input_scroll_x(20), 0).",
+  "input_scroll_x_follows_cursor_once_input_overflows_the_visible_width — app.input = \"a\".repeat(30), assert_eq!(app.input_scroll_x(10), 21) (30 - (10-1) = 21), vérifie la formule saturating_sub exacte.",
+  "input_scroll_x_never_panics_on_zero_width_area — app.input = \"hello\".to_string(), assert_eq!(app.input_scroll_x(0), 5) — documente l'absence de panique/underflow (visible_width.saturating_sub(1) reste 0 quand visible_width==0).",
+  "input_cursor_chars_counts_unicode_scalars_not_bytes — app.input = \"héllo\".to_string(), assert_eq!(app.input_cursor_chars(), 5) et assert_ne!(app.input_cursor_chars() as usize, app.input.len()) (len()==6 en bytes) — pin explicitement la limitation connue (chars().count() ≠ largeur d'affichage réelle pour les glyphes multi-octets/larges, cf risks).",
+  "typing_long_input_keeps_scroll_offset_zero_at_or_below_width — reprendre le style de typing_fills_input_and_enter_submits (app.rs:561) : pousser N caractères via on_event(&key(KeyCode::Char(c))) jusqu'à dépasser une largeur simulée, puis appeler app.input_scroll_x(width) et asserter la borne (>0 seulement après dépassement), pour couvrir le chemin réel clavier -> App::input plutôt que l'assignation directe du champ."
+ ],
+ "risks": [
+  "Décalage curseur/colonne sur glyphes larges (CJK) : app.input_cursor_chars() (comme l'ancien code ui.rs:218) compte des scalars Unicode, pas des colonnes terminal — un caractère large (largeur 2, ex. 鍛冶 utilisé ailleurs dans l'app, theme.rs:12/14) ferait dériver cursor_x et scroll_x d'une colonne par caractère large tapé. Limitation PRÉEXISTANTE (déjà présente avant ce fix à ui.rs:218), non corrigée par cette proposition — nécessiterait la crate unicode-width (transitive seulement aujourd'hui, cf Cargo.toml:70) pour un calcul par largeur d'affichage réelle.",
+  "Piège ratatui : ajouter .wrap(...) au Paragraph de l'input plus tard (par exemple pour une future feature multi-ligne) désactiverait silencieusement le scroll horizontal ajouté ici, car la branche wrap de paragraph.rs (431-439) ignore scroll.x — pas d'erreur de compilation, juste un curseur qui recommence à sortir du cadre visible. Le commentaire proposé mitige mais ne bloque pas mécaniquement ce piège.",
+  "Aucune couverture de test au niveau rendu (ui.rs) : ui.rs n'a aujourd'hui aucun mod tests (contrairement à app.rs) — le calcul scroll_x/cursor_x reste testé uniquement via les méthodes pures sur App, pas via un test de rendu réel (TestBackend) qui vérifierait le contenu effectif du buffer affiché. Écart de couverture cohérent avec le reste de ui.rs (line_wrapped_rows, chat_title, etc. ne sont pas non plus testés), mais à signaler.",
+  "Home/End déjà réservés au scroll du chat globalement (app.rs:288-295, avant tout accès à l'input) : toute future feature de navigation de curseur dans l'input (Home = début de ligne, End = fin de ligne) entrera en conflit direct de touche et nécessitera soit un mode contextuel, soit des raccourcis alternatifs (Ctrl+A/Ctrl+E). Cette proposition ne résout PAS ce conflit, elle documente juste qu'il existera si l'édition de curseur est ajoutée plus tard.",
+  "Aucune limite de longueur sur app.input (app.rs:319-322 push sans borne) : un collage très long dans le terminal ferait grossir scroll_x en O(n) sans plafond ; le rendu reste correct (une seule ligne, LineTruncator ne rend que ce qui est visible) mais chaque frame recalcule input_cursor_chars() en O(n) sur toute la chaîne — comportement inchangé en complexité par rapport à l'existant (ui.rs:218 faisait déjà ce comptage), donc pas de régression, mais pas d'amélioration non plus si un futur cas d'usage exige des inputs de plusieurs Ko."
+ ],
+ "open_questions": [
+  "L'item C attend-il aussi un début de gestion de curseur en milieu de chaîne (Left/Right/Delete) ou est-ce strictement hors scope (le libellé dit 'wrap/scroll' pas 'édition') ? Aujourd'hui app.rs:318-355 n'a aucune de ces touches — si elles sont attendues dans le même item, le scope et le risque Home/End (cf risks) doivent être tranchés avant implémentation.",
+  "Le wrap multi-ligne (Option A, rejetée ici) est-il explicitement exclu par les mainteneurs, ou seulement 'non recommandé par défaut' — si un futur besoin (ex. coller un long prompt multi-phrases) demande une vraie zone de texte multi-ligne, faut-il rouvrir un item séparé plutôt que d'étendre celui-ci ?",
+  "Faut-il ajouter un test de rendu (ratatui::backend::TestBackend) pour ui.rs::draw_input, sachant qu'aucun précédent de ce type n'existe dans ce fichier aujourd'hui (aucun mod tests dans ui.rs) — ou la couverture au niveau App (méthodes pures testées, cf tests proposés) est-elle jugée suffisante par la review ?",
+  "La dépendance unicode-width (aujourd'hui seulement transitive via ratatui, Cargo.toml:70) doit-elle devenir directe pour corriger le décalage curseur sur glyphes larges (CJK), ou ce risque est-il accepté comme dette préexistante hors scope de l'item C ?"
+ ]
+}

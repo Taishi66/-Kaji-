@@ -1,0 +1,237 @@
+{
+ "key": "freeze-setup-tour",
+ "item": "D — fix structurel du freeze d'input pendant le setup de tour (stream 'static)",
+ "current": [
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/tui/mod.rs",
+   "line": 222,
+   "note": "Unique tokio::select! de la TUI. terminal.draw est appelé une fois par itération de boucle (:221), donc aucun redraw tant qu'aucune branche du select ne se termine."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/tui/mod.rs",
+   "line": 238,
+   "note": "CAUSE RACINE: dans le bras `ev = input_rx.recv()` (:224), Action::Submit (:236) fait `send_turn(...).await?` INLINE (:238-247). Pendant cet await le select ne poll plus input_rx -> input gelé pour toute la durée du setup."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/tui/mod.rs",
+   "line": 257,
+   "note": "Même await inline dans Action::GateApprove (:257-265) et dans le chaînage de fin de tour (:321-330). Trois sites, pas un."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/tui/mod.rs",
+   "line": 344,
+   "note": "send_turn<'a>(terminal, app, agent: &'a Agent, session_config, prompt, turn: &mut Option<TurnStream<'a>>, cancel: &mut Option<CancellationToken>) -> Result<bool>. Pose status=\"démarrage du tour…\" (:353), dessine UNE frame (:354) — dernière image vue par l'utilisateur — puis await start_turn (:356)."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/tui/mod.rs",
+   "line": 355,
+   "note": "Le CancellationToken est créé ici mais n'est stocké dans la variable `cancel` de la boucle qu'à :361, APRÈS le retour de start_turn. Pendant le setup, `cancel` vaut None (ou le token du tour précédent) -> Esc ne peut rien annuler même si la boucle tournait."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/tui/mod.rs",
+   "line": 379,
+   "note": "start_turn<'a>(agent: &'a Agent, ...) -> anyhow::Result<TurnStream<'a>> appelle agent.reply(message, session_config.clone(), Some(cancel.clone())).await (:379-381). TurnStream<'a> = BoxStream<'a, anyhow::Result<AgentEvent>> (:184) — 'a est lié à &'a Agent, d'où l'impossibilité de spawn."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/tui/mod.rs",
+   "line": 223,
+   "note": "Le bras `tick.tick()` est gardé par `if app.turn_active`. turn_active n'est posé qu'après le setup (begin_turn à :358) -> même le ticker ne redessine pas pendant le gel."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/tui/mod.rs",
+   "line": 32,
+   "note": "Les événements clavier sont produits par un thread OS dédié (:33, input_thread :165-182) dans un mpsc::channel::<Event>(64). Les frappes ne sont donc pas perdues (jusqu'à 64) — c'est bien un gel d'affichage + de traitement, pas une perte d'entrée."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/agent.rs",
+   "line": 1811,
+   "note": "SIGNATURE: `pub async fn reply(&self, user_message: Message, session_config: SessionConfig, cancel_token: Option<CancellationToken>) -> Result<BoxStream<'_, Result<AgentEvent>>>`. Le '_ élidé = lifetime de &self. Message et SessionConfig sont pris par valeur: le SEUL emprunt est &self. #[instrument(...)] à :1797."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/agent.rs",
+   "line": 1584,
+   "note": "POURQUOI PAS 'static (chemin state-machine): create_state_machine renvoie StateMachine<'_> construite depuis `Vec<Arc<dyn Operation + '_>>` (:1625) — le '_ vient de &self car les opérations stockent des références vers les champs de Agent."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/state_machine/ops_llm.rs",
+   "line": 113,
+   "note": "InferenceRunner<'a> { provider: Arc<dyn Provider>, model_config, extension_manager: Arc<..>, kaji_mode: &'a Mutex<KajiMode>, prompt_manager: &'a Mutex<PromptManager>, tool_inspection_manager: &'a ToolInspectionManager, frontend_instructions: &'a Mutex<Option<String>> } — 4 emprunts vers Agent."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/state_machine/ops_tool_approval.rs",
+   "line": 25,
+   "note": "ToolApprovalOperation<'a> { kaji_mode: &'a Mutex<KajiMode>, tool_inspection_manager: &'a ToolInspectionManager }."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/state_machine/ops_retry.rs",
+   "line": 30,
+   "note": "RetryOperation<'a> { goal: &'a Mutex<Option<String>>, grind: &'a Mutex<Option<String>>, ... }."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/agent.rs",
+   "line": 253,
+   "note": "Les champs empruntés sont des Mutex nus, pas des Arc: current_kaji_mode: Mutex<KajiMode> (:253), frontend_instructions: Mutex<Option<String>> (:259), prompt_manager: Mutex<PromptManager> (:260), tool_inspection_manager: ToolInspectionManager (:267), goal/grind: Mutex<Option<String>> (:271-272). extension_manager est déjà Arc (:255)."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/state_machine/machine.rs",
+   "line": 17,
+   "note": "`pub enum Step<'a> { Operation(Arc<dyn Operation + 'a>), Inference(Arc<dyn Inference + 'a>) }` et `pub struct StateMachine<'a> { steps: Vec<Step<'a>>, ... }` (:31). Le lifetime remonte jusqu'au stream renvoyé."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/agent.rs",
+   "line": 1693,
+   "note": "SETUP chemin state-machine (reply_with_state_machine, :1693-1791) — tout est awaité AVANT de renvoyer le stream (:1774): get_session (:1703), update schedule_id (:1705-1711), add_message (:1712), provider.lock (:1715-1722), résolution model_config (:1738-1752), get_context_limit (:1757), steer_queue (:1760), create_state_machine (:1761, synchrone). Le nommage de session est lui spawné (:1727) donc non bloquant."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-providers/src/openai.rs",
+   "line": 697,
+   "note": "COÛT MESURABLE DU SETUP: get_context_limit fait, en cache miss et sans context_limit explicite, une sonde HTTP /v1/models bornée par un timeout de 5 s (const N_CTX_PROBE_TIMEOUT :711, appel :712-718). Appelé à agent.rs:1757 (chemin SM) et via context_mgmt/mod.rs:257 (chemin legacy)."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-providers/src/azure_foundry.rs",
+   "line": 459,
+   "note": "Variante Azure de get_context_limit: fetch_model_info().await sans timeout local (:463-466) — setup potentiellement non borné."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/agent.rs",
+   "line": 1826,
+   "note": "SETUP chemin legacy (reply_impl, :1826-2143), tout awaité avant le stream (:2068): get_session (:1894), emit_hook SessionStart (:1919), has_hooks + emit UserPromptSubmit (:1925/:1933), execute_command (:1938), 1 à 3 add_message (:1964-2045), 2e get_session (:2050), check_if_compaction_needed (:2057)."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/hooks/mod.rs",
+   "line": 335,
+   "note": "HookManager::emit exécute les actions de hook SÉQUENTIELLEMENT et les awaite (:352-390), chacune via un sous-processus `sh` (run_action, Command::new(\"sh\") :624). Donc sur le chemin legacy, un hook UserPromptSubmit utilisateur s'exécute intégralement DANS la phase de gel (agent.rs:1933)."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/context_mgmt/mod.rs",
+   "line": 262,
+   "note": "check_if_compaction_needed: quand session.usage.total_tokens est None (1er tour / session restaurée), construit un TokenCounter (:265, token_counter.rs:43 get_tokenizer().await) puis tokenise CHAQUE message agent-visible de façon SYNCHRONE sur le thread runtime (:269-273). Section bloquante sans point d'await — aucune approche coopérative ne peut la préempter."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/tui/app.rs",
+   "line": 327,
+   "note": "ANNULATION: `KeyCode::Esc if self.turn_active => Action::CancelTurn`. turn_active n'est vrai qu'après begin_turn (:210-216, appelé mod.rs:358) -> pendant le setup Esc tombe dans le bras `_ => Action::None` et serait ignoré même si la boucle tournait. Test existant: :589 esc_cancels_running_turn_and_ctrl_c_quits (pose turn_active=true à la main)."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/tui/mod.rs",
+   "line": 228,
+   "note": "Traitement de Action::CancelTurn: token.cancel() (:230) puis app.pass_abort si une passe SDD est en cours (:232-234)."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/tui/app.rs",
+   "line": 328,
+   "note": "`KeyCode::Enter if self.turn_active` refuse la soumission avec un message système (:328-331), test :603 enter_during_active_turn_does_not_submit. Ce garde-fou ne couvre PAS un état 'setup en cours' — à étendre si l'input redevient vivant pendant le setup."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/agent.rs",
+   "line": 1882,
+   "note": "PARITÉ: reply (:1811) est le point d'entrée UNIQUE; il délègue à reply_impl (:1818) qui branche à :1882-1889 sur `state_machine::enabled() || bang_shell_command(text).is_some()` -> reply_with_state_machine, sinon chemin legacy (reply_internal :2138). Deux corps de setup à modifier en miroir."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/state_machine/mod.rs",
+   "line": 56,
+   "note": "state_machine::enabled() lit KAJI_STATE_MACHINE, défaut FALSE. La TUI tourne donc sur le chemin LEGACY par défaut — c'est le setup de reply_impl (hooks + tokenizer) qui produit le gel observé, pas celui de reply_with_state_machine."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/state_machine/machine.rs",
+   "line": 51,
+   "note": "DIVERGENCE DE PARITÉ PRÉEXISTANTE pertinente pour D: les hooks d'entrée (SessionStart / UserPromptSubmit) sont émis DANS la machine (emit_entry_hooks :51-80), donc dans le stream; côté legacy ils sont dans le setty pré-stream (agent.rs:1919/1933). Le gel est structurellement plus long sur legacy."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/session/mod.rs",
+   "line": 1334,
+   "note": "APPELANT 1 (CLI interactif): self.agent.reply(...).await? puis boucle select sur stream.next(). Le champ est `agent: Agent` possédé (:201), pas un Arc."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/session/mod.rs",
+   "line": 1451,
+   "note": "APPELANT 2 (réponse d'élicitation): `let _ = self.agent.reply(response_message, ...).await?;` — le stream est jeté sans être poll. Aujourd'hui le `?` propage l'erreur de setup (agent.rs:1870-1876). Point de régression si les erreurs de setup migrent dans le stream."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/session/mod.rs",
+   "line": 337,
+   "note": "`pub fn into_parts(self) -> (Agent, String, Conversation)` — unique consommateur: crates/kaji-cli/src/commands/tui.rs:16, qui passe l'Agent possédé à tui::run (tui/mod.rs:25, qui en prend ensuite une &ref à :37)."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/acp/server.rs",
+   "line": 1800,
+   "note": "APPELANT 3 (ACP): agent.reply(user_message, session_config, Some(cancel_token.clone())).await. Détient déjà un Arc<Agent> (champ :176, get_session_agent :1763 -> signature :1523)."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/gateway/handler.rs",
+   "line": 476,
+   "note": "APPELANT 4 (gateway Telegram): agent: Arc<Agent> (:44). Le bras Err envoie « ⚠️ Failed to start agent: {e} » (:486) — deviendrait mort si les erreurs de setup migraient dans le stream."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/platform_extensions/orchestrator.rs",
+   "line": 505,
+   "note": "APPELANT 5 (orchestrateur): agent obtenu via manager.get_or_create_agent -> Arc<Agent> (execution/manager.rs:103; stockage LruCache<String, Arc<Agent>> :34)."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/subagent_handler.rs",
+   "line": 195,
+   "note": "APPELANT 6 (subagents): agent déjà `Arc::new(Agent::with_config(...))` (:140); l'appel est enveloppé dans session_context::with_session_id (:193-199)."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/scheduler.rs",
+   "line": 1143,
+   "note": "APPELANT 7 (scheduler): `let agent = Agent::with_config(...)` local possédé (:1025), consommé dans la même fonction -> Arc::new trivial."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/examples/agent.rs",
+   "line": 60,
+   "note": "APPELANT 8 (exemple): agent.reply(user_message, session_config, None).await?."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/tests/agent.rs",
+   "line": 613,
+   "note": "COUVERTURE TESTS existante sur reply(): tests/agent.rs (~20 sites: 613, 806, 1022, 1383, 1437, 1629, 1830, 1991, 2143, 2333, 2412, 2508, 2572, 2695, 3058, 3335, 3519, 3607, 3725, 3814, 3876), tests/compaction.rs:475 et :629, tests/providers.rs:537, agent.rs:4576/4657/4790/4816/4835."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji/src/agents/state_machine/tests/agent_reply.rs",
+   "line": 73,
+   "note": "Seul test qui cible reply_with_state_machine directement (reply_streams_the_turn_and_ends :64). Le doc-comment :1-2 le désigne comme « the entry point the CLI and desktop reach when the state machine is enabled »."
+  },
+  {
+   "file": "/Users/ishaatari/workspace/kaji/crates/kaji-cli/src/tui/app.rs",
+   "line": 544,
+   "note": "Le seul harnais de test de la TUI est le `mod tests` inline de app.rs (:544-1101). Il n'existe PAS de crates/kaji-cli/tests/ (vérifié: os error 2). event_loop (tui/mod.rs:194) n'est pas testable en l'état: il prend &mut ratatui::DefaultTerminal (:195) et un &Agent réel."
+  }
+ ],
+ "proposal": [
+  "RECOMMANDATION: option B d'abord (fix réel, 1 crate, zéro risque de parité), option A ensuite — après la fin de la migration state-machine. Argument décisif: AGENTS.md impose d'implémenter et tester tout changement de comportement dans les DEUX chemins tant que la migration n'est pas finie; or A doit réécrire le setup de reply_impl (agent.rs:1826-2143) qui est justement le code voué à la suppression. Faire A maintenant = écrire deux fois le même patch dont la moitié sera jetée. B ne touche aucun des deux chemins.",
+  "OPTION B — étape 1 (le fix): dans crates/kaji-cli/src/tui/mod.rs, transformer le lancement de tour en machine à 3 états dans la boucle select. Remplacer send_turn (:344-370) par deux fonctions: `fn begin_setup<'a>(agent: &'a Agent, session_config: &SessionConfig, prompt: &str, token: CancellationToken) -> Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'a>>> + 'a>>` (retourne `Box::pin(agent.reply(Message::user().with_text(prompt), session_config.clone(), Some(token)))`, ne fait AUCUN await) et `fn install_turn(app, turn, cancel, result)` appelée quand le futur se résout. Le lifetime 'a reste celui de `agent: &Agent` d'event_loop (:196) — aucune signature de kaji touchée.",
+  "OPTION B — étape 2: ajouter dans event_loop (mod.rs:215) un état `let mut pending: Option<Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'_>>> + '_>>> = None;` et un 4e bras au select (mod.rs:222): `res = async { pending.as_mut().unwrap().await }, if pending.is_some() => { pending = None; install_turn(...) }`. Comme le futur de setup est poll par le MÊME select que input_rx.recv() (:224), chaque `.await` interne au setup rend la main à la branche input: l'input reste vivant pendant TOUT le setup asynchrone.",
+  "OPTION B — étape 3 (annulation Esc réellement branchée): créer le CancellationToken AVANT begin_setup et l'écrire immédiatement dans `cancel` (aujourd'hui écrit seulement à mod.rs:361). Sur Action::CancelTurn (:228), en plus de token.cancel(): `pending = None` (drop du futur) pour interrompre le setup instantanément.",
+  "OPTION B — étape 4 (app.rs): ajouter un champ `pub turn_pending: bool` à App (à côté de turn_active :74), le poser dans begin_setup et l'effacer dans install_turn. Étendre deux gardes: `KeyCode::Esc if self.turn_active || self.turn_pending => Action::CancelTurn` (app.rs:327) et `KeyCode::Enter if self.turn_active || self.turn_pending` (app.rs:328) pour interdire une 2e soumission concurrente sur la même session.",
+  "OPTION B — étape 5 (feedback visuel): élargir la garde du ticker `_ = tick.tick(), if app.turn_active` (mod.rs:223) en `if app.turn_active || app.turn_pending`, sinon le status « démarrage du tour… » (:353) reste figé faute de redraw périodique. Appliquer aussi begin_setup aux deux autres sites d'await inline: Action::GateApprove (:257-265) et le chaînage de fin de tour (:321-330).",
+  "OPTION B — étape 6 (raccourcir le setup, indépendant): pré-chauffer get_context_limit au démarrage de la TUI. Dans crates/kaji-cli/src/commands/tui.rs (après into_parts :16) ou dans tui::run (mod.rs:30-47), spawner un `tokio::spawn` qui appelle provider.get_context_limit(&model_config) une fois — le cache n_ctx_cache d'OpenAiProvider (openai.rs:702-708, insert :720) fait alors tomber la sonde 5 s du premier tour à ~0.",
+  "OPTION A — signature: `pub async fn reply(self: &Arc<Self>, user_message: Message, session_config: SessionConfig, cancel_token: Option<CancellationToken>) -> Result<BoxStream<'static, Result<AgentEvent>>>` (agent.rs:1811). Idem pour reply_impl (:1826) et reply_with_state_machine (:1693). Tout le corps de setup migre à l'INTÉRIEUR du `async_stream::try_stream!` final.",
+  "OPTION A — point technique clé qui rend A faisable sans réécrire les Operation: le générateur async possède un `let agent: Arc<Agent> = self.clone();` local; `agent.create_state_machine(...)` (agent.rs:1584) emprunte alors une variable locale AU générateur, pas l'appelant. Le futur devient auto-référentiel mais reste 'static une fois Box::pin. Conséquence: PAS besoin de convertir current_kaji_mode / prompt_manager / frontend_instructions / goal / grind / tool_inspection_manager (agent.rs:253-272) en Arc, ni de toucher InferenceRunner<'a> (ops_llm.rs:113), ToolApprovalOperation<'a> (ops_tool_approval.rs:25), RetryOperation<'a> (ops_retry.rs:30), Step<'a>/StateMachine<'a> (machine.rs:17/31).",
+  "OPTION A — fichiers appelants à adapter: crates/kaji-cli/src/session/mod.rs (champ `agent: Agent` :201 -> `Arc<Agent>`; into_parts :337 -> `(Arc<Agent>, String, Conversation)`; l'autoderef couvre les ~15 autres `self.agent.<méthode>`), crates/kaji-cli/src/commands/tui.rs:16-17, crates/kaji-cli/src/tui/mod.rs (run :25-30 prend `Arc<Agent>`, event_loop :196 idem, TurnStream :184 -> BoxStream<'static, _>), crates/kaji/src/scheduler.rs:1025 (Arc::new). Aucun changement pour acp/server.rs:1800, gateway/handler.rs:476, orchestrator.rs:505, subagent_handler.rs:195 (déjà Arc<Agent>, `arc.reply(...)` marche par autoref sur `self: &Arc<Self>`).",
+  "OPTION A — bénéfice qu'aucune autre option ne donne: la TUI peut alors `tokio::spawn` le tour complet et ne garder dans le select qu'un `mpsc::Receiver<AgentEvent>`. C'est le SEUL moyen de rendre préemptible la section CPU synchrone de check_if_compaction_needed (context_mgmt/mod.rs:265-273, tokenisation de tous les messages sans point d'await) — B ne peut pas la couvrir."
+ ],
+ "tests": [
+  "OPTION B / app.rs (mod tests :544): `esc_during_pending_setup_returns_cancel_turn` — App::new(None), poser turn_pending=true, assert on_event(Esc) == Action::CancelTurn. Miroir exact de esc_cancels_running_turn_and_ctrl_c_quits (app.rs:589)."
+ ],
+ "risks": [
+  "OPTION B — réentrance (risque le plus concret): aujourd'hui l'input est gelé, donc une 2e soumission pendant le setup est physiquement impossible. Avec B l'input redevient vivant: sans la garde `KeyCode::Enter if self.turn_active || self.turn_pending` (app.rs:328), deux appels reply() concurrents partiraient sur le MÊME session_id, avec deux add_message concurrents (agent.rs:1712 / 1964-2045) et deux state machines. Corruption de conversation, pas juste un glitch UI.",
+  "OPTION B — annulation à mi-setup laisse un état partiel: drop du futur pendant reply_impl peut survenir APRÈS l'add_message du message utilisateur (agent.rs:1913/1964/2045) et APRÈS l'exécution des hooks SessionStart/UserPromptSubmit (:1919/:1933, sous-processus déjà lancés). Le message reste persisté sans réponse. À accepter explicitement (ou à documenter dans le message d'abort), pas à masquer.",
+  "OPTION B — trou résiduel assumé: la tokenisation synchrone de check_if_compaction_needed (context_mgmt/mod.rs:269-273) n'a aucun point d'await; sur une conversation longue restaurée (session.usage.total_tokens == None) la boucle reste bloquée pendant cette section. B réduit le gel au temps CPU pur, il ne l'annule pas. C'est la limite honnête de B et la justification d'A à terme.",
+  "OPTION B — emprunts: `pending` (futur empruntant `agent: &'a Agent`) et `turn: Option<TurnStream<'a>>` (mod.rs:215) coexistent — deux emprunts partagés, OK — mais la signature actuelle send_turn(&mut app, ..., &mut turn, &mut cancel) (mod.rs:344-352) tient un &mut sur `turn` pendant l'await; il FAUT scinder begin/install sinon le borrow checker refuse l'état pending.",
+  "OPTION A — régression silencieuse identifiée: crates/kaji-cli/src/session/mod.rs:1451 fait `let _ = self.agent.reply(...).await?;` et jette le stream sans le poll. Aujourd'hui le `?` propage l'erreur de complétion d'élicitation (agent.rs:1870-1876, .map_err). Si les erreurs de setup migrent dans le stream, cette erreur disparaît totalement. À corriger explicitement en même temps qu'A.",
+  "OPTION A — bras Err désormais morts chez tous les appelants: gateway/handler.rs:481-489 (« ⚠️ Failed to start agent »), acp/server.rs:1805-1810 (clear_active_run + erreur ACP), tui/mod.rs:364-368. Les erreurs arriveraient en premier item du stream; les branches Some(Err(e)) existent déjà partout mais leurs effets de bord (clear_active_run, pass_abort) ne sont pas équivalents.",
+  "OPTION A — télémétrie déplacée: le span #[instrument] de reply (agent.rs:1797-1810) et les record() de reply_impl (:1836-1837) s'exécutent aujourd'hui sur la tâche appelante avant tout streaming. Déplacés dans le générateur, ils ne se déclenchent qu'au premier poll — un stream créé puis jeté (cas :1451) n'émettrait plus rien.",
+  "OPTION A — parité AGENTS.md: reply_impl (chemin legacy, :1826-2143) et reply_with_state_machine (:1693-1791) devraient tous deux être réécrits en miroir. C'est exactement le type de changement que la note « changes to agent-loop behavior must be implemented and tested in both paths » vise. Coût double, moitié jetable.",
+  "OPTION A — Send/Sync non vérifié: `Arc<Agent>` doit être Send+Sync pour traverser un tokio::spawn. Non prouvé dans cette passe (aucune commande cargo autorisée). Agent contient tool_result_rx (agent.rs:263) et un Mutex<Option<Container>> (:270) dont je n'ai pas vérifié les bornes.",
+  "TRANSVERSE — la mesure manque: je n'ai identifié que les candidats de coût (sonde HTTP 5 s openai.rs:711, hooks sous-processus hooks/mod.rs:624, tokenizer context_mgmt/mod.rs:265). La répartition réelle du gel observé n'est PAS mesurée; un fix choisi sans instrumenter risque d'optimiser la mauvaise branche."
+ ],
+ "open_questions": [
+  "Quelle est la répartition réelle du temps de setup mesurée en session TUI (sonde /v1/models vs hooks utilisateur vs tokenisation) ? Non mesurable ici: aucune commande cargo autorisée. Sans ce chiffre, le choix entre B seul et B+étape 6 (pré-chauffage) est arbitraire.",
+  "Le provider effectivement utilisé par la TUI est-il un OpenAiProvider sans context_limit explicite ? Si KAJI_CONTEXT_LIMIT ou une canonical limit est posée, get_context_limit sort en O(1) (openai.rs:698-700) et la sonde 5 s n'est jamais le coupable.",
+  "`Agent` est-il Send + Sync ? Prérequis dur de l'option A (spawn d'Arc<Agent>). Non vérifié — impossible sans compiler.",
+  "La TUI est-elle destinée à basculer sur KAJI_STATE_MACHINE=1 ? Aujourd'hui elle tourne sur le chemin legacy (state_machine/mod.rs:56, défaut false), donc c'est le setup de reply_impl qu'il faut optimiser. Si la bascule est proche, l'étape 6 et toute optimisation legacy perdent leur valeur.",
+  "Stratégie de test d'intégration pour event_loop: il n'existe pas de crates/kaji-cli/tests/ et event_loop (tui/mod.rs:194) prend &mut ratatui::DefaultTerminal + &Agent. Faut-il extraire la machine à états de la boucle dans une unité testable (sans terminal ni agent) avant d'implémenter B, ou se contenter des tests unitaires d'App ? Non tranché.",
+  "Y a-t-il un indicateur visuel (spinner) prévu pendant l'état pending ? Je n'ai pas inspecté crates/kaji-cli/src/tui/ui.rs (311 lignes) ni report.rs pour savoir ce que le status rend pendant un tour non actif."
+ ]
+}

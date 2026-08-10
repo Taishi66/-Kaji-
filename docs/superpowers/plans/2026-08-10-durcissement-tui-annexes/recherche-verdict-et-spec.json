@@ -1,0 +1,135 @@
+{
+ "key": "verdict-et-spec",
+ "item": "Durcissement A — TUI SDD pass : (1) verdict absent au stage Validate défaute silencieusement à VALIDE (fail-open) ; (2) --spec <fichier> introuvable/illisible est avalé sans erreur au lancement de la TUI.",
+ "current": [
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 185,
+   "note": "Prompt du stage Validate : exige `VERDICT: VALIDE` ou `VERDICT: DRIFT` en première ligne, mais rien n'impose ce format au modèle."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 452,
+   "note": "apply_assistant_message() : le texte de chaque chunk assistant est accumulé dans self.validate_buffer uniquement quand driver == Validating (lignes 452-454)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 188,
+   "note": "turn_end(), bras PassDriver::Validating (188-203) : pass.advance() est appelé d'abord (189), PUIS le buffer est testé."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 190,
+   "note": "Test unique et négatif : `if self.validate_buffer.to_uppercase().contains(\"VERDICT: DRIFT\")` (190-194). Rien ne vérifie la présence de VERDICT: VALIDE."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 197,
+   "note": "Bras else (197-200) : atteint dès que \"VERDICT: DRIFT\" est absent — donc aussi bien pour un buffer vide, un verdict tronqué, du texte hors-format que pour un vrai \"VERDICT: VALIDE\". pass.advance() + push_system(\"✓ passe SDD complète — spec verrouillée\"). C'est le fail-open confirmé : verdict absent ⇒ traité comme VALIDE."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 159,
+   "note": "pass_abort() (159-167) appelle fail_current() inconditionnellement quand la passe tourne — c'est pour ça que le chemin erreur/annulation est déjà fail-closed ; le trou est uniquement dans le chemin de complétion normale (turn_end)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 672,
+   "note": "Test existant happy_path_valide_locks_the_spec (672-691) : n'exerce que le cas explicite \"VERDICT: VALIDE — conforme\" (687), ne teste jamais l'absence des deux tokens."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 771,
+   "note": "Test existant stream_error_during_validating_aborts_pass (771-787) : envoie un verdict tronqué (\"début de verdict tronqué\", 779) mais le test appelle ensuite pass_abort() (782), pas turn_end() — il couvre le chemin erreur/annulation, pas la complétion normale sans erreur qui contient le vrai bug fail-open."
+  },
+  {
+   "file": "crates/kaji-core/src/sdd.rs",
+   "line": 1,
+   "note": "Confirmé par grep (aucune autre occurrence de VERDICT/validate_buffer/PassDriver dans le repo hors kaji-cli/src/tui) : sdd.rs est une pure machine à états sans logique de parsing de verdict — le parsing vit entièrement côté TUI, aucune duplication ni parité agent-loop/state-machine (AGENTS.md) à traiter pour ce point."
+  },
+  {
+   "file": "crates/kaji-cli/src/cli.rs",
+   "line": 1098,
+   "note": "Sous-commande Tui { spec: Option<PathBuf> } (1098-1102), flag --spec documenté en long_help (1093-1096)."
+  },
+  {
+   "file": "crates/kaji-cli/src/commands/tui.rs",
+   "line": 17,
+   "note": "handle_tui() transmet spec tel quel à crate::tui::run(agent, session_id, conversation, spec).await (7-18) — aucune validation avant l'appel."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 34,
+   "note": "run() (25-47) : ratatui::init() est appelé (34) avant toute tentative de charger la spec — le chargement n'a lieu que plus tard, dans event_loop, ligne 203."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 203,
+   "note": "event_loop() : `let mut app = App::new(resolve_spec(spec_path));` — seul point d'appel de resolve_spec."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 384,
+   "note": "resolve_spec(spec_path: Option<PathBuf>) -> Option<SpecDoc> (384-390). Ligne 385-388 : `spec_path.or_else(|| default.exists().then_some(default))` — Option::or_else ne s'exécute que si spec_path est None ; donc quand --spec est fourni (Some(path)), ce chemin explicite est bien conservé tel quel (pas remplacé par le défaut)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 389,
+   "note": "`SpecDoc::load(&path).ok()` — le `.ok()` avale silencieusement TOUT io::Error (fichier absent, permission refusée, UTF-8 invalide) et retourne None, indistinguable de \"pas de --spec, pas de SPEC.md par défaut\"."
+  },
+  {
+   "file": "crates/kaji-core/src/sdd.rs",
+   "line": 71,
+   "note": "SpecDoc::load(path) -> io::Result<Self> (71-74) : `std::fs::read_to_string(path)?` — confirme que l'erreur avalée en mod.rs:389 est un io::Error réel porteur d'une cause (NotFound, PermissionDenied, InvalidData...)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 125,
+   "note": "start_pass() (124-132) : seul symptôme visible côté utilisateur quand /sdd est tapé après un --spec raté silencieusement — \"aucune SPEC chargée — /sdd nécessite un fichier SPEC.md\", message identique que --spec n'ait jamais été passé."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 61,
+   "note": "push_welcome() : message d'accueil qui annonce --spec <fichier> comme option, sans jamais indiquer qu'un échec de chargement serait signalé (ou pas)."
+  },
+  {
+   "file": "crates/kaji-cli/src/cli.rs",
+   "line": 2619,
+   "note": "Test existant tui_command_accepts_spec_flag (2619-2630) : vérifie uniquement le parsing CLI du flag en Some(PathBuf), aucun test sur le comportement de chargement/échec."
+  },
+  {
+   "file": "crates/kaji-cli/src/main.rs",
+   "line": 34,
+   "note": "fn main() -> Result<()> (34-53) appelle run() (19-32) qui retourne cli().await sans wrapping supplémentaire — confirme qu'une Err remontée depuis tui::run() atteindrait l'utilisateur sans être avalée en amont (aucun .ok()/.unwrap_or sur ce chemin)."
+  }
+ ],
+ "proposal": [
+  "[1/verdict] crates/kaji-cli/src/tui/app.rs — dans turn_end(), bras PassDriver::Validating (188-203) : inverser la logique pour un test POSITIF sur VALIDE, tout le reste (y compris buffer vide ou imparsable) tombe en DRIFT : `let upper = self.validate_buffer.to_uppercase(); if upper.contains(\"VERDICT: VALIDE\") { self.pass.advance(); self.push_system(\"✓ passe SDD complète — spec verrouillée\"); } else { self.pass.fail_current(); if upper.contains(\"VERDICT: DRIFT\") { self.push_system(\"⚠ drift détecté — spec non verrouillée\"); } else { self.push_system(\"⚠ verdict absent/imparsable — DRIFT par prudence (fail-closed)\"); } }` — garde le driver = Idle et le `None` de retour inchangés (201-202).",
+  "[1/verdict] Aucun changement requis dans kaji-core/src/sdd.rs ni dans crates/kaji/src/agents/ (agent loop legacy ou state_machine) : confirmé par grep que la logique de parsing VERDICT/validate_buffer/PassDriver est entièrement locale à kaji-cli/src/tui/app.rs — pas de parité AGENTS.md à assurer sur ce point précis.",
+  "[2/--spec] crates/kaji-cli/src/tui/mod.rs — changer resolve_spec (384-390) en `fn resolve_spec(spec_path: Option<PathBuf>) -> anyhow::Result<Option<SpecDoc>>` : si spec_path est Some(path) (flag explicite), `SpecDoc::load(&path).map(Some).with_context(|| format!(\"--spec {}\", path.display()))` — erreur dure. Si None, garder le comportement actuel inchangé pour l'auto-détection SPEC.md (soft, `.ok()` conservé) puisque ce n'est pas une demande explicite de l'utilisateur.",
+  "[2/--spec] crates/kaji-cli/src/tui/mod.rs — déplacer l'appel de resolve_spec hors de event_loop : dans run() (25-47), appeler `let spec = resolve_spec(spec_path)?;` AVANT `ratatui::init()` (ligne 34), pour bail proprement sans jamais toucher le terminal (pas de ratatui::restore() à gérer sur ce chemin). Passer `spec` (déjà Option<SpecDoc>) à event_loop à la place de spec_path.",
+  "[2/--spec] crates/kaji-cli/src/tui/mod.rs — changer la signature de event_loop (199) de `spec_path: Option<PathBuf>` vers `spec: Option<SpecDoc>`, et supprimer l'appel resolve_spec devenu redondant à la ligne 203 : `let mut app = App::new(spec);`.",
+  "[2/--spec] crates/kaji-cli/src/tui/mod.rs — ajouter `use anyhow::Context;` aux imports (à côté de `use anyhow::Result;` ligne 7) pour `.with_context()`.",
+  "[2/--spec] Aucun changement requis dans crates/kaji-cli/src/commands/tui.rs ni crates/kaji-cli/src/cli.rs : handle_tui() (commands/tui.rs:17) retourne déjà crate::tui::run(...) tel quel comme expression finale, et main() (main.rs:34) propage déjà toute Err de cli() — la nouvelle Err de run() remontera sans câblage supplémentaire."
+ ],
+ "tests": [
+  "[1/verdict] crates/kaji-cli/src/tui/app.rs, module #[cfg(test)] existant (imiter le style de happy_path_valide_locks_the_spec, 672-691, et des helpers spec()/agent_says() déjà présents 654-662) : nouveau test verdict_absent_fails_closed_as_drift — start_pass(), gate_approve(), agent_says exec puis turn_end() pour entrer en Validating, puis agent_says(&mut app, \"m2\", \"réponse sans le token attendu\") (aucun des deux tokens VERDICT), turn_end(), assert!(app.pass.drifted()), assert!(!app.pass.is_complete()), et assert qu'une ligne du chat distingue ce cas du DRIFT explicite (ex. contient \"verdict absent\").",
+  "[1/verdict] Variante optionnelle même fichier/module : verdict_empty_buffer_fails_closed_as_drift avec agent_says(&mut app, \"m2\", \"\") pour couvrir le cas buffer littéralement vide (flux terminé sans texte).",
+  "[1/verdict] Re-vérifier que happy_path_valide_locks_the_spec (672-691) et drift_verdict_fails_drift_lock (693-703) restent verts sans modification — ils exercent les deux cas où un token est bien présent, non affectés par l'inversion de logique.",
+  "[2/--spec] crates/kaji-cli/src/tui/mod.rs, module #[cfg(test)] existant (398+, imiter le style tempfile::tempdir() de git_summary_reports_branch_and_dirty_count_in_a_temp_repo, 416-433, en passant des chemins explicites plutôt que de muter le CWD) : resolve_spec_errors_when_explicit_flag_path_is_missing — tempdir, chemin inexistant, `resolve_spec(Some(missing)).expect_err(...)`, assert que err.to_string() contient le chemin tenté.",
+  "[2/--spec] Même module : resolve_spec_loads_explicit_flag_path_successfully — écrire un vrai fichier `# Demo\\ncorps` dans un tempdir, `resolve_spec(Some(path))` retourne Ok(Some(spec)) avec le title/body attendus.",
+  "[2/--spec] Ne PAS ajouter de test 'pas de flag, pas de SPEC.md par défaut' basé sur une mutation de CWD (std::env::set_current_dir) — cf. risque ci-dessous sur les tests multi-threadés ; ce sous-chemin reste inchangé par le fix donc pas de régression à couvrir ici.",
+  "[2/--spec] crates/kaji-cli/src/cli.rs : aucun nouveau test requis — le bug est côté chargement (mod.rs), pas côté parsing du flag (tui_command_accepts_spec_flag, 2619-2630, reste valide et suffisant pour le parsing)."
+ ],
+ "risks": [
+  "[1/verdict] Changement de comportement réel, pas juste un durcissement cosmétique : toute réponse de modèle qui aujourd'hui passe accidentellement en VALIDE (verdict absent, mal formaté, ou casing/format légèrement différent de \"VERDICT: VALIDE\") basculera désormais en DRIFT — à mentionner explicitement en review/PR car ça peut faire échouer des passes qui \"marchaient\" avant par accident.",
+  "[1/verdict] Le parsing reste un `.contains()` sur tout le buffer accumulé, pas strictement sur la \"première ligne\" comme l'exige le prompt (app.rs:185) — un texte de justification qui citerait les deux tokens (ex. en reformulant la consigne) resterait ambigu après ce fix minimal comme avant ; non traité ici (hors scope du changement minimal demandé).",
+  "[2/--spec] Rendre --spec introuvable/illisible fatal au lancement change le comportement pour tout script/CI qui passerait un --spec de façon best-effort en s'appuyant sur le fallback silencieux actuel — à signaler comme breaking change côté UX CLI, même si c'est le comportement demandé.",
+  "[2/--spec] std::io::Error (retourné par SpecDoc::load, sdd.rs:71-74) omet typiquement le chemin fautif dans son Display (comportement standard de la lib std, non re-vérifié spécifiquement ici par lecture de code kaji) — sans le `.with_context()` proposé qui ajoute explicitement path.display(), le message d'erreur remonté à l'utilisateur risquerait d'être un \"No such file or directory\" sans indication du fichier concerné ; ce n'est pas un contexte redondant au sens AGENTS.md (\"ne pas ajouter de contexte qui n'apporte rien\") puisqu'il ajoute une information absente de l'erreur source."
+ ],
+ "open_questions": [
+  "[1/verdict] Le mécanisme de rendu TUI (ui.rs:117, 185) applique un style unique 'dim' à toutes les lignes Sender::System via theme::SYSTEM_PREFIX — je n'ai trouvé aucun canal de style/sévérité par message. La distinction 'DRIFT explicite' vs 'verdict absent → DRIFT par prudence' proposée est donc purement textuelle (deux messages différents), pas visuelle (couleur/icône dédiée) — à confirmer que c'est suffisant, sinon une distinction visuelle serait un changement plus large que 'peu coûteux'.",
+  "[1/verdict] Le cas 'SPEC vide' est déjà géré ailleurs (app.rs:129-132, start_pass()) et distinct du sujet verdict — à confirmer que ce n'est pas dans le périmètre de cet item.",
+  "[2/--spec] Le fix proposé ne durcit que le chemin --spec explicite ; l'auto-détection SPEC.md (pas de flag, fichier présent mais illisible) garde son `.ok()` silencieux actuel (mod.rs:389, comportement inchangé pour ce sous-cas) — à confirmer que c'est le périmètre voulu, ou si ce sous-cas doit aussi devenir un warning visible."
+ ]
+}

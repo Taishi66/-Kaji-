@@ -1,0 +1,193 @@
+{
+ "key": "resume-tui",
+ "item": "Durcissement B — kaji tui --resume (seed_chat inerte sans lui)",
+ "current": [
+  {
+   "file": "crates/kaji-cli/src/cli.rs",
+   "line": 1098,
+   "note": "Command::Tui { spec: Option<PathBuf> } — seul champ, aucun resume/identifier."
+  },
+  {
+   "file": "crates/kaji-cli/src/cli.rs",
+   "line": 2226,
+   "note": "handle_default_session(): si stdout/stdin tty et feature tui, appelle handle_tui(None) (kaji sans sous-commande)."
+  },
+  {
+   "file": "crates/kaji-cli/src/cli.rs",
+   "line": 2372,
+   "note": "Dispatch explicite Some(Command::Tui { spec }) => handle_tui(spec).await."
+  },
+  {
+   "file": "crates/kaji-cli/src/commands/tui.rs",
+   "line": 7,
+   "note": "handle_tui(spec): kaji_mode + session_id via get_or_create_session_id(None, false, false, kaji_mode) — identifier et resume figés à None/false, donc toujours une session neuve."
+  },
+  {
+   "file": "crates/kaji-cli/src/commands/tui.rs",
+   "line": 10,
+   "note": "build_session(SessionBuilderConfig{ session_id, interactive:true, ..Default::default() }) — resume reste false par défaut (builder.rs:130)."
+  },
+  {
+   "file": "crates/kaji-cli/src/commands/tui.rs",
+   "line": 16,
+   "note": "session.into_parts() -> (agent, session_id, conversation) puis tui::run(...)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 25,
+   "note": "run(agent, session_id, conversation, spec_path) -> event_loop(...)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 203,
+   "note": "event_loop: App::new(...) puis seed_chat(&mut app, &conversation) à la ligne 206, avant push_welcome (207)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 392,
+   "note": "fn seed_chat(app, conversation) { for message in conversation.messages() { app.apply_agent_event(&AgentEvent::Message(message.clone())); } } — mécanique déjà fonctionnelle, mais toujours appelée avec une Conversation vide car (4)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 413,
+   "note": "apply_agent_event: Message -> apply_message; HistoryReplaced -> push_system('— historique compacté —'); autres variantes ignorées."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 456,
+   "note": "apply_assistant_message/ToolRequest: crée une ChatLine avec tool: Some(ToolLineState{ name, started: Instant::now() }) et l'indexe dans pending_tools — started est pris au moment du replay, pas au moment réel de l'appel."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 500,
+   "note": "apply_user_message/ToolResponse: si pending_tools contient l'id, calcule elapsed = started.elapsed() et affiche '✓/✗ name (Xs)' — lors d'un seed_chat synchrone, ce delta sera quasi 0.0s (pas la durée réelle de l'outil à l'époque)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 517,
+   "note": "Si le ToolResponse n'a pas de ToolRequest correspondant dans pending_tools (historique tronqué), fallback push_system('✓ outil terminé')."
+  },
+  {
+   "file": "crates/kaji-cli/src/cli.rs",
+   "line": 934,
+   "note": "Command::Session{ identifier: Option<Identifier>, resume: bool, fork: bool, edit: bool, history: bool, ... } — mécanique resume CLI classique, alias 's'."
+  },
+  {
+   "file": "crates/kaji-cli/src/cli.rs",
+   "line": 76,
+   "note": "struct Identifier{ name: Option<String>, session_id: Option<String>, path: Option<PathBuf> } — flatten réutilisé par Session (938) et Run (990)."
+  },
+  {
+   "file": "crates/kaji-cli/src/cli.rs",
+   "line": 394,
+   "note": "get_or_create_session_id(identifier, resume, no_session, kaji_mode): si resume && identifier.is_none() -> session_manager.list_sessions_by_types(&[SessionType::User]).first() = 'dernière session' (406-416); sinon résout via session_id/name/path (418-436)."
+  },
+  {
+   "file": "crates/kaji/src/session/session_manager.rs",
+   "line": 2030,
+   "note": "list_sessions_matching: ORDER BY sort_timestamp DESC, s.id DESC — confirme que .first() est bien la session la plus récemment active (message le plus récent ou updated_at)."
+  },
+  {
+   "file": "crates/kaji-cli/src/cli.rs",
+   "line": 1648,
+   "note": "handle_interactive_session(identifier, resume, fork, edit, history, ...) — construit SessionBuilderConfig{ session_id, resume, fork, ... } (1720-1743)."
+  },
+  {
+   "file": "crates/kaji-cli/src/cli.rs",
+   "line": 1745,
+   "note": "if (resume || fork) && history { session.render_message_history(); } — équivalent texte de seed_chat côté CLI classique, mais optionnel (flag --history) et post-construction, pas dans CliSession::new."
+  },
+  {
+   "file": "crates/kaji-cli/src/session/mod.rs",
+   "line": 1788,
+   "note": "render_message_history(): itère messages.user_visible_messages() et les imprime via output::render_message — mécanisme parallèle à seed_chat, jamais partagé."
+  },
+  {
+   "file": "crates/kaji-cli/src/session/mod.rs",
+   "line": 296,
+   "note": "CliSession::new(agent, session_id, ...): messages = agent.config.session_manager.get_session(&session_id, true).await...conversation.unwrap_or_default() — charge INCONDITIONNELLEMENT l'historique persisté sous session_id, indépendamment du flag resume. Donc into_parts() renverra déjà la conversation complète si session_id pointe vers une session existante non vide."
+  },
+  {
+   "file": "crates/kaji-cli/src/session/mod.rs",
+   "line": 337,
+   "note": "pub fn into_parts(self) -> (Agent, String, Conversation) { (self.agent, self.session_id, self.messages) }."
+  },
+  {
+   "file": "crates/kaji-cli/src/session/builder.rs",
+   "line": 499,
+   "note": "build_session(): session_config.resume pilote plusieurs comportements critiques au-delà du session_id — pas juste un id différent."
+  },
+  {
+   "file": "crates/kaji-cli/src/session/builder.rs",
+   "line": 300,
+   "note": "resolve_session_id(): si !resume et !no_session -> session_config.session_id.clone().unwrap() (branche actuelle du TUI, 347-349); si resume -> valide/relit le session_id fourni ou reprend la dernière session User (323-346)."
+  },
+  {
+   "file": "crates/kaji-cli/src/session/builder.rs",
+   "line": 269,
+   "note": "resolve_provider_and_model: si resume && saved_model_config existe et correspond au model_name -> réutilise le modèle sauvegardé de la session au lieu de la config globale."
+  },
+  {
+   "file": "crates/kaji-cli/src/session/builder.rs",
+   "line": 421,
+   "note": "collect_extension_configs: si resume -> EnabledExtensionsState::for_session(...) restaure les extensions persistées de la session; sinon résolution 'nouvelle session' (profil/recipe)."
+  },
+  {
+   "file": "crates/kaji-cli/src/session/builder.rs",
+   "line": 512,
+   "note": "build_session charge saved_provider/saved_model_config depuis session_manager.get_session si resume, pour piloter resolve_provider_and_model."
+  },
+  {
+   "file": "crates/kaji-cli/src/session/builder.rs",
+   "line": 537,
+   "note": "if session_config.resume { handle_resumed_session_workdir(...) } — compare le working_dir de la session à cwd; si différent et interactive=true, ouvre un prompt cliclack::confirm() AVANT tui::run()/ratatui::init() (donc avant la prise de contrôle du terminal par la TUI)."
+  },
+  {
+   "file": "crates/kaji-cli/src/session/builder.rs",
+   "line": 559,
+   "note": "Fallback provider si resume && provider indisponible — logique spécifique au chemin resume, absente aujourd'hui pour le TUI puisque resume=false y est toujours."
+  },
+  {
+   "file": "crates/kaji-cli/src/session/builder.rs",
+   "line": 126,
+   "note": "impl Default for SessionBuilderConfig: resume:false, interactive:false, etc. — confirme que commands/tui.rs:10 (..Default::default()) part de resume=false."
+  },
+  {
+   "file": "crates/kaji-cli/src/cli.rs",
+   "line": 2608,
+   "note": "Tests existants: tui_command_defaults_spec_to_none / tui_command_accepts_spec_flag via Cli::try_parse_from — patron à suivre pour tester les nouveaux flags."
+  }
+ ],
+ "proposal": [
+  "crates/kaji-cli/src/cli.rs (Command::Tui, ~ligne 1098-1102): ajouter `#[command(flatten)] identifier: Option<Identifier>` et `#[arg(short, long, help=\"Resume a previous session\")] resume: bool` — même pattern que Command::Session (934-948) et Command::Run (990), pas de nouveau positional custom. Ajouter la validation --session-id-sans---resume déjà utilisée ailleurs (cli.rs:1678-1687, 1915-1924) au point d'appel.",
+  "crates/kaji-cli/src/cli.rs (dispatch ~2372-2373): `Some(Command::Tui { spec, identifier, resume }) => crate::commands::tui::handle_tui(spec, identifier, resume).await` — changer la signature de handle_tui.",
+  "crates/kaji-cli/src/commands/tui.rs (handle_tui): signature `pub async fn handle_tui(spec: Option<PathBuf>, identifier: Option<Identifier>, resume: bool) -> Result<()>`; remplacer `get_or_create_session_id(None, false, false, kaji_mode)` (ligne 9) par `get_or_create_session_id(identifier, resume, false, kaji_mode)` — réutilise TEL QUEL le mécanisme existant (dernière session User si pas d'identifiant, cli.rs:406-416).",
+  "crates/kaji-cli/src/commands/tui.rs (build_session, ligne 10-14): passer `resume` dans SessionBuilderConfig (`resume, session_id, interactive: true, ..Default::default()`) — indispensable: sans ce flag, resolve_provider_and_model/collect_extension_configs/handle_resumed_session_workdir (builder.rs 269, 421, 537) ne se déclenchent pas et le provider/modèle/extensions de la session ne sont pas restaurés, même si l'historique de conversation l'est (CliSession::new charge déjà l'historique inconditionnellement, session/mod.rs:309-315).",
+  "crates/kaji-cli/src/cli.rs (handle_default_session, ligne 2226-2228): ne pas toucher — le lancement bare `kaji` reste un nouveau `handle_tui(None, None, false)`, pas dans le scope de --resume explicite.",
+  "crates/kaji-cli/src/tui/mod.rs (event_loop, ligne 206-207): conditionner push_welcome au cas où conversation est vide (`if conversation.messages().is_empty() { push_welcome(&mut app); }` ou équivalent sur app.chat après seed_chat) pour éviter le bandeau de bienvenue après un historique replayé — changement à coût quasi nul, cohérent avec ce que fait déjà render_message_history côté CLI classique (session/mod.rs:1788 n'affiche rien si messages est vide).",
+  "Optionnel (parité stricte avec Session): threader aussi `history`/`fork` n'est PAS nécessaire pour le TUI — seed_chat REMPLACE déjà l'usage de --history (rendu direct dans le chat au lieu d'un println pré-boucle); fork resterait un `kaji session --fork` puis `kaji tui --resume --session-id <copie>` en deux commandes, pas de gain à le dupliquer immédiatement."
+ ],
+ "tests": [
+  "crates/kaji-cli/src/cli.rs (mod tests, à côté de tui_command_defaults_spec_to_none:2610 / tui_command_accepts_spec_flag:2621): tui_command_accepts_resume_flag — Cli::try_parse_from([\"kaji\",\"tui\",\"--resume\"]) => Command::Tui{resume:true, identifier:None,...}.",
+  "crates/kaji-cli/src/cli.rs: tui_command_accepts_resume_with_session_id — try_parse_from([\"kaji\",\"tui\",\"--resume\",\"--session-id\",\"X\"]) => identifier.session_id == Some(\"X\").",
+  "crates/kaji-cli/src/cli.rs: tui_command_rejects_session_id_without_resume — reprendre le pattern d'erreur déjà exercé pour Session/Run (cli.rs:1678-1687 / 1915-1924) sur --session-id sans --resume pour Tui.",
+  "crates/kaji-cli/src/tui/mod.rs (mod tests, à côté de git_summary_* ~416+): seed_chat_replays_persisted_messages_into_chat_lines — construire une Conversation avec 1 message user + 1 assistant Text, appeler seed_chat(&mut app, &conv), asserter sur app.chat (contenu/ordre) sans passer par ratatui/event_loop (App est testable en isolation, cf. tests existants app.rs:561-611).",
+  "crates/kaji-cli/src/tui/mod.rs ou app.rs: seed_chat_replays_tool_request_and_response_pair — Conversation avec ToolRequest (assistant) + ToolResponse (user) correspondant, vérifier que la ligne outil passe de 'running' à '✓ name (Xs)' et que pending_tools est vidé après seed (couvre le risque de durée factice/quasi-0s).",
+  "crates/kaji-cli/src/tui/mod.rs ou app.rs: seed_chat_leaves_unmatched_tool_request_pending — Conversation se terminant sur un ToolRequest sans ToolResponse (session interrompue en plein appel d'outil), vérifier l'état résultant (ligne 'outil' encore en pending_tools) est un état affichable et non un crash — documente le risque plutôt que de le corriger silencieusement.",
+  "Integration (crates/kaji-cli/tests, si un harness build_session existant y est déjà exercé pour Session/Run): build_session_with_resume_restores_saved_model_and_extensions_for_tui_session_id — vérifie qu'un SessionBuilderConfig{resume:true, session_id: Some(existing)} restaure bien provider_name/model_config sauvegardés (couvre builder.rs:269, 512) plutôt que la config globale, pour le chemin TUI spécifiquement."
+ ],
+ "risks": [
+  "Durée d'outil factice à l'historique replay: seed_chat rejoue ToolRequest+ToolResponse de façon synchrone, donc started.elapsed() (app.rs:456/504) est proche de 0s pour tout appel d'outil ancien — l'utilisateur verra '✓ tool (0.0s)' pour des appels qui ont pu durer plusieurs secondes/minutes en réalité. Pas bloquant (cosmétique) mais trompeur si un audit de perf est fait depuis la TUI.",
+  "Historique tronqué sur un ToolRequest sans réponse (session interrompue mid-tool-call, ex: kill -9 ou crash): la ligne reste indexée dans pending_tools avec started fixé au moment du seed — elle affichera un spinner 'en cours' (ui.rs:161-165, spinner_frame(tool.started.elapsed())) qui ne s'arrêtera jamais puisqu'aucun ToolResponse ne viendra le clore. Comportement à vérifier/décider (message explicite 'outil interrompu' serait plus honnête).",
+  "Bandeau de bienvenue après historique: push_welcome (tui/mod.rs:207) s'exécute après seed_chat sans condition — un --resume avec des dizaines de messages affichera quand même 'bienvenue dans kaji / tape ton message' en fin de scroll, ce qui est incohérent avec une reprise de session. Proposé en fix ci-dessus, mais à valider côté UX (peut-être volontaire comme séparateur visuel).",
+  "Rendu markdown de vieux messages: push_agent_lines (ui.rs:136) ré-exécute markdown::render_markdown(text) à CHAQUE frame de draw, pas seulement au seed — pour un historique long (dizaines/centaines de messages assistant), le coût de re-parsing markdown à chaque tick (250ms, tui/mod.rs:217-218) peut dégrader la fluidité de la TUI comparé à une session neuve. Pas de cache observé (ChatLine.rendered reste None pour les lignes Agent/User, seul System l'utilise via push_system_lines).",
+  "Prompt interactif de changement de répertoire AVANT la TUI: si --resume est utilisé depuis un cwd différent du working_dir original de la session, handle_resumed_session_workdir (builder.rs:352-411) déclenche un cliclack::confirm() bloquant en terminal 'classique' avant que ratatui::init() ne prenne le contrôle — l'utilisateur verra un prompt texte standard puis la TUI démarre après réponse. Comportement hérité du chemin CLI classique, pas un bug introduit, mais à documenter car inattendu dans un flux 'TUI' pur.",
+  "Fallback provider silencieux-ish: si --resume et le provider original de la session n'est plus disponible (builder.rs:558-607), un eprintln! de warning est émis avant que la TUI ne démarre (donc visible un court instant en terminal normal) puis bascule sur le provider par défaut — cohérent avec le comportement CLI, mais premier flag --resume introduisant ce chemin pour le TUI qui ne l'avait jamais emprunté."
+ ],
+ "open_questions": [
+  "Faut-il exposer --fork et/ou --history pour `kaji tui` en plus de --resume, ou volontairement les exclure du scope minimal (l'équivalent de --history est déjà obtenu 'gratuitement' via seed_chat) ? Pas tranché dans le libellé de l'item B.",
+  "Le item B ne précise pas si `kaji tui --resume <id>` doit accepter un ID positionnel nu ou passer par --session-id (flatten Identifier, cohérent avec Session/Run). Le design proposé choisit la cohérence avec l'existant (--session-id/--name) plutôt qu'un nouveau positional, mais ce choix n'est pas confirmé par un ticket/design déjà accepté — à vérifier sur le board Kaji Issues avant implémentation (AGENTS.md exige un issue Ready).",
+  "Comportement souhaité pour un ToolRequest orphelin en fin d'historique (session interrompue en plein appel d'outil) : afficher un état 'interrompu' explicite, ou laisser le spinner tourner indéfiniment comme c'est le cas naturellement aujourd'hui ? Non observé de traitement dédié dans app.rs pour ce cas.",
+  "KAJI_STATE_MACHINE=1 (AGENTS.md, agent loop migration) : je n'ai pas vérifié si crates/kaji/src/agents/state_machine/ a un chemin de reconstruction de session/historique distinct qui affecterait get_or_create_session_id ou CliSession::new différemment sous ce flag — non exploré dans cette cartographie (hors du périmètre file:line demandé), à vérifier si le state-machine path est actif pour la TUI."
+ ]
+}

@@ -1,0 +1,181 @@
+{
+ "key": "trim-ratatui",
+ "item": "Durcissement E — trim ratatui (default-features=false, features=[\"crossterm\"]) dans crates/kaji-cli",
+ "current": [
+  {
+   "file": "crates/kaji-cli/Cargo.toml",
+   "line": 70,
+   "note": "ratatui = { version = \"0.30.2\", optional = true } — aucune default-features=false, donc les 5 default features de ratatui 0.30.2 sont actives (all-widgets, crossterm, layout-cache, macros, underline-color)."
+  },
+  {
+   "file": "crates/kaji-cli/Cargo.toml",
+   "line": 104,
+   "note": "feature crate `tui = [\"dep:ratatui\"]` — c'est ce qui gate `mod tui` (cfg(feature=\"tui\") vu dans src/lib.rs:17 et src/commands/mod.rs:14)."
+  },
+  {
+   "file": "crates/kaji-cli/Cargo.toml",
+   "line": 127,
+   "note": "feature crate `ratatui = [\"dep:ratatui\"]` — un second feature nommé identiquement à la dep (redondant avec `tui`, jamais référencé par un `cfg(feature=\"ratatui\")` dans src/ — aucun hit trouvé). Hors scope de l'item E mais à signaler."
+  },
+  {
+   "file": "Cargo.lock",
+   "line": 9101,
+   "note": "ratatui résolu en 0.30.2, dépendances: instability, ratatui-core, ratatui-crossterm, ratatui-macros, ratatui-termina, ratatui-termwiz, ratatui-widgets, serde — tous présents car defaults actifs."
+  },
+  {
+   "file": "~/.cargo/registry/.../ratatui-0.30.2/Cargo.toml",
+   "line": 74,
+   "note": "default = [\"all-widgets\", \"crossterm\", \"layout-cache\", \"macros\", \"underline-color\"] — lu directement depuis le Cargo.toml source (pas deviné)."
+  },
+  {
+   "file": "~/.cargo/registry/.../ratatui-0.30.2/Cargo.toml",
+   "line": 62,
+   "note": "crossterm = [\"dep:ratatui-crossterm\", \"std\"] — le seul feature nécessaire implique aussi std."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 5,
+   "note": "use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers} — nécessite feature crossterm."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 548,
+   "note": "mod tests: use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers} — même feature, dans un module inline #[cfg(test)] (pas de tests/ dir séparé)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/app.rs",
+   "line": 557,
+   "note": "ratatui::crossterm::event::KeyEventState::NONE (répété ligne 598) — feature crossterm."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 18,
+   "note": "use ratatui::crossterm::event::{self, Event} — feature crossterm."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 34,
+   "note": "ratatui::init() — API gated #[cfg(feature=\"crossterm\")] en amont, voir ratatui-0.30.2/src/lib.rs:496-501."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 45,
+   "note": "ratatui::restore() — même gate crossterm."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/mod.rs",
+   "line": 195,
+   "note": "terminal: &mut ratatui::DefaultTerminal (répété ligne 345) — même gate crossterm."
+  },
+  {
+   "file": "~/.cargo/registry/.../ratatui-0.30.2/src/lib.rs",
+   "line": 482,
+   "note": "pub use ratatui_crossterm::crossterm; sous #[cfg(feature=\"crossterm\")] — confirme que ratatui::crossterm::* nécessite exactement ce feature, rien d'autre."
+  },
+  {
+   "file": "~/.cargo/registry/.../ratatui-0.30.2/src/lib.rs",
+   "line": 496,
+   "note": "pub use crate::init::{DefaultTerminal, init, ...} sous #[cfg(feature=\"crossterm\")] — confirme le gate pour init()/restore()/DefaultTerminal."
+  },
+  {
+   "file": "~/.cargo/registry/.../ratatui-0.30.2/src/lib.rs",
+   "line": 517,
+   "note": "pub use ratatui_core::{style, symbols, text}; — inconditionnel, pas de feature requis pour Line/Span/Text/Color/Modifier/Style."
+  },
+  {
+   "file": "~/.cargo/registry/.../ratatui-0.30.2/src/lib.rs",
+   "line": 518,
+   "note": "pub mod widgets; — inconditionnel. Block/Borders/Clear/Paragraph/Wrap (utilisés dans ui.rs:7) sont des widgets 'core', PAS gatés par all-widgets/calendar."
+  },
+  {
+   "file": "~/.cargo/registry/.../ratatui-0.30.2/src/lib.rs",
+   "line": 480,
+   "note": "pub use ratatui_core::{buffer, layout}; — inconditionnel, couvre ratatui::layout::{Alignment,Constraint,Direction,Layout,Rect} (ui.rs:4) et ratatui::Frame (lib.rs:479, ui.rs:8)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/markdown.rs",
+   "line": 2,
+   "note": "use ratatui::style::Modifier — inconditionnel. Modifier::BOLD/ITALIC/REVERSED/UNDERLINED sont des bitflags de base, PAS liés au feature 'underline-color' (qui gate Style::underline_color(Color), jamais appelé — grep 'underline_color|UNDERLINE_COLOR' sur src/ = 0 hit)."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/theme.rs",
+   "line": 1,
+   "note": "use ratatui::style::{Color, Modifier, Style} — inconditionnel."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/ui.rs",
+   "line": 4,
+   "note": "use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect} — inconditionnel."
+  },
+  {
+   "file": "crates/kaji-cli/src/tui/ui.rs",
+   "line": 7,
+   "note": "use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap} — widgets core, pas de Calendar/Chart/Gauge/Sparkline/Table/List/Tabs (grep dédié = 0 hit) → all-widgets non requis."
+  },
+  {
+   "file": "crates/kaji-cli/src/cli.rs",
+   "line": 1090,
+   "note": "#[cfg(feature = \"tui\")] — seul point où le feature crate 'tui' gate du code (Command::Tui + branches associées lignes 1389, 2226, 2372, 2608, 2619). Pas de use ratatui:: direct dans cli.rs (seul hit ligne 1092 est une string de description CLI, pas du code)."
+  },
+  {
+   "file": "n/a — grep exhaustif",
+   "line": 0,
+   "note": "Aucun `use crossterm` ni `crossterm::` direct dans crates/kaji-cli/src — crossterm est TOUJOURS consommé via le ré-export ratatui::crossterm, jamais en dépendance directe (pas de ligne 'crossterm' dans crates/kaji-cli/Cargo.toml, confirmé par lecture complète du fichier)."
+  },
+  {
+   "file": "n/a — grep exhaustif",
+   "line": 0,
+   "note": "Aucun ratatui_macros / macro ratatui invoquée dans src/ (grep 'ratatui_macros|ratatui::.*!\\(' = 0 hit) → feature 'macros' non requise."
+  },
+  {
+   "file": "n/a — grep exhaustif",
+   "line": 0,
+   "note": "Aucun Serialize/Deserialize sur des types ratatui dans src/tui/ (grep 'Serialize|Deserialize' = 0 hit) → feature 'serde' de ratatui non requise."
+  },
+  {
+   "file": "n/a",
+   "line": 0,
+   "note": "crates/kaji-cli n'a ni tests/ ni benches/ ni examples/ (seulement src/) — le scan de src/*.rs (7 fichiers, incl. mod tests inline dans app.rs/markdown.rs) est une couverture exhaustive du code kaji-cli, pas un échantillon."
+  },
+  {
+   "file": "n/a — grep workspace",
+   "line": 0,
+   "note": "Aucun autre Cargo.toml du workspace (crates/*, resolver=\"2\", racine Cargo.toml:2-7) ne référence ratatui — grep 'ratatui' --include=Cargo.toml sur crates/ et ui/ ne retourne QUE crates/kaji-cli/Cargo.toml. Risque de feature-unification cross-crate = nul dans ce workspace."
+  },
+  {
+   "file": "Cargo.lock",
+   "line": 9122,
+   "note": "ratatui-core dépend actuellement de critical-section (via feature layout-cache, cf ratatui-core/Cargo.toml:66 'layout-cache = [\"dep:critical-section\"]') — seule occurrence de critical-section dans tout Cargo.lock (grep 'critical-section' = 2 lignes: def + ce seul usage) → suppression complète du graphe si layout-cache est dropé."
+  },
+  {
+   "file": "Cargo.lock",
+   "line": 9197,
+   "note": "ratatui-widgets dépend actuellement de `time` (via feature calendar, cf ratatui-widgets/Cargo.toml:57-58 'all-widgets=[\"calendar\"]' / 'calendar=[\"dep:time\"]'). ATTENTION: `time` reste dans Cargo.lock même après le trim car cookie et yasna (autres branches du graphe, non-ratatui) en dépendent aussi — le trim retire le lien ratatui-widgets→time mais pas le paquet `time` lui-même."
+  }
+ ],
+ "proposal": [
+  "1. crates/kaji-cli/Cargo.toml:70 — remplacer `ratatui = { version = \"0.30.2\", optional = true }` par `ratatui = { version = \"0.30.2\", default-features = false, features = [\"crossterm\"], optional = true }`.",
+  "2. Commande d'implémentation (phase suivante, PAS exécutée ici — read-only): depuis la racine du workspace, `cargo add -p kaji-cli ratatui@0.30.2 --no-default-features --features crossterm --optional` (le --optional est nécessaire par prudence: à vérifier après coup que cargo add a bien préservé `optional = true`, cf open_questions).",
+  "3. Ne PAS toucher aux lignes 104 (`tui = [\"dep:ratatui\"]`) et 127 (`ratatui = [\"dep:ratatui\"]`) — hors scope strict de l'item E, ces feature-flags crate référencent juste `dep:ratatui` et restent valides quel que soit le feature-set interne de la dep.",
+  "4. Après `cargo add`, vérifier `git diff Cargo.lock` pour confirmer la disparition de `ratatui-macros` et `critical-section`, et la disparition du lien ratatui-widgets→time (tout en s'assurant que `time` reste présent globalement via cookie/yasna, ce qui est attendu et non un signe d'échec du trim)."
+ ],
+ "tests": [
+  "cargo build -p kaji-cli (features par défaut, donc tui actif) — doit compiler sans erreur de feature manquante.",
+  "cargo build -p kaji-cli --no-default-features --features tui,rustls-tls (ou combinaison minimale incluant tui) pour isoler le chemin TUI.",
+  "cargo test -p kaji-cli -- tui:: (couvre les mod tests inline de app.rs:548 et markdown.rs qui exercent ratatui::crossterm::event et ratatui::text::Span).",
+  "cargo clippy --all-targets -- -D warnings sur kaji-cli après le changement.",
+  "git diff Cargo.lock — vérifier que ratatui-macros et critical-section disparaissent, que ratatui-widgets ne référence plus `time`."
+ ],
+ "risks": [
+  "cargo add peut ne pas préserver `optional = true` s'il ne détecte pas l'entrée existante correctement — à vérifier par diff avant commit, sinon éditer manuellement.",
+  "Suppression du feature 'layout-cache' retire le cache LRU/critical-section de Layout::split (ratatui-core/Cargo.toml:66) — aucune API utilisée n'en dépend (vérifié), impact potentiel purement perf sur redraw intensif, pas de risque de compilation.",
+  "Suppression du feature 'underline-color' est une mine pour le futur: si un contributeur ajoute plus tard Style::underline_color(...)/Modifier lié à la couleur de soulignement RGB, ça cassera la compilation jusqu'à réactivation du feature — aucun usage actuel (grep confirmé à 0 hit), donc sans risque immédiat.",
+  "Suppression de 'all-widgets'/'macros' est un frein pour un futur widget (Gauge/Sparkline/Chart/Calendar) ou l'usage de ratatui_macros — pas d'usage actuel, donc sans risque immédiat, mais réduit la marge de manoeuvre sans réflexion préalable côté équipe.",
+  "Le feature crate redondant kaji-cli/Cargo.toml:127 (`ratatui = [\"dep:ratatui\"]`) coexistant avec `tui` (ligne 104) n'est pas touché par ce trim mais reste une source de confusion (deux flags publics activent la même dep) — non bloquant pour l'item E."
+ ],
+ "open_questions": [
+  "cargo add préserve-t-il `optional = true` sur une entrée de dépendance déjà optionnelle quand on ne repasse pas explicitement `--optional`? Non vérifiable ici (aucune commande cargo autorisée) — à confirmer en phase d'implémentation via `git diff` immédiatement après la commande.",
+  "L'équipe a-t-elle une feature-roadmap TUI proche (Gauge/Sparkline/Chart pour un futur écran de progression, macros ratatui pour simplifier des layouts) qui justifierait de garder 'all-widgets' ou 'macros' en anticipation plutôt que de les retirer maintenant ? Non tranchable depuis le code seul — question de scope produit, pas de fait vérifiable.",
+  "Le feature crate `ratatui` de kaji-cli/Cargo.toml:127 (doublon de `tui`) est-il consommé par un outillage externe (script CI, autre repo, doc) qui l'active par son nom exact `--features ratatui` plutôt que `--features tui` ? Grep sur ce repo ne montre aucun usage (.github, Justfile inclus), mais un consommateur externe au repo n'est pas vérifiable depuis ce clone."
+ ]
+}
