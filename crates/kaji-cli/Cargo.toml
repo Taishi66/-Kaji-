@@ -85,7 +85,6 @@ default = [
     "local-inference",
     "tui",
     "aws-providers",
-    "telemetry",
     "nostr",
     "otel",
     "rustls-tls",
@@ -104,7 +103,7 @@ otel = ["kaji/otel"]
 system-keyring = ["kaji/system-keyring"]
 tui = ["dep:ratatui"]
 update = ["dep:sigstore-verify"]
-portable-default = ["rustls-tls", "aws-providers", "telemetry", "otel", "tui"]
+portable-default = ["rustls-tls", "aws-providers", "otel", "tui"]
 # disables the update command
 disable-update = []
 rustls-tls = [

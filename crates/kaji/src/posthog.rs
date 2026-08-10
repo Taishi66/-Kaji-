@@ -13,8 +13,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use uuid::Uuid;
 
-const POSTHOG_API_KEY: &str = "phc_RyX5CaY01VtZJCQyhSR5KFh6qimUy81YwxsEpotAftT";
-const POSTHOG_CAPTURE_URL: &str = "https://us.i.posthog.com/capture/";
+static POSTHOG_API_KEY: Lazy<String> =
+    Lazy::new(|| std::env::var("KAJI_TELEMETRY_POSTHOG_KEY").unwrap_or_default());
+
+static POSTHOG_CAPTURE_URL: Lazy<String> = Lazy::new(|| {
+    std::env::var("KAJI_TELEMETRY_POSTHOG_URL")
+        .unwrap_or_else(|_| "https://us.i.posthog.com/capture/".to_string())
+});
 
 /// Config key for telemetry opt-out preference
 pub const TELEMETRY_ENABLED_KEY: &str = "KAJI_TELEMETRY_ENABLED";
@@ -57,7 +62,7 @@ pub fn is_telemetry_enabled() -> bool {
 
 #[derive(Serialize)]
 struct CaptureEvent {
-    api_key: &'static str,
+    api_key: String,
     event: String,
     distinct_id: String,
     properties: HashMap<String, serde_json::Value>,
@@ -69,8 +74,12 @@ async fn posthog_capture(
     distinct_id: &str,
     properties: HashMap<String, serde_json::Value>,
 ) -> Result<(), String> {
+    if POSTHOG_API_KEY.is_empty() {
+        return Ok(());
+    }
+
     let payload = CaptureEvent {
-        api_key: POSTHOG_API_KEY,
+        api_key: POSTHOG_API_KEY.clone(),
         event: event_name.to_string(),
         distinct_id: distinct_id.to_string(),
         properties,
@@ -79,7 +88,7 @@ async fn posthog_capture(
 
     let client = reqwest::Client::new();
     client
-        .post(POSTHOG_CAPTURE_URL)
+        .post(POSTHOG_CAPTURE_URL.as_str())
         .header("Content-Type", "application/json")
         .json(&payload)
         .send()
