@@ -72,6 +72,12 @@ pub struct App {
     pub chat: Vec<ChatLine>,
     pub status: String,
     pub turn_active: bool,
+    /// True while the setup future (`Agent::reply` up to its first yield) is
+    /// being polled by the event loop's `select!` but hasn't resolved into a
+    /// `TurnStream` yet — distinct from `turn_active`, which only becomes
+    /// true once the stream exists. Input stays live during this window
+    /// (option B); the guards below treat it like an in-flight turn.
+    pub turn_pending: bool,
     pub turn_started: Option<Instant>,
     pub tokens_turn_in: i64,
     pub tokens_turn_out: i64,
@@ -100,6 +106,7 @@ impl App {
             chat: Vec::new(),
             status: String::new(),
             turn_active: false,
+            turn_pending: false,
             turn_started: None,
             tokens_turn_in: 0,
             tokens_turn_out: 0,
@@ -207,9 +214,11 @@ impl App {
     }
 
     /// Posé au démarrage effectif d'un tour (Submit/relance) : réarme le
-    /// chrono et la tally de tokens propre à ce tour.
+    /// chrono et la tally de tokens propre à ce tour, et efface
+    /// `turn_pending` — le setup asynchrone qui précédait vient de résoudre.
     pub fn begin_turn(&mut self) {
         self.turn_active = true;
+        self.turn_pending = false;
         self.turn_started = Some(Instant::now());
         self.tokens_turn_in = 0;
         self.tokens_turn_out = 0;
@@ -337,8 +346,8 @@ impl App {
                 self.input.pop();
                 Action::None
             }
-            KeyCode::Esc if self.turn_active => Action::CancelTurn,
-            KeyCode::Enter if self.turn_active => {
+            KeyCode::Esc if self.turn_active || self.turn_pending => Action::CancelTurn,
+            KeyCode::Enter if self.turn_active || self.turn_pending => {
                 self.push_system("tour en cours — Esc pour annuler d'abord");
                 Action::None
             }
@@ -645,6 +654,42 @@ mod tests {
             .chat
             .iter()
             .any(|l| l.text.contains("tour en cours") && l.text.contains("Esc")));
+    }
+
+    #[test]
+    fn esc_during_pending_setup_returns_cancel_turn() {
+        let mut app = App::new(None);
+        app.turn_pending = true;
+        assert_eq!(app.on_event(&key(KeyCode::Esc)), Action::CancelTurn);
+    }
+
+    #[test]
+    fn enter_during_pending_setup_does_not_submit() {
+        let mut app = App::new(None);
+        app.turn_pending = true;
+        app.on_event(&key(KeyCode::Char('h')));
+        app.on_event(&key(KeyCode::Char('i')));
+        let action = app.on_event(&key(KeyCode::Enter));
+        assert_eq!(action, Action::None);
+        assert_eq!(app.input, "hi");
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains("tour en cours") && l.text.contains("Esc")));
+    }
+
+    #[test]
+    fn turn_pending_lifecycle() {
+        let mut app = App::new(None);
+        assert!(!app.turn_pending);
+
+        app.turn_pending = true;
+        app.begin_turn();
+        assert!(
+            !app.turn_pending,
+            "begin_turn installs the turn — the setup it followed is no longer pending"
+        );
+        assert!(app.turn_active);
     }
 
     #[test]

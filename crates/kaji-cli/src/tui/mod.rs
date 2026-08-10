@@ -17,7 +17,9 @@ use kaji::session::SessionManager;
 use kaji_core::sdd::SpecDoc;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::text::{Line, Span};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -215,13 +217,15 @@ async fn event_loop(
     };
     let mut turn: Option<TurnStream<'_>> = None;
     let mut cancel: Option<CancellationToken> = None;
+    let mut pending: Option<Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'_>>> + '_>>> =
+        None;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         terminal.draw(|frame| ui::draw(frame, &app))?;
         tokio::select! {
-            _ = tick.tick(), if app.turn_active => {}
+            _ = tick.tick(), if app.turn_active || app.turn_pending => {}
             ev = input_rx.recv() => {
                 let Some(ev) = ev else { break };
                 match app.on_event(&ev) {
@@ -230,43 +234,31 @@ async fn event_loop(
                         if let Some(token) = &cancel {
                             token.cancel();
                         }
+                        if app.turn_pending {
+                            // Dropping the setup future is the interruption — nothing
+                            // else observes it, so there is no completion event to
+                            // wait for the way a running turn's stream provides one.
+                            pending = None;
+                            cancel = None;
+                            app.turn_pending = false;
+                            app.status.clear();
+                            app.push_system(
+                                "démarrage du tour annulé — le message envoyé peut déjà avoir été enregistré côté session",
+                            );
+                        }
                         if app.driver != PassDriver::Idle {
                             app.pass_abort("tour annulé — passe interrompue");
                         }
                     }
                     Action::Submit(text) => {
                         app.push_user(&text);
-                        let started = send_turn(
-                            terminal,
-                            &mut app,
-                            agent,
-                            &session_config,
-                            &text,
-                            &mut turn,
-                            &mut cancel,
-                        )
-                        .await?;
-                        if !started && app.driver != PassDriver::Idle {
-                            app.pass_abort("échec du démarrage du tour — passe interrompue");
-                        }
+                        pending = Some(begin_setup(&mut app, agent, &session_config, &text, &mut cancel));
                     }
                     Action::StartPass => app.start_pass(),
                     Action::GateApprove => {
                         if let Some(prompt) = app.gate_approve() {
                             app.push_system("Exec : envoi de la SPEC à l'agent");
-                            let started = send_turn(
-                                terminal,
-                                &mut app,
-                                agent,
-                                &session_config,
-                                &prompt,
-                                &mut turn,
-                                &mut cancel,
-                            )
-                            .await?;
-                            if !started {
-                                app.pass_abort("échec du démarrage du tour — passe interrompue");
-                            }
+                            pending = Some(begin_setup(&mut app, agent, &session_config, &prompt, &mut cancel));
                         }
                     }
                     Action::GateReject => app.gate_reject(),
@@ -300,6 +292,18 @@ async fn event_loop(
                     Action::None => {}
                 }
             }
+            // The setup future (Agent::reply through its first yield: hooks,
+            // add_message, tokenizer…) is polled by this arm of the same
+            // select! that polls input_rx — every internal .await it hits
+            // hands control back to the other arms, so input stays live for
+            // the whole setup instead of freezing the loop for its duration.
+            res = async { pending.as_mut().unwrap().await }, if pending.is_some() => {
+                pending = None;
+                let started = install_turn(&mut app, &mut turn, &mut cancel, res);
+                if !started && app.driver != PassDriver::Idle {
+                    app.pass_abort("échec du démarrage du tour — passe interrompue");
+                }
+            }
             item = next_turn_event(&mut turn), if turn.is_some() => {
                 match item {
                     Some(Ok(ev)) => app.apply_agent_event(&ev),
@@ -319,19 +323,7 @@ async fn event_loop(
                         app.finish_turn();
                         app.git_status = refresh_git_status();
                         if let Some(prompt) = app.turn_end() {
-                            let started = send_turn(
-                                terminal,
-                                &mut app,
-                                agent,
-                                &session_config,
-                                &prompt,
-                                &mut turn,
-                                &mut cancel,
-                            )
-                            .await?;
-                            if !started {
-                                app.pass_abort("échec du démarrage du tour — passe interrompue");
-                            }
+                            pending = Some(begin_setup(&mut app, agent, &session_config, &prompt, &mut cancel));
                         }
                     }
                 }
@@ -341,45 +333,54 @@ async fn event_loop(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn send_turn<'a>(
-    terminal: &mut ratatui::DefaultTerminal,
+/// Builds the `Agent::reply` future WITHOUT awaiting it, so `event_loop` can
+/// store it as `pending` and poll it from inside its own `select!` — the
+/// borrow checker forces this split: a single async fn holding `&mut turn`
+/// across the setup await would collide with the other `select!` arms that
+/// also need `turn` every iteration `pending` is alive. The cancellation
+/// token is created here and written into `cancel` immediately (before any
+/// `.await`), not after setup completes, so Esc can reach it right away.
+fn begin_setup<'a>(
     app: &mut App,
     agent: &'a Agent,
     session_config: &SessionConfig,
     prompt: &str,
+    cancel: &mut Option<CancellationToken>,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'a>>> + 'a>> {
+    app.status = "démarrage du tour…".to_string();
+    app.turn_pending = true;
+    let token = CancellationToken::new();
+    let message = Message::user().with_text(prompt);
+    let fut = agent.reply(message, session_config.clone(), Some(token.clone()));
+    *cancel = Some(token);
+    Box::pin(fut)
+}
+
+/// Consumes the resolved setup future: on success, stores the stream and
+/// hands off to `begin_turn`; on failure, resets to a clean idle state
+/// (mirrors what `Action::CancelTurn` does when setup is interrupted before
+/// it resolves).
+fn install_turn<'a>(
+    app: &mut App,
     turn: &mut Option<TurnStream<'a>>,
     cancel: &mut Option<CancellationToken>,
-) -> Result<bool> {
-    app.status = "démarrage du tour…".to_string();
-    terminal.draw(|frame| ui::draw(frame, app))?;
-    let token = CancellationToken::new();
-    match start_turn(agent, session_config, prompt, &token).await {
+    result: anyhow::Result<TurnStream<'a>>,
+) -> bool {
+    match result {
         Ok(stream) => {
             app.begin_turn();
             app.status.clear();
             *turn = Some(stream);
-            *cancel = Some(token);
-            Ok(true)
+            true
         }
         Err(e) => {
+            app.turn_pending = false;
             app.status.clear();
+            *cancel = None;
             app.push_system(&format!("erreur: {e}"));
-            Ok(false)
+            false
         }
     }
-}
-
-async fn start_turn<'a>(
-    agent: &'a Agent,
-    session_config: &SessionConfig,
-    text: &str,
-    cancel: &CancellationToken,
-) -> anyhow::Result<TurnStream<'a>> {
-    let message = Message::user().with_text(text);
-    agent
-        .reply(message, session_config.clone(), Some(cancel.clone()))
-        .await
 }
 
 fn resolve_spec(spec_path: Option<PathBuf>) -> Result<Option<SpecDoc>> {
