@@ -67,7 +67,7 @@ sigstore-verify = { version = "0.10", default-features = false, optional = true 
 axum.workspace = true
 axum-server = { version = "0.8", default-features = false, optional = true }
 clap_complete_nushell = { version = "4", default-features = false }
-ratatui = { version = "0.30.2", optional = true }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"], optional = true }
 kaji-core = { version = "0.1.0", path = "../kaji-core" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
