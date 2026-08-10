@@ -181,6 +181,30 @@ pub struct SessionUsageTotals {
     pub accumulated_cost: Option<f64>,
 }
 
+/// Somme de tokens/coût sur une fenêtre — `cost` est `None` uniquement si
+/// aucune ligne `usage_ledger` de la fenêtre n'a de coût connu (ex. un
+/// provider local sans tarification), pas quand la somme vaut zéro.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageAggregate {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub cost: Option<f64>,
+}
+
+/// Fenêtres d'usage consommées par `/cost` côté TUI : la session courante
+/// (arbre de sous-agents inclus, via `get_session_usage_totals`) et deux
+/// agrégats globaux glissants — dernières 5 h et derniers 7 j — à la manière
+/// des blocs de facturation ccusage.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageWindows {
+    pub session: UsageAggregate,
+    pub last_5h: UsageAggregate,
+    pub last_7d: UsageAggregate,
+}
+
 impl<'a> SessionUpdateBuilder<'a> {
     fn new(session_manager: &'a SessionManager, session_id: String) -> Self {
         Self {
@@ -479,6 +503,33 @@ impl SessionManager {
 
     pub async fn get_session_usage_totals(&self, id: &str) -> Result<SessionUsageTotals> {
         self.storage.get_session_usage_totals(id).await
+    }
+
+    /// Somme globale (toutes sessions) des lignes `usage_ledger` créées
+    /// depuis `since_epoch_secs`. Lecture pure, aucun effet de bord.
+    pub async fn usage_since(&self, since_epoch_secs: i64) -> Result<UsageAggregate> {
+        self.storage.usage_since(since_epoch_secs).await
+    }
+
+    /// Fenêtres d'usage pour `/cost` : session courante, dernières 5 h et
+    /// derniers 7 j. Lecture pure, aucun effet de bord.
+    pub async fn usage_windows(&self, session_id: &str) -> Result<UsageWindows> {
+        let now = Utc::now().timestamp();
+        let session_totals = self.get_session_usage_totals(session_id).await?;
+        let last_5h = self.usage_since(now - 5 * 3600).await?;
+        let last_7d = self.usage_since(now - 7 * 24 * 3600).await?;
+        Ok(UsageWindows {
+            session: UsageAggregate {
+                input_tokens: i64::from(session_totals.accumulated_usage.input_tokens.unwrap_or(0)),
+                output_tokens: i64::from(
+                    session_totals.accumulated_usage.output_tokens.unwrap_or(0),
+                ),
+                total_tokens: i64::from(session_totals.accumulated_usage.total_tokens.unwrap_or(0)),
+                cost: session_totals.accumulated_cost,
+            },
+            last_5h,
+            last_7d,
+        })
     }
 
     pub async fn record_usage_metrics(
@@ -2334,6 +2385,30 @@ impl SessionStorage {
             accumulated_usage: Usage::new(opt(input), opt(output), opt(total))
                 .with_cache_tokens(opt(cache_read), opt(cache_write)),
             accumulated_cost: cost,
+        })
+    }
+
+    async fn usage_since(&self, since_epoch_secs: i64) -> Result<UsageAggregate> {
+        let pool = self.pool().await?;
+        let row = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, Option<f64>)>(
+            r#"
+            SELECT COALESCE(SUM(input_tokens), 0),
+                   COALESCE(SUM(output_tokens), 0),
+                   COALESCE(SUM(total_tokens), 0),
+                   SUM(cost)
+            FROM usage_ledger
+            WHERE created_timestamp >= ?
+            "#,
+        )
+        .bind(since_epoch_secs)
+        .fetch_one(pool)
+        .await?;
+
+        Ok(UsageAggregate {
+            input_tokens: row.0.unwrap_or(0),
+            output_tokens: row.1.unwrap_or(0),
+            total_tokens: row.2.unwrap_or(0),
+            cost: row.3,
         })
     }
 
@@ -4610,5 +4685,98 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(remaining, 0);
+    }
+
+    async fn seed_ledger_at(
+        pool: &Pool<Sqlite>,
+        session_id: &str,
+        created_timestamp: i64,
+        input_tokens: i64,
+        output_tokens: i64,
+        cost: Option<f64>,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO usage_ledger (
+                session_id, created_timestamp, model,
+                input_tokens, output_tokens, total_tokens,
+                cost, cost_source, is_compaction
+            )
+            VALUES (?, ?, 'test-model', ?, ?, ?, ?, ?, 0)
+            "#,
+        )
+        .bind(session_id)
+        .bind(created_timestamp)
+        .bind(input_tokens)
+        .bind(output_tokens)
+        .bind(input_tokens + output_tokens)
+        .bind(cost)
+        .bind(cost.map(|_| "estimated"))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_usage_windows_aggregates_session_5h_and_7d() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let current = new_session(&sm).await;
+        let other = new_session(&sm).await;
+        let pool = sm.storage().pool().await.unwrap();
+        let now = Utc::now().timestamp();
+
+        // Session courante : une ligne récente, avec coût.
+        seed_ledger_at(pool, &current, now - 60, 100, 20, Some(0.10)).await;
+        // Autre session, il y a 4h : compte dans 5h et 7j, pas dans "session".
+        seed_ledger_at(pool, &other, now - 4 * 3600, 50, 10, Some(0.05)).await;
+        // Autre session, il y a 6h, coût inconnu : compte dans 7j mais pas 5h.
+        seed_ledger_at(pool, &other, now - 6 * 3600, 30, 5, None).await;
+        // Autre session, il y a 8j : hors des deux fenêtres glissantes.
+        seed_ledger_at(pool, &other, now - 8 * 24 * 3600, 999, 999, Some(9.0)).await;
+
+        let windows = sm.usage_windows(&current).await.unwrap();
+
+        assert_eq!(windows.session.input_tokens, 100);
+        assert_eq!(windows.session.output_tokens, 20);
+        assert_eq!(windows.session.total_tokens, 120);
+        assert!((windows.session.cost.unwrap() - 0.10).abs() < 1e-9);
+
+        assert_eq!(windows.last_5h.input_tokens, 150);
+        assert_eq!(windows.last_5h.output_tokens, 30);
+        assert!((windows.last_5h.cost.unwrap() - 0.15).abs() < 1e-9);
+
+        assert_eq!(windows.last_7d.input_tokens, 180);
+        assert_eq!(windows.last_7d.output_tokens, 35);
+        // La ligne à cost=NULL est ignorée par SUM(), pas traitée comme 0.
+        assert!((windows.last_7d.cost.unwrap() - 0.15).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn test_usage_since_returns_none_cost_when_no_row_has_one() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let id = new_session(&sm).await;
+        let pool = sm.storage().pool().await.unwrap();
+        let now = Utc::now().timestamp();
+
+        seed_ledger_at(pool, &id, now - 30, 40, 8, None).await;
+        seed_ledger_at(pool, &id, now - 40, 10, 2, None).await;
+
+        let aggregate = sm.usage_since(now - 3600).await.unwrap();
+        assert_eq!(aggregate.input_tokens, 50);
+        assert_eq!(aggregate.output_tokens, 10);
+        assert_eq!(aggregate.cost, None);
+    }
+
+    #[tokio::test]
+    async fn test_usage_since_empty_window_has_zero_tokens_and_no_cost() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let aggregate = sm.usage_since(Utc::now().timestamp()).await.unwrap();
+        assert_eq!(aggregate.input_tokens, 0);
+        assert_eq!(aggregate.output_tokens, 0);
+        assert_eq!(aggregate.total_tokens, 0);
+        assert_eq!(aggregate.cost, None);
     }
 }
