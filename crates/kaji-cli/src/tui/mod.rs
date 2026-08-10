@@ -4,7 +4,7 @@ pub mod report;
 pub mod theme;
 pub mod ui;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use app::{Action, App, PassDriver};
 use futures::stream::BoxStream;
 use futures::StreamExt;
@@ -28,6 +28,7 @@ pub async fn run(
     conversation: kaji::conversation::Conversation,
     spec_path: Option<PathBuf>,
 ) -> Result<()> {
+    let spec = resolve_spec(spec_path)?;
     let header = build_header(&session_id);
     let (input_tx, input_rx) = mpsc::channel::<Event>(64);
     std::thread::spawn(move || input_thread(input_tx));
@@ -37,7 +38,7 @@ pub async fn run(
         &agent,
         &session_id,
         conversation,
-        spec_path,
+        spec,
         header,
         input_rx,
     )
@@ -196,11 +197,11 @@ async fn event_loop(
     agent: &Agent,
     session_id: &str,
     conversation: kaji::conversation::Conversation,
-    spec_path: Option<PathBuf>,
+    spec: Option<SpecDoc>,
     header: String,
     mut input_rx: mpsc::Receiver<Event>,
 ) -> Result<()> {
-    let mut app = App::new(resolve_spec(spec_path));
+    let mut app = App::new(spec);
     app.header = header;
     app.git_status = refresh_git_status();
     seed_chat(&mut app, &conversation);
@@ -381,12 +382,17 @@ async fn start_turn<'a>(
         .await
 }
 
-fn resolve_spec(spec_path: Option<PathBuf>) -> Option<SpecDoc> {
-    let path = spec_path.or_else(|| {
-        let default = PathBuf::from("SPEC.md");
-        default.exists().then_some(default)
-    })?;
-    SpecDoc::load(&path).ok()
+fn resolve_spec(spec_path: Option<PathBuf>) -> Result<Option<SpecDoc>> {
+    if let Some(path) = spec_path {
+        return SpecDoc::load(&path)
+            .map(Some)
+            .with_context(|| format!("--spec {}", path.display()));
+    }
+    let default = PathBuf::from("SPEC.md");
+    Ok(default
+        .exists()
+        .then(|| SpecDoc::load(&default).ok())
+        .flatten())
 }
 
 fn seed_chat(app: &mut App, conversation: &kaji::conversation::Conversation) {
@@ -436,5 +442,29 @@ mod tests {
     fn git_summary_returns_none_outside_a_repo() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(git_summary(dir.path()), None);
+    }
+
+    #[test]
+    fn resolve_spec_errors_when_explicit_flag_path_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.md");
+
+        let err = resolve_spec(Some(missing.clone())).expect_err("missing --spec must error");
+
+        assert!(err.to_string().contains(&missing.display().to_string()));
+    }
+
+    #[test]
+    fn resolve_spec_loads_explicit_flag_path_successfully() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SPEC.md");
+        std::fs::write(&path, "# Demo\ncorps").unwrap();
+
+        let spec = resolve_spec(Some(path))
+            .expect("existing --spec must load")
+            .expect("Some(path) must resolve to Some(SpecDoc)");
+
+        assert_eq!(spec.title, "Demo");
+        assert_eq!(spec.body, "# Demo\ncorps");
     }
 }

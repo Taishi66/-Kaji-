@@ -187,16 +187,17 @@ impl App {
             }
             PassDriver::Validating => {
                 self.pass.advance();
-                if self
-                    .validate_buffer
-                    .to_uppercase()
-                    .contains("VERDICT: DRIFT")
-                {
-                    self.pass.fail_current();
-                    self.push_system("⚠ drift détecté — spec non verrouillée");
-                } else {
+                let upper = self.validate_buffer.to_uppercase();
+                if upper.contains("VERDICT: VALIDE") {
                     self.pass.advance();
                     self.push_system("✓ passe SDD complète — spec verrouillée");
+                } else {
+                    self.pass.fail_current();
+                    if upper.contains("VERDICT: DRIFT") {
+                        self.push_system("⚠ drift détecté — spec non verrouillée");
+                    } else {
+                        self.push_system("⚠ verdict absent ou imparsable — DRIFT par prudence");
+                    }
                 }
                 self.driver = PassDriver::Idle;
                 None
@@ -700,6 +701,33 @@ mod tests {
         agent_says(&mut app, "m2", "VERDICT: DRIFT — hors spec");
         app.turn_end();
         assert!(app.pass.drifted());
+    }
+
+    #[test]
+    fn verdict_absent_fails_closed_as_drift() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_approve();
+        agent_says(&mut app, "m1", "fait autre chose");
+        app.turn_end();
+        agent_says(&mut app, "m2", "réponse sans le token attendu");
+        app.turn_end();
+        assert!(app.pass.drifted());
+        assert!(!app.pass.is_complete());
+        assert!(app.chat.iter().any(|l| l.text.contains("verdict absent")));
+    }
+
+    #[test]
+    fn verdict_empty_buffer_fails_closed_as_drift() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_approve();
+        agent_says(&mut app, "m1", "fait autre chose");
+        app.turn_end();
+        agent_says(&mut app, "m2", "");
+        app.turn_end();
+        assert!(app.pass.drifted());
+        assert!(!app.pass.is_complete());
     }
 
     #[test]
