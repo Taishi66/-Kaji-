@@ -524,6 +524,25 @@ impl App {
         }
     }
 
+    /// Closes any tool line still awaiting its response after a history
+    /// replay (`--resume` seeding a `ToolRequest` whose `ToolResponse` was
+    /// never persisted — the session was interrupted mid-call) so it reads
+    /// as "interrupted" instead of a spinner that will never resolve.
+    pub fn close_orphaned_tool_requests(&mut self) {
+        for (_, idx) in self.pending_tools.drain() {
+            let Some(line) = self.chat.get_mut(idx) else {
+                continue;
+            };
+            let name = line
+                .tool
+                .as_ref()
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| "outil".to_string());
+            line.text = format!("✗ {name} (interrompu)");
+            line.tool = None;
+        }
+    }
+
     fn merge_agent_text(&mut self, message_id: &Option<String>, text: &str) {
         if message_id.is_some() && *message_id == self.last_agent_msg_id {
             if let Some(last) = self.chat.last_mut() {

@@ -205,7 +205,7 @@ async fn event_loop(
     app.header = header;
     app.git_status = refresh_git_status();
     seed_chat(&mut app, &conversation);
-    push_welcome(&mut app);
+    maybe_push_welcome(&mut app);
     let session_manager = SessionManager::instance();
     let session_config = SessionConfig {
         id: session_id.to_string(),
@@ -399,11 +399,23 @@ fn seed_chat(app: &mut App, conversation: &kaji::conversation::Conversation) {
     for message in conversation.messages() {
         app.apply_agent_event(&AgentEvent::Message(message.clone()));
     }
+    app.close_orphaned_tool_requests();
+}
+
+/// Skips the first-run welcome banner once a `--resume`d conversation has
+/// replayed messages into the chat — repeating "bienvenue dans kaji" after
+/// pages of history reads as a bug, not onboarding.
+fn maybe_push_welcome(app: &mut App) {
+    if app.chat.is_empty() {
+        push_welcome(app);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use app::Sender;
+    use kaji::conversation::Conversation;
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
         let output = kaji::subprocess::git_command()
@@ -466,5 +478,77 @@ mod tests {
 
         assert_eq!(spec.title, "Demo");
         assert_eq!(spec.body, "# Demo\ncorps");
+    }
+
+    #[test]
+    fn seed_chat_replays_persisted_messages_into_chat_lines() {
+        let mut app = App::new(None);
+        let conversation = Conversation::new_unvalidated([
+            Message::user().with_text("salut"),
+            Message::assistant().with_text("bonjour"),
+        ]);
+
+        seed_chat(&mut app, &conversation);
+
+        assert_eq!(app.chat.len(), 2);
+        assert_eq!(app.chat[0].sender, Sender::User);
+        assert_eq!(app.chat[0].text, "salut");
+        assert_eq!(app.chat[1].sender, Sender::Agent);
+        assert_eq!(app.chat[1].text, "bonjour");
+    }
+
+    #[test]
+    fn seed_chat_replays_tool_request_and_response_pair() {
+        let mut app = App::new(None);
+        let conversation = Conversation::new_unvalidated([
+            Message::assistant()
+                .with_tool_request("t1", Ok(rmcp::model::CallToolRequestParams::new("shell"))),
+            Message::user()
+                .with_tool_response("t1", Ok(rmcp::model::CallToolResult::success(vec![]))),
+        ]);
+
+        seed_chat(&mut app, &conversation);
+
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains('✓') && l.text.contains("shell")));
+        assert!(!app.chat.iter().any(|l| l.tool.is_some()));
+    }
+
+    #[test]
+    fn seed_chat_closes_unmatched_tool_request_as_interrupted() {
+        let mut app = App::new(None);
+        let conversation = Conversation::new_unvalidated([Message::assistant()
+            .with_tool_request("t1", Ok(rmcp::model::CallToolRequestParams::new("shell")))]);
+
+        seed_chat(&mut app, &conversation);
+
+        assert!(!app.chat.iter().any(|l| l.tool.is_some()));
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains("interrompu") && l.text.contains("shell")));
+    }
+
+    #[test]
+    fn maybe_push_welcome_shows_banner_on_empty_chat() {
+        let mut app = App::new(None);
+
+        maybe_push_welcome(&mut app);
+
+        assert!(!app.chat.is_empty());
+    }
+
+    #[test]
+    fn maybe_push_welcome_stays_silent_after_replayed_history() {
+        let mut app = App::new(None);
+        let conversation = Conversation::new_unvalidated([Message::user().with_text("salut")]);
+        seed_chat(&mut app, &conversation);
+        let count_before = app.chat.len();
+
+        maybe_push_welcome(&mut app);
+
+        assert_eq!(app.chat.len(), count_before);
     }
 }

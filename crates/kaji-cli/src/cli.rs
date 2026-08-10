@@ -391,6 +391,20 @@ pub struct RunBehavior {
     pub scheduled_job_id: Option<String>,
 }
 
+#[cfg(feature = "tui")]
+fn validate_tui_identifier(identifier: &Option<Identifier>, resume: bool) -> Result<()> {
+    if let Some(Identifier {
+        session_id: Some(_),
+        ..
+    }) = identifier
+    {
+        if !resume {
+            anyhow::bail!("--session-id can only be used with --resume flag");
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn get_or_create_session_id(
     identifier: Option<Identifier>,
     resume: bool,
@@ -1096,6 +1110,18 @@ enum Command {
                       --spec <FILE> : fichier SPEC affiché dans le panneau SDD (défaut : ./SPEC.md s'il existe)."
     )]
     Tui {
+        #[command(flatten)]
+        identifier: Option<Identifier>,
+
+        /// Resume a previous session
+        #[arg(
+            short,
+            long,
+            help = "Resume a previous session (last used or specified by --name/--session-id)",
+            long_help = "Continue from a previous session. If --name or --session-id is provided, resumes that specific session. Otherwise, resumes the most recently used session."
+        )]
+        resume: bool,
+
         /// Fichier SPEC affiché dans le panneau SDD
         #[arg(long, value_name = "FILE")]
         spec: Option<PathBuf>,
@@ -2225,7 +2251,7 @@ async fn handle_default_session() -> Result<()> {
 
     #[cfg(feature = "tui")]
     if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
-        return crate::commands::tui::handle_tui(None).await;
+        return crate::commands::tui::handle_tui(None, None, false).await;
     }
 
     let kaji_mode = Config::global().get_kaji_mode().unwrap_or_default();
@@ -2370,7 +2396,17 @@ pub async fn cli() -> anyhow::Result<()> {
         Some(Command::Plugin { command }) => handle_plugin_subcommand(command),
         Some(Command::Term { command }) => handle_term_subcommand(command).await,
         #[cfg(feature = "tui")]
-        Some(Command::Tui { spec }) => crate::commands::tui::handle_tui(spec).await,
+        Some(Command::Tui {
+            identifier,
+            resume,
+            spec,
+        }) => {
+            if let Err(e) = validate_tui_identifier(&identifier, resume) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+            crate::commands::tui::handle_tui(spec, identifier, resume).await
+        }
         #[cfg(feature = "local-inference")]
         Some(Command::LocalModels { command }) => handle_local_models_command(command).await,
         Some(Command::Review {
@@ -2611,7 +2647,7 @@ mod tests {
         let cli = Cli::try_parse_from(["kaji", "tui"]).expect("parse failed");
 
         match cli.command {
-            Some(Command::Tui { spec }) => assert_eq!(spec, None),
+            Some(Command::Tui { spec, .. }) => assert_eq!(spec, None),
             _ => panic!("expected tui command"),
         }
     }
@@ -2622,10 +2658,59 @@ mod tests {
         let cli = Cli::try_parse_from(["kaji", "tui", "--spec", "SPEC.md"]).expect("parse failed");
 
         match cli.command {
-            Some(Command::Tui { spec }) => {
+            Some(Command::Tui { spec, .. }) => {
                 assert_eq!(spec, Some(std::path::PathBuf::from("SPEC.md")))
             }
             _ => panic!("expected tui command"),
         }
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_command_accepts_resume_flag() {
+        let cli = Cli::try_parse_from(["kaji", "tui", "--resume"]).expect("parse failed");
+
+        match cli.command {
+            Some(Command::Tui {
+                resume, identifier, ..
+            }) => {
+                assert!(resume);
+                assert!(identifier.is_none());
+            }
+            _ => panic!("expected tui command"),
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_command_accepts_resume_with_session_id() {
+        let cli = Cli::try_parse_from(["kaji", "tui", "--resume", "--session-id", "X"])
+            .expect("parse failed");
+
+        match cli.command {
+            Some(Command::Tui {
+                resume, identifier, ..
+            }) => {
+                assert!(resume);
+                assert_eq!(
+                    identifier.and_then(|id| id.session_id),
+                    Some("X".to_string())
+                );
+            }
+            _ => panic!("expected tui command"),
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_command_rejects_session_id_without_resume() {
+        let identifier = Some(Identifier {
+            name: None,
+            session_id: Some("X".to_string()),
+            path: None,
+        });
+
+        assert!(validate_tui_identifier(&identifier, false).is_err());
+        assert!(validate_tui_identifier(&identifier, true).is_ok());
     }
 }
