@@ -286,9 +286,14 @@ impl ApiClient {
     }
 
     fn client_builder(timeout: Duration) -> reqwest::ClientBuilder {
+        // Idle pooled connections silently closed by remote LBs caused first-turn
+        // hangs in interactive sessions: never reuse an idle connection — the
+        // per-request handshake is negligible next to LLM latency.
         Client::builder()
             .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
             .read_timeout(timeout)
+            .pool_max_idle_per_host(0)
+            .tcp_keepalive(Duration::from_secs(30))
     }
 
     fn rebuild_client(&mut self) -> Result<()> {
