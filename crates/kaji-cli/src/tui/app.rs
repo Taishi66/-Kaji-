@@ -3,6 +3,7 @@ use kaji::conversation::message::{ActionRequiredData, Message, MessageContentBlo
 use kaji::providers::base::ProviderUsage;
 use kaji_core::sdd::{SddPass, SpecDoc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::text::Line;
 use rmcp::model::Role;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -35,10 +36,11 @@ pub struct ChatLine {
     pub sender: Sender,
     pub text: String,
     pub tool: Option<ToolLineState>,
-    /// System lines only: render `text` through the markdown subset
-    /// (headings, bullets, bold) instead of the plain dim-italic style —
-    /// used for on-demand report blocks (`/cost`, `/docker`).
-    pub markdown: bool,
+    /// System lines only: pre-rendered, per-role-styled lines (aligned
+    /// tables) that bypass the plain dim-italic style entirely — used for
+    /// on-demand report blocks (`/cost`, `/docker`). `text` still carries
+    /// the flattened plain-text equivalent for scroll-height accounting.
+    pub rendered: Option<Vec<Line<'static>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -369,7 +371,7 @@ impl App {
             sender: Sender::User,
             text: text.to_string(),
             tool: None,
-            markdown: false,
+            rendered: None,
         });
         self.last_agent_msg_id = None;
     }
@@ -379,19 +381,31 @@ impl App {
             sender: Sender::System,
             text: text.to_string(),
             tool: None,
-            markdown: false,
+            rendered: None,
         });
         self.last_agent_msg_id = None;
     }
 
-    /// Same as [`Self::push_system`] but rendered through the markdown
-    /// subset — used for on-demand report blocks (`/cost`, `/docker`).
-    pub fn push_system_markdown(&mut self, text: &str) {
+    /// Same as [`Self::push_system`] but with pre-rendered, per-role-styled
+    /// lines (aligned tables) — used for on-demand report blocks (`/cost`,
+    /// `/docker`) that need theme styling the plain system register can't
+    /// express.
+    pub fn push_system_lines(&mut self, lines: Vec<Line<'static>>) {
+        let text = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         self.chat.push(ChatLine {
             sender: Sender::System,
-            text: text.to_string(),
+            text,
             tool: None,
-            markdown: true,
+            rendered: Some(lines),
         });
         self.last_agent_msg_id = None;
     }
@@ -453,7 +467,7 @@ impl App {
                             name,
                             started: Instant::now(),
                         }),
-                        markdown: false,
+                        rendered: None,
                     });
                     self.pending_tools
                         .insert(req.id.clone(), self.chat.len() - 1);
@@ -520,7 +534,7 @@ impl App {
             sender: Sender::Agent,
             text: text.to_string(),
             tool: None,
-            markdown: false,
+            rendered: None,
         });
         self.last_agent_msg_id = message_id.clone();
     }
@@ -532,6 +546,7 @@ mod tests {
     use kaji::conversation::message::Message;
     use kaji::providers::base::Usage;
     use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::text::Span;
     use rmcp::model::{CallToolRequestParams, CallToolResult};
 
     fn key(code: KeyCode) -> Event {
@@ -1039,12 +1054,16 @@ mod tests {
     }
 
     #[test]
-    fn push_system_markdown_marks_the_chat_line_for_markdown_rendering() {
+    fn push_system_lines_marks_the_chat_line_as_rendered_and_flattens_text() {
         let mut app = App::new(None);
-        app.push_system_markdown("**/cost**\n- session : ↑10 ↓2");
+        app.push_system_lines(vec![
+            Line::from(Span::raw("/cost")),
+            Line::from(Span::raw("session : 10")),
+        ]);
         let line = app.chat.last().expect("chat line pushed");
         assert!(matches!(line.sender, Sender::System));
-        assert!(line.markdown);
+        assert!(line.rendered.is_some());
+        assert_eq!(line.text, "/cost\nsession : 10");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 pub mod app;
 pub mod markdown;
+pub mod report;
 pub mod theme;
 pub mod ui;
 
@@ -12,9 +13,10 @@ use kaji::config::Config;
 use kaji::conversation::message::Message;
 use kaji::permission::permission_confirmation::PrincipalType;
 use kaji::permission::{Permission, PermissionConfirmation};
-use kaji::session::{SessionManager, UsageAggregate, UsageWindows};
+use kaji::session::SessionManager;
 use kaji_core::sdd::SpecDoc;
 use ratatui::crossterm::event::{self, Event};
+use ratatui::text::{Line, Span};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -58,7 +60,9 @@ fn push_welcome(app: &mut App) {
     app.push_system("tape ton message puis Entrée");
     app.push_system("/sdd démarre une passe SDD (SPEC.md auto-détecté ou --spec <fichier>)");
     app.push_system("/spec (ou F2) affiche/masque le panneau SPEC · /help réaffiche l'aide");
-    app.push_system("/cost affiche l'usage tokens/coût (session, 5 h, 7 j)");
+    app.push_system(
+        "/cost affiche l'usage tokens/coût (session, 5 h, 7 j) — budgets optionnels via KAJI_BUDGET_5H / KAJI_BUDGET_7J",
+    );
     app.push_system("/docker liste les conteneurs en cours");
     app.push_system("PageUp/PageDown/Home/End font défiler le chat");
     app.push_system("Esc interrompt · Ctrl+C quitte");
@@ -103,77 +107,34 @@ fn refresh_git_status() -> Option<String> {
     git_summary(&std::env::current_dir().ok()?)
 }
 
-fn format_usage_row(label: &str, agg: &UsageAggregate) -> String {
-    let cost = agg.cost.map(|c| format!(" · ${c:.2}")).unwrap_or_default();
-    format!(
-        "- {label} : ↑{} ↓{} ({} tokens){cost}",
-        agg.input_tokens, agg.output_tokens, agg.total_tokens
-    )
+fn budget_from_env(var: &str) -> Option<report::Budget> {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| report::parse_budget(&v))
 }
 
-fn format_cost_block(windows: &UsageWindows, provider: &str, model: &str) -> String {
-    let mut lines = vec![
-        format!("**/cost** — provider `{provider}/{model}`"),
-        String::new(),
-        format_usage_row("session courante", &windows.session),
-        format_usage_row("5 h", &windows.last_5h),
-        format_usage_row("7 j", &windows.last_7d),
-    ];
-    let cost_unknown_everywhere = windows.session.cost.is_none()
-        && windows.last_5h.cost.is_none()
-        && windows.last_7d.cost.is_none();
-    if cost_unknown_everywhere {
-        lines.push(String::new());
-        lines.push("coût : n/a (provider sans tarification — tokens seulement)".to_string());
-    }
-    lines.join("\n")
-}
-
-async fn cost_report(session_manager: &SessionManager, session_id: &str) -> String {
+async fn cost_report(session_manager: &SessionManager, session_id: &str) -> Vec<Line<'static>> {
     let config = Config::global();
     let provider = config
         .get_kaji_provider()
         .unwrap_or_else(|_| "?".to_string());
     let model = config.get_kaji_model().unwrap_or_else(|_| "?".to_string());
     match session_manager.usage_windows(session_id).await {
-        Ok(windows) => format_cost_block(&windows, &provider, &model),
-        Err(e) => format!("erreur /cost : {e}"),
+        Ok(windows) => report::cost_table_lines(
+            &windows,
+            &provider,
+            &model,
+            budget_from_env("KAJI_BUDGET_5H"),
+            budget_from_env("KAJI_BUDGET_7J"),
+        ),
+        Err(e) => vec![Line::from(Span::styled(
+            format!("erreur /cost : {e}"),
+            theme::dim(),
+        ))],
     }
 }
 
-/// Parse la sortie de `docker ps --format "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"`
-/// en tableau markdown Names/Image/Status/Ports.
-fn format_docker_table(raw_output: &str) -> String {
-    let rows: Vec<[&str; 4]> = raw_output
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| {
-            let mut cols = line.split('\t');
-            Some([
-                cols.next()?,
-                cols.next()?,
-                cols.next()?,
-                cols.next().unwrap_or(""),
-            ])
-        })
-        .collect();
-
-    if rows.is_empty() {
-        return "docker : aucun conteneur en cours".to_string();
-    }
-
-    let mut out = String::from("| Names | Image | Status | Ports |\n|---|---|---|---|");
-    for row in rows {
-        out.push('\n');
-        out.push_str(&format!(
-            "| {} | {} | {} | {} |",
-            row[0], row[1], row[2], row[3]
-        ));
-    }
-    out
-}
-
-fn docker_report() -> String {
+fn docker_report() -> Vec<Line<'static>> {
     let output = std::process::Command::new("docker")
         .args([
             "ps",
@@ -184,14 +145,20 @@ fn docker_report() -> String {
 
     match output {
         Ok(out) if out.status.success() => {
-            format_docker_table(&String::from_utf8_lossy(&out.stdout))
+            report::docker_table_lines(&String::from_utf8_lossy(&out.stdout))
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let first_line = stderr.lines().next().unwrap_or("erreur inconnue");
-            format!("docker indisponible — {first_line}")
+            vec![Line::from(Span::styled(
+                format!("docker indisponible — {first_line}"),
+                theme::dim(),
+            ))]
         }
-        Err(e) => format!("docker indisponible — {e}"),
+        Err(e) => vec![Line::from(Span::styled(
+            format!("docker indisponible — {e}"),
+            theme::dim(),
+        ))],
     }
 }
 
@@ -323,11 +290,11 @@ async fn event_loop(
                     Action::Help => push_welcome(&mut app),
                     Action::Cost => {
                         let report = cost_report(&session_manager, session_id).await;
-                        app.push_system_markdown(&report);
+                        app.push_system_lines(report);
                     }
                     Action::Docker => {
                         let report = docker_report();
-                        app.push_system_markdown(&report);
+                        app.push_system_lines(report);
                     }
                     Action::None => {}
                 }
@@ -469,60 +436,5 @@ mod tests {
     fn git_summary_returns_none_outside_a_repo() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(git_summary(dir.path()), None);
-    }
-
-    #[test]
-    fn format_docker_table_renders_markdown_table_from_fixture() {
-        let fixture =
-            "web\tnginx:latest\tUp 3 hours\t0.0.0.0:80->80/tcp\ndb\tpostgres:16\tUp 3 hours\t";
-        let table = format_docker_table(fixture);
-        assert!(table.starts_with("| Names | Image | Status | Ports |\n|---|---|---|---|"));
-        assert!(table.contains("| web | nginx:latest | Up 3 hours | 0.0.0.0:80->80/tcp |"));
-        assert!(table.contains("| db | postgres:16 | Up 3 hours |  |"));
-    }
-
-    #[test]
-    fn format_docker_table_empty_output_reports_no_containers() {
-        assert_eq!(format_docker_table(""), "docker : aucun conteneur en cours");
-        assert_eq!(
-            format_docker_table("\n\n"),
-            "docker : aucun conteneur en cours"
-        );
-    }
-
-    fn aggregate(input: i64, output: i64, cost: Option<f64>) -> UsageAggregate {
-        UsageAggregate {
-            input_tokens: input,
-            output_tokens: output,
-            total_tokens: input + output,
-            cost,
-        }
-    }
-
-    #[test]
-    fn format_cost_block_shows_per_window_cost_when_known() {
-        let windows = UsageWindows {
-            session: aggregate(100, 20, Some(0.10)),
-            last_5h: aggregate(1000, 200, Some(1.50)),
-            last_7d: aggregate(9000, 2000, Some(12.00)),
-        };
-        let report = format_cost_block(&windows, "anthropic", "claude-sonnet");
-        assert!(report.contains("anthropic/claude-sonnet"));
-        assert!(report.contains("session courante : ↑100 ↓20 (120 tokens) · $0.10"));
-        assert!(report.contains("5 h : ↑1000 ↓200 (1200 tokens) · $1.50"));
-        assert!(report.contains("7 j : ↑9000 ↓2000 (11000 tokens) · $12.00"));
-        assert!(!report.contains("n/a"));
-    }
-
-    #[test]
-    fn format_cost_block_reports_na_when_no_window_has_a_cost() {
-        let windows = UsageWindows {
-            session: aggregate(100, 20, None),
-            last_5h: aggregate(1000, 200, None),
-            last_7d: aggregate(9000, 2000, None),
-        };
-        let report = format_cost_block(&windows, "ollama", "llama3");
-        assert!(report.contains("coût : n/a (provider sans tarification — tokens seulement)"));
-        assert!(!report.contains('$'));
     }
 }

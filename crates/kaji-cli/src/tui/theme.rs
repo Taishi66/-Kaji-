@@ -75,3 +75,8 @@ pub fn heading() -> Style {
         .fg(OR_PATINE)
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
 }
+
+/// En-tête de tableau aligné (`/cost`, `/docker`) — or patiné estompé.
+pub fn table_header() -> Style {
+    Style::default().fg(OR_PATINE).add_modifier(Modifier::DIM)
+}

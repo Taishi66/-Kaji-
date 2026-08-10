@@ -164,8 +164,8 @@ fn push_system_line(lines: &mut Vec<Line<'static>>, chat_line: &crate::tui::app:
         lines.push(Line::from(Span::styled(content, theme::system())));
         return;
     }
-    if chat_line.markdown {
-        push_system_markdown_lines(lines, &chat_line.text);
+    if let Some(rendered) = &chat_line.rendered {
+        push_rendered_lines(lines, rendered);
         return;
     }
     push_plain_lines(
@@ -176,20 +176,17 @@ fn push_system_line(lines: &mut Vec<Line<'static>>, chat_line: &crate::tui::app:
     );
 }
 
-/// On-demand report blocks (`/cost`, `/docker`) — rendered through the same
-/// markdown subset as agent messages so headings/bold/bullets survive, kept
-/// dim to stay in the "sobre" system register.
-fn push_system_markdown_lines(lines: &mut Vec<Line<'static>>, text: &str) {
-    let mut md_lines = markdown::render_markdown(text);
-    if md_lines.is_empty() {
-        md_lines.push(Line::from(""));
-    }
-    if let Some(first) = md_lines.first_mut() {
+/// On-demand report blocks (`/cost`, `/docker`) — already fully styled by
+/// `crate::tui::report`; only the leading `SYSTEM_PREFIX` marker is spliced
+/// onto the first line so it still reads as a system message.
+fn push_rendered_lines(lines: &mut Vec<Line<'static>>, rendered: &[Line<'static>]) {
+    let mut iter = rendered.iter();
+    if let Some(first) = iter.next() {
         let mut spans = vec![Span::styled(theme::SYSTEM_PREFIX, theme::dim())];
-        spans.append(&mut first.spans);
-        *first = Line::from(spans);
+        spans.extend(first.spans.iter().cloned());
+        lines.push(Line::from(spans));
     }
-    lines.extend(md_lines);
+    lines.extend(iter.cloned());
 }
 
 fn line_wrapped_rows(line: &Line, width: u16) -> usize {
