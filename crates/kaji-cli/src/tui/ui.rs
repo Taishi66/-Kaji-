@@ -213,9 +213,11 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         Paragraph::new(app.input.as_str()).style(theme::text())
     };
-    frame.render_widget(paragraph.block(block), area);
+    let scroll_x = app.input_scroll_x(inner.width.max(1));
+    frame.render_widget(paragraph.block(block).scroll((0, scroll_x)), area);
 
-    let cursor_x = inner.x + (app.input.chars().count() as u16).min(inner.width.saturating_sub(1));
+    let cursor_x =
+        inner.x + (app.input_cursor_chars() - scroll_x).min(inner.width.saturating_sub(1));
     frame.set_cursor_position((cursor_x, inner.y));
 }
 

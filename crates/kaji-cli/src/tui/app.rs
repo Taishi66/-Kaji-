@@ -234,6 +234,18 @@ impl App {
         self.total_chat_lines().saturating_sub(1)
     }
 
+    pub fn input_cursor_chars(&self) -> u16 {
+        self.input.chars().count() as u16
+    }
+
+    /// `.wrap()` et `scroll.x` sont mutuellement exclusifs sur `Paragraph`
+    /// dans ratatui 0.30 (la branche wrap ignore `scroll.x`) — ne pas
+    /// ajouter `.wrap()` au Paragraph de l'input sans retirer ce scroll.
+    pub fn input_scroll_x(&self, visible_width: u16) -> u16 {
+        self.input_cursor_chars()
+            .saturating_sub(visible_width.saturating_sub(1))
+    }
+
     pub fn scroll_page_up(&mut self) {
         self.scroll_offset = (self.scroll_offset + SCROLL_PAGE).min(self.max_scroll());
     }
@@ -893,6 +905,47 @@ mod tests {
         assert!(app.scroll_offset > 0);
         assert_eq!(app.on_event(&key(KeyCode::End)), Action::None);
         assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn input_scroll_x_is_zero_while_input_fits_the_visible_width() {
+        let mut app = App::new(None);
+        app.input = "short".to_string();
+        assert_eq!(app.input_scroll_x(20), 0);
+    }
+
+    #[test]
+    fn input_scroll_x_follows_cursor_once_input_overflows_the_visible_width() {
+        let mut app = App::new(None);
+        app.input = "a".repeat(30);
+        assert_eq!(app.input_scroll_x(10), 21);
+    }
+
+    #[test]
+    fn input_scroll_x_never_panics_on_zero_width_area() {
+        let mut app = App::new(None);
+        app.input = "hello".to_string();
+        assert_eq!(app.input_scroll_x(0), 5);
+    }
+
+    #[test]
+    fn input_cursor_chars_counts_unicode_scalars_not_bytes() {
+        let mut app = App::new(None);
+        app.input = "héllo".to_string();
+        assert_eq!(app.input_cursor_chars(), 5);
+        assert_ne!(app.input_cursor_chars() as usize, app.input.len());
+    }
+
+    #[test]
+    fn typing_long_input_keeps_scroll_offset_zero_at_or_below_width() {
+        let mut app = App::new(None);
+        let width = 10u16;
+        for _ in 0..width - 1 {
+            app.on_event(&key(KeyCode::Char('a')));
+        }
+        assert_eq!(app.input_scroll_x(width), 0);
+        app.on_event(&key(KeyCode::Char('a')));
+        assert!(app.input_scroll_x(width) > 0);
     }
 
     #[test]
