@@ -548,7 +548,11 @@ impl App {
     /// Closes any tool line still awaiting its response after a history
     /// replay (`--resume` seeding a `ToolRequest` whose `ToolResponse` was
     /// never persisted — the session was interrupted mid-call) so it reads
-    /// as "interrupted" instead of a spinner that will never resolve.
+    /// as "interrupted" instead of a spinner that will never resolve. Also
+    /// clears any stale `tool_approval` left by a replayed
+    /// `ActionRequired`/`ToolConfirmation` block — same "session died
+    /// mid-tool" contract: the confirmation channel behind it is dead, so
+    /// leaving the approval modal open would swallow all input on resume.
     pub fn close_orphaned_tool_requests(&mut self) {
         for (_, idx) in self.pending_tools.drain() {
             let Some(line) = self.chat.get_mut(idx) else {
@@ -561,6 +565,12 @@ impl App {
                 .unwrap_or_else(|| "outil".to_string());
             line.text = format!("✗ {name} (interrompu)");
             line.tool = None;
+        }
+        if let Some(req) = self.tool_approval.take() {
+            self.push_system(&format!(
+                "✗ {} — approbation abandonnée (session interrompue)",
+                req.tool_name
+            ));
         }
     }
 

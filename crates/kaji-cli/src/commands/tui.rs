@@ -10,6 +10,7 @@ pub async fn handle_tui(
     identifier: Option<Identifier>,
     resume: bool,
 ) -> Result<()> {
+    let spec = crate::tui::resolve_spec(spec)?;
     let kaji_mode = Config::global().get_kaji_mode().unwrap_or_default();
     let session_id =
         crate::cli::get_or_create_session_id(identifier, resume, false, kaji_mode).await?;

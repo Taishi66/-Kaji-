@@ -28,9 +28,8 @@ pub async fn run(
     agent: Agent,
     session_id: String,
     conversation: kaji::conversation::Conversation,
-    spec_path: Option<PathBuf>,
+    spec: Option<SpecDoc>,
 ) -> Result<()> {
-    let spec = resolve_spec(spec_path)?;
     let header = build_header(&session_id);
     let (input_tx, input_rx) = mpsc::channel::<Event>(64);
     std::thread::spawn(move || input_thread(input_tx));
@@ -311,8 +310,7 @@ async fn event_loop(
                         app.push_system(&format!("erreur: {e}"));
                         turn = None;
                         cancel = None;
-                        app.finish_turn();
-                        app.git_status = refresh_git_status();
+                        teardown_turn(&mut app);
                         if app.driver != PassDriver::Idle {
                             app.pass_abort("erreur pendant la passe — passe interrompue");
                         }
@@ -320,8 +318,7 @@ async fn event_loop(
                     None => {
                         turn = None;
                         cancel = None;
-                        app.finish_turn();
-                        app.git_status = refresh_git_status();
+                        teardown_turn(&mut app);
                         if let Some(prompt) = app.turn_end() {
                             pending = Some(begin_setup(&mut app, agent, &session_config, &prompt, &mut cancel));
                         }
@@ -383,7 +380,21 @@ fn install_turn<'a>(
     }
 }
 
-fn resolve_spec(spec_path: Option<PathBuf>) -> Result<Option<SpecDoc>> {
+/// Shared cleanup once a turn's event stream ends — cleanly, by error, or
+/// by Esc cancellation reaching this arm as the stream's trailing `None`.
+/// Clears the turn clock/token bookkeeping, refreshes the git summary, and
+/// closes any tool line still awaiting its response (Esc mid-tool-call, or
+/// the stream ending with a tool pending) so the ⚙ spinner doesn't stay
+/// frozen forever. `close_orphaned_tool_requests` only touches still-pending
+/// entries, so calling it here is safe even when every tool already
+/// completed normally.
+fn teardown_turn(app: &mut App) {
+    app.finish_turn();
+    app.close_orphaned_tool_requests();
+    app.git_status = refresh_git_status();
+}
+
+pub fn resolve_spec(spec_path: Option<PathBuf>) -> Result<Option<SpecDoc>> {
     if let Some(path) = spec_path {
         return SpecDoc::load(&path)
             .map(Some)
@@ -530,6 +541,54 @@ mod tests {
             .chat
             .iter()
             .any(|l| l.text.contains("interrompu") && l.text.contains("shell")));
+    }
+
+    /// Finding 1: a session interrupted mid-approval persists its
+    /// `ActionRequired`/`ToolConfirmation` block (agent.rs adds it before
+    /// yielding). Replaying it via `--resume` must not reopen the modal —
+    /// the confirmation channel behind it is dead, so `y`/`n` would go
+    /// nowhere and swallow all input.
+    #[test]
+    fn seed_chat_clears_stale_tool_approval_left_by_an_interrupted_resume() {
+        let mut app = App::new(None);
+        let conversation = Conversation::new_unvalidated([Message::assistant()
+            .with_action_required(
+                "req-1".to_string(),
+                "shell".to_string(),
+                Default::default(),
+                Some("exécuter `rm -rf /tmp/x` ?".to_string()),
+            )]);
+
+        seed_chat(&mut app, &conversation);
+
+        assert!(app.tool_approval.is_none());
+    }
+
+    /// Finding 2: after Esc cancels a running turn mid-tool-call (or the
+    /// stream ends with a tool pending), the ⚙ spinner must not stay frozen
+    /// forever — `teardown_turn` is the shared cleanup every stream-end site
+    /// in `event_loop` calls, and it must close orphaned tool lines the same
+    /// way `close_orphaned_tool_requests` already does for `--resume`.
+    #[test]
+    fn teardown_turn_closes_orphaned_tool_line_left_pending_by_a_cancelled_or_errored_stream() {
+        let mut app = App::new(None);
+        let req_msg = Message::assistant()
+            .with_tool_request("t1", Ok(rmcp::model::CallToolRequestParams::new("shell")));
+        app.apply_agent_event(&AgentEvent::Message(req_msg));
+        assert!(
+            app.chat.iter().any(|l| l.tool.is_some()),
+            "tool line starts pending"
+        );
+
+        teardown_turn(&mut app);
+
+        assert!(
+            !app.chat.iter().any(|l| l.tool.is_some()),
+            "spinner must not stay frozen after teardown"
+        );
+        assert!(app.chat.iter().any(|l| l.text.contains('✗')
+            && l.text.contains("shell")
+            && l.text.contains("interrompu")));
     }
 
     #[test]
