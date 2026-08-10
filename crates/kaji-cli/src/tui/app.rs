@@ -1,8 +1,13 @@
 use kaji::agents::AgentEvent;
-use kaji::conversation::message::{Message, MessageContentBlock};
+use kaji::conversation::message::{ActionRequiredData, Message, MessageContentBlock};
+use kaji::providers::base::ProviderUsage;
 use kaji_core::sdd::{SddPass, SpecDoc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use rmcp::model::Role;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+const SCROLL_PAGE: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassDriver {
@@ -20,9 +25,23 @@ pub enum Sender {
 }
 
 #[derive(Debug, Clone)]
+pub struct ToolLineState {
+    pub name: String,
+    pub started: Instant,
+}
+
+#[derive(Debug, Clone)]
 pub struct ChatLine {
     pub sender: Sender,
     pub text: String,
+    pub tool: Option<ToolLineState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolApprovalRequest {
+    pub id: String,
+    pub tool_name: String,
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +53,9 @@ pub enum Action {
     StartPass,
     GateApprove,
     GateReject,
+    ToolApprove,
+    ToolDeny,
+    Help,
 }
 
 pub struct App {
@@ -42,12 +64,21 @@ pub struct App {
     pub chat: Vec<ChatLine>,
     pub status: String,
     pub turn_active: bool,
+    pub turn_started: Option<Instant>,
+    pub tokens_turn_in: i64,
+    pub tokens_turn_out: i64,
+    pub tokens_total_in: i64,
+    pub tokens_total_out: i64,
     pub spec: Option<SpecDoc>,
     pub pass: SddPass,
     pub gate_open: bool,
+    pub tool_approval: Option<ToolApprovalRequest>,
     pub driver: PassDriver,
+    pub scroll_offset: u16,
     validate_buffer: String,
     last_agent_msg_id: Option<String>,
+    pending_tools: HashMap<String, usize>,
+    spec_panel_forced: Option<bool>,
 }
 
 impl App {
@@ -58,12 +89,21 @@ impl App {
             chat: Vec::new(),
             status: String::new(),
             turn_active: false,
+            turn_started: None,
+            tokens_turn_in: 0,
+            tokens_turn_out: 0,
+            tokens_total_in: 0,
+            tokens_total_out: 0,
             spec,
             pass: SddPass::new(),
             gate_open: false,
+            tool_approval: None,
             driver: PassDriver::Idle,
+            scroll_offset: 0,
             validate_buffer: String::new(),
             last_agent_msg_id: None,
+            pending_tools: HashMap::new(),
+            spec_panel_forced: None,
         }
     }
 
@@ -151,6 +191,62 @@ impl App {
         }
     }
 
+    /// Posé au démarrage effectif d'un tour (Submit/relance) : réarme le
+    /// chrono et la tally de tokens propre à ce tour.
+    pub fn begin_turn(&mut self) {
+        self.turn_active = true;
+        self.turn_started = Some(Instant::now());
+        self.tokens_turn_in = 0;
+        self.tokens_turn_out = 0;
+    }
+
+    /// Effacé à la fin du tour (stream terminé ou erreur) — laisse le
+    /// cumul de session (tokens_total_*) intact.
+    pub fn finish_turn(&mut self) {
+        self.turn_active = false;
+        self.turn_started = None;
+    }
+
+    fn total_chat_lines(&self) -> u16 {
+        self.chat
+            .iter()
+            .map(|line| line.text.split('\n').count() as u16)
+            .sum()
+    }
+
+    fn max_scroll(&self) -> u16 {
+        self.total_chat_lines().saturating_sub(1)
+    }
+
+    pub fn scroll_page_up(&mut self) {
+        self.scroll_offset = (self.scroll_offset + SCROLL_PAGE).min(self.max_scroll());
+    }
+
+    pub fn scroll_page_down(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(SCROLL_PAGE);
+    }
+
+    pub fn scroll_home(&mut self) {
+        self.scroll_offset = self.max_scroll();
+    }
+
+    pub fn scroll_end(&mut self) {
+        self.scroll_offset = 0;
+    }
+
+    pub fn spec_panel_visible(&self) -> bool {
+        self.spec_panel_forced
+            .unwrap_or_else(|| self.spec.is_some() || self.pass.is_running())
+    }
+
+    pub fn toggle_spec_panel(&mut self) {
+        self.spec_panel_forced = Some(!self.spec_panel_visible());
+    }
+
+    pub fn take_tool_approval(&mut self) -> Option<ToolApprovalRequest> {
+        self.tool_approval.take()
+    }
+
     pub fn on_event(&mut self, ev: &Event) -> Action {
         let Event::Key(key) = ev else {
             return Action::None;
@@ -160,6 +256,36 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Action::Quit;
+        }
+        match key.code {
+            KeyCode::F(2) => {
+                self.toggle_spec_panel();
+                return Action::None;
+            }
+            KeyCode::PageUp => {
+                self.scroll_page_up();
+                return Action::None;
+            }
+            KeyCode::PageDown => {
+                self.scroll_page_down();
+                return Action::None;
+            }
+            KeyCode::Home => {
+                self.scroll_home();
+                return Action::None;
+            }
+            KeyCode::End => {
+                self.scroll_end();
+                return Action::None;
+            }
+            _ => {}
+        }
+        if self.tool_approval.is_some() {
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Action::ToolApprove,
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::ToolDeny,
+                _ => Action::None,
+            };
         }
         if self.gate_open {
             return match key.code {
@@ -197,6 +323,11 @@ impl App {
                     Action::StartPass
                 } else if text == "/quit" {
                     Action::Quit
+                } else if text == "/help" {
+                    Action::Help
+                } else if text == "/spec" {
+                    self.toggle_spec_panel();
+                    Action::None
                 } else {
                     Action::Submit(text)
                 }
@@ -206,9 +337,21 @@ impl App {
     }
 
     pub fn push_user(&mut self, text: &str) {
+        // Some providers echo the triggering user message back through the
+        // reply stream (e.g. built-in slash commands answered without a model
+        // round-trip) — the TUI already renders it eagerly on submit, so drop
+        // an immediate consecutive repeat instead of showing it twice.
+        let is_echo = self
+            .chat
+            .last()
+            .is_some_and(|line| line.sender == Sender::User && line.text == text);
+        if is_echo {
+            return;
+        }
         self.chat.push(ChatLine {
             sender: Sender::User,
             text: text.to_string(),
+            tool: None,
         });
         self.last_agent_msg_id = None;
     }
@@ -217,6 +360,7 @@ impl App {
         self.chat.push(ChatLine {
             sender: Sender::System,
             text: text.to_string(),
+            tool: None,
         });
         self.last_agent_msg_id = None;
     }
@@ -224,15 +368,34 @@ impl App {
     pub fn apply_agent_event(&mut self, ev: &AgentEvent) {
         match ev {
             AgentEvent::Message(message) => self.apply_message(message),
+            AgentEvent::Usage(usage) => self.apply_usage(usage),
+            // MessageUsage carries the same round-trip totals already seen via
+            // Usage (both derive from the same provider response) — accumulating
+            // both would double the token tally shown in the header.
+            AgentEvent::MessageUsage { .. } => {}
             AgentEvent::HistoryReplaced(_) => self.push_system("— historique compacté —"),
             _ => {}
         }
     }
 
+    fn apply_usage(&mut self, usage: &ProviderUsage) {
+        let input = i64::from(usage.usage.input_tokens.unwrap_or(0));
+        let output = i64::from(usage.usage.output_tokens.unwrap_or(0));
+        self.tokens_turn_in += input;
+        self.tokens_turn_out += output;
+        self.tokens_total_in += input;
+        self.tokens_total_out += output;
+    }
+
     fn apply_message(&mut self, message: &Message) {
-        if message.role != Role::Assistant {
-            return;
+        if message.role == Role::Assistant {
+            self.apply_assistant_message(message);
+        } else if message.role == Role::User {
+            self.apply_user_message(message);
         }
+    }
+
+    fn apply_assistant_message(&mut self, message: &Message) {
         for block in &message.content {
             match block {
                 MessageContentBlock::Text(text) => {
@@ -246,10 +409,65 @@ impl App {
                         .tool_call
                         .as_ref()
                         .map(|call| call.name.as_ref())
-                        .unwrap_or("outil");
-                    self.push_system(&format!("⚙ {name}"));
+                        .unwrap_or("outil")
+                        .to_string();
+                    self.chat.push(ChatLine {
+                        sender: Sender::System,
+                        text: format!("⚙ {name}"),
+                        tool: Some(ToolLineState {
+                            name,
+                            started: Instant::now(),
+                        }),
+                    });
+                    self.pending_tools
+                        .insert(req.id.clone(), self.chat.len() - 1);
+                    self.last_agent_msg_id = None;
                 }
-                MessageContentBlock::ToolResponse(_) => self.push_system("✓ outil terminé"),
+                MessageContentBlock::ActionRequired(action) => {
+                    if let ActionRequiredData::ToolConfirmation {
+                        id,
+                        tool_name,
+                        prompt,
+                        ..
+                    } = &action.data
+                    {
+                        self.tool_approval = Some(ToolApprovalRequest {
+                            id: id.clone(),
+                            tool_name: tool_name.clone(),
+                            prompt: prompt.clone(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn apply_user_message(&mut self, message: &Message) {
+        for block in &message.content {
+            match block {
+                MessageContentBlock::Text(text) => self.push_user(&text.text),
+                MessageContentBlock::ToolResponse(resp) => {
+                    match self.pending_tools.remove(&resp.id) {
+                        Some(idx) => {
+                            let (name, elapsed) = self.chat[idx]
+                                .tool
+                                .as_ref()
+                                .map(|t| (t.name.clone(), t.started.elapsed()))
+                                .unwrap_or_else(|| ("outil".to_string(), Duration::ZERO));
+                            let symbol = if resp.tool_result.is_ok() {
+                                "✓"
+                            } else {
+                                "✗"
+                            };
+                            self.chat[idx].text =
+                                format!("{symbol} {name} ({:.1}s)", elapsed.as_secs_f64());
+                            self.chat[idx].tool = None;
+                        }
+                        None => self.push_system("✓ outil terminé"),
+                    }
+                    self.last_agent_msg_id = None;
+                }
                 _ => {}
             }
         }
@@ -265,6 +483,7 @@ impl App {
         self.chat.push(ChatLine {
             sender: Sender::Agent,
             text: text.to_string(),
+            tool: None,
         });
         self.last_agent_msg_id = message_id.clone();
     }
@@ -274,7 +493,9 @@ impl App {
 mod tests {
     use super::*;
     use kaji::conversation::message::Message;
+    use kaji::providers::base::Usage;
     use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use rmcp::model::{CallToolRequestParams, CallToolResult};
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent {
@@ -532,5 +753,226 @@ mod tests {
             .chat
             .iter()
             .any(|l| matches!(l.sender, Sender::System) && l.text.contains("outil")));
+    }
+
+    #[test]
+    fn scroll_page_up_and_down_are_bounded() {
+        let mut app = App::new(None);
+        for i in 0..30 {
+            app.push_system(&format!("line {i}"));
+        }
+        assert_eq!(app.scroll_offset, 0);
+        app.scroll_page_up();
+        assert!(app.scroll_offset > 0);
+
+        app.scroll_home();
+        let top = app.scroll_offset;
+        app.scroll_page_up();
+        assert_eq!(app.scroll_offset, top, "clamped at the top");
+
+        app.scroll_end();
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_page_down_never_goes_negative() {
+        let mut app = App::new(None);
+        app.push_system("only one line");
+        app.scroll_page_down();
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn page_and_home_end_keys_drive_scroll_state() {
+        let mut app = App::new(None);
+        for i in 0..30 {
+            app.push_system(&format!("line {i}"));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::PageUp)), Action::None);
+        assert!(app.scroll_offset > 0);
+        assert_eq!(app.on_event(&key(KeyCode::Home)), Action::None);
+        assert!(app.scroll_offset > 0);
+        assert_eq!(app.on_event(&key(KeyCode::End)), Action::None);
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn tool_request_then_response_updates_line_with_checkmark() {
+        let mut app = App::new(None);
+        let req_msg =
+            Message::assistant().with_tool_request("t1", Ok(CallToolRequestParams::new("shell")));
+        app.apply_agent_event(&AgentEvent::Message(req_msg));
+
+        assert!(app.chat.iter().any(|l| l.text.contains("⚙ shell")));
+        assert!(app.chat.iter().any(|l| l.tool.is_some()));
+
+        let resp_msg =
+            Message::user().with_tool_response("t1", Ok(CallToolResult::success(vec![])));
+        app.apply_agent_event(&AgentEvent::Message(resp_msg));
+
+        assert!(!app.chat.iter().any(|l| l.text.contains("⚙ shell")));
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains('✓') && l.text.contains("shell")));
+        assert!(!app.chat.iter().any(|l| l.tool.is_some()));
+    }
+
+    #[test]
+    fn tool_response_with_error_result_marks_failure() {
+        let mut app = App::new(None);
+        let req_msg =
+            Message::assistant().with_tool_request("t2", Ok(CallToolRequestParams::new("compile")));
+        app.apply_agent_event(&AgentEvent::Message(req_msg));
+
+        let resp_msg = Message::user().with_tool_response(
+            "t2",
+            Err(rmcp::model::ErrorData {
+                code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                message: std::borrow::Cow::from("boom"),
+                data: None,
+            }),
+        );
+        app.apply_agent_event(&AgentEvent::Message(resp_msg));
+
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains('✗') && l.text.contains("compile")));
+    }
+
+    #[test]
+    fn begin_turn_resets_turn_tokens_and_arms_the_clock() {
+        let mut app = App::new(None);
+        app.tokens_turn_in = 42;
+        app.begin_turn();
+        assert!(app.turn_active);
+        assert!(app.turn_started.is_some());
+        assert_eq!(app.tokens_turn_in, 0);
+    }
+
+    #[test]
+    fn finish_turn_clears_active_flag_and_clock_but_keeps_totals() {
+        let mut app = App::new(None);
+        app.begin_turn();
+        app.tokens_total_in = 100;
+        app.finish_turn();
+        assert!(!app.turn_active);
+        assert!(app.turn_started.is_none());
+        assert_eq!(app.tokens_total_in, 100);
+    }
+
+    #[test]
+    fn usage_event_accumulates_turn_and_total_tokens() {
+        let mut app = App::new(None);
+        app.begin_turn();
+        let usage = ProviderUsage::new(
+            "test-model".to_string(),
+            Usage::new(Some(10), Some(4), None),
+        );
+        app.apply_agent_event(&AgentEvent::Usage(usage.clone()));
+        assert_eq!(app.tokens_turn_in, 10);
+        assert_eq!(app.tokens_turn_out, 4);
+        assert_eq!(app.tokens_total_in, 10);
+        assert_eq!(app.tokens_total_out, 4);
+
+        app.apply_agent_event(&AgentEvent::Usage(usage));
+        assert_eq!(app.tokens_turn_in, 20);
+        assert_eq!(app.tokens_total_in, 20);
+    }
+
+    #[test]
+    fn message_usage_event_does_not_double_count_tokens() {
+        let mut app = App::new(None);
+        app.begin_turn();
+        let usage = ProviderUsage::new(
+            "test-model".to_string(),
+            Usage::new(Some(10), Some(4), None),
+        );
+        app.apply_agent_event(&AgentEvent::Usage(usage));
+        app.apply_agent_event(&AgentEvent::MessageUsage {
+            message_id: Some("m1".to_string()),
+            usage: kaji::conversation::message::MessageUsage::default(),
+        });
+        assert_eq!(app.tokens_turn_in, 10);
+    }
+
+    #[test]
+    fn spec_panel_hidden_by_default_without_spec_or_pass() {
+        let app = App::new(None);
+        assert!(!app.spec_panel_visible());
+    }
+
+    #[test]
+    fn spec_panel_visible_when_spec_loaded() {
+        let app = App::new(Some(spec()));
+        assert!(app.spec_panel_visible());
+    }
+
+    #[test]
+    fn slash_spec_toggles_panel_regardless_of_state() {
+        let mut app = App::new(None);
+        assert!(!app.spec_panel_visible());
+        for c in "/spec".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.on_event(&key(KeyCode::Enter));
+        assert!(app.spec_panel_visible());
+
+        for c in "/spec".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.on_event(&key(KeyCode::Enter));
+        assert!(!app.spec_panel_visible());
+    }
+
+    #[test]
+    fn f2_toggles_spec_panel() {
+        let mut app = App::new(None);
+        assert!(!app.spec_panel_visible());
+        app.on_event(&key(KeyCode::F(2)));
+        assert!(app.spec_panel_visible());
+    }
+
+    #[test]
+    fn slash_help_returns_help_action() {
+        let mut app = App::new(None);
+        for c in "/help".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::Help);
+    }
+
+    #[test]
+    fn action_required_tool_confirmation_opens_approval_and_y_n_answer_it() {
+        let mut app = App::new(None);
+        let msg = Message::assistant().with_action_required(
+            "req-1".to_string(),
+            "shell".to_string(),
+            Default::default(),
+            Some("exécuter `rm -rf /tmp/x` ?".to_string()),
+        );
+        app.apply_agent_event(&AgentEvent::Message(msg));
+
+        assert!(app.tool_approval.is_some());
+        assert_eq!(app.on_event(&key(KeyCode::Char('y'))), Action::ToolApprove);
+        let taken = app
+            .take_tool_approval()
+            .expect("approval consumed by test, not event");
+        assert_eq!(taken.id, "req-1");
+        assert_eq!(taken.tool_name, "shell");
+    }
+
+    #[test]
+    fn action_required_tool_confirmation_n_denies() {
+        let mut app = App::new(None);
+        let msg = Message::assistant().with_action_required(
+            "req-2".to_string(),
+            "shell".to_string(),
+            Default::default(),
+            None,
+        );
+        app.apply_agent_event(&AgentEvent::Message(msg));
+        assert_eq!(app.on_event(&key(KeyCode::Char('n'))), Action::ToolDeny);
     }
 }
