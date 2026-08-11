@@ -386,7 +386,10 @@ fn chart_bar_width(value: f64, denom: f64) -> usize {
 }
 
 fn format_chart_value(value: f64) -> String {
-    if value.fract() == 0.0 && value.abs() < 1e15 {
+    if value.abs() > 1e9 {
+        return format!("{value:.1e}");
+    }
+    if value.fract() == 0.0 {
         return (value as i64).to_string();
     }
     let s = format!("{value:.2}");
@@ -769,6 +772,45 @@ mod tests {
         let lines = render_markdown(input);
         assert_eq!(lines.len(), 1);
         assert!(plain_text(&lines[0]).contains("\"value\":-1"));
+    }
+
+    #[test]
+    fn unterminated_chart_fence_falls_back_to_raw_lines() {
+        let input = "```kaji-chart\n{\"type\":\"bar\",\n\"items\":[{\"label\":\"a\"";
+        let lines = render_markdown(input);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(plain_text(&lines[0]), "│ {\"type\":\"bar\",");
+        assert_eq!(plain_text(&lines[1]), "│ \"items\":[{\"label\":\"a\"");
+    }
+
+    #[test]
+    fn giant_bar_value_falls_back_to_scientific_notation() {
+        let input =
+            "```kaji-chart\n{\"type\":\"bar\",\"items\":[{\"label\":\"a\",\"value\":1e308}]}\n```";
+        let lines = render_markdown(input);
+        assert_eq!(lines.len(), 1);
+        let text = plain_text(&lines[0]);
+        let expected_value = format!("{:.1e}", 1e308_f64);
+        assert_eq!(text, format!("a  {}  {expected_value}", "█".repeat(40)));
+        assert!(
+            text.chars().count() < 80,
+            "line too long: {} chars",
+            text.chars().count()
+        );
+        assert!(text.contains('e'));
+    }
+
+    #[test]
+    fn pie_color_rotation_wraps_after_four_colors() {
+        let input = "```kaji-chart\n{\"type\":\"pie\",\"items\":[{\"label\":\"a\",\"value\":1},{\"label\":\"b\",\"value\":1},{\"label\":\"c\",\"value\":1},{\"label\":\"d\",\"value\":1},{\"label\":\"e\",\"value\":1}]}\n```";
+        let lines = render_markdown(input);
+        assert_eq!(lines.len(), 5);
+        let dot4 = lines[4]
+            .spans
+            .iter()
+            .find(|s| s.content == "●")
+            .expect("pastille span");
+        assert_eq!(dot4.style.fg, Some(theme::VERMILLON));
     }
 
     #[test]
