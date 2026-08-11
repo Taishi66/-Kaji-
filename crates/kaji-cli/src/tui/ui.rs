@@ -120,6 +120,10 @@ fn chat_content_rect(inner: Rect) -> Rect {
     }
 }
 
+fn scroll_offset_u16(value: usize) -> u16 {
+    value.min(u16::MAX as usize) as u16
+}
+
 fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -152,7 +156,7 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
         .map(|line| line_wrapped_rows(line, chat_rect.width))
         .sum();
     let base_scroll = wrapped_rows.saturating_sub(chat_rect.height as usize);
-    app.chat_overflow.set(base_scroll as u16);
+    app.chat_overflow.set(scroll_offset_u16(base_scroll));
     let scroll = base_scroll.saturating_sub(app.scroll_offset as usize) as u16;
 
     frame.render_widget(block, area);
@@ -250,10 +254,20 @@ fn push_rendered_lines(lines: &mut Vec<Line<'static>>, rendered: &[Line<'static>
     lines.extend(iter.cloned());
 }
 
+/// Row count for one already-built `Line`, measured with the SAME
+/// `WordWrapper` ratatui's renderer uses (`Paragraph::line_count`, gated
+/// behind the `unstable-rendered-line-info` feature) instead of a
+/// hand-rolled char-count/width division — that div_ceil undercounted CJK
+/// text (unicode-width cells, not `chars().count()`) and ignored word-break
+/// boundaries entirely. `WordWrapper` wraps each source `Line` of a
+/// `Paragraph` independently (it never merges adjacent lines), so measuring
+/// one `Line` at a time here and summing gives the same total as measuring
+/// the whole chat `Text` at once the way `draw_chat` renders it.
 fn line_wrapped_rows(line: &Line, width: u16) -> usize {
-    let width = width.max(1) as usize;
-    let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-    chars.max(1).div_ceil(width)
+    let width = width.max(1);
+    Paragraph::new(Text::from(vec![line.clone()]))
+        .wrap(Wrap { trim: false })
+        .line_count(width)
 }
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
@@ -377,11 +391,63 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
 
+    /// Regression for the wrap-measure divergence: `line_wrapped_rows` must
+    /// count what ratatui actually renders, not `chars().count()` — CJK
+    /// graphemes are 2 terminal cells wide, so 10 of them (20 cells) at a
+    /// 12-cell width wrap onto 2 rows, not the 1 row a char-count/width
+    /// division would report. Ground truth comes from an independent
+    /// TestBackend render (not from `line_wrapped_rows` itself) so the test
+    /// can't pass by construction.
+    #[test]
+    fn line_wrapped_rows_matches_ratatui_actual_wrap_for_cjk_text() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let text = "鍛冶".repeat(5); // 10 CJK chars, 20 cells wide
+        let line = Line::from(text.clone());
+        let width = 12u16;
+
+        let backend = TestBackend::new(width, 8);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| {
+                let paragraph =
+                    Paragraph::new(Text::from(vec![line.clone()])).wrap(Wrap { trim: false });
+                frame.render_widget(paragraph, frame.area());
+            })
+            .expect("draw must succeed against a TestBackend");
+        let buffer = terminal.backend().buffer();
+        let rendered_rows = (0..buffer.area.height)
+            .filter(|&y| (0..buffer.area.width).any(|x| buffer[(x, y)].symbol() != " "))
+            .count();
+
+        assert_eq!(
+            rendered_rows, 2,
+            "sanity check on the oracle itself: 20 cells at width 12 must take 2 rows"
+        );
+        assert_eq!(
+            line_wrapped_rows(&line, width),
+            rendered_rows,
+            "line_wrapped_rows must match the row count ratatui actually renders"
+        );
+    }
+
     #[test]
     fn chat_measure_is_capped_at_102_columns() {
         assert_eq!(chat_width(200), 102);
         assert_eq!(chat_width(102), 102);
         assert_eq!(chat_width(80), 80);
+    }
+
+    /// `running_rows` already saturates (`saturating_add`) rather than
+    /// wrapping past `u16::MAX` — `base_scroll` (a `usize`) must clamp the
+    /// same way when narrowed to `u16` for `chat_overflow`, instead of `as
+    /// u16` truncating (e.g. 70000 → 4464) and silently under-reporting how
+    /// far the chat can scroll.
+    #[test]
+    fn scroll_offset_u16_saturates_instead_of_truncating() {
+        assert_eq!(scroll_offset_u16(70_000), u16::MAX);
+        assert_eq!(scroll_offset_u16(30), 30);
     }
 
     #[test]
@@ -472,7 +538,11 @@ mod tests {
     /// `draw_chat` is the only place that measures where each user turn
     /// starts (in wrapped-row coordinates) — Ctrl+↑/↓ (`App::jump_prev_turn`
     /// / `jump_next_turn`) reads `app.user_turn_rows` and has no other way
-    /// to learn these offsets.
+    /// to learn these offsets. Asserts the exact offsets (not just their
+    /// order) with a first message long enough to genuinely wrap across
+    /// several rows at the TestBackend's width, so a regression that
+    /// undercounts wrapped rows (the char-count/width bug this replaced)
+    /// would move these numbers, not just their relative order.
     #[test]
     fn draw_chat_records_a_row_offset_for_every_user_turn() {
         use ratatui::backend::TestBackend;
@@ -480,7 +550,7 @@ mod tests {
 
         let mut app = App::new(None);
         app.push_system("intro");
-        app.push_user("premier message");
+        app.push_user(&"m".repeat(80));
         for i in 0..5 {
             app.push_system(&format!("filler {i}"));
         }
@@ -494,7 +564,16 @@ mod tests {
 
         let rows = app.user_turn_rows.borrow();
         assert_eq!(rows.len(), 2, "one row offset per user turn");
-        assert!(rows[0] < rows[1], "offsets follow chat order top to bottom");
+        // Golden values measured against ratatui's real WordWrapper output
+        // (chat width 76 for an 80-column TestBackend — see
+        // `chat_content_rect`) — not recomputed via `line_wrapped_rows`
+        // here, so the assertion can't pass by construction. Row math:
+        // "intro" (1) + blank (1) = 2 → first offset. The 80-`m` message
+        // (with the 7-cell `vous ▸ ` prefix) wraps across 3 rows + its
+        // blank (4), then 5 filler lines at 2 rows each (content + blank,
+        // 10) → 2 + 4 + 10 = 16, the second offset.
+        assert_eq!(rows[0], 2);
+        assert_eq!(rows[1], 16);
     }
 
     #[test]

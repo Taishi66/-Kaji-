@@ -39,6 +39,7 @@ pub async fn run(
     let mouse = mouse_enabled();
     if mouse {
         let _ = execute!(stdout(), EnableMouseCapture);
+        install_mouse_panic_hook();
     }
     let result = event_loop(
         &mut terminal,
@@ -55,6 +56,21 @@ pub async fn run(
     }
     ratatui::restore();
     result
+}
+
+/// `ratatui::init()` already installed a panic hook that restores raw
+/// mode/alt-screen, but not mouse capture — a panic while the mouse is
+/// captured would otherwise leave the user's shell eating raw mouse escape
+/// sequences after the crash. Chains onto the existing hook (installed
+/// before this runs, and while still in alt-screen) rather than replacing
+/// it, so both cleanups happen. The nominal `DisableMouseCapture` in `run`
+/// still runs on the non-panic path — calling it twice is a harmless no-op.
+fn install_mouse_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(stdout(), DisableMouseCapture);
+        previous(info);
+    }));
 }
 
 /// `KAJI_MOUSE` kill-switch — mirrors the `condense::enabled` idiom: absent
@@ -87,11 +103,22 @@ fn push_welcome(app: &mut App) {
         "/cost affiche l'usage tokens/coût (session, 5 h, 7 j) — budgets optionnels via KAJI_BUDGET_5H / KAJI_BUDGET_7J",
     );
     app.push_system("/docker liste les conteneurs en cours");
-    app.push_system("PageUp/PageDown/Home/End font défiler le chat · molette = 3 lignes par cran");
-    app.push_system(
-        "Ctrl+↑/↓ saute au tour précédent/suivant · ↑/↓ rappelle l'historique de prompts",
-    );
-    app.push_system("Option/Shift+glisser dans le terminal pour sélectionner du texte");
+    // Souris OFF (KAJI_MOUSE=0): the wheel isn't captured and ↑/↓ go back to
+    // legacy line-scroll (App::mouse_enabled guard in on_event) instead of
+    // prompt-history recall — advertising either would describe controls
+    // that don't work.
+    if app.mouse_enabled {
+        app.push_system(
+            "PageUp/PageDown/Home/End font défiler le chat · molette = 3 lignes par cran",
+        );
+        app.push_system(
+            "Ctrl+↑/↓ saute au tour précédent/suivant · ↑/↓ rappelle l'historique de prompts",
+        );
+        app.push_system("Option/Shift+glisser dans le terminal pour sélectionner du texte");
+    } else {
+        app.push_system("PageUp/PageDown/Home/End font défiler le chat");
+        app.push_system("Ctrl+↑/↓ saute au tour précédent/suivant");
+    }
     app.push_system("Esc interrompt · Ctrl+C quitte");
 }
 
@@ -662,5 +689,43 @@ mod tests {
         maybe_push_welcome(&mut app);
 
         assert_eq!(app.chat.len(), count_before);
+    }
+
+    fn welcome_text(app: &App) -> String {
+        app.chat
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn push_welcome_mentions_wheel_and_history_arrows_when_mouse_is_enabled() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+
+        push_welcome(&mut app);
+
+        let text = welcome_text(&app);
+        assert!(text.contains("molette"));
+        assert!(text.contains("↑/↓ rappelle l'historique"));
+    }
+
+    /// Souris OFF (`KAJI_MOUSE=0`) — the arrows go back to line-scrolling
+    /// the chat (`App::mouse_enabled` guard in `on_event`) and prompt
+    /// history is unreachable from the keyboard, so advertising the wheel
+    /// or ↑/↓ recall would describe controls that don't work.
+    #[test]
+    fn push_welcome_falls_back_to_legacy_scroll_hint_when_mouse_is_disabled() {
+        let mut app = App::new(None);
+        app.mouse_enabled = false;
+
+        push_welcome(&mut app);
+
+        let text = welcome_text(&app);
+        assert!(!text.contains("molette"));
+        assert!(!text.contains("↑/↓ rappelle"));
+        assert!(text.contains("PageUp/PageDown/Home/End"));
+        assert!(text.contains("Ctrl+↑/↓"));
     }
 }

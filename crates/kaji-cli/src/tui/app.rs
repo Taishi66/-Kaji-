@@ -439,8 +439,13 @@ impl App {
         self.history_index = None;
     }
 
+    /// `HISTCONTROL=ignoredups`: an immediately-repeated submit (recalling
+    /// a prompt with ↑ and resubmitting it unedited) doesn't grow the
+    /// history with a duplicate right next to the original.
     fn push_history(&mut self, text: &str) {
-        self.prompt_history.push(text.to_string());
+        if self.prompt_history.last().map(String::as_str) != Some(text) {
+            self.prompt_history.push(text.to_string());
+        }
         self.history_index = None;
     }
 
@@ -512,6 +517,13 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Action::Quit;
         }
+        // A y/n modal (tool approval or gate) swallows Enter/chars, but bare
+        // ↑/↓ used to reach the history-recall branch below before the
+        // modal guards further down even ran — recalling a prompt would
+        // silently mutate `input` behind the modal. Ctrl+↑/↓ (turn jump)
+        // and the mouse wheel are unaffected: only the plain-arrow
+        // history/scroll choice depends on this.
+        let modal_active = self.tool_approval.is_some() || self.gate_open;
         match key.code {
             KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.jump_prev_turn();
@@ -543,7 +555,7 @@ impl App {
             // legacy line-scroll behavior and leaves history unbound to the
             // arrows (documented degradation).
             KeyCode::Up => {
-                if self.mouse_enabled {
+                if !modal_active && self.mouse_enabled {
                     self.history_prev();
                 } else {
                     self.scroll_line_up();
@@ -551,7 +563,7 @@ impl App {
                 return Action::None;
             }
             KeyCode::Down => {
-                if self.mouse_enabled {
+                if !modal_active && self.mouse_enabled {
                     self.history_next();
                 } else {
                     self.scroll_line_down();
@@ -1084,6 +1096,85 @@ mod tests {
         assert_eq!(app.on_event(&key(KeyCode::Char('n'))), Action::GateReject);
     }
 
+    fn open_tool_approval_modal(app: &mut App) {
+        let msg = Message::assistant().with_action_required(
+            "req-modal".to_string(),
+            "shell".to_string(),
+            Default::default(),
+            None,
+        );
+        app.apply_agent_event(&AgentEvent::Message(msg));
+        assert!(
+            app.tool_approval.is_some(),
+            "test setup: modal must be open"
+        );
+    }
+
+    /// Bug: bare ↑/↓ were handled (and returned) before the `tool_approval`/
+    /// `gate_open` guards further down, so while a y/n modal was open, ↑
+    /// still ran `history_prev` and clobbered `input` with a recalled
+    /// prompt — the modal swallows `y`/`n` but arrow-key input leaked past
+    /// it into the draft the user can't even see behind the modal.
+    #[test]
+    fn plain_up_scrolls_instead_of_recalling_history_while_tool_approval_modal_is_open() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+        app.on_event(&key(KeyCode::Char('a')));
+        app.on_event(&key(KeyCode::Enter));
+        assert!(app.input.is_empty());
+        app.chat_overflow.set(30);
+
+        open_tool_approval_modal(&mut app);
+
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(
+            app.input, "",
+            "modal must not let ↑ mutate input via history recall"
+        );
+        assert_eq!(
+            app.history_index, None,
+            "history browsing must not start while a modal is open"
+        );
+        assert_eq!(
+            app.scroll_offset, 1,
+            "↑ still scrolls the chat while a modal blocks history"
+        );
+    }
+
+    #[test]
+    fn plain_down_scrolls_instead_of_recalling_history_while_gate_modal_is_open() {
+        let mut app = App::new(Some(spec()));
+        app.mouse_enabled = true;
+        app.on_event(&key(KeyCode::Char('a')));
+        app.on_event(&key(KeyCode::Enter));
+        app.chat_overflow.set(30);
+        app.scroll_offset = 5;
+        app.start_pass();
+        assert!(app.gate_open);
+
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.input, "");
+        assert_eq!(app.history_index, None);
+        assert_eq!(
+            app.scroll_offset, 4,
+            "↓ still scrolls the chat while the gate modal blocks history"
+        );
+    }
+
+    #[test]
+    fn ctrl_arrows_still_jump_turns_while_a_modal_is_open() {
+        let mut app = App::new(None);
+        app.chat_overflow.set(30);
+        *app.user_turn_rows.borrow_mut() = vec![2, 10, 25];
+        open_tool_approval_modal(&mut app);
+
+        app.on_event(&ctrl_key(KeyCode::Up));
+        assert_eq!(
+            app.scroll_offset, 5,
+            "Ctrl+↑ keeps jumping turns even with a modal open"
+        );
+    }
+
     #[test]
     fn agent_text_chunks_with_same_id_merge_into_one_line() {
         let mut app = App::new(None);
@@ -1384,6 +1475,21 @@ mod tests {
     }
 
     #[test]
+    fn mouse_wheel_is_a_noop_at_the_default_zero_overflow() {
+        let mut app = App::new(None);
+        assert_eq!(
+            app.chat_overflow.get(),
+            0,
+            "fresh App starts with no overflow"
+        );
+
+        app.on_event(&mouse_event(MouseEventKind::ScrollUp));
+        assert_eq!(app.scroll_offset, 0);
+        app.on_event(&mouse_event(MouseEventKind::ScrollDown));
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
     fn ctrl_arrows_jump_between_user_turns() {
         let mut app = App::new(None);
         app.chat_overflow.set(30);
@@ -1417,6 +1523,21 @@ mod tests {
 
         app.on_event(&ctrl_key(KeyCode::Up));
         assert_eq!(app.scroll_offset, 30);
+    }
+
+    /// `jump_prev_turn` looks for a turn strictly above the current top row
+    /// (`row < top`, not `row <= top`) — sitting exactly at the first
+    /// turn's row must be a no-op rather than re-jumping to the same spot.
+    /// Kills the `<` → `<=` mutant.
+    #[test]
+    fn ctrl_up_is_a_noop_when_top_row_exactly_matches_the_first_user_turn() {
+        let mut app = App::new(None);
+        app.chat_overflow.set(30);
+        *app.user_turn_rows.borrow_mut() = vec![2, 10, 25];
+        app.scroll_offset = 28; // top row = 30-28 = 2, exactly the first turn
+
+        app.on_event(&ctrl_key(KeyCode::Up));
+        assert_eq!(app.scroll_offset, 28);
     }
 
     #[test]
@@ -1477,6 +1598,22 @@ mod tests {
         );
     }
 
+    /// `push_history` runs unconditionally on every non-empty submit
+    /// (before the slash-command dispatch), so recalling a slash command
+    /// must work exactly like recalling free text.
+    #[test]
+    fn arrow_up_recalls_a_slash_command() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+        for c in "/help".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::Help);
+
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.input, "/help");
+    }
+
     #[test]
     fn arrow_up_does_nothing_while_editing_a_fresh_non_empty_draft() {
         let mut app = App::new(None);
@@ -1506,6 +1643,41 @@ mod tests {
         // starts from the latest entry again rather than a stale index.
         app.on_event(&key(KeyCode::Up));
         assert_eq!(app.input, "a");
+    }
+
+    /// HISTCONTROL=ignoredups: resubmitting a recalled prompt unedited (a
+    /// common ↑, Enter loop while iterating on a message) must not grow the
+    /// history with a duplicate entry right next to the original.
+    #[test]
+    fn push_history_dedups_consecutive_identical_submits() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+        app.on_event(&key(KeyCode::Char('a')));
+        app.on_event(&key(KeyCode::Enter));
+
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.input, "a");
+        app.on_event(&key(KeyCode::Enter));
+
+        assert_eq!(app.prompt_history, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn push_history_keeps_non_consecutive_repeats() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+        app.on_event(&key(KeyCode::Char('a')));
+        app.on_event(&key(KeyCode::Enter));
+        app.on_event(&key(KeyCode::Char('b')));
+        app.on_event(&key(KeyCode::Enter));
+        app.on_event(&key(KeyCode::Char('a')));
+        app.on_event(&key(KeyCode::Enter));
+
+        assert_eq!(
+            app.prompt_history,
+            vec!["a".to_string(), "b".to_string(), "a".to_string()],
+            "only an immediately-adjacent repeat is deduped"
+        );
     }
 
     #[test]
