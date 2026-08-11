@@ -4046,13 +4046,22 @@ mod tests {
         /// turn's text survive.
         #[tokio::test]
         async fn old_tool_result_is_condensed_on_legacy_path() -> Result<()> {
-            // KAJI_STATE_MACHINE left unset: `state_machine::enabled()`
-            // defaults to false, so `agent.reply()` below runs the legacy
-            // loop. Pin KAJI_CONDENSE to its default (unset = enabled) so a
-            // concurrently-running test in this binary can't flip the
-            // process-wide env var mid-flight (same idiom as
-            // `condense_lifecycle.rs` on the state-machine side).
-            let _guard = env_lock::lock_env([("KAJI_CONDENSE", None::<&str>)]);
+            // Lock both vars for the test's duration: `KAJI_STATE_MACHINE`
+            // unset so `state_machine::enabled()` stays false and
+            // `agent.reply()` below runs the legacy loop (not just by
+            // convention — a leaked `KAJI_STATE_MACHINE=1` from the shell or
+            // CI would silently reroute this test through the state-machine
+            // path and it would stay green without proving anything about
+            // the legacy loop); `KAJI_CONDENSE` pinned to its default
+            // (unset = enabled) so a concurrently-running test in this
+            // binary can't flip either process-wide var mid-flight (same
+            // idiom as `condense_lifecycle.rs` and
+            // `state_machine/tests/agent_reply.rs:105` on the state-machine
+            // side).
+            let _guard = env_lock::lock_env([
+                ("KAJI_CONDENSE", None::<&str>),
+                ("KAJI_STATE_MACHINE", None::<&str>),
+            ]);
 
             let temp_dir = tempfile::tempdir()?;
             let session_manager = Arc::new(SessionManager::new(temp_dir.path().join("data")));
