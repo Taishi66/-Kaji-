@@ -257,6 +257,20 @@ impl App {
             .saturating_sub(visible_width.saturating_sub(1))
     }
 
+    pub fn delete_last_word(&mut self) {
+        let trimmed_len = self.input.trim_end().len();
+        self.input.truncate(trimmed_len);
+        match self
+            .input
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+        {
+            Some((pos, c)) => self.input.truncate(pos + c.len_utf8()),
+            None => self.input.clear(),
+        }
+    }
+
     pub fn scroll_page_up(&mut self) {
         self.scroll_offset = (self.scroll_offset + SCROLL_PAGE).min(self.max_scroll());
     }
@@ -361,6 +375,18 @@ impl App {
             };
         }
         match key.code {
+            KeyCode::Backspace
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.delete_last_word();
+                Action::None
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_last_word();
+                Action::None
+            }
             KeyCode::Char(c) => {
                 self.input.push(c);
                 Action::None
@@ -649,6 +675,48 @@ mod tests {
         app.on_event(&key(KeyCode::Char('a')));
         app.on_event(&key(KeyCode::Backspace));
         assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_previous_word() {
+        let mut app = App::new(None);
+        app.input = "hello world  ".to_string();
+        let ctrl_backspace = Event::Key(KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        });
+        app.on_event(&ctrl_backspace);
+        assert_eq!(app.input, "hello ");
+        app.on_event(&ctrl_backspace);
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn alt_backspace_and_ctrl_w_share_the_behavior() {
+        let alt_backspace = Event::Key(KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::ALT,
+            kind: KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        });
+        let ctrl_w = Event::Key(KeyEvent {
+            code: KeyCode::Char('w'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        });
+
+        let mut app_alt = App::new(None);
+        app_alt.input = "hello world  ".to_string();
+        app_alt.on_event(&alt_backspace);
+        assert_eq!(app_alt.input, "hello ");
+
+        let mut app_ctrl_w = App::new(None);
+        app_ctrl_w.input = "hello world  ".to_string();
+        app_ctrl_w.on_event(&ctrl_w);
+        assert_eq!(app_ctrl_w.input, "hello ");
     }
 
     #[test]

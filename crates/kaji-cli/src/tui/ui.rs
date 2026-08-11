@@ -101,8 +101,23 @@ fn chat_title(app: &App) -> String {
 /// terminals instead of running edge-to-edge across ~200 columns.
 const CHAT_MAX_WIDTH: u16 = 102;
 
+/// Horizontal breathing room so chat text doesn't collide with the block
+/// borders — applied on both sides, inside the width cap above.
+const CHAT_HORIZONTAL_MARGIN: u16 = 1;
+
 fn chat_width(inner_width: u16) -> u16 {
     inner_width.min(CHAT_MAX_WIDTH)
+}
+
+/// Applies the width cap, then the horizontal margin inside it — every
+/// downstream measurement (wrapped_rows, chat_overflow) must read
+/// `chat_rect.width` rather than recompute it, so they stay in sync.
+fn chat_content_rect(inner: Rect) -> Rect {
+    Rect {
+        x: inner.x + CHAT_HORIZONTAL_MARGIN,
+        width: chat_width(inner.width).saturating_sub(CHAT_HORIZONTAL_MARGIN * 2),
+        ..inner
+    }
 }
 
 fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
@@ -111,10 +126,7 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(theme::border_inactive())
         .title(chat_title(app));
     let inner = block.inner(area);
-    let chat_rect = Rect {
-        width: chat_width(inner.width),
-        ..inner
-    };
+    let chat_rect = chat_content_rect(inner);
 
     let mut lines: Vec<Line> = Vec::new();
     for chat_line in &app.chat {
@@ -334,5 +346,28 @@ mod tests {
         assert_eq!(chat_width(200), 102);
         assert_eq!(chat_width(102), 102);
         assert_eq!(chat_width(80), 80);
+    }
+
+    #[test]
+    fn chat_content_rect_applies_horizontal_margin_inside_the_width_cap() {
+        let wide = Rect {
+            x: 1,
+            y: 0,
+            width: 200,
+            height: 10,
+        };
+        let rect = chat_content_rect(wide);
+        assert_eq!(rect.x, 2);
+        assert_eq!(rect.width, 100);
+
+        let narrow = Rect {
+            x: 1,
+            y: 0,
+            width: 40,
+            height: 10,
+        };
+        let rect = chat_content_rect(narrow);
+        assert_eq!(rect.x, 2);
+        assert_eq!(rect.width, 38);
     }
 }
