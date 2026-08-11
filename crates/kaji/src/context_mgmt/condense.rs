@@ -241,12 +241,23 @@ pub struct CondenseTotals {
     pub bytes_after: u64,
 }
 
+/// Accumulates into the session-wide totals returned by [`totals`]. Called
+/// once per provider call, whenever that call's `condense_history` actually
+/// touched something — see `totals` for why the same old tool-result being
+/// counted again on every later call is correct, not double-counting.
 pub fn record_totals(stats: &CondenseStats) {
     TOTAL_RESULTS_TOUCHED.fetch_add(stats.results_touched as u64, Ordering::Relaxed);
     TOTAL_BYTES_BEFORE.fetch_add(stats.bytes_before as u64, Ordering::Relaxed);
     TOTAL_BYTES_AFTER.fetch_add(stats.bytes_after as u64, Ordering::Relaxed);
 }
 
+/// Cumulative bytes *not sent* to the provider across every inference call
+/// in the process — not a count of unique tool-results ever compressed.
+/// `condense_history` recomputes from the raw history on every call (nothing
+/// is condensed in place), so the same old tool-result is re-counted on each
+/// call it stays outside the freshness window. That's the intended
+/// semantics: every call re-sends the full history, so the prompt-token
+/// savings are genuinely realized again on every single call.
 pub fn totals() -> CondenseTotals {
     CondenseTotals {
         results_touched: TOTAL_RESULTS_TOUCHED.load(Ordering::Relaxed),
