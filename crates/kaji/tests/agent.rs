@@ -3919,4 +3919,225 @@ mod tests {
             Ok(())
         }
     }
+
+    /// Legacy-loop parity for the condense transform (AGENTS.md requires
+    /// behavior changes to `stream_response_from_provider` be proven on both
+    /// paths). The state-machine path already has e2e coverage in
+    /// `state_machine::tests::condense_lifecycle`; this mirrors that
+    /// scenario with `KAJI_STATE_MACHINE` unset so the legacy loop
+    /// (`agent.rs`) is exercised instead.
+    #[cfg(test)]
+    mod condense_legacy_tests {
+        use super::*;
+        use async_trait::async_trait;
+        use kaji::agents::{AgentConfig, SessionConfig};
+        use kaji::config::{KajiMode, PermissionManager};
+        use kaji::conversation::message::{Message, MessageContent};
+        use kaji::providers::base::{stream_from_single_message, MessageStream, Provider};
+        use kaji::session::{SessionManager, SessionType};
+        use kaji_providers::conversation::token_usage::{ProviderUsage, Usage};
+        use kaji_providers::errors::ProviderError;
+        use kaji_providers::model::ModelConfig;
+        use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, Tool};
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+
+        fn numbered_lines(n: usize) -> String {
+            (1..=n)
+                .map(|i| format!("line_{i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        fn tool_response_text(messages: &[Message], id: &str) -> Option<String> {
+            messages.iter().find_map(|message| {
+                message.content.iter().find_map(|content| {
+                    let MessageContent::ToolResponse(response) = content else {
+                        return None;
+                    };
+                    if response.id != id {
+                        return None;
+                    }
+                    let result = response.tool_result.as_ref().ok()?;
+                    Some(
+                        result
+                            .content
+                            .iter()
+                            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                })
+            })
+        }
+
+        /// Captures the messages passed to the most recent `stream` call so
+        /// the test can inspect exactly what would go out over the wire.
+        /// This is the legacy-loop equivalent of
+        /// `state_machine::tests::dummy_api::ApiCall::input_contains`: there
+        /// is no HTTP boundary to intercept here, so the mock `Provider`
+        /// itself is the capture point.
+        struct CondenseCapturingProvider {
+            call_count: AtomicUsize,
+            last_messages: Mutex<Vec<Message>>,
+        }
+
+        impl CondenseCapturingProvider {
+            fn new() -> Self {
+                Self {
+                    call_count: AtomicUsize::new(0),
+                    last_messages: Mutex::new(Vec::new()),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl Provider for CondenseCapturingProvider {
+            async fn stream(
+                &self,
+                _model_config: &ModelConfig,
+                _system_prompt: &str,
+                messages: &[Message],
+                _tools: &[Tool],
+            ) -> Result<MessageStream, ProviderError> {
+                *self.last_messages.lock().unwrap() = messages.to_vec();
+                let call = self.call_count.fetch_add(1, Ordering::SeqCst);
+                let text = if call == 0 { "ok two" } else { "ok three" };
+                let usage = ProviderUsage::new("mock-model".to_string(), Usage::default());
+                Ok(stream_from_single_message(
+                    Message::assistant().with_text(text),
+                    usage,
+                ))
+            }
+
+            fn get_name(&self) -> &str {
+                "condense-capturing-mock"
+            }
+        }
+
+        async fn run_reply(agent: &Agent, session_id: &str, text: &str) -> Result<()> {
+            let stream = agent
+                .reply(
+                    Message::user().with_text(text),
+                    SessionConfig {
+                        id: session_id.to_string(),
+                        schedule_id: None,
+                        max_turns: Some(1),
+                        retry_config: None,
+                    },
+                    None,
+                )
+                .await?;
+            tokio::pin!(stream);
+            while let Some(event) = stream.next().await {
+                event?;
+            }
+            Ok(())
+        }
+
+        /// Seeds an old turn (user text, assistant tool_request, user
+        /// tool_response carrying a 200-line result) then runs two more user
+        /// turns, pushing the old tool-result past the default
+        /// `keep_raw_turns = 2` freshness window. Asserts on the messages
+        /// the mock provider actually received for the third turn: the
+        /// condense marker is present, the middle of the old result
+        /// (`line_100`) is gone, and the head (`line_1`) plus the current
+        /// turn's text survive.
+        #[tokio::test]
+        async fn old_tool_result_is_condensed_on_legacy_path() -> Result<()> {
+            // KAJI_STATE_MACHINE left unset: `state_machine::enabled()`
+            // defaults to false, so `agent.reply()` below runs the legacy
+            // loop. Pin KAJI_CONDENSE to its default (unset = enabled) so a
+            // concurrently-running test in this binary can't flip the
+            // process-wide env var mid-flight (same idiom as
+            // `condense_lifecycle.rs` on the state-machine side).
+            let _guard = env_lock::lock_env([("KAJI_CONDENSE", None::<&str>)]);
+
+            let temp_dir = tempfile::tempdir()?;
+            let session_manager = Arc::new(SessionManager::new(temp_dir.path().join("data")));
+            let agent = Agent::with_config(AgentConfig::new(
+                Arc::clone(&session_manager),
+                Arc::new(PermissionManager::new(temp_dir.path().join("config"))),
+                None,
+                KajiMode::Auto,
+                true,
+                KajiPlatform::KajiCli,
+            ));
+            let provider = Arc::new(CondenseCapturingProvider::new());
+
+            let session = session_manager
+                .create_session(
+                    PathBuf::from("."),
+                    "condense-legacy-test".to_string(),
+                    SessionType::Hidden,
+                    KajiMode::Auto,
+                )
+                .await?;
+
+            agent
+                .update_provider(
+                    provider.clone(),
+                    ModelConfig::new("mock-model"),
+                    &session.id,
+                )
+                .await?;
+
+            session_manager
+                .add_message(&session.id, &Message::user().with_text("turn one"))
+                .await?;
+            session_manager
+                .add_message(
+                    &session.id,
+                    &Message::assistant().with_tool_request(
+                        "big-result",
+                        Ok(CallToolRequestParams::new("read_file")),
+                    ),
+                )
+                .await?;
+            session_manager
+                .add_message(
+                    &session.id,
+                    &Message::user().with_tool_response(
+                        "big-result",
+                        Ok(CallToolResult::success(vec![ContentBlock::text(
+                            numbered_lines(200),
+                        )])),
+                    ),
+                )
+                .await?;
+
+            run_reply(&agent, &session.id, "turn two").await?;
+            run_reply(&agent, &session.id, "turn three").await?;
+
+            let last_messages = provider.last_messages.lock().unwrap().clone();
+            let condensed_text = tool_response_text(&last_messages, "big-result").expect(
+                "old tool-result should still be present (condensed) in the outbound history",
+            );
+            assert!(
+                condensed_text.contains("lignes omises"),
+                "old tool-result from turn one should be condensed by turn three's inference: {condensed_text:?}"
+            );
+            assert!(
+                !condensed_text.contains("line_100"),
+                "middle of the old tool-result should have been omitted: {condensed_text:?}"
+            );
+            assert!(
+                condensed_text.contains("line_1"),
+                "head of the old tool-result should be kept: {condensed_text:?}"
+            );
+
+            let recent_text = last_messages
+                .iter()
+                .map(|m| m.as_concat_text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                recent_text.contains("turn three"),
+                "the current turn's user text must reach the provider intact: {recent_text:?}"
+            );
+
+            Ok(())
+        }
+    }
 }
