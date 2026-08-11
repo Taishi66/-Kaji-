@@ -1,6 +1,7 @@
 use crate::tui::theme;
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use serde::Deserialize;
 
 /// Renders a maison markdown subset (headings, bold, italic, inline code,
 /// fenced code blocks, lists, blockquotes) into styled ratatui lines. No
@@ -9,24 +10,47 @@ use ratatui::text::{Line, Span};
 pub fn render_markdown(input: &str) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
+    let mut in_chart_block = false;
+    let mut chart_buf: Vec<&str> = Vec::new();
     let mut table_buf: Vec<&str> = Vec::new();
 
     for raw_line in input.lines() {
-        if raw_line.trim_start().starts_with("```") {
+        let trimmed = raw_line.trim_start();
+        if trimmed.starts_with("```") {
             flush_table_buffer(&mut table_buf, &mut lines);
-            in_code_block = !in_code_block;
+            if in_chart_block {
+                lines.extend(render_chart_block(&chart_buf));
+                chart_buf.clear();
+                in_chart_block = false;
+            } else if in_code_block {
+                in_code_block = false;
+            } else {
+                let tag = trimmed.trim_start_matches('`').trim();
+                if tag == "kaji-chart" {
+                    in_chart_block = true;
+                } else {
+                    in_code_block = true;
+                }
+            }
+            continue;
+        }
+        if in_chart_block {
+            chart_buf.push(raw_line);
             continue;
         }
         if in_code_block {
             lines.push(render_code_line(raw_line));
             continue;
         }
-        if raw_line.trim_start().starts_with('|') {
+        if trimmed.starts_with('|') {
             table_buf.push(raw_line);
             continue;
         }
         flush_table_buffer(&mut table_buf, &mut lines);
         lines.push(render_line(raw_line));
+    }
+    if in_chart_block {
+        lines.extend(chart_buf.iter().map(|line| render_code_line(line)));
     }
     flush_table_buffer(&mut table_buf, &mut lines);
 
@@ -213,6 +237,182 @@ fn render_code_line(raw_line: &str) -> Line<'static> {
         Span::styled("│ ", theme::dim()),
         Span::styled(raw_line.to_string(), theme::code_block()),
     ])
+}
+
+const CHART_LABEL_CAP: usize = 24;
+const CHART_BAR_MAX_WIDTH: usize = 40;
+const PIE_COLORS: [Color; 4] = [
+    theme::VERMILLON,
+    theme::OR_PATINE,
+    theme::INDIGO,
+    theme::ENCRE,
+];
+
+#[derive(Deserialize)]
+struct ChartSpec {
+    #[serde(rename = "type")]
+    kind: ChartKind,
+    title: Option<String>,
+    items: Vec<ChartItem>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ChartKind {
+    Bar,
+    Pie,
+}
+
+#[derive(Deserialize)]
+struct ChartItem {
+    label: String,
+    value: f64,
+}
+
+/// Renders a `kaji-chart` fenced block: parses the buffered JSON body and
+/// draws a bar or pie chart. Any failure (invalid JSON, empty items,
+/// negative or non-finite values, zero total/max) falls back to the same
+/// raw rendering as an ordinary fenced code block — arbitrary LLM output
+/// must never panic here.
+fn render_chart_block(body: &[&str]) -> Vec<Line<'static>> {
+    match parse_chart_spec(body) {
+        Some(spec) => render_chart(&spec),
+        None => body.iter().map(|line| render_code_line(line)).collect(),
+    }
+}
+
+fn parse_chart_spec(body: &[&str]) -> Option<ChartSpec> {
+    let json = body.join("\n");
+    let spec: ChartSpec = serde_json::from_str(&json).ok()?;
+    if spec.items.is_empty() {
+        return None;
+    }
+    if spec
+        .items
+        .iter()
+        .any(|item| !item.value.is_finite() || item.value < 0.0)
+    {
+        return None;
+    }
+    let total: f64 = spec.items.iter().map(|item| item.value).sum();
+    if !total.is_finite() {
+        return None;
+    }
+    match spec.kind {
+        ChartKind::Bar => {
+            let max = spec
+                .items
+                .iter()
+                .fold(0.0_f64, |acc, item| acc.max(item.value));
+            if max <= 0.0 {
+                return None;
+            }
+        }
+        ChartKind::Pie => {
+            if total <= 0.0 {
+                return None;
+            }
+        }
+    }
+    Some(spec)
+}
+
+fn render_chart(spec: &ChartSpec) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    if let Some(title) = &spec.title {
+        out.push(Line::from(Span::styled(title.clone(), theme::title())));
+    }
+
+    let label_width = spec
+        .items
+        .iter()
+        .map(|item| truncate_label(&item.label, CHART_LABEL_CAP).chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(CHART_LABEL_CAP);
+
+    match spec.kind {
+        ChartKind::Bar => {
+            let max = spec
+                .items
+                .iter()
+                .fold(0.0_f64, |acc, item| acc.max(item.value));
+            for item in &spec.items {
+                out.push(render_bar_line(item, max, label_width));
+            }
+        }
+        ChartKind::Pie => {
+            let total: f64 = spec.items.iter().map(|item| item.value).sum();
+            for (i, item) in spec.items.iter().enumerate() {
+                out.push(render_pie_line(item, total, label_width, i));
+            }
+        }
+    }
+    out
+}
+
+fn render_bar_line(item: &ChartItem, max: f64, label_width: usize) -> Line<'static> {
+    let bar = "█".repeat(chart_bar_width(item.value, max));
+    Line::from(vec![
+        Span::styled(pad_label(&item.label, label_width), theme::text()),
+        Span::raw("  "),
+        Span::styled(bar, theme::accent()),
+        Span::raw("  "),
+        Span::styled(format_chart_value(item.value), theme::text()),
+    ])
+}
+
+fn render_pie_line(item: &ChartItem, total: f64, label_width: usize, idx: usize) -> Line<'static> {
+    let color = Style::default().fg(PIE_COLORS[idx % PIE_COLORS.len()]);
+    let bar = "█".repeat(chart_bar_width(item.value, total));
+    let pct = (item.value / total * 100.0).round() as i64;
+    Line::from(vec![
+        Span::styled("●", color),
+        Span::raw(" "),
+        Span::styled(pad_label(&item.label, label_width), theme::text()),
+        Span::raw("  "),
+        Span::styled(bar, color),
+        Span::raw("  "),
+        Span::styled(format!("{pct} %"), theme::text()),
+    ])
+}
+
+fn chart_bar_width(value: f64, denom: f64) -> usize {
+    if denom <= 0.0 || value <= 0.0 {
+        return 0;
+    }
+    let width = ((value / denom) * CHART_BAR_MAX_WIDTH as f64).round() as usize;
+    width.clamp(1, CHART_BAR_MAX_WIDTH)
+}
+
+fn format_chart_value(value: f64) -> String {
+    if value.fract() == 0.0 && value.abs() < 1e15 {
+        return (value as i64).to_string();
+    }
+    let s = format!("{value:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+fn truncate_label(label: &str, cap: usize) -> String {
+    let chars: Vec<char> = label.chars().collect();
+    if chars.len() <= cap {
+        chars.into_iter().collect()
+    } else if cap == 0 {
+        String::new()
+    } else {
+        let truncated: String = chars[..cap - 1].iter().collect();
+        format!("{truncated}…")
+    }
+}
+
+fn pad_label(label: &str, width: usize) -> String {
+    let truncated = truncate_label(label, CHART_LABEL_CAP);
+    let len = truncated.chars().count();
+    if len >= width {
+        truncated
+    } else {
+        format!("{truncated}{}", " ".repeat(width - len))
+    }
 }
 
 fn render_heading(line: &str) -> Option<Line<'static>> {
@@ -496,6 +696,79 @@ mod tests {
         assert!(plain_text(&lines[1]).starts_with('┌'));
         assert!(plain_text(&lines[5]).starts_with('└'));
         assert_eq!(plain_text(&lines[6]), "apres");
+    }
+
+    #[test]
+    fn renders_bar_chart_block() {
+        let input = "```kaji-chart\n{\"type\":\"bar\",\"items\":[{\"label\":\"a\",\"value\":10},{\"label\":\"bb\",\"value\":20},{\"label\":\"ccc\",\"value\":5}]}\n```";
+        let lines = render_markdown(input);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            plain_text(&lines[0]),
+            format!("a    {}  10", "█".repeat(20))
+        );
+        assert_eq!(
+            plain_text(&lines[1]),
+            format!("bb   {}  20", "█".repeat(40))
+        );
+        assert_eq!(plain_text(&lines[2]), format!("ccc  {}  5", "█".repeat(10)));
+    }
+
+    #[test]
+    fn renders_pie_chart_with_percentages() {
+        let input = "```kaji-chart\n{\"type\":\"pie\",\"items\":[{\"label\":\"x\",\"value\":1},{\"label\":\"y\",\"value\":1},{\"label\":\"z\",\"value\":3}]}\n```";
+        let lines = render_markdown(input);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            plain_text(&lines[0]),
+            format!("● x  {}  20 %", "█".repeat(8))
+        );
+        assert_eq!(
+            plain_text(&lines[1]),
+            format!("● y  {}  20 %", "█".repeat(8))
+        );
+        assert_eq!(
+            plain_text(&lines[2]),
+            format!("● z  {}  60 %", "█".repeat(24))
+        );
+
+        let dot0 = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content == "●")
+            .expect("pastille span");
+        assert_eq!(dot0.style.fg, Some(theme::VERMILLON));
+        let dot1 = lines[1]
+            .spans
+            .iter()
+            .find(|s| s.content == "●")
+            .expect("pastille span");
+        assert_eq!(dot1.style.fg, Some(theme::OR_PATINE));
+    }
+
+    #[test]
+    fn invalid_chart_json_falls_back_to_raw_block() {
+        let input = "```kaji-chart\nnot json\n```";
+        let lines = render_markdown(input);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(plain_text(&lines[0]), "│ not json");
+    }
+
+    #[test]
+    fn empty_items_falls_back() {
+        let input = "```kaji-chart\n{\"type\":\"bar\",\"items\":[]}\n```";
+        let lines = render_markdown(input);
+        assert_eq!(lines.len(), 1);
+        assert!(plain_text(&lines[0]).contains("\"items\":[]"));
+    }
+
+    #[test]
+    fn negative_values_fall_back() {
+        let input =
+            "```kaji-chart\n{\"type\":\"bar\",\"items\":[{\"label\":\"a\",\"value\":-1}]}\n```";
+        let lines = render_markdown(input);
+        assert_eq!(lines.len(), 1);
+        assert!(plain_text(&lines[0]).contains("\"value\":-1"));
     }
 
     #[test]
