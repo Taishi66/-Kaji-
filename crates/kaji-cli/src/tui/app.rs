@@ -87,6 +87,14 @@ pub struct App {
     /// count) — reset per turn by `reset_turn_visibility`. Drives the
     /// loader zen: it disappears the moment there is something to read.
     pub turn_has_visible_output: bool,
+    /// Set the first time a `Thinking` block renders a chat line this turn
+    /// (`merge_agent_thinking`) — unlike `turn_thinking_visible`, this does
+    /// NOT depend on the current value of `show_thinking`: once a 思 line
+    /// is on screen it stays on screen even if `/think`/F3 toggles off
+    /// mid-turn, so the loader must keep treating the turn as "already has
+    /// visible content" regardless of the toggle. Reset per turn by
+    /// `reset_turn_visibility`.
+    turn_thinking_shown: bool,
     /// Togglable via `/think` and F3 — default off (zen). When on, streamed
     /// `Thinking` blocks render dimmed/italic with the `思` prefix instead
     /// of being dropped.
@@ -135,6 +143,7 @@ impl App {
             turn_pending: false,
             turn_started: None,
             turn_has_visible_output: false,
+            turn_thinking_shown: false,
             show_thinking: false,
             tokens_turn_in: 0,
             tokens_turn_out: 0,
@@ -267,6 +276,7 @@ impl App {
     /// zen and the thinking-merge chain for the new turn.
     pub fn reset_turn_visibility(&mut self) {
         self.turn_has_visible_output = false;
+        self.turn_thinking_shown = false;
         self.last_thinking_msg_id = None;
     }
 
@@ -280,11 +290,14 @@ impl App {
         self.push_system(msg);
     }
 
-    /// True once a `Thinking` block has streamed in for the current turn
-    /// AND `show_thinking` is on — the loader's exception clause ("pas de
-    /// loader quand `show_thinking` ON et que du thinking s'affiche déjà").
+    /// True once a `Thinking` block has rendered a chat line for the
+    /// current turn — the loader's exception clause ("pas de loader quand
+    /// `show_thinking` ON et que du thinking s'affiche déjà"). Deliberately
+    /// independent of the *current* `show_thinking` value: once a 思 line
+    /// is visible, toggling the setting off mid-turn must not bring the
+    /// loader back underneath it.
     pub fn turn_thinking_visible(&self) -> bool {
-        self.show_thinking && self.last_thinking_msg_id.is_some()
+        self.turn_thinking_shown
     }
 
     /// Loader zen visibility: a turn is in flight and nothing readable has
@@ -714,6 +727,11 @@ impl App {
             rendered: None,
         });
         self.last_agent_msg_id = message_id.clone();
+        // A same-id message can interleave Text and Thinking blocks — the
+        // new line just pushed is now `chat.last()`, so any in-flight
+        // thinking merge chain pointing at the same id would otherwise
+        // append its next chunk onto THIS (visible, normal-style) line.
+        self.last_thinking_msg_id = None;
     }
 
     fn merge_agent_thinking(&mut self, message_id: &Option<String>, text: &str) {
@@ -730,6 +748,10 @@ impl App {
             rendered: None,
         });
         self.last_thinking_msg_id = message_id.clone();
+        self.turn_thinking_shown = true;
+        // Mirror of the invalidation above: the pushed line is now
+        // `chat.last()`, so the text merge chain must not append onto it.
+        self.last_agent_msg_id = None;
     }
 }
 
@@ -1550,6 +1572,51 @@ mod tests {
         assert_eq!(thinking_lines[1].text, "après");
     }
 
+    /// Regression: `merge_agent_text`/`merge_agent_thinking` used to only
+    /// invalidate their OWN merge-chain id on push, not the other one — so
+    /// a same-id `Thinking → Text → Thinking` interleave left
+    /// `last_thinking_msg_id` still pointing at the (now stale) first
+    /// thinking chunk's id, and the 3rd chunk merged onto `chat.last_mut()`
+    /// which by then was the TEXT line, leaking reasoning into the visible
+    /// reply under the normal agent style instead of getting its own dim
+    /// `思` line.
+    #[test]
+    fn thinking_text_thinking_same_id_keeps_three_separate_lines_with_correct_styles() {
+        let mut app = App::new(None);
+        app.show_thinking = true;
+        agent_thinks(&mut app, "m1", "réflexion 1");
+        agent_says(&mut app, "m1", "réponse");
+        agent_thinks(&mut app, "m1", "réflexion 2");
+
+        assert_eq!(app.chat.len(), 3);
+        assert_eq!(app.chat[0].sender, Sender::Thinking);
+        assert_eq!(app.chat[0].text, "réflexion 1");
+        assert_eq!(app.chat[1].sender, Sender::Agent);
+        assert_eq!(app.chat[1].text, "réponse");
+        assert_eq!(app.chat[2].sender, Sender::Thinking);
+        assert_eq!(app.chat[2].text, "réflexion 2");
+    }
+
+    /// Mirror of the above: `Text → Thinking → Text` under the same id must
+    /// not let the 3rd chunk (visible reply) merge onto the thinking line —
+    /// that would swallow part of the answer into the dim/italic register.
+    #[test]
+    fn text_thinking_text_same_id_keeps_three_separate_lines_with_correct_styles() {
+        let mut app = App::new(None);
+        app.show_thinking = true;
+        agent_says(&mut app, "m1", "réponse 1");
+        agent_thinks(&mut app, "m1", "réflexion");
+        agent_says(&mut app, "m1", "réponse 2");
+
+        assert_eq!(app.chat.len(), 3);
+        assert_eq!(app.chat[0].sender, Sender::Agent);
+        assert_eq!(app.chat[0].text, "réponse 1");
+        assert_eq!(app.chat[1].sender, Sender::Thinking);
+        assert_eq!(app.chat[1].text, "réflexion");
+        assert_eq!(app.chat[2].sender, Sender::Agent);
+        assert_eq!(app.chat[2].text, "réponse 2");
+    }
+
     #[test]
     fn thinking_does_not_mark_turn_output_visible() {
         let mut app = App::new(None);
@@ -1615,6 +1682,30 @@ mod tests {
         assert!(
             !app.show_loader(),
             "thinking ON and already displaying this turn hides the loader"
+        );
+    }
+
+    /// Regression: toggling `/think` OFF mid-turn, after a thinking line
+    /// already rendered but before any visible `Text` chunk, used to bring
+    /// the loader back — `turn_thinking_visible()` was gated on the
+    /// *current* value of `show_thinking`, not on whether a thinking line
+    /// is actually sitting in the chat. The ensō would reappear underneath
+    /// an already-visible 思 line.
+    #[test]
+    fn loader_stays_hidden_after_toggling_thinking_off_mid_turn_once_thinking_was_shown() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+        app.show_thinking = true;
+        agent_thinks(&mut app, "m1", "raisonnement");
+        assert!(
+            !app.show_loader(),
+            "thinking visible this turn hides the loader"
+        );
+
+        app.show_thinking = false;
+        assert!(
+            !app.show_loader(),
+            "loader must not reappear under an already-visible thinking line just because the toggle flipped off"
         );
     }
 }

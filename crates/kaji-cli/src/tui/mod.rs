@@ -517,6 +517,25 @@ mod tests {
         assert_eq!(app.chat[1].text, "bonjour");
     }
 
+    /// `show_thinking` defaults off — a persisted `Thinking` block replayed
+    /// via `--resume` must be dropped the same way it would be live,
+    /// instead of surfacing reasoning the user never opted into seeing.
+    #[test]
+    fn seed_chat_drops_persisted_thinking_blocks_when_show_thinking_is_off_by_default() {
+        let mut app = App::new(None);
+        let mut thinking_msg = Message::assistant().with_thinking("raisonnement persisté", "sig");
+        thinking_msg.id = Some("m1".to_string());
+        let conversation = Conversation::new_unvalidated([thinking_msg]);
+
+        assert!(!app.show_thinking);
+        seed_chat(&mut app, &conversation);
+
+        assert!(!app
+            .chat
+            .iter()
+            .any(|l| matches!(l.sender, Sender::Thinking)));
+    }
+
     #[test]
     fn seed_chat_replays_tool_request_and_response_pair() {
         let mut app = App::new(None);
