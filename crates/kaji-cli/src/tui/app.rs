@@ -5,6 +5,7 @@ use kaji_core::sdd::{SddPass, SpecDoc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::text::Line;
 use rmcp::model::Role;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -92,6 +93,13 @@ pub struct App {
     pub tool_approval: Option<ToolApprovalRequest>,
     pub driver: PassDriver,
     pub scroll_offset: u16,
+    /// Real overflow (wrapped rows beyond the viewport) measured by
+    /// `draw_chat` at render time — `max_scroll` reads this instead of
+    /// counting raw `\n` lines, which undercounts once markdown expansion
+    /// and terminal-width wrapping are in play. `Cell` because `draw_chat`
+    /// only borrows `&App`; the UI loop is single-threaded so `Cell<u16>`
+    /// (Send, not Sync) is sufficient — no `Sync` bound is needed here.
+    pub chat_overflow: Cell<u16>,
     validate_buffer: String,
     last_agent_msg_id: Option<String>,
     pending_tools: HashMap<String, usize>,
@@ -121,6 +129,7 @@ impl App {
             tool_approval: None,
             driver: PassDriver::Idle,
             scroll_offset: 0,
+            chat_overflow: Cell::new(0),
             validate_buffer: String::new(),
             last_agent_msg_id: None,
             pending_tools: HashMap::new(),
@@ -232,15 +241,8 @@ impl App {
         self.turn_started = None;
     }
 
-    fn total_chat_lines(&self) -> u16 {
-        self.chat
-            .iter()
-            .map(|line| line.text.split('\n').count() as u16)
-            .sum()
-    }
-
     fn max_scroll(&self) -> u16 {
-        self.total_chat_lines().saturating_sub(1)
+        self.chat_overflow.get()
     }
 
     pub fn input_cursor_chars(&self) -> u16 {
@@ -261,6 +263,14 @@ impl App {
 
     pub fn scroll_page_down(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(SCROLL_PAGE);
+    }
+
+    pub fn scroll_line_up(&mut self) {
+        self.scroll_offset = (self.scroll_offset + 1).min(self.max_scroll());
+    }
+
+    pub fn scroll_line_down(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
     }
 
     pub fn scroll_home(&mut self) {
@@ -305,6 +315,19 @@ impl App {
             }
             KeyCode::PageDown => {
                 self.scroll_page_down();
+                return Action::None;
+            }
+            // Terminals translate the mouse wheel/trackpad into Up/Down arrow
+            // keys while in the alternate screen (iTerm2/Terminal.app
+            // default) — this doubles as the wheel-scroll path. We don't
+            // enable mouse capture instead: that would break native text
+            // selection/copy in the terminal.
+            KeyCode::Up => {
+                self.scroll_line_up();
+                return Action::None;
+            }
+            KeyCode::Down => {
+                self.scroll_line_down();
                 return Action::None;
             }
             KeyCode::Home => {
@@ -927,6 +950,7 @@ mod tests {
         for i in 0..30 {
             app.push_system(&format!("line {i}"));
         }
+        app.chat_overflow.set(30);
         assert_eq!(app.scroll_offset, 0);
         app.scroll_page_up();
         assert!(app.scroll_offset > 0);
@@ -954,12 +978,35 @@ mod tests {
         for i in 0..30 {
             app.push_system(&format!("line {i}"));
         }
+        app.chat_overflow.set(30);
         assert_eq!(app.on_event(&key(KeyCode::PageUp)), Action::None);
         assert!(app.scroll_offset > 0);
         assert_eq!(app.on_event(&key(KeyCode::Home)), Action::None);
         assert!(app.scroll_offset > 0);
         assert_eq!(app.on_event(&key(KeyCode::End)), Action::None);
         assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn arrow_keys_scroll_the_chat_line_by_line() {
+        let mut app = App::new(None);
+        app.chat_overflow.set(30);
+        assert_eq!(app.on_event(&key(KeyCode::Up)), Action::None);
+        assert_eq!(app.on_event(&key(KeyCode::Up)), Action::None);
+        assert_eq!(app.scroll_offset, 2);
+        assert_eq!(app.on_event(&key(KeyCode::Down)), Action::None);
+        assert_eq!(app.scroll_offset, 1);
+    }
+
+    #[test]
+    fn scroll_is_bounded_by_measured_overflow_not_raw_line_count() {
+        let mut app = App::new(None);
+        app.push_system("one raw line");
+        app.chat_overflow.set(25);
+        app.scroll_page_up();
+        app.scroll_page_up();
+        app.scroll_page_up();
+        assert_eq!(app.scroll_offset, 25);
     }
 
     #[test]

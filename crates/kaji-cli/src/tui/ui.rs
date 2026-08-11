@@ -124,6 +124,7 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
         .map(|line| line_wrapped_rows(line, inner.width))
         .sum();
     let base_scroll = wrapped_rows.saturating_sub(inner.height as usize);
+    app.chat_overflow.set(base_scroll as u16);
     let scroll = base_scroll.saturating_sub(app.scroll_offset as usize) as u16;
 
     let paragraph = Paragraph::new(Text::from(lines))
