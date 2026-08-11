@@ -143,6 +143,14 @@ pub fn condense_text(text: &str, max_lines: usize) -> Option<String> {
     let rtrimmed: Vec<&str> = stripped.lines().map(|line| line.trim_end()).collect();
     let deduped = dedup_consecutive(&rtrimmed);
 
+    // head(>=1) + marker(1) + tail(>=1) needs at least 3 lines to represent a
+    // truncation at all; below that, the two `.max(1)` floors would make the
+    // truncated output longer than max_lines and a second pass would
+    // re-truncate it, breaking idempotence. Clamp the working budget instead
+    // of the raw parameter so tiny budgets still degrade to "head+marker+tail"
+    // rather than panicking or oscillating.
+    let max_lines = max_lines.max(3);
+
     let result = if deduped.len() > max_lines {
         let head = (max_lines * 60 / 100).max(1).min(deduped.len());
         let tail = (max_lines * 25 / 100).max(1).min(deduped.len() - head);
@@ -435,6 +443,57 @@ mod tests {
             let text = result.content[0].as_text().unwrap().text.as_str();
             assert!(text.contains("lignes omises"));
         }
+    }
+
+    #[test]
+    fn condense_text_is_idempotent_for_tiny_budgets() {
+        // Reported repro: max_lines=1 on 10 lines used to re-truncate a
+        // second time (marker "8 lignes omises" then "1 lignes omises").
+        let once = condense_text(&numbered(10), 1).expect("first pass should condense");
+        let twice = condense_text(&once, 1);
+        assert_eq!(twice, None, "second pass must be a no-op: {once:?}");
+
+        for max_lines in [1usize, 2, 3, 40] {
+            let source = numbered(200);
+            let once = condense_text(&source, max_lines).expect("first pass should condense");
+            let twice = condense_text(&once, max_lines).unwrap_or_else(|| once.clone());
+            assert_eq!(
+                twice, once,
+                "max_lines={max_lines}: re-condensing an already-condensed result must not change it"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_non_text_content_block_in_tool_result_is_untouched() {
+        let mixed_result = CallToolResult::success(vec![
+            ContentBlock::text(numbered(200)),
+            ContentBlock::image("base64data", "image/png"),
+        ]);
+        let msgs = vec![
+            user_text("q1"),
+            Message::user().with_content(MessageContentBlock::ToolResponse(ToolResponse {
+                id: "a".into(),
+                tool_result: Ok(mixed_result),
+                metadata: None,
+            })),
+            user_text("q2"),
+            user_text("q3"),
+        ];
+        let (out, stats) = condense_history(&msgs, 2, &CondenseBudget::default());
+        let response = out[1]
+            .content
+            .iter()
+            .find_map(MessageContentBlock::as_tool_response)
+            .unwrap();
+        let result = response.tool_result.as_ref().unwrap();
+        assert!(result.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("lignes omises"));
+        assert!(matches!(result.content[1], ContentBlock::Image(_)));
+        assert_eq!(stats.results_touched, 1);
     }
 
     #[test]
