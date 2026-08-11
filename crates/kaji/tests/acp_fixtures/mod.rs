@@ -14,7 +14,6 @@ use fs_err as fs;
 use kaji::acp::server::{serve, AcpProviderFactory, KajiAcpAgent, KajiAcpAgentOptions};
 pub use kaji::acp::{map_permission_response, PermissionDecision};
 use kaji::agents::KajiPlatform;
-use kaji::builtin_extension::register_builtin_extensions;
 use kaji::config::paths::Paths;
 use kaji::config::{KajiMode, PermissionManager};
 use kaji::providers::api_client::{ApiClient, AuthMethod as ApiAuthMethod};
@@ -779,7 +778,6 @@ where
     if std::env::var_os("KAJI_PATH_ROOT").is_none() {
         std::env::set_var("KAJI_PATH_ROOT", ACP_CONFIG_ROOT.path());
     }
-    register_builtin_extensions(kaji_mcp::BUILTIN_EXTENSIONS.clone());
 
     let handle = std::thread::Builder::new()
         .name("acp-test".to_string())
