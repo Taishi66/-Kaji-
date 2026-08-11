@@ -334,11 +334,14 @@ fn draw_palette(frame: &mut Frame, app: &App, input_area: Rect) {
         .map(|c| name_w + 2 + c.desc.chars().count() + 4)
         .max()
         .unwrap_or(0) as u16;
+    // Ceiling last: the 20-column floor must never win over the space
+    // actually available, or the box is drawn wider than `input_area` and
+    // spills into neighboring UI (or past the terminal on narrower widths).
     let width = (inner_w + 2)
-        .min(input_area.width.saturating_sub(2))
-        .max(20);
+        .max(20)
+        .min(input_area.width.saturating_sub(2));
     let height = (matches.len() as u16 + 2).min(input_area.y);
-    if height < 3 {
+    if width < 4 || height < 3 {
         return;
     }
     let rows = (height - 2) as usize;
@@ -897,5 +900,73 @@ mod tests {
             .expect("draw must succeed against a TestBackend");
 
         assert!(app.user_turn_rows.borrow().is_empty());
+    }
+
+    /// Regression: the width clamp used to apply `.max(20)` *after*
+    /// `.min(available)`, so the floor could win over the ceiling — on a
+    /// narrow column (e.g. the left side of the 72/28 SPEC-panel split on a
+    /// small terminal) the palette was drawn wider than the space actually
+    /// available and spilled past its own `input_area` into neighboring UI.
+    /// `input_area` here is computed with the exact same `Layout` calls
+    /// `draw()` uses for a 24x12 terminal with the SPEC panel visible (left
+    /// column narrows to 17 columns), so the assertion can't pass by
+    /// construction. `draw_palette` is driven directly (not the full
+    /// `draw()`) because the SPEC panel is rendered *after* the palette in
+    /// `draw()` and would silently paint over any overflow into its own
+    /// column, masking the very bug this test targets.
+    #[test]
+    fn palette_does_not_panic_nor_overflow_on_a_narrow_terminal() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        for c in "/s".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+
+        let root = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(Rect::new(0, 0, 24, 12));
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
+            .split(root[1]);
+        let left = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(3)])
+            .split(cols[0]);
+        let input_area = left[1];
+
+        let backend = TestBackend::new(24, 12);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|f| draw_palette(f, &app, input_area))
+            .expect("draw_palette must not panic on a narrow input_area");
+
+        let buffer = terminal.backend().buffer();
+        let boundary = input_area.x + input_area.width - 1;
+        for y in 0..buffer.area.height {
+            for x in (boundary + 1)..buffer.area.width {
+                assert_eq!(
+                    buffer[(x, y)].symbol(),
+                    " ",
+                    "palette cell at ({x},{y}) spills past input_area's right edge (boundary {boundary})"
+                );
+            }
+        }
+
+        // Full-pipeline sanity check: the exact scenario the fix targets
+        // (SPEC panel visible on a 24x12 terminal) must never panic ratatui.
+        let mut full_app = App::new(None);
+        full_app.toggle_spec_panel();
+        for c in "/s".chars() {
+            full_app.on_event(&key(KeyCode::Char(c)));
+        }
+        let backend = TestBackend::new(24, 12);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|f| draw(f, &full_app))
+            .expect("draw() must not panic on a narrow terminal with the SPEC panel visible");
     }
 }

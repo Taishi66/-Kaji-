@@ -600,16 +600,22 @@ impl App {
         self.tool_approval.is_some() || self.gate_open
     }
 
-    /// Commands whose name starts with the current input — empty whenever
-    /// `input` doesn't start with `/` (including the empty input), which is
-    /// also what makes `palette_visible` false with nothing typed.
+    /// Commands whose name starts with the current input, trimmed — empty
+    /// whenever the trimmed input doesn't start with `/` (including the
+    /// empty input), which is also what makes `palette_visible` false with
+    /// nothing typed. Trimming here must match the trim the Enter dispatch
+    /// applies to the legacy submit path, or the palette can disappear
+    /// (surrounding whitespace breaking the prefix match) while Enter still
+    /// executes the command the user can no longer see selected — the UI
+    /// would visually promise a plain message send and then run a command.
     pub fn palette_matches(&self) -> Vec<&'static Command> {
-        if !self.input.starts_with('/') {
+        let trimmed = self.input.trim();
+        if !trimmed.starts_with('/') {
             return Vec::new();
         }
         COMMANDS
             .iter()
-            .filter(|c| c.name.starts_with(self.input.as_str()))
+            .filter(|c| c.name.starts_with(trimmed))
             .collect()
     }
 
@@ -792,6 +798,11 @@ impl App {
                     Action::None
                 } else {
                     self.push_history(&text);
+                    // Unreachable today: any trimmed input that names a command
+                    // keeps the palette visible (see `palette_matches`), so this
+                    // branch never runs for typed input — kept as a safety net
+                    // against a future `input` mutation path that bypasses the
+                    // palette state (e.g. a programmatic/paste submit).
                     if let Some(cmd) = COMMANDS.iter().find(|c| c.name == text) {
                         cmd.run(self)
                     } else {
@@ -1444,6 +1455,56 @@ mod tests {
         open_tool_approval_modal(&mut app);
         app.input.push('/');
         assert!(!app.palette_visible());
+    }
+
+    /// FIX 1: `palette_matches` used to filter on `self.input` raw — a
+    /// trailing/leading space broke the `starts_with` prefix match and
+    /// closed the palette even though the Enter dispatch below trims before
+    /// comparing, so the visible state and the actual behavior disagreed.
+    #[test]
+    fn palette_stays_visible_with_surrounding_whitespace() {
+        let mut app = App::new(None);
+        for c in "/quit".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.on_event(&key(KeyCode::Char(' ')));
+        assert!(
+            app.palette_visible(),
+            "trailing space must not close the palette"
+        );
+        let names: Vec<_> = app.palette_matches().iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["/quit"]);
+
+        let mut app2 = App::new(None);
+        app2.on_event(&key(KeyCode::Char(' ')));
+        for c in "/sdd".chars() {
+            app2.on_event(&key(KeyCode::Char(c)));
+        }
+        assert!(
+            app2.palette_visible(),
+            "leading space must not close the palette"
+        );
+        let names2: Vec<_> = app2.palette_matches().iter().map(|c| c.name).collect();
+        assert_eq!(names2, vec!["/sdd"]);
+    }
+
+    /// FIX 1: the UI must not lie — if the palette is what the user sees
+    /// (surrounding whitespace kept it open), Enter must go through the
+    /// palette-selection branch, not the legacy trim-then-exact-match
+    /// fallback. Same end action either way for `/quit`, but the assertion
+    /// on `palette_visible()` right before Enter proves which path ran.
+    #[test]
+    fn palette_enter_with_trailing_space_executes_the_visible_selection() {
+        let mut app = App::new(None);
+        for c in "/quit ".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert!(
+            app.palette_visible(),
+            "palette must still be visible at Enter time"
+        );
+        let action = app.on_event(&key(KeyCode::Enter));
+        assert_eq!(action, Action::Quit);
     }
 
     #[test]
