@@ -71,6 +71,62 @@ pub enum Action {
     Docker,
 }
 
+pub struct Command {
+    pub name: &'static str,
+    pub desc: &'static str,
+    run: fn(&mut App) -> Action,
+}
+
+impl Command {
+    pub fn run(&self, app: &mut App) -> Action {
+        (self.run)(app)
+    }
+}
+
+pub const COMMANDS: &[Command] = &[
+    Command {
+        name: "/sdd",
+        desc: "démarre une passe SDD (SPEC.md auto-détecté ou --spec <fichier>)",
+        run: |_| Action::StartPass,
+    },
+    Command {
+        name: "/spec",
+        desc: "(ou F2) affiche/masque le panneau SPEC",
+        run: |app| {
+            app.toggle_spec_panel();
+            Action::None
+        },
+    },
+    Command {
+        name: "/think",
+        desc: "(ou F3) affiche/masque le raisonnement du modèle (思考中)",
+        run: |app| {
+            app.toggle_thinking();
+            Action::None
+        },
+    },
+    Command {
+        name: "/cost",
+        desc: "affiche l'usage tokens/coût (session, 5 h, 7 j) — budgets optionnels via KAJI_BUDGET_5H / KAJI_BUDGET_7J",
+        run: |_| Action::Cost,
+    },
+    Command {
+        name: "/docker",
+        desc: "liste les conteneurs en cours",
+        run: |_| Action::Docker,
+    },
+    Command {
+        name: "/help",
+        desc: "réaffiche l'aide",
+        run: |_| Action::Help,
+    },
+    Command {
+        name: "/quit",
+        desc: "quitte kaji",
+        run: |_| Action::Quit,
+    },
+];
+
 pub struct App {
     pub header: String,
     pub input: String,
@@ -663,22 +719,8 @@ impl App {
                     Action::None
                 } else {
                     self.push_history(&text);
-                    if text == "/sdd" {
-                        Action::StartPass
-                    } else if text == "/quit" {
-                        Action::Quit
-                    } else if text == "/help" {
-                        Action::Help
-                    } else if text == "/spec" {
-                        self.toggle_spec_panel();
-                        Action::None
-                    } else if text == "/think" {
-                        self.toggle_thinking();
-                        Action::None
-                    } else if text == "/cost" {
-                        Action::Cost
-                    } else if text == "/docker" {
-                        Action::Docker
+                    if let Some(cmd) = COMMANDS.iter().find(|c| c.name == text) {
+                        cmd.run(self)
                     } else {
                         Action::Submit(text)
                     }
@@ -2384,5 +2426,21 @@ mod tests {
             !app.show_loader(),
             "text was already shown this turn — no loader reappears under the thinking line either"
         );
+    }
+
+    #[test]
+    fn every_command_in_the_table_dispatches_without_falling_through_to_submit() {
+        for cmd in COMMANDS {
+            let mut app = App::new(None);
+            for c in cmd.name.chars() {
+                app.on_event(&key(KeyCode::Char(c)));
+            }
+            let action = app.on_event(&key(KeyCode::Enter));
+            assert!(
+                !matches!(action, Action::Submit(_)),
+                "{} doit être dispatché comme commande, pas soumis comme message",
+                cmd.name
+            );
+        }
     }
 }

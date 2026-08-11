@@ -96,13 +96,9 @@ fn build_header(session_id: &str) -> String {
 fn push_welcome(app: &mut App) {
     app.push_system("鍛冶 bienvenue dans kaji");
     app.push_system("tape ton message puis Entrée");
-    app.push_system("/sdd démarre une passe SDD (SPEC.md auto-détecté ou --spec <fichier>)");
-    app.push_system("/spec (ou F2) affiche/masque le panneau SPEC · /help réaffiche l'aide");
-    app.push_system("/think (ou F3) affiche/masque le raisonnement du modèle (思考中)");
-    app.push_system(
-        "/cost affiche l'usage tokens/coût (session, 5 h, 7 j) — budgets optionnels via KAJI_BUDGET_5H / KAJI_BUDGET_7J",
-    );
-    app.push_system("/docker liste les conteneurs en cours");
+    for cmd in crate::tui::app::COMMANDS {
+        app.push_system(&format!("{}  {}", cmd.name, cmd.desc));
+    }
     // Souris OFF (KAJI_MOUSE=0): the wheel isn't captured and ↑/↓ go back to
     // legacy line-scroll (App::mouse_enabled guard in on_event) instead of
     // prompt-history recall — advertising either would describe controls
@@ -727,5 +723,19 @@ mod tests {
         assert!(!text.contains("↑/↓ rappelle"));
         assert!(text.contains("PageUp/PageDown/Home/End"));
         assert!(text.contains("Ctrl+↑/↓"));
+    }
+
+    #[test]
+    fn push_welcome_lists_every_command_from_the_table() {
+        let mut app = App::new(None);
+        push_welcome(&mut app);
+        let text = welcome_text(&app);
+        for cmd in crate::tui::app::COMMANDS {
+            assert!(
+                text.contains(cmd.name),
+                "{} absent du welcome/help",
+                cmd.name
+            );
+        }
     }
 }
