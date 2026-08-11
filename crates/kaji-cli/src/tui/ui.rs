@@ -4,7 +4,7 @@ use kaji_core::sdd::StageStatus;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -28,6 +28,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
         draw_chat(frame, app, left[0]);
         draw_input(frame, app, left[1]);
+        draw_palette(frame, app, left[1]);
         draw_spec(frame, app, cols[1]);
     } else {
         let left = Layout::default()
@@ -37,6 +38,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
         draw_chat(frame, app, left[0]);
         draw_input(frame, app, left[1]);
+        draw_palette(frame, app, left[1]);
     }
 
     if app.gate_open {
@@ -317,6 +319,67 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.set_cursor_position((cursor_x, inner.y));
 }
 
+/// Command palette (T5) — overlay anchored just above the input box, drawn
+/// after `draw_input` like the y/n modals: it reads `input_area` only to
+/// position itself and never touches the chat's own `chat_overflow`/
+/// `user_turn_rows` measurement.
+fn draw_palette(frame: &mut Frame, app: &App, input_area: Rect) {
+    if !app.palette_visible() {
+        return;
+    }
+    let matches = app.palette_matches();
+    let name_w = matches.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    let inner_w = matches
+        .iter()
+        .map(|c| name_w + 2 + c.desc.chars().count() + 4)
+        .max()
+        .unwrap_or(0) as u16;
+    let width = (inner_w + 2)
+        .min(input_area.width.saturating_sub(2))
+        .max(20);
+    let height = (matches.len() as u16 + 2).min(input_area.y);
+    if height < 3 {
+        return;
+    }
+    let rows = (height - 2) as usize;
+    // Sliding window: keep the selection visible when the filtered list is
+    // taller than the space available above the input.
+    let first = app.palette_selected.saturating_sub(rows.saturating_sub(1));
+    let area = Rect {
+        x: input_area.x + 1,
+        y: input_area.y - height,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" commandes ")
+        .title_bottom(Line::from(" ↑↓ choisir · ⏎ valider · esc ").style(theme::dim()));
+    let lines: Vec<Line> = matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows)
+        .map(|(i, cmd)| {
+            let selected = i == app.palette_selected;
+            let marker = if selected { "▸ " } else { "  " };
+            let name_style = if selected {
+                theme::accent()
+            } else {
+                Style::default()
+            };
+            Line::from(vec![
+                Span::styled(marker, theme::accent()),
+                Span::styled(format!("{:<name_w$}", cmd.name), name_style),
+                Span::styled(format!("  {}", cmd.desc), theme::dim()),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+}
+
 fn draw_spec(frame: &mut Frame, app: &App, area: Rect) {
     let title = app
         .spec
@@ -411,6 +474,73 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+    };
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        })
+    }
+
+    fn buffer_as_string(buffer: &ratatui::buffer::Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn palette_renders_filtered_commands_above_the_input() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        for c in "/s".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+
+        let backend = TestBackend::new(80, 14);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal.draw(|f| draw(f, &app)).expect("draw");
+        let content = buffer_as_string(terminal.backend().buffer());
+
+        assert!(content.contains("commandes"));
+        assert!(content.contains("/sdd"));
+        assert!(content.contains("/spec"));
+        assert!(!content.contains("/quit"), "filtré hors de la liste");
+        assert!(content.contains("▸"), "marqueur de sélection visible");
+    }
+
+    #[test]
+    fn palette_is_absent_without_slash_input_and_without_matches() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        for input in ["", "hello", "/xyz"] {
+            let mut app = App::new(None);
+            for c in input.chars() {
+                app.on_event(&key(KeyCode::Char(c)));
+            }
+            let backend = TestBackend::new(80, 14);
+            let mut terminal = Terminal::new(backend).expect("test backend terminal");
+            terminal.draw(|f| draw(f, &app)).expect("draw");
+            let content = buffer_as_string(terminal.backend().buffer());
+
+            assert!(
+                !content.contains("commandes"),
+                "input {input:?} ne doit pas ouvrir la palette"
+            );
+        }
+    }
 
     /// Regression for the wrap-measure divergence: `line_wrapped_rows` must
     /// count what ratatui actually renders, not `chars().count()` — CJK
