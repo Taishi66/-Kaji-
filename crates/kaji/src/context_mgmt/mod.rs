@@ -1,3 +1,4 @@
+pub mod condense;
 pub mod structured;
 
 use crate::context_mgmt::structured::StructuredSummary;
