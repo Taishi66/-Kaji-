@@ -9,9 +9,11 @@ use ratatui::text::{Line, Span};
 pub fn render_markdown(input: &str) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
+    let mut table_buf: Vec<&str> = Vec::new();
 
     for raw_line in input.lines() {
         if raw_line.trim_start().starts_with("```") {
+            flush_table_buffer(&mut table_buf, &mut lines);
             in_code_block = !in_code_block;
             continue;
         }
@@ -19,22 +21,186 @@ pub fn render_markdown(input: &str) -> Vec<Line<'static>> {
             lines.push(render_code_line(raw_line));
             continue;
         }
-        if let Some(heading) = render_heading(raw_line) {
-            lines.push(heading);
+        if raw_line.trim_start().starts_with('|') {
+            table_buf.push(raw_line);
             continue;
         }
-        if let Some(quote) = render_blockquote(raw_line) {
-            lines.push(quote);
-            continue;
-        }
-        if let Some(item) = render_list_item(raw_line) {
-            lines.push(item);
-            continue;
-        }
-        lines.push(Line::from(render_inline_spans(raw_line)));
+        flush_table_buffer(&mut table_buf, &mut lines);
+        lines.push(render_line(raw_line));
     }
+    flush_table_buffer(&mut table_buf, &mut lines);
 
     lines
+}
+
+fn render_line(raw_line: &str) -> Line<'static> {
+    if let Some(heading) = render_heading(raw_line) {
+        return heading;
+    }
+    if let Some(quote) = render_blockquote(raw_line) {
+        return quote;
+    }
+    if let Some(item) = render_list_item(raw_line) {
+        return item;
+    }
+    Line::from(render_inline_spans(raw_line))
+}
+
+fn flush_table_buffer(table_buf: &mut Vec<&str>, lines: &mut Vec<Line<'static>>) {
+    if table_buf.is_empty() {
+        return;
+    }
+    match try_render_table(table_buf) {
+        Some(table_lines) => lines.extend(table_lines),
+        None => {
+            for raw_line in table_buf.iter() {
+                lines.push(render_line(raw_line));
+            }
+        }
+    }
+    table_buf.clear();
+}
+
+const TABLE_BUDGET_COLS: usize = 100;
+
+enum TableBorder {
+    Top,
+    Mid,
+    Bottom,
+}
+
+/// Detects and renders a markdown pipe table into box-drawing lines. The
+/// second buffered line must be a separator row (`-`/`:` cells only); any
+/// other shape (no separator, inconsistent column counts) returns `None` so
+/// the caller falls back to rendering the raw buffered lines untouched —
+/// arbitrary LLM output must never panic here.
+fn try_render_table(lines: &[&str]) -> Option<Vec<Line<'static>>> {
+    if lines.len() < 2 {
+        return None;
+    }
+    let rows: Vec<Vec<String>> = lines.iter().map(|line| split_table_row(line)).collect();
+    if !is_separator_row(&rows[1]) {
+        return None;
+    }
+    let num_cols = rows[0].len();
+    if num_cols == 0 || rows.iter().any(|row| row.len() != num_cols) {
+        return None;
+    }
+
+    let header = &rows[0];
+    let data_rows = &rows[2..];
+
+    let mut natural_widths = vec![1usize; num_cols];
+    for row in std::iter::once(header).chain(data_rows.iter()) {
+        for (i, cell) in row.iter().enumerate() {
+            natural_widths[i] = natural_widths[i].max(cell.chars().count());
+        }
+    }
+    let col_widths = fit_table_to_budget(&natural_widths, TABLE_BUDGET_COLS);
+
+    let mut out = Vec::with_capacity(4 + data_rows.len());
+    out.push(table_border_line(&col_widths, TableBorder::Top));
+    out.push(table_row_line(header, &col_widths, true));
+    out.push(table_border_line(&col_widths, TableBorder::Mid));
+    for row in data_rows {
+        out.push(table_row_line(row, &col_widths, false));
+    }
+    out.push(table_border_line(&col_widths, TableBorder::Bottom));
+    Some(out)
+}
+
+fn split_table_row(line: &str) -> Vec<String> {
+    let mut parts: Vec<&str> = line.trim().split('|').collect();
+    if parts.first() == Some(&"") {
+        parts.remove(0);
+    }
+    if parts.last() == Some(&"") {
+        parts.pop();
+    }
+    parts.iter().map(|p| p.trim().to_string()).collect()
+}
+
+fn is_separator_row(cells: &[String]) -> bool {
+    !cells.is_empty() && cells.iter().all(|cell| is_separator_cell(cell))
+}
+
+fn is_separator_cell(cell: &str) -> bool {
+    !cell.is_empty() && cell.contains('-') && cell.chars().all(|c| c == '-' || c == ':')
+}
+
+/// Scales natural column widths down proportionally so the rendered table
+/// (borders + 1-space padding per side) fits within `total_budget` columns.
+/// Never exceeds the budget; may undershoot by a column or two on rounding.
+fn fit_table_to_budget(natural_widths: &[usize], total_budget: usize) -> Vec<usize> {
+    let num_cols = natural_widths.len();
+    let overhead = 3 * num_cols + 1;
+    if total_budget <= overhead {
+        return vec![1; num_cols];
+    }
+    let available = total_budget - overhead;
+    let natural_sum: usize = natural_widths.iter().sum();
+    if natural_sum <= available {
+        return natural_widths.to_vec();
+    }
+
+    let mut widths: Vec<usize> = natural_widths
+        .iter()
+        .map(|&w| (w * available / natural_sum).max(1))
+        .collect();
+    while widths.iter().sum::<usize>() > available && widths.iter().any(|&w| w > 1) {
+        if let Some((idx, _)) = widths.iter().enumerate().max_by_key(|&(_, &w)| w) {
+            widths[idx] -= 1;
+        }
+    }
+    widths
+}
+
+fn fit_table_cell(content: &str, width: usize) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    if chars.len() <= width {
+        let mut s: String = chars.into_iter().collect();
+        s.push_str(&" ".repeat(width - s.chars().count()));
+        s
+    } else if width == 0 {
+        String::new()
+    } else {
+        let truncated: String = chars[..width - 1].iter().collect();
+        format!("{truncated}…")
+    }
+}
+
+fn table_row_line(cells: &[String], col_widths: &[usize], header: bool) -> Line<'static> {
+    let mut spans = vec![Span::styled("│", theme::dim())];
+    for (i, &width) in col_widths.iter().enumerate() {
+        let content = cells.get(i).map(String::as_str).unwrap_or("");
+        let cell = fit_table_cell(content, width);
+        let style = if header {
+            theme::text().add_modifier(Modifier::BOLD)
+        } else {
+            theme::text()
+        };
+        spans.push(Span::styled(format!(" {cell} "), style));
+        spans.push(Span::styled("│", theme::dim()));
+    }
+    Line::from(spans)
+}
+
+fn table_border_line(col_widths: &[usize], kind: TableBorder) -> Line<'static> {
+    let (left, mid, right) = match kind {
+        TableBorder::Top => ('┌', '┬', '┐'),
+        TableBorder::Mid => ('├', '┼', '┤'),
+        TableBorder::Bottom => ('└', '┴', '┘'),
+    };
+    let mut s = String::new();
+    s.push(left);
+    for (i, &width) in col_widths.iter().enumerate() {
+        s.push_str(&"─".repeat(width + 2));
+        if i + 1 < col_widths.len() {
+            s.push(mid);
+        }
+    }
+    s.push(right);
+    Line::from(Span::styled(s, theme::dim()))
 }
 
 fn render_code_line(raw_line: &str) -> Line<'static> {
@@ -225,7 +391,8 @@ mod tests {
             .iter()
             .find(|s| s.content == "cargo test")
             .expect("code span");
-        assert!(code.style.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(code.style, theme::code_inline());
+        assert!(!code.style.add_modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
@@ -277,5 +444,52 @@ mod tests {
     fn unterminated_delimiters_fall_back_to_literal_text() {
         let lines = render_markdown("texte **incomplet sans fermeture");
         assert_eq!(plain_text(&lines[0]), "texte **incomplet sans fermeture");
+    }
+
+    #[test]
+    fn renders_pipe_table_as_box_drawing() {
+        let lines = render_markdown("| a | bb |\n| - | -- |\n| c | dd |");
+        assert_eq!(lines.len(), 5);
+        assert_eq!(plain_text(&lines[0]), "┌───┬────┐");
+        assert_eq!(plain_text(&lines[1]), "│ a │ bb │");
+        assert_eq!(plain_text(&lines[2]), "├───┼────┤");
+        assert_eq!(plain_text(&lines[3]), "│ c │ dd │");
+        assert_eq!(plain_text(&lines[4]), "└───┴────┘");
+        let header = &lines[1].spans[1];
+        assert!(header.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn truncates_wide_table_cells_to_total_budget() {
+        let wide_cell = "z".repeat(200);
+        let input = format!("| a | b |\n| - | - |\n| x | {wide_cell} |");
+        let lines = render_markdown(&input);
+        assert_eq!(lines.len(), 5);
+        for line in &lines {
+            assert!(
+                plain_text(line).chars().count() <= 100,
+                "line exceeds 100-column budget: {}",
+                plain_text(line)
+            );
+        }
+        assert!(plain_text(&lines[3]).contains('…'));
+    }
+
+    #[test]
+    fn malformed_table_falls_back_to_raw_lines() {
+        let input = "| a | b |\n| - | - |\n| c | d | e |";
+        let lines = render_markdown(input);
+        let rendered: Vec<String> = lines.iter().map(plain_text).collect();
+        assert_eq!(rendered, vec!["| a | b |", "| - | - |", "| c | d | e |"]);
+    }
+
+    #[test]
+    fn table_inside_other_content_renders_between_paragraphs() {
+        let lines = render_markdown("avant\n| a | b |\n| - | - |\n| c | d |\napres");
+        assert_eq!(lines.len(), 7);
+        assert_eq!(plain_text(&lines[0]), "avant");
+        assert!(plain_text(&lines[1]).starts_with('┌'));
+        assert!(plain_text(&lines[5]).starts_with('└'));
+        assert_eq!(plain_text(&lines[6]), "apres");
     }
 }

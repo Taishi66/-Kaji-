@@ -97,12 +97,24 @@ fn chat_title(app: &App) -> String {
     format!(" {} ", parts.join(" · "))
 }
 
+/// Chat reading width is capped so text stays legible on ultra-wide
+/// terminals instead of running edge-to-edge across ~200 columns.
+const CHAT_MAX_WIDTH: u16 = 102;
+
+fn chat_width(inner_width: u16) -> u16 {
+    inner_width.min(CHAT_MAX_WIDTH)
+}
+
 fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::border_inactive())
         .title(chat_title(app));
     let inner = block.inner(area);
+    let chat_rect = Rect {
+        width: chat_width(inner.width),
+        ..inner
+    };
 
     let mut lines: Vec<Line> = Vec::new();
     for chat_line in &app.chat {
@@ -121,17 +133,17 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
 
     let wrapped_rows: usize = lines
         .iter()
-        .map(|line| line_wrapped_rows(line, inner.width))
+        .map(|line| line_wrapped_rows(line, chat_rect.width))
         .sum();
-    let base_scroll = wrapped_rows.saturating_sub(inner.height as usize);
+    let base_scroll = wrapped_rows.saturating_sub(chat_rect.height as usize);
     app.chat_overflow.set(base_scroll as u16);
     let scroll = base_scroll.saturating_sub(app.scroll_offset as usize) as u16;
 
+    frame.render_widget(block, area);
     let paragraph = Paragraph::new(Text::from(lines))
-        .block(block)
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
-    frame.render_widget(paragraph, area);
+    frame.render_widget(paragraph, chat_rect);
 }
 
 fn push_agent_lines(lines: &mut Vec<Line<'static>>, text: &str) {
@@ -311,4 +323,16 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_measure_is_capped_at_102_columns() {
+        assert_eq!(chat_width(200), 102);
+        assert_eq!(chat_width(102), 102);
+        assert_eq!(chat_width(80), 80);
+    }
 }

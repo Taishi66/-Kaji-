@@ -8,6 +8,8 @@ pub const INDIGO: Color = Color::Rgb(84, 110, 140);
 pub const VERMILLON: Color = Color::Rgb(203, 88, 65);
 /// Or patiné — titres, glyphe 鍛冶, coches de complétion.
 pub const OR_PATINE: Color = Color::Rgb(196, 164, 106);
+/// Sumi profond — fond discret des puces de code inline.
+pub const SUMI_PROFOND: Color = Color::Rgb(40, 40, 38);
 
 pub const KAJI_GLYPH: &str = "鍛冶";
 pub const USER_PREFIX: &str = "vous ▸ ";
@@ -63,7 +65,7 @@ pub fn border_active() -> Style {
 }
 
 pub fn code_inline() -> Style {
-    Style::default().fg(ENCRE).add_modifier(Modifier::REVERSED)
+    Style::default().fg(VERMILLON).bg(SUMI_PROFOND)
 }
 
 pub fn code_block() -> Style {
