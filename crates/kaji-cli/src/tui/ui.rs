@@ -128,10 +128,20 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     let chat_rect = chat_content_rect(inner);
 
+    app.user_turn_rows.borrow_mut().clear();
+    let mut running_rows: u16 = 0;
     let mut lines: Vec<Line> = Vec::new();
     for chat_line in &app.chat {
+        if chat_line.sender == Sender::User {
+            app.user_turn_rows.borrow_mut().push(running_rows);
+        }
+        let start = lines.len();
         push_chat_line(&mut lines, chat_line, chat_rect.width);
         lines.push(Line::from(""));
+        for line in &lines[start..] {
+            running_rows =
+                running_rows.saturating_add(line_wrapped_rows(line, chat_rect.width) as u16);
+        }
     }
     if let Some(loader) = loader_line(app) {
         lines.push(loader);
@@ -457,5 +467,51 @@ mod tests {
         app.apply_agent_event(&thinking_message("m1", "raisonnement"));
 
         assert!(loader_line(&app).is_none());
+    }
+
+    /// `draw_chat` is the only place that measures where each user turn
+    /// starts (in wrapped-row coordinates) — Ctrl+↑/↓ (`App::jump_prev_turn`
+    /// / `jump_next_turn`) reads `app.user_turn_rows` and has no other way
+    /// to learn these offsets.
+    #[test]
+    fn draw_chat_records_a_row_offset_for_every_user_turn() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        app.push_system("intro");
+        app.push_user("premier message");
+        for i in 0..5 {
+            app.push_system(&format!("filler {i}"));
+        }
+        app.push_user("second message");
+
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| draw(frame, &app))
+            .expect("draw must succeed against a TestBackend");
+
+        let rows = app.user_turn_rows.borrow();
+        assert_eq!(rows.len(), 2, "one row offset per user turn");
+        assert!(rows[0] < rows[1], "offsets follow chat order top to bottom");
+    }
+
+    #[test]
+    fn draw_chat_clears_stale_user_turn_rows_when_no_user_lines_remain() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        app.user_turn_rows.borrow_mut().push(7);
+        app.push_system("only system output this draw");
+
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| draw(frame, &app))
+            .expect("draw must succeed against a TestBackend");
+
+        assert!(app.user_turn_rows.borrow().is_empty());
     }
 }

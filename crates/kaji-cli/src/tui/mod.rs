@@ -15,9 +15,11 @@ use kaji::permission::permission_confirmation::PrincipalType;
 use kaji::permission::{Permission, PermissionConfirmation};
 use kaji::session::SessionManager;
 use kaji_core::sdd::SpecDoc;
-use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use ratatui::crossterm::execute;
 use ratatui::text::{Line, Span};
 use std::future::Future;
+use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
@@ -34,6 +36,10 @@ pub async fn run(
     let (input_tx, input_rx) = mpsc::channel::<Event>(64);
     std::thread::spawn(move || input_thread(input_tx));
     let mut terminal = ratatui::init();
+    let mouse = mouse_enabled();
+    if mouse {
+        let _ = execute!(stdout(), EnableMouseCapture);
+    }
     let result = event_loop(
         &mut terminal,
         &agent,
@@ -44,8 +50,22 @@ pub async fn run(
         input_rx,
     )
     .await;
+    if mouse {
+        let _ = execute!(stdout(), DisableMouseCapture);
+    }
     ratatui::restore();
     result
+}
+
+/// `KAJI_MOUSE` kill-switch — mirrors the `condense::enabled` idiom: absent
+/// or unrecognized values default to on, `0|false|FALSE|no` turns it off.
+/// Off keeps the legacy line-scroll arrow behavior (`App::mouse_enabled`)
+/// and skips `EnableMouseCapture`/`DisableMouseCapture` entirely so native
+/// terminal text selection (Option/Shift+drag) still works.
+fn mouse_enabled() -> bool {
+    !std::env::var("KAJI_MOUSE")
+        .map(|v| matches!(v.as_str(), "0" | "false" | "FALSE" | "no"))
+        .unwrap_or(false)
 }
 
 fn build_header(session_id: &str) -> String {
@@ -67,7 +87,11 @@ fn push_welcome(app: &mut App) {
         "/cost affiche l'usage tokens/coût (session, 5 h, 7 j) — budgets optionnels via KAJI_BUDGET_5H / KAJI_BUDGET_7J",
     );
     app.push_system("/docker liste les conteneurs en cours");
-    app.push_system("PageUp/PageDown/Home/End font défiler le chat");
+    app.push_system("PageUp/PageDown/Home/End font défiler le chat · molette = 3 lignes par cran");
+    app.push_system(
+        "Ctrl+↑/↓ saute au tour précédent/suivant · ↑/↓ rappelle l'historique de prompts",
+    );
+    app.push_system("Option/Shift+glisser dans le terminal pour sélectionner du texte");
     app.push_system("Esc interrompt · Ctrl+C quitte");
 }
 
@@ -212,6 +236,7 @@ async fn event_loop(
     let mut app = App::new(spec);
     app.header = header;
     app.git_status = refresh_git_status();
+    app.mouse_enabled = mouse_enabled();
     seed_chat(&mut app, &conversation);
     maybe_push_welcome(&mut app);
     let session_manager = SessionManager::instance();

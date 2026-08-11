@@ -2,14 +2,15 @@ use kaji::agents::AgentEvent;
 use kaji::conversation::message::{ActionRequiredData, Message, MessageContentBlock};
 use kaji::providers::base::ProviderUsage;
 use kaji_core::sdd::{SddPass, SpecDoc};
-use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::text::Line;
 use rmcp::model::Role;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const SCROLL_PAGE: u16 = 10;
+const SCROLL_WHEEL: u16 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassDriver {
@@ -119,6 +120,25 @@ pub struct App {
     /// only borrows `&App`; the UI loop is single-threaded so `Cell<u16>`
     /// (Send, not Sync) is sufficient — no `Sync` bound is needed here.
     pub chat_overflow: Cell<u16>,
+    /// Row (same coordinate space as `chat_overflow`/`scroll_offset`) at
+    /// which each `Sender::User` chat line starts, measured by `draw_chat`
+    /// at render time — cleared and repopulated every draw. Powers
+    /// Ctrl+↑/↓ turn jumps (`jump_prev_turn`/`jump_next_turn`).
+    pub user_turn_rows: RefCell<Vec<u16>>,
+    /// Every non-empty Enter submission, oldest first — in-memory only
+    /// (not persisted across sessions). Recalled by ↑/↓ when the mouse is
+    /// enabled (native wheel scroll takes over the plain arrows).
+    prompt_history: Vec<String>,
+    /// `Some(idx)` while ↑/↓ is browsing `prompt_history` — `None` means the
+    /// input holds a fresh (non-recalled) draft. Any edit (typing,
+    /// backspace) exits browsing by resetting this to `None` while leaving
+    /// `input` untouched.
+    history_index: Option<usize>,
+    /// Set once in `run()` from the `KAJI_MOUSE` kill-switch — defaults to
+    /// `false` here so the ~60 existing `App::new` call sites (mostly
+    /// tests) keep the legacy arrow-scroll behavior unless the caller
+    /// explicitly opts in.
+    pub mouse_enabled: bool,
     validate_buffer: String,
     last_agent_msg_id: Option<String>,
     /// Same merge-chain invariant as `last_agent_msg_id`, tracked
@@ -159,6 +179,10 @@ impl App {
             driver: PassDriver::Idle,
             scroll_offset: 0,
             chat_overflow: Cell::new(0),
+            user_turn_rows: RefCell::new(Vec::new()),
+            prompt_history: Vec::new(),
+            history_index: None,
+            mouse_enabled: false,
             validate_buffer: String::new(),
             last_agent_msg_id: None,
             last_thinking_msg_id: None,
@@ -326,6 +350,7 @@ impl App {
     }
 
     pub fn delete_last_word(&mut self) {
+        self.exit_history_navigation();
         let trimmed_len = self.input.trim_end().len();
         self.input.truncate(trimmed_len);
         match self
@@ -363,6 +388,99 @@ impl App {
         self.scroll_offset = 0;
     }
 
+    pub fn scroll_wheel_up(&mut self) {
+        self.scroll_offset = (self.scroll_offset + SCROLL_WHEEL).min(self.max_scroll());
+    }
+
+    pub fn scroll_wheel_down(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(SCROLL_WHEEL);
+    }
+
+    /// Positions the start of the nearest user turn strictly above the
+    /// current top row at the top of the viewport. `top` is the row
+    /// currently at the top of the view — same derivation the renderer uses
+    /// (`base_scroll − scroll_offset`). No-op if there is no user turn
+    /// above (already at/past the first one).
+    pub fn jump_prev_turn(&mut self) {
+        let base = self.chat_overflow.get();
+        let top = base.saturating_sub(self.scroll_offset);
+        let target = self
+            .user_turn_rows
+            .borrow()
+            .iter()
+            .rev()
+            .find(|&&row| row < top)
+            .copied();
+        if let Some(target) = target {
+            self.scroll_offset = base.saturating_sub(target);
+        }
+    }
+
+    /// Mirror of [`Self::jump_prev_turn`] for the nearest user turn strictly
+    /// below the current top row.
+    pub fn jump_next_turn(&mut self) {
+        let base = self.chat_overflow.get();
+        let top = base.saturating_sub(self.scroll_offset);
+        let target = self
+            .user_turn_rows
+            .borrow()
+            .iter()
+            .find(|&&row| row > top)
+            .copied();
+        if let Some(target) = target {
+            self.scroll_offset = base.saturating_sub(target);
+        }
+    }
+
+    /// Exits prompt-history browsing (if active) without touching `input` —
+    /// called by every input-editing key so typing/backspacing while
+    /// recalling a prompt keeps the edit instead of snapping back.
+    fn exit_history_navigation(&mut self) {
+        self.history_index = None;
+    }
+
+    fn push_history(&mut self, text: &str) {
+        self.prompt_history.push(text.to_string());
+        self.history_index = None;
+    }
+
+    /// ↑ when the mouse is enabled: recalls the previous prompt. Only
+    /// starts browsing from an empty input (an in-progress draft is never
+    /// clobbered); once browsing, repeated presses walk further back,
+    /// clamped at the oldest entry.
+    pub fn history_prev(&mut self) {
+        if self.history_index.is_none() && !self.input.is_empty() {
+            return;
+        }
+        let next_idx = match self.history_index {
+            Some(idx) => idx.saturating_sub(1),
+            None => match self.prompt_history.len().checked_sub(1) {
+                Some(idx) => idx,
+                None => return,
+            },
+        };
+        if let Some(text) = self.prompt_history.get(next_idx) {
+            self.input = text.clone();
+            self.history_index = Some(next_idx);
+        }
+    }
+
+    /// ↓ when the mouse is enabled: walks forward through history, clearing
+    /// the input and exiting browsing once past the most recent entry. A
+    /// no-op while not currently browsing.
+    pub fn history_next(&mut self) {
+        let Some(idx) = self.history_index else {
+            return;
+        };
+        if idx + 1 < self.prompt_history.len() {
+            self.history_index = Some(idx + 1);
+            self.input = self.prompt_history[idx + 1].clone();
+        } else {
+            self.history_index = None;
+            self.input.clear();
+        }
+    }
+
     pub fn spec_panel_visible(&self) -> bool {
         self.spec_panel_forced
             .unwrap_or_else(|| self.spec.is_some() || self.pass.is_running())
@@ -377,6 +495,14 @@ impl App {
     }
 
     pub fn on_event(&mut self, ev: &Event) -> Action {
+        if let Event::Mouse(mouse) = ev {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => self.scroll_wheel_up(),
+                MouseEventKind::ScrollDown => self.scroll_wheel_down(),
+                _ => {}
+            }
+            return Action::None;
+        }
         let Event::Key(key) = ev else {
             return Action::None;
         };
@@ -387,6 +513,14 @@ impl App {
             return Action::Quit;
         }
         match key.code {
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.jump_prev_turn();
+                return Action::None;
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.jump_next_turn();
+                return Action::None;
+            }
             KeyCode::F(2) => {
                 self.toggle_spec_panel();
                 return Action::None;
@@ -403,17 +537,25 @@ impl App {
                 self.scroll_page_down();
                 return Action::None;
             }
-            // Terminals translate the mouse wheel/trackpad into Up/Down arrow
-            // keys while in the alternate screen (iTerm2/Terminal.app
-            // default) — this doubles as the wheel-scroll path. We don't
-            // enable mouse capture instead: that would break native text
-            // selection/copy in the terminal.
+            // With the mouse enabled, the native wheel (Event::Mouse above)
+            // owns chat scrolling, so the bare arrows are freed up for
+            // prompt-history recall instead. `KAJI_MOUSE=0` keeps the
+            // legacy line-scroll behavior and leaves history unbound to the
+            // arrows (documented degradation).
             KeyCode::Up => {
-                self.scroll_line_up();
+                if self.mouse_enabled {
+                    self.history_prev();
+                } else {
+                    self.scroll_line_up();
+                }
                 return Action::None;
             }
             KeyCode::Down => {
-                self.scroll_line_down();
+                if self.mouse_enabled {
+                    self.history_next();
+                } else {
+                    self.scroll_line_down();
+                }
                 return Action::None;
             }
             KeyCode::Home => {
@@ -460,10 +602,12 @@ impl App {
                 Action::None
             }
             KeyCode::Char(c) => {
+                self.exit_history_navigation();
                 self.input.push(c);
                 Action::None
             }
             KeyCode::Backspace => {
+                self.exit_history_navigation();
                 self.input.pop();
                 Action::None
             }
@@ -477,24 +621,27 @@ impl App {
                 let text = text.trim().to_string();
                 if text.is_empty() {
                     Action::None
-                } else if text == "/sdd" {
-                    Action::StartPass
-                } else if text == "/quit" {
-                    Action::Quit
-                } else if text == "/help" {
-                    Action::Help
-                } else if text == "/spec" {
-                    self.toggle_spec_panel();
-                    Action::None
-                } else if text == "/think" {
-                    self.toggle_thinking();
-                    Action::None
-                } else if text == "/cost" {
-                    Action::Cost
-                } else if text == "/docker" {
-                    Action::Docker
                 } else {
-                    Action::Submit(text)
+                    self.push_history(&text);
+                    if text == "/sdd" {
+                        Action::StartPass
+                    } else if text == "/quit" {
+                        Action::Quit
+                    } else if text == "/help" {
+                        Action::Help
+                    } else if text == "/spec" {
+                        self.toggle_spec_panel();
+                        Action::None
+                    } else if text == "/think" {
+                        self.toggle_thinking();
+                        Action::None
+                    } else if text == "/cost" {
+                        Action::Cost
+                    } else if text == "/docker" {
+                        Action::Docker
+                    } else {
+                        Action::Submit(text)
+                    }
                 }
             }
             _ => Action::None,
@@ -760,7 +907,9 @@ mod tests {
     use super::*;
     use kaji::conversation::message::Message;
     use kaji::providers::base::Usage;
-    use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    };
     use ratatui::text::Span;
     use rmcp::model::{CallToolRequestParams, CallToolResult};
 
@@ -770,6 +919,24 @@ mod tests {
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
             state: ratatui::crossterm::event::KeyEventState::NONE,
+        })
+    }
+
+    fn ctrl_key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        })
+    }
+
+    fn mouse_event(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
         })
     }
 
@@ -1184,6 +1351,183 @@ mod tests {
         assert_eq!(app.on_event(&key(KeyCode::Up)), Action::None);
         assert_eq!(app.scroll_offset, 2);
         assert_eq!(app.on_event(&key(KeyCode::Down)), Action::None);
+        assert_eq!(app.scroll_offset, 1);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_three_lines() {
+        let mut app = App::new(None);
+        app.chat_overflow.set(10);
+
+        app.on_event(&mouse_event(MouseEventKind::ScrollUp));
+        assert_eq!(app.scroll_offset, 3);
+        app.on_event(&mouse_event(MouseEventKind::ScrollUp));
+        app.on_event(&mouse_event(MouseEventKind::ScrollUp));
+        assert_eq!(app.scroll_offset, 9);
+
+        // Bounded at chat_overflow — one more cran would overshoot by 2.
+        app.on_event(&mouse_event(MouseEventKind::ScrollUp));
+        assert_eq!(app.scroll_offset, 10);
+
+        app.on_event(&mouse_event(MouseEventKind::ScrollDown));
+        assert_eq!(app.scroll_offset, 7);
+    }
+
+    #[test]
+    fn mouse_wheel_scroll_down_never_goes_negative() {
+        let mut app = App::new(None);
+        app.chat_overflow.set(10);
+        app.scroll_offset = 1;
+
+        app.on_event(&mouse_event(MouseEventKind::ScrollDown));
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn ctrl_arrows_jump_between_user_turns() {
+        let mut app = App::new(None);
+        app.chat_overflow.set(30);
+        *app.user_turn_rows.borrow_mut() = vec![2, 10, 25];
+
+        app.on_event(&ctrl_key(KeyCode::Up));
+        assert_eq!(
+            app.scroll_offset, 5,
+            "row 25 (the closest above the bottom) is aligned to the top: 30-25"
+        );
+
+        app.on_event(&ctrl_key(KeyCode::Up));
+        assert_eq!(
+            app.scroll_offset, 20,
+            "next jump aligns row 10 to the top: 30-10"
+        );
+
+        app.on_event(&ctrl_key(KeyCode::Down));
+        assert_eq!(
+            app.scroll_offset, 5,
+            "jumping back down realigns row 25: 30-25"
+        );
+    }
+
+    #[test]
+    fn ctrl_up_is_a_noop_once_at_the_topmost_user_turn() {
+        let mut app = App::new(None);
+        app.chat_overflow.set(30);
+        *app.user_turn_rows.borrow_mut() = vec![2, 10, 25];
+        app.scroll_offset = 30; // top row = 0, nothing above it
+
+        app.on_event(&ctrl_key(KeyCode::Up));
+        assert_eq!(app.scroll_offset, 30);
+    }
+
+    #[test]
+    fn ctrl_down_is_a_noop_when_no_turn_lies_below() {
+        let mut app = App::new(None);
+        app.chat_overflow.set(30);
+        *app.user_turn_rows.borrow_mut() = vec![2, 10, 25];
+        // top row = 30 (bottom of the chat), nothing recorded below it
+
+        app.on_event(&ctrl_key(KeyCode::Down));
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn ctrl_arrows_are_a_noop_with_no_recorded_user_turns() {
+        let mut app = App::new(None);
+        app.chat_overflow.set(30);
+
+        app.on_event(&ctrl_key(KeyCode::Up));
+        assert_eq!(app.scroll_offset, 0);
+        app.on_event(&ctrl_key(KeyCode::Down));
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn arrow_up_recalls_previous_prompt_when_input_empty() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+
+        for c in "a".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.on_event(&key(KeyCode::Enter));
+        for c in "b".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.on_event(&key(KeyCode::Enter));
+        assert!(app.input.is_empty());
+
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.input, "b");
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.input, "a");
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.input, "b");
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.input, "", "past the latest entry clears the input");
+
+        // Typing while browsing exits navigation but keeps the edit.
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.input, "b");
+        app.on_event(&key(KeyCode::Char('!')));
+        assert_eq!(app.input, "b!");
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(
+            app.input, "b!",
+            "non-empty input outside navigation does not recall history"
+        );
+    }
+
+    #[test]
+    fn arrow_up_does_nothing_while_editing_a_fresh_non_empty_draft() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+        app.on_event(&key(KeyCode::Char('a')));
+        app.on_event(&key(KeyCode::Enter));
+
+        app.on_event(&key(KeyCode::Char('x')));
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.input, "x");
+    }
+
+    #[test]
+    fn backspace_during_history_navigation_exits_navigation_and_keeps_edit() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+        app.on_event(&key(KeyCode::Char('a')));
+        app.on_event(&key(KeyCode::Enter));
+
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.input, "a");
+        app.on_event(&key(KeyCode::Backspace));
+        assert_eq!(app.input, "");
+        // No longer browsing — Up must not blow away the (empty) draft by
+        // reusing whatever index browsing was left at; input-empty still
+        // legitimately recalls though, so re-arm history and check it
+        // starts from the latest entry again rather than a stale index.
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.input, "a");
+    }
+
+    #[test]
+    fn plain_arrows_do_not_scroll_when_mouse_enabled() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+        app.chat_overflow.set(30);
+
+        app.on_event(&key(KeyCode::Up));
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.scroll_offset, 0);
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn plain_arrows_still_scroll_when_mouse_disabled() {
+        let mut app = App::new(None);
+        assert!(!app.mouse_enabled, "mouse_enabled defaults to false");
+        app.chat_overflow.set(30);
+
+        app.on_event(&key(KeyCode::Up));
         assert_eq!(app.scroll_offset, 1);
     }
 
