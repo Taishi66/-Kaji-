@@ -9,6 +9,7 @@ use crate::agents::state_machine::ops_retry::NUDGED;
 mod agent_reply;
 mod calculator_extension;
 mod compaction_lifecycle;
+mod condense_lifecycle;
 mod dummy_api;
 mod hooks_lifecycle;
 mod pipeline;

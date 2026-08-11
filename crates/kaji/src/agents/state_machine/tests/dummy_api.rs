@@ -222,6 +222,16 @@ impl DummyApi {
         self.state.calls.lock().unwrap().clone()
     }
 
+    pub(super) fn last_call(&self) -> ApiCall {
+        self.state
+            .calls
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("dummy API has not received any calls yet")
+    }
+
     pub(super) fn call_count(&self) -> usize {
         self.state.calls.lock().unwrap().len()
     }
