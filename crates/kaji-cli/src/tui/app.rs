@@ -190,6 +190,11 @@ pub struct App {
     /// backspace) exits browsing by resetting this to `None` while leaving
     /// `input` untouched.
     history_index: Option<usize>,
+    /// Index into `palette_matches()` while the command palette is open.
+    /// Cyclic ↑/↓ navigation only; reset to 0 by `reset_palette_selection`
+    /// whenever `input` changes so a narrower filter always starts back at
+    /// its first (and often only) match.
+    pub palette_selected: usize,
     /// Set once in `run()` from the `KAJI_MOUSE` kill-switch — defaults to
     /// `false` here so the ~60 existing `App::new` call sites (mostly
     /// tests) keep the legacy arrow-scroll behavior unless the caller
@@ -249,6 +254,7 @@ impl App {
             user_turn_rows: RefCell::new(Vec::new()),
             prompt_history: Vec::new(),
             history_index: None,
+            palette_selected: 0,
             mouse_enabled: false,
             validate_buffer: String::new(),
             last_agent_msg_id: None,
@@ -435,6 +441,7 @@ impl App {
 
     pub fn delete_last_word(&mut self) {
         self.exit_history_navigation();
+        self.reset_palette_selection();
         let trimmed_len = self.input.trim_end().len();
         self.input.truncate(trimmed_len);
         match self
@@ -551,6 +558,7 @@ impl App {
         if let Some(text) = self.prompt_history.get(next_idx) {
             self.input = text.clone();
             self.history_index = Some(next_idx);
+            self.reset_palette_selection();
         }
     }
 
@@ -561,6 +569,7 @@ impl App {
         let Some(idx) = self.history_index else {
             return;
         };
+        self.reset_palette_selection();
         if idx + 1 < self.prompt_history.len() {
             self.history_index = Some(idx + 1);
             self.input = self.prompt_history[idx + 1].clone();
@@ -581,6 +590,41 @@ impl App {
 
     pub fn take_tool_approval(&mut self) -> Option<ToolApprovalRequest> {
         self.tool_approval.take()
+    }
+
+    /// A y/n modal (tool approval or gate) is on screen and owns the
+    /// keyboard — the palette must not open underneath it, and the plain
+    /// arrows must fall back to chat scroll instead of history recall (see
+    /// `on_event`'s `modal_active` local).
+    pub fn modal_active(&self) -> bool {
+        self.tool_approval.is_some() || self.gate_open
+    }
+
+    /// Commands whose name starts with the current input — empty whenever
+    /// `input` doesn't start with `/` (including the empty input), which is
+    /// also what makes `palette_visible` false with nothing typed.
+    pub fn palette_matches(&self) -> Vec<&'static Command> {
+        if !self.input.starts_with('/') {
+            return Vec::new();
+        }
+        COMMANDS
+            .iter()
+            .filter(|c| c.name.starts_with(self.input.as_str()))
+            .collect()
+    }
+
+    /// The palette is on screen: no modal is stealing the keyboard, and the
+    /// current prefix filter has at least one match (a filter with zero
+    /// matches closes the palette rather than showing an empty box).
+    pub fn palette_visible(&self) -> bool {
+        !self.modal_active() && !self.palette_matches().is_empty()
+    }
+
+    /// Called wherever `input` mutates so a narrower/wider filter always
+    /// resets the selection back to the first match instead of pointing at
+    /// a now-unrelated item.
+    fn reset_palette_selection(&mut self) {
+        self.palette_selected = 0;
     }
 
     pub fn on_event(&mut self, ev: &Event) -> Action {
@@ -607,7 +651,7 @@ impl App {
         // silently mutate `input` behind the modal. Ctrl+↑/↓ (turn jump)
         // and the mouse wheel are unaffected: only the plain-arrow
         // history/scroll choice depends on this.
-        let modal_active = self.tool_approval.is_some() || self.gate_open;
+        let modal_active = self.modal_active();
         match key.code {
             KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.jump_prev_turn();
@@ -639,7 +683,10 @@ impl App {
             // legacy line-scroll behavior and leaves history unbound to the
             // arrows (documented degradation).
             KeyCode::Up => {
-                if !modal_active && self.mouse_enabled {
+                if self.palette_visible() {
+                    let n = self.palette_matches().len();
+                    self.palette_selected = (self.palette_selected + n - 1) % n;
+                } else if !modal_active && self.mouse_enabled {
                     self.history_prev();
                 } else {
                     self.scroll_line_up();
@@ -647,7 +694,10 @@ impl App {
                 return Action::None;
             }
             KeyCode::Down => {
-                if !modal_active && self.mouse_enabled {
+                if self.palette_visible() {
+                    let n = self.palette_matches().len();
+                    self.palette_selected = (self.palette_selected + 1) % n;
+                } else if !modal_active && self.mouse_enabled {
                     self.history_next();
                 } else {
                     self.scroll_line_down();
@@ -699,12 +749,27 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.exit_history_navigation();
+                self.reset_palette_selection();
                 self.input.push(c);
                 Action::None
             }
             KeyCode::Backspace => {
                 self.exit_history_navigation();
+                self.reset_palette_selection();
                 self.input.pop();
+                Action::None
+            }
+            KeyCode::Tab if self.palette_visible() => {
+                let matches = self.palette_matches();
+                let name = matches[self.palette_selected.min(matches.len() - 1)].name;
+                self.input = name.to_string();
+                self.exit_history_navigation();
+                self.reset_palette_selection();
+                Action::None
+            }
+            KeyCode::Esc if self.palette_visible() => {
+                self.input.clear();
+                self.reset_palette_selection();
                 Action::None
             }
             KeyCode::Esc if self.turn_active || self.turn_pending => Action::CancelTurn,
@@ -713,6 +778,14 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => {
+                if self.palette_visible() {
+                    let matches = self.palette_matches();
+                    let cmd = matches[self.palette_selected.min(matches.len() - 1)];
+                    self.input.clear();
+                    self.reset_palette_selection();
+                    self.push_history(cmd.name);
+                    return cmd.run(self);
+                }
                 let text = std::mem::take(&mut self.input);
                 let text = text.trim().to_string();
                 if text.is_empty() {
@@ -1248,6 +1321,129 @@ mod tests {
             app.scroll_offset, 5,
             "Ctrl+↑ keeps jumping turns even with a modal open"
         );
+    }
+
+    #[test]
+    fn typing_slash_opens_the_palette_and_filters_by_prefix() {
+        let mut app = App::new(None);
+        app.on_event(&key(KeyCode::Char('/')));
+        assert!(app.palette_visible());
+        assert_eq!(app.palette_matches().len(), COMMANDS.len());
+        app.on_event(&key(KeyCode::Char('s')));
+        let names: Vec<_> = app.palette_matches().iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["/sdd", "/spec"]);
+        assert!(
+            !App::new(None).palette_visible(),
+            "input vide → pas de palette"
+        );
+    }
+
+    #[test]
+    fn palette_arrows_cycle_selection_and_reset_on_edit() {
+        let mut app = App::new(None);
+        app.on_event(&key(KeyCode::Char('/')));
+        app.on_event(&key(KeyCode::Char('s')));
+        assert_eq!(app.palette_selected, 0);
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.palette_selected, 1);
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.palette_selected, 0, "cyclique en bas");
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.palette_selected, 1, "cyclique en haut");
+        app.on_event(&key(KeyCode::Char('d')));
+        assert_eq!(
+            app.palette_selected, 0,
+            "l'édition resélectionne le premier"
+        );
+    }
+
+    #[test]
+    fn palette_enter_runs_the_selected_command_not_the_typed_text() {
+        let mut app = App::new(None);
+        // Recalling the executed command via ↑ below relies on prompt-history
+        // recall, which is only bound to the bare arrows in mouse mode (see
+        // the `KAJI_MOUSE` gating on the plain Up/Down arms) — without this,
+        // Up would scroll the (empty) chat instead of recalling history.
+        app.mouse_enabled = true;
+        for c in "/th".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.palette_matches()[0].name, "/think");
+        let action = app.on_event(&key(KeyCode::Enter));
+        assert_eq!(action, Action::None);
+        assert!(app.show_thinking, "la sélection /think a bien été exécutée");
+        assert!(app.input.is_empty());
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(
+            app.input, "/think",
+            "la commande exécutée entre dans l'historique"
+        );
+    }
+
+    #[test]
+    fn palette_enter_without_any_match_submits_the_text_as_is() {
+        let mut app = App::new(None);
+        for c in "/xyz".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert!(!app.palette_visible(), "aucun match → pas de palette");
+        assert_eq!(
+            app.on_event(&key(KeyCode::Enter)),
+            Action::Submit("/xyz".to_string())
+        );
+    }
+
+    #[test]
+    fn palette_tab_completes_the_selected_name_without_running_it() {
+        let mut app = App::new(None);
+        for c in "/s".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.on_event(&key(KeyCode::Tab)), Action::None);
+        assert_eq!(app.input, "/spec");
+        assert_eq!(app.driver, PassDriver::Idle, "rien n'a été exécuté");
+    }
+
+    #[test]
+    fn palette_esc_clears_the_input_and_never_cancels_the_turn() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+        app.on_event(&key(KeyCode::Char('/')));
+        assert_eq!(app.on_event(&key(KeyCode::Esc)), Action::None);
+        assert!(app.input.is_empty());
+        assert_eq!(
+            app.on_event(&key(KeyCode::Esc)),
+            Action::CancelTurn,
+            "sans palette, Esc retrouve l'annulation du tour"
+        );
+    }
+
+    #[test]
+    fn palette_arrows_take_priority_over_history_but_ctrl_arrows_still_jump_turns() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+        app.on_event(&key(KeyCode::Char('a')));
+        app.on_event(&key(KeyCode::Enter));
+        app.chat_overflow.set(30);
+        *app.user_turn_rows.borrow_mut() = vec![2, 10, 25];
+        app.on_event(&key(KeyCode::Char('/')));
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(
+            app.input, "/",
+            "↑ navigue la palette, ne rappelle pas l'historique"
+        );
+        assert_eq!(app.history_index, None);
+        app.on_event(&ctrl_key(KeyCode::Up));
+        assert_eq!(app.scroll_offset, 5, "Ctrl+↑ saute toujours les tours");
+    }
+
+    #[test]
+    fn palette_is_inert_while_a_modal_is_open() {
+        let mut app = App::new(None);
+        open_tool_approval_modal(&mut app);
+        app.input.push('/');
+        assert!(!app.palette_visible());
     }
 
     #[test]
