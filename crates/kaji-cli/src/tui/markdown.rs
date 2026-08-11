@@ -23,7 +23,16 @@ pub fn render_markdown(input: &str, width: u16) -> Vec<Line<'static>> {
         if trimmed.starts_with("```") {
             flush_table_buffer(&mut table_buf, &mut lines, width);
             if in_chart_block {
-                lines.extend(render_chart_block(&chart_buf, width));
+                let preceding_text = lines
+                    .iter()
+                    .rev()
+                    .map(line_plain_text)
+                    .find(|text| !text.trim().is_empty());
+                lines.extend(render_chart_block(
+                    &chart_buf,
+                    width,
+                    preceding_text.as_deref(),
+                ));
                 chart_buf.clear();
                 in_chart_block = false;
             } else if in_code_block {
@@ -59,6 +68,13 @@ pub fn render_markdown(input: &str, width: u16) -> Vec<Line<'static>> {
     flush_table_buffer(&mut table_buf, &mut lines, width);
 
     lines
+}
+
+fn line_plain_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
 }
 
 fn render_line(raw_line: &str) -> Line<'static> {
@@ -316,9 +332,13 @@ struct ChartItem {
 /// negative or non-finite values, zero total/max) falls back to the same
 /// raw rendering as an ordinary fenced code block — arbitrary LLM output
 /// must never panic here.
-fn render_chart_block(body: &[&str], width: u16) -> Vec<Line<'static>> {
+fn render_chart_block(
+    body: &[&str],
+    width: u16,
+    preceding_text: Option<&str>,
+) -> Vec<Line<'static>> {
     match parse_chart_spec(body) {
-        Some(spec) => render_chart(&spec, width),
+        Some(spec) => render_chart(&spec, width, preceding_text),
         None => body.iter().map(|line| render_code_line(line)).collect(),
     }
 }
@@ -359,10 +379,19 @@ fn parse_chart_spec(body: &[&str]) -> Option<ChartSpec> {
     Some(spec)
 }
 
-fn render_chart(spec: &ChartSpec, width: u16) -> Vec<Line<'static>> {
+/// Renders a parsed chart spec. `preceding_text` is the plain-text content of
+/// the last non-empty line already emitted before this chart (typically a
+/// markdown heading) — when the chart's own title matches it (trimmed,
+/// case-insensitive), the model already wrote the title as a heading, so the
+/// chart's title line is suppressed to avoid rendering the same text twice.
+fn render_chart(spec: &ChartSpec, width: u16, preceding_text: Option<&str>) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     if let Some(title) = &spec.title {
-        out.push(Line::from(Span::styled(title.clone(), theme::title())));
+        let duplicates_preceding_text = preceding_text
+            .is_some_and(|text| text.trim().to_lowercase() == title.trim().to_lowercase());
+        if !duplicates_preceding_text {
+            out.push(Line::from(Span::styled(title.clone(), theme::title())));
+        }
     }
 
     let bar_max = chart_bar_max_width(width);
@@ -818,6 +847,37 @@ mod tests {
             .find(|s| s.content == "●")
             .expect("pastille span");
         assert_eq!(dot1.style.fg, Some(theme::OR_PATINE));
+    }
+
+    #[test]
+    fn chart_title_matching_preceding_heading_is_not_duplicated() {
+        let input = "### Parts fictives\n\n```kaji-chart\n{\"type\":\"pie\",\"title\":\"Parts fictives\",\"items\":[{\"label\":\"x\",\"value\":1},{\"label\":\"y\",\"value\":1}]}\n```";
+        let lines = render_markdown(input, 200);
+        let occurrences = lines
+            .iter()
+            .filter(|line| plain_text(line) == "Parts fictives")
+            .count();
+        assert_eq!(
+            occurrences,
+            1,
+            "expected exactly one 'Parts fictives' line, got {occurrences} in {:?}",
+            lines.iter().map(plain_text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn chart_title_differing_from_preceding_text_still_renders() {
+        let input = "### Répartition\n\n```kaji-chart\n{\"type\":\"pie\",\"title\":\"Parts\",\"items\":[{\"label\":\"x\",\"value\":1},{\"label\":\"y\",\"value\":1}]}\n```";
+        let lines = render_markdown(input, 200);
+        assert!(lines.iter().any(|line| plain_text(line) == "Répartition"));
+        assert!(lines.iter().any(|line| plain_text(line) == "Parts"));
+    }
+
+    #[test]
+    fn chart_title_without_preceding_heading_renders() {
+        let input = "```kaji-chart\n{\"type\":\"pie\",\"title\":\"Parts fictives\",\"items\":[{\"label\":\"x\",\"value\":1},{\"label\":\"y\",\"value\":1}]}\n```";
+        let lines = render_markdown(input, 200);
+        assert_eq!(plain_text(&lines[0]), "Parts fictives");
     }
 
     #[test]
