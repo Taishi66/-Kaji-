@@ -122,13 +122,19 @@ async fn cost_report(session_manager: &SessionManager, session_id: &str) -> Vec<
         .unwrap_or_else(|_| "?".to_string());
     let model = config.get_kaji_model().unwrap_or_else(|_| "?".to_string());
     match session_manager.usage_windows(session_id).await {
-        Ok(windows) => report::cost_table_lines(
-            &windows,
-            &provider,
-            &model,
-            budget_from_env("KAJI_BUDGET_5H"),
-            budget_from_env("KAJI_BUDGET_7J"),
-        ),
+        Ok(windows) => {
+            let mut lines = report::cost_table_lines(
+                &windows,
+                &provider,
+                &model,
+                budget_from_env("KAJI_BUDGET_5H"),
+                budget_from_env("KAJI_BUDGET_7J"),
+            );
+            if let Some(line) = report::condense_line(&kaji::context_mgmt::condense::totals()) {
+                lines.push(line);
+            }
+            lines
+        }
         Err(e) => vec![Line::from(Span::styled(
             format!("erreur /cost : {e}"),
             theme::dim(),

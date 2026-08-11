@@ -4,6 +4,7 @@
 //! flux du chat.
 
 use crate::tui::theme;
+use kaji::context_mgmt::condense::CondenseTotals;
 use kaji::session::{UsageAggregate, UsageWindows};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -257,6 +258,27 @@ fn budget_gauge_line(window_label: &str, budget: Budget, agg: &UsageAggregate) -
     ])
 }
 
+/// Ligne de synthèse condense — `None` si aucun résultat d'outil n'a jamais
+/// été condensé. Le compte de tokens est une estimation cumulative : les
+/// mêmes résultats condensés sont recomptés à chaque appel provider tant
+/// qu'ils restent hors de la fenêtre de fraîcheur (voir
+/// `condense::totals`), donc ce nombre reflète l'économie réalisée sur
+/// l'ensemble de la session, pas un total de résultats uniques.
+pub fn condense_line(totals: &CondenseTotals) -> Option<Line<'static>> {
+    if totals.results_touched == 0 {
+        return None;
+    }
+    let saved_tokens = totals.bytes_before.saturating_sub(totals.bytes_after) / 4;
+    Some(Line::from(Span::styled(
+        format!(
+            "condensé : {} résultats · ~{} tok d'historique non envoyés (cumul, est.)",
+            totals.results_touched,
+            fmt_tokens(saved_tokens)
+        ),
+        theme::dim(),
+    )))
+}
+
 /// Parse `docker ps --format "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"`
 /// en tableau aligné NOM/IMAGE/STATUT/PORTS, colonnes tronquées avec `…` au
 /// besoin.
@@ -482,6 +504,30 @@ mod tests {
         assert!(text
             .iter()
             .any(|l| l.contains("budget 7 j") && l.contains("indisponible")));
+    }
+
+    #[test]
+    fn condense_line_is_none_when_nothing_touched() {
+        let totals = CondenseTotals {
+            results_touched: 0,
+            bytes_before: 1_000,
+            bytes_after: 100,
+        };
+        assert_eq!(condense_line(&totals), None);
+    }
+
+    #[test]
+    fn condense_line_reports_count_and_estimated_tokens_saved() {
+        let totals = CondenseTotals {
+            results_touched: 3,
+            bytes_before: 4_400,
+            bytes_after: 400,
+        };
+        let line = condense_line(&totals).expect("line present");
+        assert_eq!(
+            plain_text(&line),
+            "condensé : 3 résultats · ~1\u{202f}000 tok d'historique non envoyés (cumul, est.)"
+        );
     }
 
     #[test]
