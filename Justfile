@@ -419,3 +419,14 @@ build-test-tools:
 record-mcp-tests: build-test-tools
   KAJI_RECORD_MCP=1 cargo test --package kaji --test mcp_integration_test
   git add crates/kaji/tests/mcp_replays/
+
+# Build, install (unlink first — macOS SIGKILLs overwritten live binaries) and
+# codesign ~/.local/bin/kaji with a stable identity so the Keychain ACL
+# survives rebuilds (ad-hoc signing changes the cdhash on every build and
+# re-triggers the password prompt).
+install codesign_id="Apple Development: Jean-Paul Lamy (MLLVU787AX)":
+    cargo build --release -p kaji-cli --bin kaji
+    rm -f ~/.local/bin/kaji
+    cp target/release/kaji ~/.local/bin/kaji
+    codesign --force -s "{{codesign_id}}" ~/.local/bin/kaji
+    @echo "installé + signé : $(~/.local/bin/kaji --version)"
