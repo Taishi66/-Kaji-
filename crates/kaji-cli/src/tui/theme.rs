@@ -18,15 +18,25 @@ pub const KAJI_GLYPH: &str = "鍛冶";
 pub const USER_PREFIX: &str = "vous ▸ ";
 pub const AGENT_PREFIX: &str = "鍛冶 ▸ ";
 pub const SYSTEM_PREFIX: &str = "· ";
+pub const THINKING_PREFIX: &str = "思 ";
 pub const STEP_SYMBOL: &str = "◦";
 pub const GATE_SYMBOL: &str = "⚔";
 pub const SCROLL_INDICATOR: &str = "▼";
 
 pub const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+/// Loader zen (`思考中`) while a turn is in flight with nothing visible yet.
+pub const ENSO_FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
 
 pub fn spinner_frame(elapsed: std::time::Duration) -> char {
     let idx = (elapsed.as_millis() / 100) as usize % SPINNER_FRAMES.len();
     SPINNER_FRAMES[idx]
+}
+
+/// Same shape as [`spinner_frame`] (one full cycle per second) but over the
+/// 4-frame ensō set — driven by the event loop's existing 250 ms tick.
+pub fn enso_frame(elapsed: std::time::Duration) -> char {
+    let idx = (elapsed.as_millis() / 250) as usize % ENSO_FRAMES.len();
+    ENSO_FRAMES[idx]
 }
 
 pub fn text() -> Style {
@@ -42,6 +52,15 @@ pub fn agent() -> Style {
 }
 
 pub fn system() -> Style {
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::ITALIC)
+}
+
+/// Dim italic, distinct name from [`system`] so the two registers (system
+/// notices vs. streamed model reasoning) can diverge visually later even
+/// though they currently share the same style.
+pub fn thinking() -> Style {
     Style::default()
         .fg(Color::DarkGray)
         .add_modifier(Modifier::ITALIC)
@@ -84,4 +103,23 @@ pub fn heading() -> Style {
 /// En-tête de tableau aligné (`/cost`, `/docker`) — or patiné estompé.
 pub fn table_header() -> Style {
     Style::default().fg(OR_PATINE).add_modifier(Modifier::DIM)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn enso_frame_cycles_through_four_frames_over_a_one_second_period() {
+        assert_eq!(enso_frame(Duration::from_millis(0)), '◐');
+        assert_eq!(enso_frame(Duration::from_millis(250)), '◓');
+        assert_eq!(enso_frame(Duration::from_millis(500)), '◑');
+        assert_eq!(enso_frame(Duration::from_millis(750)), '◒');
+        assert_eq!(
+            enso_frame(Duration::from_millis(1000)),
+            '◐',
+            "wraps back to the first frame after the 1s period"
+        );
+    }
 }

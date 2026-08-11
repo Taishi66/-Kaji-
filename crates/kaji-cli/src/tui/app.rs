@@ -24,6 +24,9 @@ pub enum Sender {
     User,
     Agent,
     System,
+    /// Accumulated `Thinking` content blocks for the turn — only ever
+    /// created while `show_thinking` is on (dropped silently otherwise).
+    Thinking,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +83,14 @@ pub struct App {
     /// (option B); the guards below treat it like an in-flight turn.
     pub turn_pending: bool,
     pub turn_started: Option<Instant>,
+    /// Set on the turn's first visible `Text` chunk (thinking doesn't
+    /// count) — reset per turn by `reset_turn_visibility`. Drives the
+    /// loader zen: it disappears the moment there is something to read.
+    pub turn_has_visible_output: bool,
+    /// Togglable via `/think` and F3 — default off (zen). When on, streamed
+    /// `Thinking` blocks render dimmed/italic with the `思` prefix instead
+    /// of being dropped.
+    pub show_thinking: bool,
     pub tokens_turn_in: i64,
     pub tokens_turn_out: i64,
     pub tokens_total_in: i64,
@@ -102,6 +113,13 @@ pub struct App {
     pub chat_overflow: Cell<u16>,
     validate_buffer: String,
     last_agent_msg_id: Option<String>,
+    /// Same merge-chain invariant as `last_agent_msg_id`, tracked
+    /// separately since a streamed message can interleave `Thinking` and
+    /// `Text`/`ToolRequest` blocks under the same id — merging thinking
+    /// chunks into whichever chat line happens to be last would corrupt
+    /// unrelated lines. Reset alongside `last_agent_msg_id` by
+    /// `reset_agent_merge_ids`, and per-turn by `reset_turn_visibility`.
+    last_thinking_msg_id: Option<String>,
     pending_tools: HashMap<String, usize>,
     spec_panel_forced: Option<bool>,
 }
@@ -116,6 +134,8 @@ impl App {
             turn_active: false,
             turn_pending: false,
             turn_started: None,
+            turn_has_visible_output: false,
+            show_thinking: false,
             tokens_turn_in: 0,
             tokens_turn_out: 0,
             tokens_total_in: 0,
@@ -132,6 +152,7 @@ impl App {
             chat_overflow: Cell::new(0),
             validate_buffer: String::new(),
             last_agent_msg_id: None,
+            last_thinking_msg_id: None,
             pending_tools: HashMap::new(),
             spec_panel_forced: None,
         }
@@ -241,6 +262,40 @@ impl App {
         self.turn_started = None;
     }
 
+    /// Called from every turn-begin path (`begin_setup`, covering Submit,
+    /// GateApprove, and the chained exec→validate turn) — arms the loader
+    /// zen and the thinking-merge chain for the new turn.
+    pub fn reset_turn_visibility(&mut self) {
+        self.turn_has_visible_output = false;
+        self.last_thinking_msg_id = None;
+    }
+
+    pub fn toggle_thinking(&mut self) {
+        self.show_thinking = !self.show_thinking;
+        let msg = if self.show_thinking {
+            "思考中 affiché — /think ou F3 pour masquer"
+        } else {
+            "思考中 masqué — /think ou F3 pour afficher"
+        };
+        self.push_system(msg);
+    }
+
+    /// True once a `Thinking` block has streamed in for the current turn
+    /// AND `show_thinking` is on — the loader's exception clause ("pas de
+    /// loader quand `show_thinking` ON et que du thinking s'affiche déjà").
+    pub fn turn_thinking_visible(&self) -> bool {
+        self.show_thinking && self.last_thinking_msg_id.is_some()
+    }
+
+    /// Loader zen visibility: a turn is in flight and nothing readable has
+    /// arrived for it yet (thinking counts only while it's actually being
+    /// shown).
+    pub fn show_loader(&self) -> bool {
+        (self.turn_pending || self.turn_active)
+            && !self.turn_has_visible_output
+            && !self.turn_thinking_visible()
+    }
+
     fn max_scroll(&self) -> u16 {
         self.chat_overflow.get()
     }
@@ -321,6 +376,10 @@ impl App {
         match key.code {
             KeyCode::F(2) => {
                 self.toggle_spec_panel();
+                return Action::None;
+            }
+            KeyCode::F(3) => {
+                self.toggle_thinking();
                 return Action::None;
             }
             KeyCode::PageUp => {
@@ -414,6 +473,9 @@ impl App {
                 } else if text == "/spec" {
                     self.toggle_spec_panel();
                     Action::None
+                } else if text == "/think" {
+                    self.toggle_thinking();
+                    Action::None
                 } else if text == "/cost" {
                     Action::Cost
                 } else if text == "/docker" {
@@ -424,6 +486,15 @@ impl App {
             }
             _ => Action::None,
         }
+    }
+
+    /// Breaks both streamed-merge chains (agent text and thinking) —
+    /// called wherever a chat line that isn't a continuation of either is
+    /// about to be pushed, so a later chunk sharing an old message id
+    /// doesn't get appended onto an unrelated line.
+    fn reset_agent_merge_ids(&mut self) {
+        self.last_agent_msg_id = None;
+        self.last_thinking_msg_id = None;
     }
 
     pub fn push_user(&mut self, text: &str) {
@@ -444,7 +515,7 @@ impl App {
             tool: None,
             rendered: None,
         });
-        self.last_agent_msg_id = None;
+        self.reset_agent_merge_ids();
     }
 
     pub fn push_system(&mut self, text: &str) {
@@ -454,7 +525,7 @@ impl App {
             tool: None,
             rendered: None,
         });
-        self.last_agent_msg_id = None;
+        self.reset_agent_merge_ids();
     }
 
     /// Same as [`Self::push_system`] but with pre-rendered, per-role-styled
@@ -478,7 +549,7 @@ impl App {
             tool: None,
             rendered: Some(lines),
         });
-        self.last_agent_msg_id = None;
+        self.reset_agent_merge_ids();
     }
 
     pub fn apply_agent_event(&mut self, ev: &AgentEvent) {
@@ -519,9 +590,15 @@ impl App {
         for block in &message.content {
             match block {
                 MessageContentBlock::Text(text) => {
+                    self.turn_has_visible_output = true;
                     self.merge_agent_text(&message.id, &text.text);
                     if self.driver == PassDriver::Validating {
                         self.validate_buffer.push_str(&text.text);
+                    }
+                }
+                MessageContentBlock::Thinking(thinking) => {
+                    if self.show_thinking {
+                        self.merge_agent_thinking(&message.id, &thinking.thinking);
                     }
                 }
                 MessageContentBlock::ToolRequest(req) => {
@@ -542,7 +619,7 @@ impl App {
                     });
                     self.pending_tools
                         .insert(req.id.clone(), self.chat.len() - 1);
-                    self.last_agent_msg_id = None;
+                    self.reset_agent_merge_ids();
                 }
                 MessageContentBlock::ActionRequired(action) => {
                     if let ActionRequiredData::ToolConfirmation {
@@ -587,7 +664,7 @@ impl App {
                         }
                         None => self.push_system("✓ outil terminé"),
                     }
-                    self.last_agent_msg_id = None;
+                    self.reset_agent_merge_ids();
                 }
                 _ => {}
             }
@@ -637,6 +714,22 @@ impl App {
             rendered: None,
         });
         self.last_agent_msg_id = message_id.clone();
+    }
+
+    fn merge_agent_thinking(&mut self, message_id: &Option<String>, text: &str) {
+        if message_id.is_some() && *message_id == self.last_thinking_msg_id {
+            if let Some(last) = self.chat.last_mut() {
+                last.text.push_str(text);
+                return;
+            }
+        }
+        self.chat.push(ChatLine {
+            sender: Sender::Thinking,
+            text: text.to_string(),
+            tool: None,
+            rendered: None,
+        });
+        self.last_thinking_msg_id = message_id.clone();
     }
 }
 
@@ -835,6 +928,12 @@ mod tests {
 
     fn agent_says(app: &mut App, id: &str, text: &str) {
         let mut m = Message::assistant().with_text(text);
+        m.id = Some(id.to_string());
+        app.apply_agent_event(&kaji::agents::AgentEvent::Message(m));
+    }
+
+    fn agent_thinks(app: &mut App, id: &str, text: &str) {
+        let mut m = Message::assistant().with_thinking(text, "");
         m.id = Some(id.to_string());
         app.apply_agent_event(&kaji::agents::AgentEvent::Message(m));
     }
@@ -1367,5 +1466,155 @@ mod tests {
         );
         app.apply_agent_event(&AgentEvent::Message(msg));
         assert_eq!(app.on_event(&key(KeyCode::Char('n'))), Action::ToolDeny);
+    }
+
+    #[test]
+    fn show_thinking_defaults_to_off() {
+        let app = App::new(None);
+        assert!(!app.show_thinking);
+    }
+
+    #[test]
+    fn slash_think_toggles_thinking_and_pushes_system_message() {
+        let mut app = App::new(None);
+        for c in "/think".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
+        assert!(app.show_thinking);
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| matches!(l.sender, Sender::System) && l.text.contains("思考中")));
+
+        for c in "/think".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.on_event(&key(KeyCode::Enter));
+        assert!(!app.show_thinking);
+    }
+
+    #[test]
+    fn f3_toggles_thinking() {
+        let mut app = App::new(None);
+        assert!(!app.show_thinking);
+        app.on_event(&key(KeyCode::F(3)));
+        assert!(app.show_thinking);
+        app.on_event(&key(KeyCode::F(3)));
+        assert!(!app.show_thinking);
+    }
+
+    #[test]
+    fn thinking_block_is_dropped_when_show_thinking_is_off() {
+        let mut app = App::new(None);
+        agent_thinks(&mut app, "m1", "raisonnement caché");
+        assert!(!app
+            .chat
+            .iter()
+            .any(|l| matches!(l.sender, Sender::Thinking)));
+    }
+
+    #[test]
+    fn thinking_blocks_accumulate_into_one_chat_line_when_enabled() {
+        let mut app = App::new(None);
+        app.show_thinking = true;
+        agent_thinks(&mut app, "m1", "étape un ");
+        agent_thinks(&mut app, "m1", "étape deux");
+
+        let thinking_lines: Vec<_> = app
+            .chat
+            .iter()
+            .filter(|l| matches!(l.sender, Sender::Thinking))
+            .collect();
+        assert_eq!(thinking_lines.len(), 1);
+        assert_eq!(thinking_lines[0].text, "étape un étape deux");
+    }
+
+    #[test]
+    fn thinking_then_tool_then_thinking_same_id_keeps_lines_separate() {
+        let mut app = App::new(None);
+        app.show_thinking = true;
+        agent_thinks(&mut app, "m1", "avant");
+        let req_msg =
+            Message::assistant().with_tool_request("t1", Ok(CallToolRequestParams::new("shell")));
+        app.apply_agent_event(&AgentEvent::Message(req_msg));
+        agent_thinks(&mut app, "m1", "après");
+
+        let thinking_lines: Vec<_> = app
+            .chat
+            .iter()
+            .filter(|l| matches!(l.sender, Sender::Thinking))
+            .collect();
+        assert_eq!(thinking_lines.len(), 2);
+        assert_eq!(thinking_lines[0].text, "avant");
+        assert_eq!(thinking_lines[1].text, "après");
+    }
+
+    #[test]
+    fn thinking_does_not_mark_turn_output_visible() {
+        let mut app = App::new(None);
+        app.show_thinking = true;
+        agent_thinks(&mut app, "m1", "raisonnement");
+        assert!(!app.turn_has_visible_output);
+    }
+
+    #[test]
+    fn text_block_marks_turn_output_visible() {
+        let mut app = App::new(None);
+        assert!(!app.turn_has_visible_output);
+        agent_says(&mut app, "m1", "bonjour");
+        assert!(app.turn_has_visible_output);
+    }
+
+    #[test]
+    fn reset_turn_visibility_clears_output_flag_and_thinking_merge_state() {
+        let mut app = App::new(None);
+        app.show_thinking = true;
+        agent_says(&mut app, "m1", "bonjour");
+        agent_thinks(&mut app, "m1", "raisonnement");
+        assert!(app.turn_has_visible_output);
+        assert!(app.turn_thinking_visible());
+
+        app.reset_turn_visibility();
+        assert!(!app.turn_has_visible_output);
+        assert!(!app.turn_thinking_visible());
+    }
+
+    #[test]
+    fn loader_visibility_matrix() {
+        let mut app = App::new(None);
+        assert!(!app.show_loader(), "idle: no turn in flight");
+
+        app.turn_pending = true;
+        assert!(
+            app.show_loader(),
+            "setup pending, nothing visible yet → loader"
+        );
+
+        app.turn_pending = false;
+        app.turn_active = true;
+        assert!(
+            app.show_loader(),
+            "turn active, nothing visible yet → loader"
+        );
+
+        app.turn_has_visible_output = true;
+        assert!(
+            !app.show_loader(),
+            "first visible Text chunk hides the loader"
+        );
+
+        app.turn_has_visible_output = false;
+        app.show_thinking = true;
+        assert!(
+            app.show_loader(),
+            "thinking ON but nothing displayed yet → loader still shows"
+        );
+
+        agent_thinks(&mut app, "m1", "raisonnement…");
+        assert!(
+            !app.show_loader(),
+            "thinking ON and already displaying this turn hides the loader"
+        );
     }
 }

@@ -62,6 +62,7 @@ fn push_welcome(app: &mut App) {
     app.push_system("tape ton message puis Entrée");
     app.push_system("/sdd démarre une passe SDD (SPEC.md auto-détecté ou --spec <fichier>)");
     app.push_system("/spec (ou F2) affiche/masque le panneau SPEC · /help réaffiche l'aide");
+    app.push_system("/think (ou F3) affiche/masque le raisonnement du modèle (思考中)");
     app.push_system(
         "/cost affiche l'usage tokens/coût (session, 5 h, 7 j) — budgets optionnels via KAJI_BUDGET_5H / KAJI_BUDGET_7J",
     );
@@ -352,6 +353,7 @@ fn begin_setup<'a>(
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'a>>> + 'a>> {
     app.status = "démarrage du tour…".to_string();
     app.turn_pending = true;
+    app.reset_turn_visibility();
     let token = CancellationToken::new();
     let message = Message::user().with_text(prompt);
     let fut = agent.reply(message, session_config.clone(), Some(token.clone()));

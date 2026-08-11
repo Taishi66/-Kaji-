@@ -1,4 +1,4 @@
-use crate::tui::app::{App, Sender, ToolApprovalRequest};
+use crate::tui::app::{App, ChatLine, Sender, ToolApprovalRequest};
 use crate::tui::{markdown, theme};
 use kaji_core::sdd::StageStatus;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -130,17 +130,11 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
     for chat_line in &app.chat {
-        match chat_line.sender {
-            Sender::Agent => push_agent_lines(&mut lines, &chat_line.text, chat_rect.width),
-            Sender::User => push_plain_lines(
-                &mut lines,
-                &chat_line.text,
-                theme::USER_PREFIX,
-                theme::user(),
-            ),
-            Sender::System => push_system_line(&mut lines, chat_line),
-        }
+        push_chat_line(&mut lines, chat_line, chat_rect.width);
         lines.push(Line::from(""));
+    }
+    if let Some(loader) = loader_line(app) {
+        lines.push(loader);
     }
 
     let wrapped_rows: usize = lines
@@ -156,6 +150,38 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     frame.render_widget(paragraph, chat_rect);
+}
+
+fn push_chat_line(lines: &mut Vec<Line<'static>>, chat_line: &ChatLine, width: u16) {
+    match chat_line.sender {
+        Sender::Agent => push_agent_lines(lines, &chat_line.text, width),
+        Sender::User => push_plain_lines(lines, &chat_line.text, theme::USER_PREFIX, theme::user()),
+        Sender::System => push_system_line(lines, chat_line),
+        Sender::Thinking => push_plain_lines(
+            lines,
+            &chat_line.text,
+            theme::THINKING_PREFIX,
+            theme::thinking(),
+        ),
+    }
+}
+
+/// Loader zen — the chat's trailing `{ensō} 思考中 · {N}s` line while a turn
+/// is in flight with nothing readable yet (`App::show_loader`). `None` once
+/// the first visible chunk lands or the turn ends; no special redraw is
+/// needed for the animation since the 250ms tick already re-renders
+/// whenever a turn is active or pending.
+fn loader_line(app: &App) -> Option<Line<'static>> {
+    if !app.show_loader() {
+        return None;
+    }
+    let elapsed = app.turn_started.map(|t| t.elapsed()).unwrap_or_default();
+    let content = format!(
+        "{} 思考中 · {}s",
+        theme::enso_frame(elapsed),
+        elapsed.as_secs()
+    );
+    Some(Line::from(Span::styled(content, theme::dim())))
 }
 
 fn push_agent_lines(lines: &mut Vec<Line<'static>>, text: &str, width: u16) {
@@ -182,7 +208,7 @@ fn push_plain_lines(lines: &mut Vec<Line<'static>>, text: &str, prefix: &str, st
     }
 }
 
-fn push_system_line(lines: &mut Vec<Line<'static>>, chat_line: &crate::tui::app::ChatLine) {
+fn push_system_line(lines: &mut Vec<Line<'static>>, chat_line: &ChatLine) {
     if let Some(tool) = &chat_line.tool {
         let spinner = theme::spinner_frame(tool.started.elapsed());
         let content = format!("{}⚙ {} {spinner}", theme::SYSTEM_PREFIX, tool.name);
@@ -369,5 +395,67 @@ mod tests {
         let rect = chat_content_rect(narrow);
         assert_eq!(rect.x, 2);
         assert_eq!(rect.width, 38);
+    }
+
+    use kaji::agents::AgentEvent;
+    use kaji::conversation::message::Message;
+
+    fn thinking_message(id: &str, text: &str) -> AgentEvent {
+        let mut m = Message::assistant().with_thinking(text, "");
+        m.id = Some(id.to_string());
+        AgentEvent::Message(m)
+    }
+
+    #[test]
+    fn thinking_chat_line_renders_with_prefix_and_dim_italic_style() {
+        let mut lines = Vec::new();
+        let chat_line = ChatLine {
+            sender: Sender::Thinking,
+            text: "raisonnement".to_string(),
+            tool: None,
+            rendered: None,
+        };
+        push_chat_line(&mut lines, &chat_line, 80);
+
+        assert_eq!(lines.len(), 1);
+        let content: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(content.starts_with(theme::THINKING_PREFIX));
+        assert!(content.contains("raisonnement"));
+        assert_eq!(lines[0].spans[0].style, theme::thinking());
+    }
+
+    #[test]
+    fn loader_line_absent_while_idle() {
+        let app = App::new(None);
+        assert!(loader_line(&app).is_none());
+    }
+
+    #[test]
+    fn loader_line_present_while_turn_pending_and_nothing_visible() {
+        let mut app = App::new(None);
+        app.turn_pending = true;
+
+        let line = loader_line(&app).expect("loader must show while nothing is visible yet");
+        let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(content.contains("思考中"));
+    }
+
+    #[test]
+    fn loader_line_absent_once_turn_output_is_visible() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+        app.turn_has_visible_output = true;
+
+        assert!(loader_line(&app).is_none());
+    }
+
+    #[test]
+    fn loader_line_absent_when_thinking_already_displayed_and_enabled() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+        app.show_thinking = true;
+        app.apply_agent_event(&thinking_message("m1", "raisonnement"));
+
+        assert!(loader_line(&app).is_none());
     }
 }
