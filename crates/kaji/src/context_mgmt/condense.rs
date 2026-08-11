@@ -62,6 +62,37 @@ pub fn max_lines() -> usize {
     }
 }
 
+/// Tool-name suffixes exempted from condensing by default. `load_skill`
+/// results carry the skill's operational instructions (see
+/// `skills::loaded_skill_context`); condensing them after `keep_raw_turns`
+/// would silently truncate instructions the model still needs, so they stay
+/// raw for the life of the session regardless of age.
+const DEFAULT_CONDENSE_EXEMPT_TOOLS: &[&str] = &["load_skill"];
+
+/// Tool names (or suffixes, to survive platform prefixes like `acp__load_skill`)
+/// whose tool-result content is never condensed. `KAJI_CONDENSE_EXEMPT_TOOLS`
+/// (comma-separated) replaces the default list entirely when set; an empty
+/// value means no exemptions.
+fn condense_exempt_tools() -> Vec<String> {
+    match Config::global().get_param::<String>("KAJI_CONDENSE_EXEMPT_TOOLS") {
+        Ok(v) => v
+            .split(',')
+            .map(|entry| entry.trim().to_string())
+            .filter(|entry| !entry.is_empty())
+            .collect(),
+        Err(_) => DEFAULT_CONDENSE_EXEMPT_TOOLS
+            .iter()
+            .map(|entry| entry.to_string())
+            .collect(),
+    }
+}
+
+fn is_exempt_tool(tool_name: &str, exempt: &[String]) -> bool {
+    exempt
+        .iter()
+        .any(|entry| tool_name == entry || tool_name.ends_with(entry.as_str()))
+}
+
 /// A turn boundary is a user message carrying prompt text and no tool
 /// results — the point where a new user instruction begins. Walking these
 /// backwards from the end lets us find "the last N turns" without needing
@@ -199,6 +230,7 @@ pub fn condense_history(
     }
 
     let tool_names = build_tool_names(messages);
+    let exempt_tools = condense_exempt_tools();
     let mut out = messages.to_vec();
 
     for message in &mut out[..cutoff] {
@@ -213,6 +245,10 @@ pub fn condense_history(
                 .get(&response.id)
                 .map(String::as_str)
                 .unwrap_or("?");
+
+            if is_exempt_tool(tool_name, &exempt_tools) {
+                continue;
+            }
 
             for block in &mut result.content {
                 let ContentBlock::Text(text_content) = block else {
@@ -610,5 +646,76 @@ mod tests {
         assert_eq!(after.results_touched - before.results_touched, 3);
         assert_eq!(after.bytes_before - before.bytes_before, 100);
         assert_eq!(after.bytes_after - before.bytes_after, 40);
+    }
+
+    #[test]
+    fn load_skill_tool_result_is_exempt_from_condensing_by_default() {
+        let _guard = env_lock::lock_env([("KAJI_CONDENSE_EXEMPT_TOOLS", None::<&str>)]);
+        let msgs = vec![
+            user_text("q1"),
+            Message::assistant()
+                .with_tool_request("a", Ok(CallToolRequestParams::new("load_skill"))),
+            tool_response("a", &numbered(200)), // vieux load_skill
+            Message::assistant().with_tool_request("b", Ok(CallToolRequestParams::new("shell"))),
+            tool_response("b", &numbered(200)), // vieux shell, frère
+            user_text("q2"),
+            user_text("q3"),
+        ];
+        let (out, stats) = condense_history(&msgs, 2, &CondenseBudget::default());
+        assert_eq!(tool_text(&out[2]), numbered(200)); // load_skill jamais condensé
+        assert!(tool_text(&out[4]).contains("lignes omises")); // shell condensé normalement
+        assert_eq!(stats.results_touched, 1);
+    }
+
+    #[test]
+    fn condense_exempt_tools_env_override_replaces_default_list() {
+        let _guard = env_lock::lock_env([("KAJI_CONDENSE_EXEMPT_TOOLS", Some("shell"))]);
+        let msgs = vec![
+            user_text("q1"),
+            Message::assistant()
+                .with_tool_request("a", Ok(CallToolRequestParams::new("load_skill"))),
+            tool_response("a", &numbered(200)),
+            Message::assistant().with_tool_request("b", Ok(CallToolRequestParams::new("shell"))),
+            tool_response("b", &numbered(200)),
+            user_text("q2"),
+            user_text("q3"),
+        ];
+        let (out, _) = condense_history(&msgs, 2, &CondenseBudget::default());
+        // Override replaces the default entirely: load_skill loses its
+        // exemption, shell gains one.
+        assert!(tool_text(&out[2]).contains("lignes omises"));
+        assert_eq!(tool_text(&out[4]), numbered(200));
+    }
+
+    #[test]
+    fn condense_exempt_tools_env_empty_string_means_no_exemption() {
+        let _guard = env_lock::lock_env([("KAJI_CONDENSE_EXEMPT_TOOLS", Some(""))]);
+        let msgs = vec![
+            user_text("q1"),
+            Message::assistant()
+                .with_tool_request("a", Ok(CallToolRequestParams::new("load_skill"))),
+            tool_response("a", &numbered(200)),
+            user_text("q2"),
+            user_text("q3"),
+        ];
+        let (out, stats) = condense_history(&msgs, 2, &CondenseBudget::default());
+        assert!(tool_text(&out[2]).contains("lignes omises"));
+        assert_eq!(stats.results_touched, 1);
+    }
+
+    #[test]
+    fn condense_exempt_tools_matches_tool_name_by_suffix() {
+        let _guard = env_lock::lock_env([("KAJI_CONDENSE_EXEMPT_TOOLS", None::<&str>)]);
+        let msgs = vec![
+            user_text("q1"),
+            Message::assistant()
+                .with_tool_request("a", Ok(CallToolRequestParams::new("platform__load_skill"))),
+            tool_response("a", &numbered(200)), // nom préfixé par la plateforme
+            user_text("q2"),
+            user_text("q3"),
+        ];
+        let (out, stats) = condense_history(&msgs, 2, &CondenseBudget::default());
+        assert_eq!(tool_text(&out[2]), numbered(200));
+        assert_eq!(stats.results_touched, 0);
     }
 }

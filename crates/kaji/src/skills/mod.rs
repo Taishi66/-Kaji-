@@ -114,6 +114,42 @@ fn resolve_docs_root_placeholder(skill: &SourceEntry, content: &str, docs_root: 
     content.replace(KAJI_DOCS_ROOT_PLACEHOLDER, docs_root)
 }
 
+/// Default cap on estimated content tokens rendered by [`loaded_skill_context`]
+/// before the content is truncated. Zero or invalid values for
+/// `KAJI_SKILL_MAX_TOKENS` fall back to this default (same shape as
+/// `context_mgmt::condense::max_lines`).
+const DEFAULT_SKILL_MAX_TOKENS: usize = 24_000;
+
+pub fn skill_max_tokens() -> usize {
+    match Config::global().get_param::<usize>("KAJI_SKILL_MAX_TOKENS") {
+        Ok(v) if v > 0 => v,
+        _ => DEFAULT_SKILL_MAX_TOKENS,
+    }
+}
+
+/// Truncate `content` at `limit` estimated tokens, cutting chars
+/// proportionally to the token estimate so the operation stays simple and
+/// deterministic (no incremental re-tokenization). Appends a marker pointing
+/// back at `load_skill` for the files listed in the header so the model can
+/// fetch precise sections instead of guessing.
+fn truncate_content_for_budget(skill_name: &str, content: &str, limit: usize) -> String {
+    let estimated_tokens = crate::token_counter::count_tokens_sync(content);
+    if estimated_tokens <= limit {
+        return content.to_string();
+    }
+
+    let keep_ratio = limit as f64 / estimated_tokens as f64;
+    let char_count = content.chars().count();
+    let keep_chars = ((char_count as f64) * keep_ratio).floor() as usize;
+    let truncated: String = content.chars().take(keep_chars).collect();
+
+    format!(
+        "{truncated}\n\n[… contenu tronqué : skill de ~{estimated_tokens} tokens, limite {limit}. \
+         Fichiers précis chargeables via load_skill(name: \"{skill_name}/<chemin>\") — voir la \
+         liste ci-dessus. Limite ajustable via KAJI_SKILL_MAX_TOKENS.]"
+    )
+}
+
 fn loaded_skill_context(skill: &SourceEntry, content: &str) -> Result<String> {
     let docs_root = Config::global()
         .get_kaji_docs_root()?
@@ -121,10 +157,7 @@ fn loaded_skill_context(skill: &SourceEntry, content: &str) -> Result<String> {
     let content = resolve_docs_root_placeholder(skill, content, &docs_root);
 
     let title = format!("{} ({})", skill.name, skill.source_type);
-    let mut output = format!(
-        "# Loaded Skill: {title}\n\n{}\n\n## Content\n\n{}\n",
-        skill.description, content
-    );
+    let mut output = format!("# Loaded Skill: {title}\n\n{}\n", skill.description);
 
     if !skill.supporting_files.is_empty() {
         let skill_dir = Path::new(&skill.path);
@@ -147,6 +180,9 @@ fn loaded_skill_context(skill: &SourceEntry, content: &str) -> Result<String> {
             }
         }
     }
+
+    let content = truncate_content_for_budget(&skill.name, &content, skill_max_tokens());
+    output.push_str(&format!("\n## Content\n\n{}\n", content));
 
     Ok(output)
 }
@@ -586,6 +622,80 @@ mod tests {
         assert!(rendered.contains("scripts/my-tool.exe"));
         assert!(rendered.contains(&resolved_path));
         assert!(rendered.contains("load_skill(name: \"test-skill/scripts/my-tool.exe\")"));
+
+        let supporting_files_pos = rendered.find("## Supporting Files").unwrap();
+        let content_pos = rendered.find("## Content").unwrap();
+        assert!(
+            supporting_files_pos < content_pos,
+            "path info (Skill directory / Supporting Files) must precede Content so the model \
+             sees where to look before it starts reading a possibly huge body"
+        );
+    }
+
+    #[test]
+    fn loaded_skill_context_puts_title_and_description_before_content() {
+        let skill = skill_with_content("Review the code carefully.");
+
+        let rendered = loaded_skill_context_with_args(&skill, None).unwrap();
+        let title_pos = rendered.find("# Loaded Skill: test-skill (skill)").unwrap();
+        let description_pos = rendered.find("Test skill").unwrap();
+        let content_pos = rendered.find("## Content").unwrap();
+
+        assert!(title_pos < description_pos);
+        assert!(description_pos < content_pos);
+    }
+
+    #[test]
+    fn skill_max_tokens_defaults_when_unset() {
+        let _guard = env_lock::lock_env([("KAJI_SKILL_MAX_TOKENS", None::<&str>)]);
+        assert_eq!(skill_max_tokens(), DEFAULT_SKILL_MAX_TOKENS);
+    }
+
+    #[test]
+    fn skill_max_tokens_reads_env_override() {
+        let _guard = env_lock::lock_env([("KAJI_SKILL_MAX_TOKENS", Some("500"))]);
+        assert_eq!(skill_max_tokens(), 500);
+    }
+
+    #[test]
+    fn skill_max_tokens_falls_back_on_zero_or_invalid() {
+        {
+            let _guard = env_lock::lock_env([("KAJI_SKILL_MAX_TOKENS", Some("0"))]);
+            assert_eq!(skill_max_tokens(), DEFAULT_SKILL_MAX_TOKENS);
+        }
+        {
+            let _guard = env_lock::lock_env([("KAJI_SKILL_MAX_TOKENS", Some("not-a-number"))]);
+            assert_eq!(skill_max_tokens(), DEFAULT_SKILL_MAX_TOKENS);
+        }
+    }
+
+    #[test]
+    fn loaded_skill_context_under_limit_is_unchanged() {
+        let _guard = env_lock::lock_env([("KAJI_SKILL_MAX_TOKENS", None::<&str>)]);
+        let skill = skill_with_content("Short instructions that stay well under budget.");
+
+        let rendered = loaded_skill_context_with_args(&skill, None).unwrap();
+
+        assert!(rendered.contains("## Content\n\nShort instructions that stay well under budget."));
+        assert!(!rendered.contains("contenu tronqué"));
+    }
+
+    #[test]
+    fn loaded_skill_context_over_limit_is_truncated_with_marker_and_header_intact() {
+        let _guard = env_lock::lock_env([("KAJI_SKILL_MAX_TOKENS", Some("10"))]);
+        let huge_content = "word ".repeat(5_000);
+        let skill = skill_with_content(&huge_content);
+
+        let rendered = loaded_skill_context_with_args(&skill, None).unwrap();
+
+        assert!(rendered.contains("# Loaded Skill: test-skill (skill)"));
+        assert!(rendered.contains("Test skill"));
+        assert!(rendered.contains("[… contenu tronqué : skill de ~"));
+        assert!(rendered.contains("tokens, limite 10."));
+        assert!(rendered
+            .contains("Fichiers précis chargeables via load_skill(name: \"test-skill/<chemin>\")"));
+        assert!(rendered.contains("Limite ajustable via KAJI_SKILL_MAX_TOKENS."));
+        assert!(rendered.len() < huge_content.len());
     }
 
     #[test]

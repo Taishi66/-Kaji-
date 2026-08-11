@@ -202,6 +202,18 @@ impl TokenCounter {
     }
 }
 
+/// Synchronous token estimate using the same tokenizer and encoding call as
+/// [`TokenCounter::count_tokens`], for callers that can't await the shared
+/// `TokenCounter` (e.g. rendering skill content outside an async context).
+/// Falls back to building a fresh tokenizer only if the shared one hasn't
+/// been initialized yet.
+pub fn count_tokens_sync(text: &str) -> usize {
+    let tokenizer = TOKENIZER.get().cloned().unwrap_or_else(|| {
+        Arc::new(tiktoken_rs::o200k_base().expect("Failed to initialize o200k_base tokenizer"))
+    });
+    tokenizer.encode_with_special_tokens(text).len()
+}
+
 async fn get_tokenizer() -> Result<Arc<CoreBPE>, String> {
     Ok(TOKENIZER
         .get_or_init(|| async {
