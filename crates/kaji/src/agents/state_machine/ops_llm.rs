@@ -574,6 +574,10 @@ impl Inference for InferenceRunner<'_> {
                     kaji_providers::conversation::token_usage::Usage::default(),
                 );
                 if let Some(response) = accumulator.last() {
+                    // Known imprecision: counts `conversation_for_provider` pre-condense,
+                    // while the wire request condense.rs builds inside
+                    // `stream_response_from_provider` may have sent fewer bytes —
+                    // overstates the estimate for providers reporting no usage.
                     crate::providers::usage_estimator::ensure_usage_tokens(
                         &mut usage,
                         &system_prompt,

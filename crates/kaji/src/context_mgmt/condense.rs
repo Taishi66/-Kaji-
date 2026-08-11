@@ -8,7 +8,17 @@ use std::sync::LazyLock;
 
 pub const DEFAULT_KEEP_RAW_TURNS: usize = 2;
 pub const DEFAULT_MAX_LINES: usize = 40;
-const OMISSION_MARKER: &str = "lignes omises — résultat complet conservé en session";
+const OMISSION_SUFFIX: &str = "résultat complet conservé en session";
+
+/// French singular/plural agreement for the omission count: "1 ligne omise"
+/// vs "N lignes omises".
+fn omission_phrase(omitted: usize) -> String {
+    if omitted == 1 {
+        format!("1 ligne omise — {OMISSION_SUFFIX}")
+    } else {
+        format!("{omitted} lignes omises — {OMISSION_SUFFIX}")
+    }
+}
 
 pub struct CondenseBudget {
     pub max_lines: usize,
@@ -55,9 +65,15 @@ pub fn max_lines() -> usize {
 /// A turn boundary is a user message carrying prompt text and no tool
 /// results — the point where a new user instruction begins. Walking these
 /// backwards from the end lets us find "the last N turns" without needing
-/// an explicit turn counter on `Message`.
+/// an explicit turn counter on `Message`. MOIM turn-context events
+/// (moim.rs) are User+Text+no-ToolResponse too, but they're synthetic
+/// per-inference-call bookkeeping, not a new user instruction — one real
+/// turn can carry several of them (compaction status ticking mid-turn on
+/// the state-machine path) — so they must not count as boundaries, or the
+/// freshness window shrinks and the cutoff can land inside the current turn.
 fn is_turn_boundary(message: &Message) -> bool {
     message.role == Role::User
+        && !message.is_turn_context()
         && message
             .content
             .iter()
@@ -157,7 +173,7 @@ pub fn condense_text(text: &str, max_lines: usize) -> Option<String> {
         let omitted = deduped.len() - head - tail;
 
         let mut lines: Vec<String> = deduped[..head].to_vec();
-        lines.push(format!("[… {omitted} {OMISSION_MARKER}]"));
+        lines.push(format!("[… {}]", omission_phrase(omitted)));
         lines.extend_from_slice(&deduped[deduped.len() - tail..]);
         lines.join("\n")
     } else {
@@ -241,7 +257,7 @@ pub struct CondenseTotals {
     pub bytes_after: u64,
 }
 
-/// Accumulates into the session-wide totals returned by [`totals`]. Called
+/// Accumulates into the process-wide totals returned by [`totals`]. Called
 /// once per provider call, whenever that call's `condense_history` actually
 /// touched something — see `totals` for why the same old tool-result being
 /// counted again on every later call is correct, not double-counting.
@@ -269,11 +285,18 @@ pub fn totals() -> CondenseTotals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::message::{Message, MessageContentBlock, ToolResponse};
+    use crate::conversation::message::{
+        Message, MessageContentBlock, MessageMetadata, ToolResponse,
+    };
     use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 
     fn user_text(t: &str) -> Message {
         Message::user().with_text(t)
+    }
+    fn turn_context(t: &str) -> Message {
+        Message::user()
+            .with_text(t)
+            .with_metadata(MessageMetadata::agent_only().with_turn_context())
     }
     fn tool_response(id: &str, text: &str) -> Message {
         let result = CallToolResult::success(vec![ContentBlock::text(text)]);
@@ -317,6 +340,49 @@ mod tests {
         assert_eq!(tool_text(&out[3]), numbered(200)); // dans la fenêtre → brut
         assert_eq!(stats.results_touched, 1);
         assert!(stats.bytes_after < stats.bytes_before);
+    }
+
+    #[test]
+    fn turn_context_events_do_not_count_as_turn_boundaries() {
+        // Real turn shape: a MOIM turn-context event follows every user
+        // message (moim.rs). If `is_turn_boundary` mistook these for real
+        // user turns, each one would eat into the `keep_raw_turns` budget
+        // and pull the cutoff forward — condensing tool-results that are
+        // still inside the freshness window.
+        let msgs = vec![
+            user_text("q1"),
+            tool_response("a", &numbered(200)), // vieux tour
+            turn_context("tc1"),
+            user_text("q2"),
+            turn_context("tc2"),
+            user_text("q3"), // tour courant
+        ];
+        let (out, _) = condense_history(&msgs, 2, &CondenseBudget::default());
+        // Real boundaries from the end: q3, q2 → cutoff at q2's index (3) →
+        // the toolresp at index 1 lies before it and is condensed.
+        assert!(tool_text(&out[1]).contains("lignes omises"));
+    }
+
+    #[test]
+    fn turn_context_events_after_last_user_message_do_not_shrink_the_window() {
+        // SM mid-turn shape: multiple turn-context events can trail the last
+        // real user message within a single turn (ops_llm.rs re-emits one
+        // per inference call when the budget ticks). None of them should
+        // count as a boundary.
+        let msgs = vec![
+            user_text("q1"),
+            tool_response("a", &numbered(200)), // toolresp1
+            user_text("q2"),
+            tool_response("b", &numbered(200)), // toolresp2 — current window
+            turn_context("tc_a"),
+            turn_context("tc_b"),
+        ];
+        let (out, stats) = condense_history(&msgs, 2, &CondenseBudget::default());
+        // Real boundaries from the end: q2 (1st), q1 (2nd) → cutoff at q1's
+        // index (0) → nothing lies before it → nothing is condensed.
+        assert_eq!(tool_text(&out[1]), numbered(200));
+        assert_eq!(tool_text(&out[3]), numbered(200));
+        assert_eq!(stats.results_touched, 0);
     }
 
     #[test]
@@ -454,6 +520,22 @@ mod tests {
             let text = result.content[0].as_text().unwrap().text.as_str();
             assert!(text.contains("lignes omises"));
         }
+    }
+
+    #[test]
+    fn omission_phrase_uses_singular_for_one_line() {
+        assert_eq!(
+            omission_phrase(1),
+            "1 ligne omise — résultat complet conservé en session"
+        );
+        assert_eq!(
+            omission_phrase(2),
+            "2 lignes omises — résultat complet conservé en session"
+        );
+        assert_eq!(
+            omission_phrase(166),
+            "166 lignes omises — résultat complet conservé en session"
+        );
     }
 
     #[test]

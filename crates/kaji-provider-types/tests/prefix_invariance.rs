@@ -90,8 +90,14 @@ fn session_states() -> Vec<Vec<Message>> {
     ]
 }
 
-/// The projection every request goes through before any formatter
-/// (`stream_response_from_provider`).
+/// The pre-condense projection every request goes through before any
+/// formatter (`stream_response_from_provider`). The real request path
+/// additionally runs condense (`crates/kaji/context_mgmt/condense.rs`),
+/// which deliberately rewrites tool-results aging out of the freshness
+/// window — an accepted prefix-invariance trade-off (decision recorded
+/// 2026-08-11: token savings vs earlier cache invalidation at the aging
+/// boundary; kill-switch `KAJI_CONDENSE=0`). This harness intentionally
+/// models the pre-condense projection.
 fn provider_view(messages: &[Message]) -> Vec<Message> {
     let projected =
         Conversation::new_unvalidated(messages.iter().cloned()).agent_visible_messages();
