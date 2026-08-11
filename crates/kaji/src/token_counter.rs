@@ -205,12 +205,25 @@ impl TokenCounter {
 /// Synchronous token estimate using the same tokenizer and encoding call as
 /// [`TokenCounter::count_tokens`], for callers that can't await the shared
 /// `TokenCounter` (e.g. rendering skill content outside an async context).
-/// Falls back to building a fresh tokenizer only if the shared one hasn't
-/// been initialized yet.
+/// Building `o200k_base()` costs tens of milliseconds, so on the cold path
+/// (nothing has initialized `TOKENIZER` yet — e.g. no prior async
+/// `create_token_counter()` call in this process) the freshly-built
+/// tokenizer is written back into the shared `OnceCell` via the synchronous
+/// `set`, so later calls — sync or async — reuse it instead of rebuilding it
+/// every time. `set` losing a race to a concurrent initializer is harmless:
+/// this call still returns a correct (locally-built) result, and the shared
+/// cell ends up populated by whichever caller won either way.
 pub fn count_tokens_sync(text: &str) -> usize {
-    let tokenizer = TOKENIZER.get().cloned().unwrap_or_else(|| {
-        Arc::new(tiktoken_rs::o200k_base().expect("Failed to initialize o200k_base tokenizer"))
-    });
+    let tokenizer = match TOKENIZER.get() {
+        Some(tokenizer) => tokenizer.clone(),
+        None => {
+            let built = Arc::new(
+                tiktoken_rs::o200k_base().expect("Failed to initialize o200k_base tokenizer"),
+            );
+            let _ = TOKENIZER.set(built.clone());
+            built
+        }
+    };
     tokenizer.encode_with_special_tokens(text).len()
 }
 
@@ -231,6 +244,32 @@ pub async fn create_token_counter() -> Result<TokenCounter, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `TOKENIZER` is a process-global `OnceCell` shared with every other test
+    // in this binary, so this can't prove the cold path only rebuilds once
+    // in true isolation (another test's `create_token_counter().await` may
+    // have already warmed it). It does assert the fix's actual
+    // post-condition: after `count_tokens_sync`, the shared cell is
+    // populated, and it stays the *same* tokenizer instance across repeated
+    // calls (no rebuild-per-call). Before the fix, the fallback branch never
+    // wrote back to `TOKENIZER`, so on a cold cell this would have rebuilt a
+    // fresh `CoreBPE` on every single call.
+    #[test]
+    fn count_tokens_sync_populates_and_reuses_the_shared_tokenizer() {
+        assert!(count_tokens_sync("warm the shared cache") > 0);
+        let first = TOKENIZER
+            .get()
+            .cloned()
+            .expect("cache populated after first call");
+
+        assert!(count_tokens_sync("second call should reuse it") > 0);
+        let second = TOKENIZER.get().cloned().expect("cache still populated");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "count_tokens_sync must reuse the cached tokenizer, not rebuild it per call"
+        );
+    }
 
     #[tokio::test]
     async fn test_token_caching() {

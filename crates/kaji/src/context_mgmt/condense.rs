@@ -87,10 +87,16 @@ fn condense_exempt_tools() -> Vec<String> {
     }
 }
 
+/// Exact match, or a `__`-delimited suffix (platform-prefixed names like
+/// `acp__load_skill`). A bare `ends_with` would also catch unrelated tools
+/// that merely happen to end in the same letters (`reload_skill`,
+/// `download_skill`, `unload_skill`), exempting them from condensing with no
+/// size cap of their own — worse than the original unbounded-growth bug this
+/// exemption exists to fix.
 fn is_exempt_tool(tool_name: &str, exempt: &[String]) -> bool {
     exempt
         .iter()
-        .any(|entry| tool_name == entry || tool_name.ends_with(entry.as_str()))
+        .any(|entry| tool_name == entry || tool_name.ends_with(&format!("__{entry}")))
 }
 
 /// A turn boundary is a user message carrying prompt text and no tool
@@ -241,6 +247,12 @@ pub fn condense_history(
             let Ok(result) = &mut response.tool_result else {
                 continue;
             };
+            // "?" (no matching ToolRequest) can't match an exempt name, so it
+            // falls back to normal condensing — a safe default, since by the
+            // time messages reach here `fix_tool_calling`
+            // (kaji-provider-types conversation.rs) has already stripped
+            // orphaned tool responses upstream in the reply pipeline; this is
+            // just the fail-safe for the rare caller that skips that step.
             let tool_name = tool_names
                 .get(&response.id)
                 .map(String::as_str)
@@ -711,6 +723,48 @@ mod tests {
             Message::assistant()
                 .with_tool_request("a", Ok(CallToolRequestParams::new("platform__load_skill"))),
             tool_response("a", &numbered(200)), // nom préfixé par la plateforme
+            user_text("q2"),
+            user_text("q3"),
+        ];
+        let (out, stats) = condense_history(&msgs, 2, &CondenseBudget::default());
+        assert_eq!(tool_text(&out[2]), numbered(200));
+        assert_eq!(stats.results_touched, 0);
+    }
+
+    #[test]
+    fn condense_exempt_tools_requires_delimited_suffix_not_bare_substring() {
+        // Bare `ends_with("load_skill")` also matches `reload_skill`,
+        // `download_skill`, `unload_skill` — unrelated tools that would slip
+        // past the 24k skill-content guard entirely and grow the transcript
+        // unbounded, which is worse than the original bug. Only an exact name
+        // or a `__`-delimited platform-prefixed suffix should exempt.
+        let _guard = env_lock::lock_env([("KAJI_CONDENSE_EXEMPT_TOOLS", None::<&str>)]);
+        for unrelated in ["reload_skill", "download_skill", "unload_skill"] {
+            let msgs = vec![
+                user_text("q1"),
+                Message::assistant()
+                    .with_tool_request("a", Ok(CallToolRequestParams::new(unrelated))),
+                tool_response("a", &numbered(200)),
+                user_text("q2"),
+                user_text("q3"),
+            ];
+            let (out, stats) = condense_history(&msgs, 2, &CondenseBudget::default());
+            assert!(
+                tool_text(&out[2]).contains("lignes omises"),
+                "{unrelated} must NOT be exempt (bare substring match, not a delimited suffix)"
+            );
+            assert_eq!(stats.results_touched, 1);
+        }
+    }
+
+    #[test]
+    fn condense_exempt_tools_matches_delimited_platform_prefix() {
+        let _guard = env_lock::lock_env([("KAJI_CONDENSE_EXEMPT_TOOLS", None::<&str>)]);
+        let msgs = vec![
+            user_text("q1"),
+            Message::assistant()
+                .with_tool_request("a", Ok(CallToolRequestParams::new("acp__load_skill"))),
+            tool_response("a", &numbered(200)),
             user_text("q2"),
             user_text("q3"),
         ];
