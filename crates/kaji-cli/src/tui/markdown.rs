@@ -7,7 +7,11 @@ use serde::Deserialize;
 /// fenced code blocks, lists, blockquotes) into styled ratatui lines. No
 /// external dependency: kept minimal on purpose, tuned for LLM chat output
 /// rather than full CommonMark compliance.
-pub fn render_markdown(input: &str) -> Vec<Line<'static>> {
+///
+/// `width` is the actual measure the caller will render into (e.g. the chat
+/// pane's rect width) — table and chart budgets scale down from it so
+/// box-drawing never wraps onto the next terminal row.
+pub fn render_markdown(input: &str, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
     let mut in_chart_block = false;
@@ -17,9 +21,9 @@ pub fn render_markdown(input: &str) -> Vec<Line<'static>> {
     for raw_line in input.lines() {
         let trimmed = raw_line.trim_start();
         if trimmed.starts_with("```") {
-            flush_table_buffer(&mut table_buf, &mut lines);
+            flush_table_buffer(&mut table_buf, &mut lines, width);
             if in_chart_block {
-                lines.extend(render_chart_block(&chart_buf));
+                lines.extend(render_chart_block(&chart_buf, width));
                 chart_buf.clear();
                 in_chart_block = false;
             } else if in_code_block {
@@ -46,13 +50,13 @@ pub fn render_markdown(input: &str) -> Vec<Line<'static>> {
             table_buf.push(raw_line);
             continue;
         }
-        flush_table_buffer(&mut table_buf, &mut lines);
+        flush_table_buffer(&mut table_buf, &mut lines, width);
         lines.push(render_line(raw_line));
     }
     if in_chart_block {
         lines.extend(chart_buf.iter().map(|line| render_code_line(line)));
     }
-    flush_table_buffer(&mut table_buf, &mut lines);
+    flush_table_buffer(&mut table_buf, &mut lines, width);
 
     lines
 }
@@ -70,11 +74,11 @@ fn render_line(raw_line: &str) -> Line<'static> {
     Line::from(render_inline_spans(raw_line))
 }
 
-fn flush_table_buffer(table_buf: &mut Vec<&str>, lines: &mut Vec<Line<'static>>) {
+fn flush_table_buffer(table_buf: &mut Vec<&str>, lines: &mut Vec<Line<'static>>, width: u16) {
     if table_buf.is_empty() {
         return;
     }
-    match try_render_table(table_buf) {
+    match try_render_table(table_buf, width) {
         Some(table_lines) => lines.extend(table_lines),
         None => {
             for raw_line in table_buf.iter() {
@@ -87,6 +91,14 @@ fn flush_table_buffer(table_buf: &mut Vec<&str>, lines: &mut Vec<Line<'static>>)
 
 const TABLE_BUDGET_COLS: usize = 100;
 
+/// Caps the table budget at the caller's actual measure, minus a 2-column
+/// safety margin (rounding/edge slack so the box-drawing never lands exactly
+/// on the wrap boundary). Never exceeds `TABLE_BUDGET_COLS` either, so wide
+/// terminals still get the existing reading-width cap.
+fn table_budget_for_width(width: u16) -> usize {
+    TABLE_BUDGET_COLS.min(width.saturating_sub(2) as usize)
+}
+
 enum TableBorder {
     Top,
     Mid,
@@ -98,8 +110,11 @@ enum TableBorder {
 /// other shape (no separator, inconsistent column counts) — or a table that
 /// can't fit within budget even at 1-char columns — returns `None` so the
 /// caller falls back to rendering the raw buffered lines untouched —
-/// arbitrary LLM output must never panic here.
-fn try_render_table(lines: &[&str]) -> Option<Vec<Line<'static>>> {
+/// arbitrary LLM output must never panic here. `width` scales the budget
+/// down on narrow terminals (see `table_budget_for_width`), so a table too
+/// wide for the actual chat measure falls back to raw instead of wrapping
+/// its box-drawing onto the next row.
+fn try_render_table(lines: &[&str], width: u16) -> Option<Vec<Line<'static>>> {
     if lines.len() < 2 {
         return None;
     }
@@ -121,7 +136,7 @@ fn try_render_table(lines: &[&str]) -> Option<Vec<Line<'static>>> {
             natural_widths[i] = natural_widths[i].max(cell.chars().count());
         }
     }
-    let col_widths = fit_table_to_budget(&natural_widths, TABLE_BUDGET_COLS)?;
+    let col_widths = fit_table_to_budget(&natural_widths, table_budget_for_width(width))?;
 
     let mut out = Vec::with_capacity(4 + data_rows.len());
     out.push(table_border_line(&col_widths, TableBorder::Top));
@@ -245,8 +260,35 @@ const PIE_COLORS: [Color; 4] = [
     theme::VERMILLON,
     theme::OR_PATINE,
     theme::INDIGO,
-    theme::ENCRE,
+    theme::WAKAKUSA,
 ];
+
+/// Reserved columns around the label+bar pair: pie's `"● "` bullet (2,
+/// reserved even for bar charts to keep one rule for both), the `"  "` gap
+/// after the label (2), the `"  "` gap after the bar (2), and the rendered
+/// value/percentage (up to 10 chars — covers `"100 %"` and the largest
+/// `format_chart_value` output, a 10-digit integer just under the 1e9
+/// scientific-notation cutoff).
+const CHART_CHROME_RESERVE: usize = 2 + 2 + 2 + 10;
+
+/// Scales the bar's max width down from the caller's actual measure so
+/// `label + chrome + bar` never exceeds it. Never exceeds `CHART_BAR_MAX_WIDTH`
+/// either, so wide terminals keep today's bar length. Floors at 1 so a bar is
+/// always drawn, even on a pathologically narrow terminal.
+fn chart_bar_max_width(width: u16) -> usize {
+    let available = (width as usize).saturating_sub(CHART_CHROME_RESERVE);
+    CHART_BAR_MAX_WIDTH.min(available / 2).max(1)
+}
+
+/// Scales the label cap down from the same budget the bar already claimed,
+/// so `label + chrome + bar` fits within `width`. Never exceeds
+/// `CHART_LABEL_CAP`. Floors at 1 for the same reason as `chart_bar_max_width`.
+fn chart_label_cap(width: u16, bar_max: usize) -> usize {
+    let available = (width as usize).saturating_sub(CHART_CHROME_RESERVE);
+    CHART_LABEL_CAP
+        .min(available.saturating_sub(bar_max))
+        .max(1)
+}
 
 #[derive(Deserialize)]
 struct ChartSpec {
@@ -274,9 +316,9 @@ struct ChartItem {
 /// negative or non-finite values, zero total/max) falls back to the same
 /// raw rendering as an ordinary fenced code block — arbitrary LLM output
 /// must never panic here.
-fn render_chart_block(body: &[&str]) -> Vec<Line<'static>> {
+fn render_chart_block(body: &[&str], width: u16) -> Vec<Line<'static>> {
     match parse_chart_spec(body) {
-        Some(spec) => render_chart(&spec),
+        Some(spec) => render_chart(&spec, width),
         None => body.iter().map(|line| render_code_line(line)).collect(),
     }
 }
@@ -317,19 +359,21 @@ fn parse_chart_spec(body: &[&str]) -> Option<ChartSpec> {
     Some(spec)
 }
 
-fn render_chart(spec: &ChartSpec) -> Vec<Line<'static>> {
+fn render_chart(spec: &ChartSpec, width: u16) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     if let Some(title) = &spec.title {
         out.push(Line::from(Span::styled(title.clone(), theme::title())));
     }
 
+    let bar_max = chart_bar_max_width(width);
+    let label_cap = chart_label_cap(width, bar_max);
     let label_width = spec
         .items
         .iter()
-        .map(|item| truncate_label(&item.label, CHART_LABEL_CAP).chars().count())
+        .map(|item| truncate_label(&item.label, label_cap).chars().count())
         .max()
         .unwrap_or(0)
-        .min(CHART_LABEL_CAP);
+        .min(label_cap);
 
     match spec.kind {
         ChartKind::Bar => {
@@ -338,23 +382,39 @@ fn render_chart(spec: &ChartSpec) -> Vec<Line<'static>> {
                 .iter()
                 .fold(0.0_f64, |acc, item| acc.max(item.value));
             for item in &spec.items {
-                out.push(render_bar_line(item, max, label_width));
+                out.push(render_bar_line(item, max, label_width, label_cap, bar_max));
             }
         }
         ChartKind::Pie => {
             let total: f64 = spec.items.iter().map(|item| item.value).sum();
             for (i, item) in spec.items.iter().enumerate() {
-                out.push(render_pie_line(item, total, label_width, i));
+                out.push(render_pie_line(
+                    item,
+                    total,
+                    label_width,
+                    label_cap,
+                    bar_max,
+                    i,
+                ));
             }
         }
     }
     out
 }
 
-fn render_bar_line(item: &ChartItem, max: f64, label_width: usize) -> Line<'static> {
-    let bar = "█".repeat(chart_bar_width(item.value, max));
+fn render_bar_line(
+    item: &ChartItem,
+    max: f64,
+    label_width: usize,
+    label_cap: usize,
+    bar_max: usize,
+) -> Line<'static> {
+    let bar = "█".repeat(chart_bar_width(item.value, max, bar_max));
     Line::from(vec![
-        Span::styled(pad_label(&item.label, label_width), theme::text()),
+        Span::styled(
+            pad_label(&item.label, label_width, label_cap),
+            theme::text(),
+        ),
         Span::raw("  "),
         Span::styled(bar, theme::accent()),
         Span::raw("  "),
@@ -362,14 +422,24 @@ fn render_bar_line(item: &ChartItem, max: f64, label_width: usize) -> Line<'stat
     ])
 }
 
-fn render_pie_line(item: &ChartItem, total: f64, label_width: usize, idx: usize) -> Line<'static> {
+fn render_pie_line(
+    item: &ChartItem,
+    total: f64,
+    label_width: usize,
+    label_cap: usize,
+    bar_max: usize,
+    idx: usize,
+) -> Line<'static> {
     let color = Style::default().fg(PIE_COLORS[idx % PIE_COLORS.len()]);
-    let bar = "█".repeat(chart_bar_width(item.value, total));
+    let bar = "█".repeat(chart_bar_width(item.value, total, bar_max));
     let pct = (item.value / total * 100.0).round() as i64;
     Line::from(vec![
         Span::styled("●", color),
         Span::raw(" "),
-        Span::styled(pad_label(&item.label, label_width), theme::text()),
+        Span::styled(
+            pad_label(&item.label, label_width, label_cap),
+            theme::text(),
+        ),
         Span::raw("  "),
         Span::styled(bar, color),
         Span::raw("  "),
@@ -377,12 +447,13 @@ fn render_pie_line(item: &ChartItem, total: f64, label_width: usize, idx: usize)
     ])
 }
 
-fn chart_bar_width(value: f64, denom: f64) -> usize {
+fn chart_bar_width(value: f64, denom: f64, bar_max: usize) -> usize {
     if denom <= 0.0 || value <= 0.0 {
         return 0;
     }
-    let width = ((value / denom) * CHART_BAR_MAX_WIDTH as f64).round() as usize;
-    width.clamp(1, CHART_BAR_MAX_WIDTH)
+    let bar_max = bar_max.max(1);
+    let width = ((value / denom) * bar_max as f64).round() as usize;
+    width.clamp(1, bar_max)
 }
 
 fn format_chart_value(value: f64) -> String {
@@ -408,8 +479,8 @@ fn truncate_label(label: &str, cap: usize) -> String {
     }
 }
 
-fn pad_label(label: &str, width: usize) -> String {
-    let truncated = truncate_label(label, CHART_LABEL_CAP);
+fn pad_label(label: &str, width: usize, cap: usize) -> String {
+    let truncated = truncate_label(label, cap);
     let len = truncated.chars().count();
     if len >= width {
         truncated
@@ -569,7 +640,7 @@ mod tests {
 
     #[test]
     fn renders_bold_text() {
-        let lines = render_markdown("hello **world**");
+        let lines = render_markdown("hello **world**", 100);
         assert_eq!(lines.len(), 1);
         assert_eq!(plain_text(&lines[0]), "hello world");
         let bold = lines[0]
@@ -582,7 +653,7 @@ mod tests {
 
     #[test]
     fn renders_italic_text() {
-        let lines = render_markdown("un mot *souligné* ici");
+        let lines = render_markdown("un mot *souligné* ici", 100);
         let italic = lines[0]
             .spans
             .iter()
@@ -593,7 +664,7 @@ mod tests {
 
     #[test]
     fn renders_inline_code() {
-        let lines = render_markdown("lance `cargo test` maintenant");
+        let lines = render_markdown("lance `cargo test` maintenant", 100);
         let code = lines[0]
             .spans
             .iter()
@@ -605,7 +676,7 @@ mod tests {
 
     #[test]
     fn renders_fenced_code_block_without_the_fence_markers() {
-        let lines = render_markdown("texte\n```\nlet x = 1;\nlet y = 2;\n```\nfin");
+        let lines = render_markdown("texte\n```\nlet x = 1;\nlet y = 2;\n```\nfin", 100);
         assert_eq!(lines.len(), 4);
         assert_eq!(plain_text(&lines[0]), "texte");
         assert!(plain_text(&lines[1]).contains("let x = 1;"));
@@ -616,7 +687,7 @@ mod tests {
 
     #[test]
     fn renders_bullet_and_ordered_list_items() {
-        let lines = render_markdown("- premier\n* second\n1. troisième");
+        let lines = render_markdown("- premier\n* second\n1. troisième", 100);
         assert_eq!(lines.len(), 3);
         assert!(plain_text(&lines[0]).starts_with('•'));
         assert!(plain_text(&lines[0]).contains("premier"));
@@ -627,14 +698,14 @@ mod tests {
 
     #[test]
     fn renders_blockquote_with_dim_marker() {
-        let lines = render_markdown("> une citation");
+        let lines = render_markdown("> une citation", 100);
         assert!(plain_text(&lines[0]).contains('▎'));
         assert!(plain_text(&lines[0]).contains("une citation"));
     }
 
     #[test]
     fn renders_heading_bold_underlined() {
-        let lines = render_markdown("# Titre principal");
+        let lines = render_markdown("# Titre principal", 100);
         assert_eq!(plain_text(&lines[0]), "Titre principal");
         let span = &lines[0].spans[0];
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
@@ -643,20 +714,20 @@ mod tests {
 
     #[test]
     fn renders_mixed_text_paragraph_untouched() {
-        let lines = render_markdown("texte normal sans formatage");
+        let lines = render_markdown("texte normal sans formatage", 100);
         assert_eq!(lines.len(), 1);
         assert_eq!(plain_text(&lines[0]), "texte normal sans formatage");
     }
 
     #[test]
     fn unterminated_delimiters_fall_back_to_literal_text() {
-        let lines = render_markdown("texte **incomplet sans fermeture");
+        let lines = render_markdown("texte **incomplet sans fermeture", 100);
         assert_eq!(plain_text(&lines[0]), "texte **incomplet sans fermeture");
     }
 
     #[test]
     fn renders_pipe_table_as_box_drawing() {
-        let lines = render_markdown("| a | bb |\n| - | -- |\n| c | dd |");
+        let lines = render_markdown("| a | bb |\n| - | -- |\n| c | dd |", 100);
         assert_eq!(lines.len(), 5);
         assert_eq!(plain_text(&lines[0]), "┌───┬────┐");
         assert_eq!(plain_text(&lines[1]), "│ a │ bb │");
@@ -671,7 +742,7 @@ mod tests {
     fn truncates_wide_table_cells_to_total_budget() {
         let wide_cell = "z".repeat(200);
         let input = format!("| a | b |\n| - | - |\n| x | {wide_cell} |");
-        let lines = render_markdown(&input);
+        let lines = render_markdown(&input, 102);
         assert_eq!(lines.len(), 5);
         for line in &lines {
             assert!(
@@ -686,14 +757,14 @@ mod tests {
     #[test]
     fn malformed_table_falls_back_to_raw_lines() {
         let input = "| a | b |\n| - | - |\n| c | d | e |";
-        let lines = render_markdown(input);
+        let lines = render_markdown(input, 100);
         let rendered: Vec<String> = lines.iter().map(plain_text).collect();
         assert_eq!(rendered, vec!["| a | b |", "| - | - |", "| c | d | e |"]);
     }
 
     #[test]
     fn table_inside_other_content_renders_between_paragraphs() {
-        let lines = render_markdown("avant\n| a | b |\n| - | - |\n| c | d |\napres");
+        let lines = render_markdown("avant\n| a | b |\n| - | - |\n| c | d |\napres", 100);
         assert_eq!(lines.len(), 7);
         assert_eq!(plain_text(&lines[0]), "avant");
         assert!(plain_text(&lines[1]).starts_with('┌'));
@@ -704,7 +775,7 @@ mod tests {
     #[test]
     fn renders_bar_chart_block() {
         let input = "```kaji-chart\n{\"type\":\"bar\",\"items\":[{\"label\":\"a\",\"value\":10},{\"label\":\"bb\",\"value\":20},{\"label\":\"ccc\",\"value\":5}]}\n```";
-        let lines = render_markdown(input);
+        let lines = render_markdown(input, 200);
         assert_eq!(lines.len(), 3);
         assert_eq!(
             plain_text(&lines[0]),
@@ -720,7 +791,7 @@ mod tests {
     #[test]
     fn renders_pie_chart_with_percentages() {
         let input = "```kaji-chart\n{\"type\":\"pie\",\"items\":[{\"label\":\"x\",\"value\":1},{\"label\":\"y\",\"value\":1},{\"label\":\"z\",\"value\":3}]}\n```";
-        let lines = render_markdown(input);
+        let lines = render_markdown(input, 200);
         assert_eq!(lines.len(), 3);
         assert_eq!(
             plain_text(&lines[0]),
@@ -752,7 +823,7 @@ mod tests {
     #[test]
     fn invalid_chart_json_falls_back_to_raw_block() {
         let input = "```kaji-chart\nnot json\n```";
-        let lines = render_markdown(input);
+        let lines = render_markdown(input, 100);
         assert_eq!(lines.len(), 1);
         assert_eq!(plain_text(&lines[0]), "│ not json");
     }
@@ -760,7 +831,7 @@ mod tests {
     #[test]
     fn empty_items_falls_back() {
         let input = "```kaji-chart\n{\"type\":\"bar\",\"items\":[]}\n```";
-        let lines = render_markdown(input);
+        let lines = render_markdown(input, 100);
         assert_eq!(lines.len(), 1);
         assert!(plain_text(&lines[0]).contains("\"items\":[]"));
     }
@@ -769,7 +840,7 @@ mod tests {
     fn negative_values_fall_back() {
         let input =
             "```kaji-chart\n{\"type\":\"bar\",\"items\":[{\"label\":\"a\",\"value\":-1}]}\n```";
-        let lines = render_markdown(input);
+        let lines = render_markdown(input, 100);
         assert_eq!(lines.len(), 1);
         assert!(plain_text(&lines[0]).contains("\"value\":-1"));
     }
@@ -777,7 +848,7 @@ mod tests {
     #[test]
     fn unterminated_chart_fence_falls_back_to_raw_lines() {
         let input = "```kaji-chart\n{\"type\":\"bar\",\n\"items\":[{\"label\":\"a\"";
-        let lines = render_markdown(input);
+        let lines = render_markdown(input, 100);
         assert_eq!(lines.len(), 2);
         assert_eq!(plain_text(&lines[0]), "│ {\"type\":\"bar\",");
         assert_eq!(plain_text(&lines[1]), "│ \"items\":[{\"label\":\"a\"");
@@ -787,7 +858,7 @@ mod tests {
     fn giant_bar_value_falls_back_to_scientific_notation() {
         let input =
             "```kaji-chart\n{\"type\":\"bar\",\"items\":[{\"label\":\"a\",\"value\":1e308}]}\n```";
-        let lines = render_markdown(input);
+        let lines = render_markdown(input, 200);
         assert_eq!(lines.len(), 1);
         let text = plain_text(&lines[0]);
         let expected_value = format!("{:.1e}", 1e308_f64);
@@ -803,7 +874,7 @@ mod tests {
     #[test]
     fn pie_color_rotation_wraps_after_four_colors() {
         let input = "```kaji-chart\n{\"type\":\"pie\",\"items\":[{\"label\":\"a\",\"value\":1},{\"label\":\"b\",\"value\":1},{\"label\":\"c\",\"value\":1},{\"label\":\"d\",\"value\":1},{\"label\":\"e\",\"value\":1}]}\n```";
-        let lines = render_markdown(input);
+        let lines = render_markdown(input, 200);
         assert_eq!(lines.len(), 5);
         let dot4 = lines[4]
             .spans
@@ -824,10 +895,57 @@ mod tests {
         let separator = make_row("-");
         let input = format!("{header}\n{separator}");
 
-        let lines = render_markdown(&input);
+        let lines = render_markdown(&input, 102);
 
         let rendered: Vec<String> = lines.iter().map(plain_text).collect();
         assert_eq!(rendered, vec![header, separator]);
         assert!(!rendered.iter().any(|l| l.starts_with('┌')));
+    }
+
+    #[test]
+    fn narrow_width_shrinks_table_budget() {
+        let col1 = "a".repeat(10);
+        let col2 = "b".repeat(50);
+        let header = format!("| {col1} | {col2} |");
+        let separator = "| - | - |".to_string();
+        let input = format!("{header}\n{separator}");
+
+        let wide = render_markdown(&input, 100);
+        let wide_text: Vec<String> = wide.iter().map(plain_text).collect();
+        assert!(
+            wide_text[0].starts_with('┌'),
+            "should render as a table at width 100"
+        );
+        assert!(
+            wide_text.iter().all(|l| !l.contains('…')),
+            "natural widths should fit unscaled at width 100: {wide_text:?}"
+        );
+
+        let narrow = render_markdown(&input, 60);
+        let narrow_text: Vec<String> = narrow.iter().map(plain_text).collect();
+        if narrow_text[0].starts_with('┌') {
+            for line in &narrow_text {
+                assert!(
+                    line.chars().count() <= 60,
+                    "line exceeds 60-col budget at narrow width: {line}"
+                );
+            }
+            assert!(
+                narrow_text.iter().any(|l| l.contains('…')),
+                "columns should be truncated once scaled down to fit width 60: {narrow_text:?}"
+            );
+        } else {
+            assert_eq!(narrow_text, vec![header, separator]);
+        }
+    }
+
+    #[test]
+    fn narrow_width_scales_chart_bars() {
+        let input = "```kaji-chart\n{\"type\":\"bar\",\"items\":[{\"label\":\"a very long label indeed\",\"value\":10},{\"label\":\"bb\",\"value\":20},{\"label\":\"ccc\",\"value\":5}]}\n```";
+        let lines = render_markdown(input, 50);
+        for line in &lines {
+            let len = plain_text(line).chars().count();
+            assert!(len <= 50, "chart line exceeds width 50 ({len} chars)");
+        }
     }
 }

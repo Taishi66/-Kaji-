@@ -119,7 +119,7 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     for chat_line in &app.chat {
         match chat_line.sender {
-            Sender::Agent => push_agent_lines(&mut lines, &chat_line.text),
+            Sender::Agent => push_agent_lines(&mut lines, &chat_line.text, chat_rect.width),
             Sender::User => push_plain_lines(
                 &mut lines,
                 &chat_line.text,
@@ -146,8 +146,8 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, chat_rect);
 }
 
-fn push_agent_lines(lines: &mut Vec<Line<'static>>, text: &str) {
-    let mut md_lines = markdown::render_markdown(text);
+fn push_agent_lines(lines: &mut Vec<Line<'static>>, text: &str, width: u16) {
+    let mut md_lines = markdown::render_markdown(text, width);
     if md_lines.is_empty() {
         md_lines.push(Line::from(""));
     }

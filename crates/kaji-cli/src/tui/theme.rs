@@ -10,6 +10,9 @@ pub const VERMILLON: Color = Color::Rgb(203, 88, 65);
 pub const OR_PATINE: Color = Color::Rgb(196, 164, 106);
 /// Sumi profond — fond discret des puces de code inline.
 pub const SUMI_PROFOND: Color = Color::Rgb(40, 40, 38);
+/// Wakakusa 若草 — vert tendre, 4ᵉ teinte des graphiques en camembert (distincte
+/// des trois accents déjà pris par vermillon/or/indigo).
+pub const WAKAKUSA: Color = Color::Rgb(139, 166, 108);
 
 pub const KAJI_GLYPH: &str = "鍛冶";
 pub const USER_PREFIX: &str = "vous ▸ ";
