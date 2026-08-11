@@ -71,8 +71,9 @@ enum TableBorder {
 
 /// Detects and renders a markdown pipe table into box-drawing lines. The
 /// second buffered line must be a separator row (`-`/`:` cells only); any
-/// other shape (no separator, inconsistent column counts) returns `None` so
-/// the caller falls back to rendering the raw buffered lines untouched —
+/// other shape (no separator, inconsistent column counts) — or a table that
+/// can't fit within budget even at 1-char columns — returns `None` so the
+/// caller falls back to rendering the raw buffered lines untouched —
 /// arbitrary LLM output must never panic here.
 fn try_render_table(lines: &[&str]) -> Option<Vec<Line<'static>>> {
     if lines.len() < 2 {
@@ -96,7 +97,7 @@ fn try_render_table(lines: &[&str]) -> Option<Vec<Line<'static>>> {
             natural_widths[i] = natural_widths[i].max(cell.chars().count());
         }
     }
-    let col_widths = fit_table_to_budget(&natural_widths, TABLE_BUDGET_COLS);
+    let col_widths = fit_table_to_budget(&natural_widths, TABLE_BUDGET_COLS)?;
 
     let mut out = Vec::with_capacity(4 + data_rows.len());
     out.push(table_border_line(&col_widths, TableBorder::Top));
@@ -130,17 +131,21 @@ fn is_separator_cell(cell: &str) -> bool {
 
 /// Scales natural column widths down proportionally so the rendered table
 /// (borders + 1-space padding per side) fits within `total_budget` columns.
-/// Never exceeds the budget; may undershoot by a column or two on rounding.
-fn fit_table_to_budget(natural_widths: &[usize], total_budget: usize) -> Vec<usize> {
+/// Returns `None` when the table can't fit even at 1-char-wide columns
+/// (borders + per-column floor alone exceed the budget) — the caller then
+/// falls back to raw lines instead of emitting a table wider than the
+/// reading budget. Otherwise never exceeds the budget; may undershoot by a
+/// column or two on rounding.
+fn fit_table_to_budget(natural_widths: &[usize], total_budget: usize) -> Option<Vec<usize>> {
     let num_cols = natural_widths.len();
     let overhead = 3 * num_cols + 1;
-    if total_budget <= overhead {
-        return vec![1; num_cols];
+    if overhead + num_cols > total_budget {
+        return None;
     }
     let available = total_budget - overhead;
     let natural_sum: usize = natural_widths.iter().sum();
     if natural_sum <= available {
-        return natural_widths.to_vec();
+        return Some(natural_widths.to_vec());
     }
 
     let mut widths: Vec<usize> = natural_widths
@@ -152,7 +157,7 @@ fn fit_table_to_budget(natural_widths: &[usize], total_budget: usize) -> Vec<usi
             widths[idx] -= 1;
         }
     }
-    widths
+    Some(widths)
 }
 
 fn fit_table_cell(content: &str, width: usize) -> String {
@@ -491,5 +496,23 @@ mod tests {
         assert!(plain_text(&lines[1]).starts_with('┌'));
         assert!(plain_text(&lines[5]).starts_with('└'));
         assert_eq!(plain_text(&lines[6]), "apres");
+    }
+
+    #[test]
+    fn table_too_wide_for_budget_falls_back_to_raw_lines() {
+        let cols = 30;
+        let make_row = |filler: &str| -> String {
+            let cells = vec![filler; cols];
+            format!("| {} |", cells.join(" | "))
+        };
+        let header = make_row("a");
+        let separator = make_row("-");
+        let input = format!("{header}\n{separator}");
+
+        let lines = render_markdown(&input);
+
+        let rendered: Vec<String> = lines.iter().map(plain_text).collect();
+        assert_eq!(rendered, vec![header, separator]);
+        assert!(!rendered.iter().any(|l| l.starts_with('┌')));
     }
 }
