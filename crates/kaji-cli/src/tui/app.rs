@@ -148,6 +148,17 @@ pub struct App {
     /// unrelated lines. Reset alongside `last_agent_msg_id` by
     /// `reset_agent_merge_ids`, and per-turn by `reset_turn_visibility`.
     last_thinking_msg_id: Option<String>,
+    /// Chat index of the agent text line currently open for streamed
+    /// chunks (T4, ninja cursor) — materializes the same merge-chain
+    /// invariant as `last_agent_msg_id` rather than re-deriving it from
+    /// `chat.last()`, so it stays correct even when a new turn starts with
+    /// no intervening chat line to otherwise break the chain (the SDD
+    /// gate→exec→validate auto-chain). Kept in sync at the same call sites
+    /// as `last_agent_msg_id`/`last_thinking_msg_id`: set on every text
+    /// push/merge, cleared by `reset_agent_merge_ids`, by
+    /// `merge_agent_thinking` (thinking always breaks the text chain), and
+    /// by `reset_turn_visibility` at the start of every turn.
+    agent_stream_idx: Option<usize>,
     pending_tools: HashMap<String, usize>,
     spec_panel_forced: Option<bool>,
 }
@@ -186,6 +197,7 @@ impl App {
             validate_buffer: String::new(),
             last_agent_msg_id: None,
             last_thinking_msg_id: None,
+            agent_stream_idx: None,
             pending_tools: HashMap::new(),
             spec_panel_forced: None,
         }
@@ -302,6 +314,7 @@ impl App {
         self.turn_has_visible_output = false;
         self.turn_thinking_shown = false;
         self.last_thinking_msg_id = None;
+        self.agent_stream_idx = None;
     }
 
     pub fn toggle_thinking(&mut self) {
@@ -331,6 +344,21 @@ impl App {
         (self.turn_pending || self.turn_active)
             && !self.turn_has_visible_output
             && !self.turn_thinking_visible()
+    }
+
+    /// Chat index of the agent text line the ninja cursor (T4) should paint
+    /// onto — `None` outside an active turn (even if `chat.last()` still
+    /// holds a finished agent line from before), and `None` whenever the
+    /// merge chain currently points at a `Thinking` line or has been broken
+    /// by a tool/system/user line. Mutually exclusive with `show_loader`:
+    /// both key off the same first-visible-text-chunk transition, one
+    /// turning off exactly when the other turns on.
+    pub fn streaming_agent_line(&self) -> Option<usize> {
+        if self.turn_active {
+            self.agent_stream_idx
+        } else {
+            None
+        }
     }
 
     fn max_scroll(&self) -> u16 {
@@ -667,6 +695,7 @@ impl App {
     fn reset_agent_merge_ids(&mut self) {
         self.last_agent_msg_id = None;
         self.last_thinking_msg_id = None;
+        self.agent_stream_idx = None;
     }
 
     pub fn push_user(&mut self, text: &str) {
@@ -876,6 +905,7 @@ impl App {
         if message_id.is_some() && *message_id == self.last_agent_msg_id {
             if let Some(last) = self.chat.last_mut() {
                 last.text.push_str(text);
+                self.agent_stream_idx = Some(self.chat.len() - 1);
                 return;
             }
         }
@@ -891,6 +921,7 @@ impl App {
         // thinking merge chain pointing at the same id would otherwise
         // append its next chunk onto THIS (visible, normal-style) line.
         self.last_thinking_msg_id = None;
+        self.agent_stream_idx = Some(self.chat.len() - 1);
     }
 
     fn merge_agent_thinking(&mut self, message_id: &Option<String>, text: &str) {
@@ -909,8 +940,10 @@ impl App {
         self.last_thinking_msg_id = message_id.clone();
         self.turn_thinking_shown = true;
         // Mirror of the invalidation above: the pushed line is now
-        // `chat.last()`, so the text merge chain must not append onto it.
+        // `chat.last()`, so the text merge chain must not append onto it —
+        // and the ninja cursor (T4) must not paint onto a thinking line.
         self.last_agent_msg_id = None;
+        self.agent_stream_idx = None;
     }
 }
 
@@ -2222,6 +2255,134 @@ mod tests {
         assert!(
             !app.show_loader(),
             "loader must not reappear under an already-visible thinking line just because the toggle flipped off"
+        );
+    }
+
+    #[test]
+    fn streaming_agent_line_is_none_while_idle() {
+        let app = App::new(None);
+        assert_eq!(app.streaming_agent_line(), None);
+    }
+
+    #[test]
+    fn streaming_agent_line_tracks_the_open_agent_text_chain() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "Bon");
+        let idx = app
+            .streaming_agent_line()
+            .expect("first text chunk arms the ninja cursor");
+        assert_eq!(idx, app.chat.len() - 1);
+
+        agent_says(&mut app, "m1", "jour");
+        assert_eq!(
+            app.streaming_agent_line(),
+            Some(idx),
+            "a same-id chunk keeps pointing at the same merged line"
+        );
+    }
+
+    #[test]
+    fn streaming_agent_line_is_none_when_turn_is_not_active() {
+        let mut app = App::new(None);
+        agent_says(&mut app, "m1", "réponse");
+        assert!(matches!(
+            app.chat.last().map(|l| l.sender),
+            Some(Sender::Agent)
+        ));
+        assert_eq!(
+            app.streaming_agent_line(),
+            None,
+            "no ninja cursor outside an active turn, even with an agent line present"
+        );
+    }
+
+    #[test]
+    fn streaming_agent_line_breaks_when_a_tool_request_interrupts_the_chain() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "je lance un outil");
+        assert!(app.streaming_agent_line().is_some());
+
+        let req_msg =
+            Message::assistant().with_tool_request("t1", Ok(CallToolRequestParams::new("shell")));
+        app.apply_agent_event(&AgentEvent::Message(req_msg));
+
+        assert_eq!(
+            app.streaming_agent_line(),
+            None,
+            "a tool line breaks the streaming chain"
+        );
+    }
+
+    #[test]
+    fn streaming_agent_line_never_points_at_a_thinking_line() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+        app.show_thinking = true;
+        agent_thinks(&mut app, "m1", "raisonnement");
+
+        assert!(matches!(
+            app.chat.last().map(|l| l.sender),
+            Some(Sender::Thinking)
+        ));
+        assert_eq!(
+            app.streaming_agent_line(),
+            None,
+            "thinking lines never carry the ninja cursor, only agent text"
+        );
+    }
+
+    #[test]
+    fn streaming_agent_line_resets_when_a_new_turn_begins_without_a_separating_chat_line() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "réponse finale");
+        assert_eq!(app.streaming_agent_line(), Some(app.chat.len() - 1));
+
+        // Mirrors the SDD gate→exec→validate auto-chain: `turn_end()` flips
+        // `turn_active` off, and for the Executing→Validating branch the
+        // next turn's `begin_setup` (via `reset_turn_visibility`) starts
+        // with no intervening system/user chat line to otherwise break the
+        // chain. A stale `agent_stream_idx` must not leak into the new turn.
+        app.turn_active = false;
+        app.reset_turn_visibility();
+        app.turn_active = true;
+
+        assert_eq!(
+            app.streaming_agent_line(),
+            None,
+            "a fresh turn must not inherit the previous turn's open chain just because no chat line separated them"
+        );
+    }
+
+    #[test]
+    fn loader_and_streaming_blade_are_mutually_exclusive_across_turn_lifecycle() {
+        let mut app = App::new(None);
+        assert!(!(app.show_loader() && app.streaming_agent_line().is_some()));
+
+        app.turn_pending = true;
+        assert!(!(app.show_loader() && app.streaming_agent_line().is_some()));
+
+        app.turn_pending = false;
+        app.turn_active = true;
+        assert!(!(app.show_loader() && app.streaming_agent_line().is_some()));
+
+        agent_says(&mut app, "m1", "bonjour");
+        assert!(
+            app.streaming_agent_line().is_some() && !app.show_loader(),
+            "first visible text hides the loader and arms the ninja cursor"
+        );
+
+        app.show_thinking = true;
+        agent_thinks(&mut app, "m1", "raisonnement");
+        assert!(
+            app.streaming_agent_line().is_none(),
+            "thinking never carries the blade, even mid-turn"
+        );
+        assert!(
+            !app.show_loader(),
+            "text was already shown this turn — no loader reappears under the thinking line either"
         );
     }
 }

@@ -27,6 +27,10 @@ pub const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴'
 /// Loader zen (`思考中`) while a turn is in flight with nothing visible yet.
 pub const ENSO_FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
 
+/// Ninja cursor (T4) — pulses at the tail of the agent's in-flight text line
+/// while it streams. Vermillon, distinct from the dim ensō loader.
+pub const BLADE_FRAMES: [char; 4] = ['▊', '▋', '▌', '▍'];
+
 pub fn spinner_frame(elapsed: std::time::Duration) -> char {
     let idx = (elapsed.as_millis() / 100) as usize % SPINNER_FRAMES.len();
     SPINNER_FRAMES[idx]
@@ -37,6 +41,16 @@ pub fn spinner_frame(elapsed: std::time::Duration) -> char {
 pub fn enso_frame(elapsed: std::time::Duration) -> char {
     let idx = (elapsed.as_millis() / 250) as usize % ENSO_FRAMES.len();
     ENSO_FRAMES[idx]
+}
+
+/// Same shape as [`enso_frame`] but over the blade set, on a faster ~600 ms
+/// full cycle (150 ms/frame) — the pulse reads as more urgent than the
+/// loader's slower breathing. Driven by the same redraw tick; a given draw
+/// can land mid-frame since 150 ms doesn't divide the 250 ms tick evenly,
+/// which is fine for a pulse (no frame is ever skipped over time).
+pub fn blade_frame(elapsed: std::time::Duration) -> char {
+    let idx = (elapsed.as_millis() / 150) as usize % BLADE_FRAMES.len();
+    BLADE_FRAMES[idx]
 }
 
 pub fn text() -> Style {
@@ -120,6 +134,19 @@ mod tests {
             enso_frame(Duration::from_millis(1000)),
             '◐',
             "wraps back to the first frame after the 1s period"
+        );
+    }
+
+    #[test]
+    fn blade_frame_cycles_through_four_frames_over_a_600ms_period() {
+        assert_eq!(blade_frame(Duration::from_millis(0)), '▊');
+        assert_eq!(blade_frame(Duration::from_millis(150)), '▋');
+        assert_eq!(blade_frame(Duration::from_millis(300)), '▌');
+        assert_eq!(blade_frame(Duration::from_millis(450)), '▍');
+        assert_eq!(
+            blade_frame(Duration::from_millis(600)),
+            '▊',
+            "wraps back to the first frame after the ~600ms period"
         );
     }
 }

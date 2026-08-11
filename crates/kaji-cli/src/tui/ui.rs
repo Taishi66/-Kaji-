@@ -135,12 +135,15 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
     app.user_turn_rows.borrow_mut().clear();
     let mut running_rows: u16 = 0;
     let mut lines: Vec<Line> = Vec::new();
-    for chat_line in &app.chat {
+    let streaming_idx = app.streaming_agent_line();
+    let elapsed = app.turn_started.map(|t| t.elapsed()).unwrap_or_default();
+    for (i, chat_line) in app.chat.iter().enumerate() {
         if chat_line.sender == Sender::User {
             app.user_turn_rows.borrow_mut().push(running_rows);
         }
+        let blade = (streaming_idx == Some(i)).then(|| theme::blade_frame(elapsed));
         let start = lines.len();
-        push_chat_line(&mut lines, chat_line, chat_rect.width);
+        push_chat_line(&mut lines, chat_line, chat_rect.width, blade);
         lines.push(Line::from(""));
         for line in &lines[start..] {
             running_rows =
@@ -166,9 +169,18 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, chat_rect);
 }
 
-fn push_chat_line(lines: &mut Vec<Line<'static>>, chat_line: &ChatLine, width: u16) {
+/// `blade` is the ninja-cursor glyph (T4) to append to this chat line's last
+/// rendered `Line`, when `App::streaming_agent_line` says this is the one —
+/// only the `Agent` arm ever consumes it, so it's silently ignored for every
+/// other sender (a `Thinking` line, for instance, must never carry it).
+fn push_chat_line(
+    lines: &mut Vec<Line<'static>>,
+    chat_line: &ChatLine,
+    width: u16,
+    blade: Option<char>,
+) {
     match chat_line.sender {
-        Sender::Agent => push_agent_lines(lines, &chat_line.text, width),
+        Sender::Agent => push_agent_lines(lines, &chat_line.text, width, blade),
         Sender::User => push_plain_lines(lines, &chat_line.text, theme::USER_PREFIX, theme::user()),
         Sender::System => push_system_line(lines, chat_line),
         Sender::Thinking => push_plain_lines(
@@ -198,7 +210,7 @@ fn loader_line(app: &App) -> Option<Line<'static>> {
     Some(Line::from(Span::styled(content, theme::dim())))
 }
 
-fn push_agent_lines(lines: &mut Vec<Line<'static>>, text: &str, width: u16) {
+fn push_agent_lines(lines: &mut Vec<Line<'static>>, text: &str, width: u16, blade: Option<char>) {
     let mut md_lines = markdown::render_markdown(text, width);
     if md_lines.is_empty() {
         md_lines.push(Line::from(""));
@@ -207,6 +219,15 @@ fn push_agent_lines(lines: &mut Vec<Line<'static>>, text: &str, width: u16) {
         let mut spans = vec![Span::styled(theme::AGENT_PREFIX, theme::agent())];
         spans.append(&mut first.spans);
         *first = Line::from(spans);
+    }
+    // Appended before `lines.extend` below, i.e. before `draw_chat` measures
+    // wrapped rows for this block — the blade is part of what gets measured,
+    // not tacked on after the fact.
+    if let Some(glyph) = blade {
+        if let Some(last) = md_lines.last_mut() {
+            last.spans
+                .push(Span::styled(glyph.to_string(), theme::accent()));
+        }
     }
     lines.extend(md_lines);
 }
@@ -482,6 +503,23 @@ mod tests {
         AgentEvent::Message(m)
     }
 
+    fn text_message(id: &str, text: &str) -> AgentEvent {
+        let mut m = Message::assistant().with_text(text);
+        m.id = Some(id.to_string());
+        AgentEvent::Message(m)
+    }
+
+    /// Scans the whole rendered buffer for any ninja-cursor glyph
+    /// (`theme::BLADE_FRAMES`) — used by the absence tests below, which only
+    /// care that the blade never appears anywhere for their scenario.
+    fn any_blade_glyph(buffer: &ratatui::buffer::Buffer) -> bool {
+        (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| {
+                theme::BLADE_FRAMES.contains(&buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+            })
+        })
+    }
+
     #[test]
     fn thinking_chat_line_renders_with_prefix_and_dim_italic_style() {
         let mut lines = Vec::new();
@@ -491,7 +529,7 @@ mod tests {
             tool: None,
             rendered: None,
         };
-        push_chat_line(&mut lines, &chat_line, 80);
+        push_chat_line(&mut lines, &chat_line, 80, None);
 
         assert_eq!(lines.len(), 1);
         let content: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
@@ -533,6 +571,143 @@ mod tests {
         app.apply_agent_event(&thinking_message("m1", "raisonnement"));
 
         assert!(loader_line(&app).is_none());
+    }
+
+    /// T4 — ninja cursor. `turn_active` plus a streaming agent text line
+    /// must render a `theme::BLADE_FRAMES` glyph, styled `theme::accent()`
+    /// (vermillon), appended right after the agent's own text on the last
+    /// rendered `Line` of that block.
+    #[test]
+    fn streaming_agent_line_carries_the_blade_cursor() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        app.begin_turn();
+        app.apply_agent_event(&text_message("m1", "réponse"));
+
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| draw_chat(frame, &app, frame.area()))
+            .expect("draw must succeed against a TestBackend");
+
+        let buffer = terminal.backend().buffer();
+        let blade_cells: Vec<(u16, u16)> = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                theme::BLADE_FRAMES.contains(&buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+            })
+            .collect();
+
+        assert_eq!(
+            blade_cells.len(),
+            1,
+            "exactly one blade glyph must be rendered"
+        );
+        let (bx, by) = blade_cells[0];
+        assert_eq!(
+            buffer[(bx, by)].fg,
+            theme::VERMILLON,
+            "the blade must be styled vermillon"
+        );
+
+        let row_text: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, by)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            row_text.contains("réponse"),
+            "the blade must trail the streaming agent line's own text, got: {row_text:?}"
+        );
+    }
+
+    #[test]
+    fn blade_cursor_absent_once_turn_has_finished() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        app.begin_turn();
+        app.apply_agent_event(&text_message("m1", "réponse"));
+        app.finish_turn();
+
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| draw_chat(frame, &app, frame.area()))
+            .expect("draw must succeed against a TestBackend");
+
+        assert!(
+            !any_blade_glyph(terminal.backend().buffer()),
+            "no blade once the turn has ended"
+        );
+    }
+
+    #[test]
+    fn blade_cursor_absent_for_tool_line() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        app.begin_turn();
+        let mut req = Message::assistant()
+            .with_tool_request("t1", Ok(rmcp::model::CallToolRequestParams::new("shell")));
+        req.id = Some("m1".to_string());
+        app.apply_agent_event(&AgentEvent::Message(req));
+
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| draw_chat(frame, &app, frame.area()))
+            .expect("draw must succeed against a TestBackend");
+
+        assert!(
+            !any_blade_glyph(terminal.backend().buffer()),
+            "tool lines never carry the blade"
+        );
+    }
+
+    #[test]
+    fn blade_cursor_absent_for_thinking_line() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        app.begin_turn();
+        app.show_thinking = true;
+        app.apply_agent_event(&thinking_message("m1", "raisonnement"));
+
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| draw_chat(frame, &app, frame.area()))
+            .expect("draw must succeed against a TestBackend");
+
+        assert!(
+            !any_blade_glyph(terminal.backend().buffer()),
+            "thinking lines never carry the blade"
+        );
+    }
+
+    #[test]
+    fn blade_cursor_absent_for_system_line() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        app.begin_turn();
+        app.push_system("intro");
+
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| draw_chat(frame, &app, frame.area()))
+            .expect("draw must succeed against a TestBackend");
+
+        assert!(
+            !any_blade_glyph(terminal.backend().buffer()),
+            "system lines never carry the blade"
+        );
     }
 
     /// `draw_chat` is the only place that measures where each user turn
