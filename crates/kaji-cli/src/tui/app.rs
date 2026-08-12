@@ -331,13 +331,19 @@ impl App {
             }
             PassDriver::Validating => {
                 self.pass.advance();
-                let upper = self.validate_buffer.to_uppercase();
-                if upper.contains("VERDICT: VALIDE") {
+                let last_line = self
+                    .validate_buffer
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("")
+                    .to_uppercase();
+                if last_line.contains("VERDICT: VALIDE") {
                     self.pass.advance();
                     self.push_system("✓ passe SDD complète — spec verrouillée");
                 } else {
                     self.pass.fail_current();
-                    if upper.contains("VERDICT: DRIFT") {
+                    if last_line.contains("VERDICT: DRIFT") {
                         self.push_system("⚠ drift détecté — spec non verrouillée");
                     } else {
                         self.push_system("⚠ verdict absent ou imparsable — DRIFT par prudence");
@@ -1577,6 +1583,75 @@ mod tests {
         assert!(app.turn_end().is_none());
         assert!(app.pass.is_complete());
         assert!(!app.pass.drifted());
+    }
+
+    #[test]
+    fn drift_verdict_with_valide_mentioned_in_reasoning_does_not_lock() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_approve();
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "c'est fait");
+        app.turn_end();
+
+        app.turn_active = true;
+        agent_says(
+            &mut app,
+            "m2",
+            "Exigence 1 : ok.\n\
+             Exigence 2 : on ne peut pas conclure VERDICT: VALIDE ici, il manque X.\n\
+             VERDICT: DRIFT",
+        );
+        assert!(app.turn_end().is_none());
+
+        assert!(app.pass.drifted());
+        assert!(!app.pass.is_complete());
+    }
+
+    #[test]
+    fn valide_only_on_last_line_locks_the_spec() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_approve();
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "c'est fait");
+        app.turn_end();
+
+        app.turn_active = true;
+        agent_says(
+            &mut app,
+            "m2",
+            "Exigence 1 : satisfaite.\n\
+             Exigence 2 : satisfaite.\n\
+             VERDICT: VALIDE",
+        );
+        assert!(app.turn_end().is_none());
+
+        assert!(app.pass.is_complete());
+        assert!(!app.pass.drifted());
+    }
+
+    #[test]
+    fn trailing_punctuation_on_verdict_line_still_parses() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_approve();
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "fait autre chose");
+        app.turn_end();
+
+        app.turn_active = true;
+        agent_says(
+            &mut app,
+            "m2",
+            "Exigence 1 : non satisfaite.\nVERDICT: DRIFT.",
+        );
+        app.turn_end();
+
+        assert!(app.pass.drifted());
+        assert!(!app.pass.is_complete());
+        assert!(app.chat.iter().any(|l| l.text.contains("drift détecté")));
+        assert!(!app.chat.iter().any(|l| l.text.contains("verdict absent")));
     }
 
     #[test]
