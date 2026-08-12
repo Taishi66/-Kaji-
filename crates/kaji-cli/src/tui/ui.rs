@@ -441,7 +441,7 @@ fn draw_gate_modal(frame: &mut Frame) {
 /// source), zero-width/invisibles, overrides et isolats bidi qui
 /// inversent l'ordre visuel. `\n` est préservé : le rendu multi-ligne de
 /// `Paragraph` (`Text::from(&str)`, qui découpe sur `\n`) en dépend.
-fn sanitize_for_display(text: &str) -> String {
+pub(crate) fn sanitize_for_display(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {

@@ -5032,6 +5032,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn last_turn_is_interrupted_reports_the_exact_event_count() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = new_session(&sm).await;
+
+        sm.append_event(&sid, 1, "turn_start", r#"{"query_preview":"q1"}"#)
+            .await
+            .unwrap();
+        sm.append_event(&sid, 1, "message", "{}").await.unwrap();
+        sm.append_event(&sid, 1, "message", "{}").await.unwrap();
+
+        let it = sm
+            .last_turn_is_interrupted(&sid)
+            .await
+            .unwrap()
+            .expect("turn_start sans turn_end → interrompu");
+        assert_eq!(
+            it.event_count, 3,
+            "1 turn_start + 2 message, aucun turn_end"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_session_cascades_session_events() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = new_session(&sm).await;
+
+        sm.append_event(&sid, 1, "turn_start", r#"{"query_preview":"q1"}"#)
+            .await
+            .unwrap();
+
+        sm.delete_session(&sid).await.unwrap();
+
+        let pool = sm.storage().pool().await.unwrap();
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM session_events WHERE session_id = ?")
+                .bind(&sid)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining, 0,
+            "delete_session doit cascader session_events (FK ON DELETE CASCADE)"
+        );
+    }
+
+    #[tokio::test]
     async fn session_events_migration_from_v15_preserves_messages() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join(SESSIONS_FOLDER).join(DB_NAME);

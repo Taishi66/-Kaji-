@@ -583,6 +583,12 @@ fn interrupted_turn_line(it: &InterruptedTurn) -> String {
         it.event_count
     );
     if let Some(preview) = &it.query_preview {
+        // `\n` is preserved by `sanitize_for_display` for the modal's multi-line
+        // rendering; this is a single-line system message, so fold it into a
+        // visible marker first — otherwise it (like other unsanitized control
+        // chars) can break the line or reintroduce the masking the anti-masquage
+        // fix on the approval modal closed.
+        let preview = crate::tui::ui::sanitize_for_display(&preview.replace('\n', "␊"));
         line.push_str(&format!(" · dernier prompt : \"{preview}\""));
     }
     line
@@ -862,6 +868,29 @@ mod tests {
         assert!(line.contains("tour interrompu"));
         assert!(line.contains('3'));
         assert!(line.contains("q2"));
+    }
+
+    #[test]
+    fn interrupted_turn_line_sanitizes_control_chars_in_preview() {
+        let it = InterruptedTurn {
+            turn_seq: 2,
+            event_count: 1,
+            query_preview: Some("line one\nline two\x1bmalicious".to_string()),
+        };
+
+        let line = interrupted_turn_line(&it);
+
+        assert!(
+            !line.contains('\n'),
+            "a raw newline must not reach the single-line system message: {line:?}"
+        );
+        assert!(
+            !line.contains('\x1b'),
+            "a raw ESC must not reach the terminal unsanitized: {line:?}"
+        );
+        assert!(line.contains("line one"));
+        assert!(line.contains("line two"));
+        assert!(line.contains("malicious"));
     }
 
     #[test]

@@ -1666,6 +1666,17 @@ impl Agent {
         let turn_seq = self
             .current_turn_seq
             .load(std::sync::atomic::Ordering::SeqCst);
+        if turn_seq < 0 {
+            // `resolve_turn_seq` returned `None` for the active turn (its
+            // `next_turn_seq` lookup failed) — there is no journaled turn to
+            // attach this approval to, so skip rather than write a stray row
+            // under the `-1` sentinel.
+            warn!(
+                %request_id,
+                "event log: no journaled turn for approval, skipping"
+            );
+            return;
+        }
         let payload = serde_json::json!({
             "request_id": request_id,
             "permission": confirmation.permission,
@@ -1901,6 +1912,27 @@ impl Agent {
         ))
     }
 
+    /// Resolves the event-log `turn_seq` for a reply from the raw
+    /// `next_turn_seq(...).await` result. `Ok` means the counter query
+    /// succeeded and the turn will be journaled; `Err` (SQLITE_BUSY, pool
+    /// exhaustion, I/O) is downgraded to a warning and `None` — the event
+    /// log is an observability feature, so a failed lookup here must never
+    /// abort the turn (see docs/superpowers/specs/2026-08-12-event-log-design.md).
+    /// Kept free of `self`/IO so the branch is directly unit-testable
+    /// without fault-injecting the SQLite pool.
+    fn resolve_turn_seq(next_turn_seq: Result<i64>) -> Option<i64> {
+        match next_turn_seq {
+            Ok(seq) => Some(seq),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "event log: next_turn_seq failed, turn not journaled"
+                );
+                None
+            }
+        }
+    }
+
     #[instrument(
         skip(self, user_message, session_config, cancel_token),
         fields(
@@ -1928,14 +1960,13 @@ impl Agent {
         // Single insertion point for the append-only event log: `reply()` is where the
         // legacy loop and the state-machine path (dispatched inside `reply_impl`) converge,
         // so wrapping here gives parity between both by construction — see
-        // docs/superpowers/specs/2026-08-12-event-log-design.md.
-        let turn_seq = self
-            .config
-            .session_manager
-            .next_turn_seq(&session_id)
-            .await?;
+        // docs/superpowers/specs/2026-08-12-event-log-design.md. `turn_seq` is `None`
+        // when the lookup itself failed (see `resolve_turn_seq`): the envelope below
+        // then skips every append for this turn but still streams normally.
+        let turn_seq =
+            Self::resolve_turn_seq(self.config.session_manager.next_turn_seq(&session_id).await);
         self.current_turn_seq
-            .store(turn_seq, std::sync::atomic::Ordering::SeqCst);
+            .store(turn_seq.unwrap_or(-1), std::sync::atomic::Ordering::SeqCst);
         *self.current_session_id.lock().await = Some(session_id.clone());
 
         let events = self
@@ -1954,35 +1985,63 @@ impl Agent {
         .to_string();
 
         Ok(Box::pin(async_stream::try_stream! {
-            if let Err(error) = session_manager
-                .append_event(&session_id, turn_seq, "turn_start", &turn_start_payload)
-                .await
-            {
-                warn!(?error, "event log append failed for turn_start");
+            if let Some(turn_seq) = turn_seq {
+                if let Err(error) = session_manager
+                    .append_event(&session_id, turn_seq, "turn_start", &turn_start_payload)
+                    .await
+                {
+                    warn!(?error, "event log append failed for turn_start");
+                }
             }
 
             tokio::pin!(events);
-            while let Some(event) = events.next().await {
-                let event = event?;
-                let kind = agent_event_kind(&event);
-                let payload = agent_event_payload(&event);
-                if let Err(error) = session_manager
-                    .append_event(&session_id, turn_seq, kind, &payload)
-                    .await
-                {
-                    warn!(?error, kind = %kind, "event log append failed");
+            loop {
+                match events.next().await {
+                    Some(Ok(event)) => {
+                        if let Some(turn_seq) = turn_seq {
+                            let kind = agent_event_kind(&event);
+                            let payload = agent_event_payload(&event);
+                            if let Err(error) = session_manager
+                                .append_event(&session_id, turn_seq, kind, &payload)
+                                .await
+                            {
+                                warn!(?error, kind = %kind, "event log append failed");
+                            }
+                        }
+                        yield event;
+                    }
+                    Some(err @ Err(_)) => {
+                        // The turn errored rather than completing normally — that is
+                        // still a terminal state (unlike a dropped stream, which never
+                        // reaches this match arm: the generator is torn down instead of
+                        // polled again). Log turn_end before propagating so
+                        // `last_turn_is_interrupted` doesn't mistake an errored turn for
+                        // a crashed/killed one.
+                        if let Some(turn_seq) = turn_seq {
+                            if let Err(append_error) = session_manager
+                                .append_event(&session_id, turn_seq, "turn_end", "{}")
+                                .await
+                            {
+                                warn!(?append_error, "event log append failed for turn_end");
+                            }
+                        }
+                        err?;
+                    }
+                    None => {
+                        // Only reached on a clean end of the underlying stream. A dropped
+                        // stream (crash/kill/cancel) skips this — that absence is exactly
+                        // the "turn interrupted" signal `last_turn_is_interrupted` detects.
+                        if let Some(turn_seq) = turn_seq {
+                            if let Err(error) = session_manager
+                                .append_event(&session_id, turn_seq, "turn_end", "{}")
+                                .await
+                            {
+                                warn!(?error, "event log append failed for turn_end");
+                            }
+                        }
+                        break;
+                    }
                 }
-                yield event;
-            }
-
-            // Only reached on a clean end of the underlying stream. A dropped stream
-            // (crash/kill/cancel) or a propagated error above skips this — that absence
-            // is exactly the "turn interrupted" signal `last_turn_is_interrupted` detects.
-            if let Err(error) = session_manager
-                .append_event(&session_id, turn_seq, "turn_end", "{}")
-                .await
-            {
-                warn!(?error, "event log append failed for turn_end");
             }
         }))
     }
@@ -5397,6 +5456,152 @@ echo start >> "$PLUGIN_ROOT/hook.log"
         assert!(
             interrupted.is_some(),
             "dropping the stream before exhaustion must leave the turn without a turn_end"
+        );
+        Ok(())
+    }
+
+    // FIX A: `next_turn_seq` is an observability lookup, not part of the
+    // turn's contract — a SQLITE_BUSY/pool-exhaustion failure there must
+    // downgrade to "skip journaling this turn", never abort `reply()`.
+    // Simulating that failure end-to-end would require fault-injecting the
+    // SQLite pool, which `SessionManager` doesn't expose a seam for;
+    // `Agent::resolve_turn_seq` is the testable decomposition point instead
+    // — `reply()` only ever feeds it `next_turn_seq(...).await`'s `Result`,
+    // so covering its `Err` branch here covers the branch in `reply()`
+    // directly.
+    #[test]
+    fn a_failed_next_turn_seq_does_not_abort_the_turn() {
+        assert_eq!(
+            Agent::resolve_turn_seq(Err(anyhow!("SQLITE_BUSY"))),
+            None,
+            "a failed next_turn_seq lookup must downgrade to skip-journal, not propagate"
+        );
+        assert_eq!(
+            Agent::resolve_turn_seq(Ok(3)),
+            Some(3),
+            "a successful lookup must still resolve to its turn_seq"
+        );
+    }
+
+    /// Deterministically forces the reply stream to yield a raw `Err` mid-turn
+    /// by dropping the `messages` table (never `sessions`/`session_events`, so
+    /// the journal rows this test inspects survive) as a side effect of a
+    /// successful `stream()` call. Every `ProviderError` variant is already
+    /// caught by the match in the reply loop above (`Err(ref provider_err @
+    /// ContextLengthExceeded(_))`, `CreditsExhausted`, `Refusal`,
+    /// `NetworkError`, and the catch-all `Err(ref provider_err)`) and
+    /// converted into a yielded message + clean loop exit — a provider error
+    /// alone never reaches `reply()`'s wrapping envelope as a raw `Err`. What
+    /// FIX B guards against is a genuine internal failure (a DB write here,
+    /// but equally a hook or tool-inspection failure) surfacing via `?`
+    /// mid-stream; this reproduces that class of failure without needing to
+    /// fault-inject the pool driver itself.
+    struct MessageTableDroppingProvider {
+        session_manager: Arc<SessionManager>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::providers::base::Provider for MessageTableDroppingProvider {
+        async fn stream(
+            &self,
+            _model_config: &kaji_providers::model::ModelConfig,
+            _system_prompt: &str,
+            _messages: &[Message],
+            _tools: &[Tool],
+        ) -> Result<MessageStream, ProviderError> {
+            let pool = self
+                .session_manager
+                .storage()
+                .pool()
+                .await
+                .expect("test setup: pool must be reachable");
+            sqlx::query("DROP TABLE messages")
+                .execute(pool)
+                .await
+                .expect("test setup: drop messages table");
+            let message = Message::assistant().with_text("about to fail");
+            let usage = ProviderUsage::new("mock-model".to_string(), Usage::default());
+            Ok(stream_from_single_message(message, usage))
+        }
+
+        fn get_name(&self) -> &str {
+            "message-table-dropping"
+        }
+    }
+
+    #[tokio::test]
+    async fn an_errored_turn_logs_turn_end_and_is_not_flagged_interrupted() -> Result<()> {
+        let _guard = env_lock::lock_env([("KAJI_STATE_MACHINE", None::<&str>)]);
+        let temp_dir = tempfile::tempdir()?;
+        let data_dir = temp_dir.path().join("data");
+        let hook_manager = crate::hooks::HookManager::from_plugins_for_test(vec![]);
+        let session_manager = Arc::new(SessionManager::new(data_dir.clone()));
+        let permission_manager = Arc::new(PermissionManager::new(data_dir));
+        let config = AgentConfig::new(
+            session_manager.clone(),
+            permission_manager,
+            None,
+            KajiMode::Auto,
+            true,
+            KajiPlatform::KajiCli,
+        );
+        let mut agent = Agent::with_config(config);
+        agent.set_hook_manager_for_test(hook_manager);
+        let session = session_manager
+            .create_session(
+                PathBuf::default(),
+                "test".to_string(),
+                SessionType::Hidden,
+                KajiMode::Auto,
+            )
+            .await?;
+        let session_id = session.id.clone();
+        let provider = Arc::new(MessageTableDroppingProvider {
+            session_manager: session_manager.clone(),
+        });
+        agent
+            .update_provider(
+                provider,
+                kaji_providers::model::ModelConfig::new("mock-model"),
+                &session_id,
+            )
+            .await?;
+
+        let session_config = SessionConfig {
+            id: session_id.clone(),
+            schedule_id: None,
+            max_turns: Some(10),
+            retry_config: None,
+        };
+        let mut stream = agent
+            .reply(Message::user().with_text("hello"), session_config, None)
+            .await?;
+
+        let mut saw_error = false;
+        while let Some(event) = stream.next().await {
+            if event.is_err() {
+                saw_error = true;
+                break;
+            }
+        }
+        assert!(
+            saw_error,
+            "the internal failure must surface as a stream error"
+        );
+
+        let events = session_manager.events_for_session(&session_id).await?;
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds.last(),
+            Some(&"turn_end"),
+            "an errored turn must still close with turn_end: {kinds:?}"
+        );
+        assert!(
+            session_manager
+                .last_turn_is_interrupted(&session_id)
+                .await?
+                .is_none(),
+            "an errored turn must not be flagged as interrupted"
         );
         Ok(())
     }
