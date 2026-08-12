@@ -326,7 +326,7 @@ impl App {
                 self.driver = PassDriver::Validating;
                 self.validate_buffer.clear();
                 Some(format!(
-                    "Vérifie que ta réponse précédente respecte la SPEC ci-dessous. Première ligne : exactement `VERDICT: VALIDE` ou `VERDICT: DRIFT`, puis justifie en une phrase.\n\n{body}"
+                    "Tu es un juge de conformité SDD, pas un assistant complaisant : ton biais par défaut doit être DRIFT, pas VALIDE. Liste chaque exigence de la SPEC ci-dessous une par une et vérifie-la individuellement contre la réponse précédente — cherche activement les écarts, ne les suppose pas absents. Ne conclus VALIDE que si CHAQUE exigence est vérifiablement satisfaite ; au moindre doute ou à la moindre exigence non démontrée, le verdict est DRIFT. Justifie ton verdict exigence par exigence (l'écart constaté, ou l'absence d'écart) avant la ligne finale. Dernière ligne, exactement : `VERDICT: VALIDE` ou `VERDICT: DRIFT`.\n\n{body}"
                 ))
             }
             PassDriver::Validating => {
@@ -1577,6 +1577,24 @@ mod tests {
         assert!(app.turn_end().is_none());
         assert!(app.pass.is_complete());
         assert!(!app.pass.drifted());
+    }
+
+    #[test]
+    fn validate_prompt_demands_refutation_before_verdict() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_approve();
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "c'est fait");
+        let validate_prompt = app.turn_end().expect("prompt validate");
+
+        assert!(validate_prompt.contains("défaut"));
+        assert!(validate_prompt.contains("DRIFT"));
+        assert!(validate_prompt.contains("exigence par exigence"));
+        assert!(validate_prompt.contains("CHAQUE exigence"));
+        assert!(validate_prompt.contains("avant la ligne finale"));
+        assert!(validate_prompt.contains("VERDICT: VALIDE"));
+        assert!(validate_prompt.contains("VERDICT: DRIFT"));
     }
 
     #[test]
