@@ -90,6 +90,14 @@ implémenté par kaji-cli sur SessionManager) ; (b) émettre les événements et
 consommateur unique les persister — **rejeté a priori** car il y a 7 consommateurs (perte de
 parité). L'option (a) préserve le point unique.
 
+## Limitations MVP connues (review 18 agents 2026-08-12 — à traiter en v2)
+
+- **Reentrance élicitation** : une réponse d'élicitation ré-appelle `reply()` pendant qu'un tour est ouvert → un 2e `turn_start` imbriqué + approbations attribuées au nouveau `turn_seq`. N'affecte que la *précision de l'audit*, pas la conversation. v2 : compteur de profondeur, journaliser au tour le plus externe.
+- **Pas de contrainte `UNIQUE(session_id, turn_seq)`** : `next_turn_seq` = `SELECT MAX+1` non transactionné. Invariant applicatif « un Agent = une session à la fois » (documenté agent.rs) ; deux process kaji reprenant la même session en parallèle pourraient courir la race (impact borné au bandeau « tour interrompu », pas de corruption d'historique).
+- **INSERT par chunk non batché** : un tour à N deltas = N INSERT awaités dans le hot-path (WAL, ~sub-ms chacun ; négligeable par token, mais non borné). v2 : batch par tour ou writer async découplé.
+- **`handle_confirmation` attend l'écriture DB** de l'approbation avant de livrer la permission — latence sous contention d'écriture sqlite. v2 : append fire-and-forget ou après livraison.
+- **Annulation Esc** = fin propre du tour (le loop interne break, `turn_end` écrit) → **non** classée « interrompu » (comportement voulu : l'utilisateur sait qu'il a annulé ; « interrompu » vise crash/kill). Écart assumé vs la formulation initiale du § kind.
+
 ## Vérification
 
 - Tests kaji : (1) `session_events` créée à la migration v16, idempotente ; (2) un tour complet
