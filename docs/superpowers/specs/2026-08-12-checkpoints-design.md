@@ -7,6 +7,10 @@ Scope : nouveau module store (crate `kaji` ou `kaji-core`) + hook `Agent::reply(
 
 Rendre chaque tour **annulable** : snapshot automatique de l'arbre de travail avant chaque tour, restore manuel (jamais automatique) qui remet fichiers **et** conversation à l'état d'un tour choisi. Filet contre un tour qui casse le code ou part en vrille.
 
+## Limite de provenance (constatée T1, mitigée — pas un non-objectif)
+
+La couche store **ne trace pas la provenance** : `files_created_since` (reverse-diff `--diff-filter=A`) ne distingue pas un ajout par tool-call d'un fichier créé à la main par l'utilisateur dans la fenêtre snapshot→restore — les deux sont des chemins nouveaux absents du tree cible. Deux mitigations rendent ça acceptable au MVP : (1) `add -A` respecte le `.gitignore` → `.env`/`node_modules`/artefacts (quasi toujours gitignorés) ne sont jamais capturés ni supprimés ; (2) le snapshot **pre-restore** (undo-the-undo, au MVP) capture tout non-gitignoré avant la mutation → un fichier utilisateur supprimé à tort est récupérable par `/restore <pre-restore>`. Le résidu non couvert : un fichier non-gitignoré créé à la main entre snapshot et restore est supprimé par le restore (mais récupérable via pre-restore). Provenance réelle (via les events tool du journal) = v2. T5 (review/E2E) doit tester le résidu ET sa récupération.
+
 ## Non-objectifs (v2+)
 
 - Preuve de volume `dev+ino` (anti-purge sur dir déplacé/remonté). MVP : restore sur le même chemin qu'au snapshot, best-effort.
