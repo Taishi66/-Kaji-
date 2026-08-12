@@ -782,6 +782,15 @@ impl SessionManager {
         self.storage.events_for_session(session_id).await
     }
 
+    /// `message_id` du dernier message persisté de la session, `None` si elle
+    /// n'en a encore aucun. Frontière stockée dans le payload de l'event
+    /// `checkpoint` (`docs/superpowers/specs/2026-08-12-checkpoints-design.md`):
+    /// un id est stable là où un timestamp est réécrit par la compaction
+    /// (premortem PM3).
+    pub async fn last_message_id(&self, session_id: &str) -> Result<Option<String>> {
+        self.storage.last_message_id(session_id).await
+    }
+
     /// `Some` ssi le dernier tour de la session a un `turn_start` sans
     /// `turn_end` correspondant (tour interrompu par crash/kill/annulation).
     pub async fn last_turn_is_interrupted(
@@ -2562,6 +2571,18 @@ impl SessionStorage {
                 payload_json,
             })
             .collect())
+    }
+
+    async fn last_message_id(&self, session_id: &str) -> Result<Option<String>> {
+        let pool = self.pool().await?;
+        let message_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT message_id FROM messages WHERE session_id = ? ORDER BY created_timestamp DESC, id DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+        Ok(message_id)
     }
 
     async fn last_turn_is_interrupted(&self, session_id: &str) -> Result<Option<InterruptedTurn>> {
@@ -4999,6 +5020,31 @@ mod tests {
             sm.next_turn_seq(&sid).await.unwrap(),
             2,
             "seq suivant après un tour ouvert"
+        );
+    }
+
+    #[tokio::test]
+    async fn last_message_id_returns_the_most_recent_persisted_message() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = new_session(&sm).await;
+
+        assert!(
+            sm.last_message_id(&sid).await.unwrap().is_none(),
+            "session sans messages → aucune frontière"
+        );
+
+        sm.add_message(&sid, &Message::user().with_text("m1").with_id("m1"))
+            .await
+            .unwrap();
+        sm.add_message(&sid, &Message::assistant().with_text("m2").with_id("m2"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sm.last_message_id(&sid).await.unwrap().as_deref(),
+            Some("m2"),
+            "dernier message persisté = frontière de restore couplé"
         );
     }
 

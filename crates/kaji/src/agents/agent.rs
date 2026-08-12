@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -36,6 +37,7 @@ use crate::agents::types::{
     FrontendTool, SessionConfig, SharedProvider, ToolResultReceiver,
     DEFAULT_ON_FAILURE_TIMEOUT_SECONDS, DEFAULT_RETRY_TIMEOUT_SECONDS,
 };
+use crate::checkpoint::{CheckpointId, CheckpointStore};
 use crate::config::extensions::name_to_key;
 use crate::config::permission::PermissionManager;
 use crate::config::{get_enabled_extensions, Config, KajiMode};
@@ -282,6 +284,19 @@ pub struct Agent {
     /// (true for its current callers); a future multi-session-per-`Agent`
     /// caller could race this alongside `current_turn_seq`.
     current_session_id: Mutex<Option<String>>,
+    /// Checkpoint store for automatic pre-turn snapshots
+    /// (`docs/superpowers/specs/2026-08-12-checkpoints-design.md`). `None`
+    /// when checkpointing isn't wired up for this `Agent` — most unit-test
+    /// call sites (and any caller with no real project directory to
+    /// snapshot) construct an `Agent` without one, and `reply()` treats that
+    /// as "checkpointing disabled", not an error.
+    checkpoint_store: Option<Arc<CheckpointStore>>,
+    /// Test-only override of the directory `checkpoint_store` snapshots —
+    /// lets tests inject a project path without mutating the real process
+    /// `current_dir` (unsafe to do per-test under a shared test binary). See
+    /// `checkpoint_project`.
+    #[cfg(test)]
+    checkpoint_project_override: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -508,6 +523,9 @@ impl Agent {
             steer_queues: Mutex::new(HashMap::new()),
             current_turn_seq: std::sync::atomic::AtomicI64::new(0),
             current_session_id: Mutex::new(None),
+            checkpoint_store: None,
+            #[cfg(test)]
+            checkpoint_project_override: None,
         }
     }
 
@@ -521,6 +539,19 @@ impl Agent {
     #[cfg(test)]
     pub(crate) fn set_stop_hook_block_cap_for_test(&mut self, cap: u32) {
         self.stop_hook_block_cap_override = Some(cap);
+    }
+
+    /// Wires a real `CheckpointStore` (and the project directory it should
+    /// snapshot) into this `Agent`, for tests that exercise the pre-turn
+    /// snapshot end-to-end via `reply()`. See `checkpoint_project`.
+    #[cfg(test)]
+    pub(crate) fn set_checkpoint_store_for_test(
+        &mut self,
+        store: Arc<CheckpointStore>,
+        project: PathBuf,
+    ) {
+        self.checkpoint_store = Some(store);
+        self.checkpoint_project_override = Some(project);
     }
 
     pub(crate) fn stop_hook_block_cap(&self) -> u32 {
@@ -1933,6 +1964,120 @@ impl Agent {
         }
     }
 
+    /// Directory `checkpoint_store` should snapshot for the upcoming turn,
+    /// or `None` to skip checkpointing this turn entirely. Best-effort like
+    /// `resolve_turn_seq`: `std::env::current_dir()` can fail (deleted cwd,
+    /// permission), which must never fail the turn — see
+    /// `snapshot_checkpoint`. Tests inject a project via
+    /// `set_checkpoint_store_for_test` instead of mutating the real,
+    /// process-wide `current_dir`.
+    fn checkpoint_project(&self) -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(project) = &self.checkpoint_project_override {
+            return Some(project.clone());
+        }
+
+        match std::env::current_dir() {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "checkpoint: could not resolve current_dir, skipping snapshot"
+                );
+                None
+            }
+        }
+    }
+
+    /// Downgrades a checkpoint snapshot's `Result` to `Option`, exactly like
+    /// `resolve_turn_seq` above downgrades the event log's turn counter — a
+    /// checkpoint is a recoverability nicety, not a turn precondition. Never
+    /// route `store.snapshot(...)` through `?`: a failed or slow `git add -A`
+    /// (disk full, index lock, huge untracked tree) must warn and let the
+    /// turn continue rather than abort it — the same mistake the Major
+    /// `next_turn_seq` bug made and `resolve_turn_seq` fixed the same day
+    /// (premortem PM4, `09 - Meta/premortems/kaji-checkpoints-2026-08-12.md`
+    /// in the Shosoin vault; enforced by `a_failed_snapshot_does_not_abort_the_turn`).
+    fn resolve_checkpoint_snapshot(
+        snapshot: Result<(CheckpointId, String)>,
+    ) -> Option<(CheckpointId, String)> {
+        match snapshot {
+            Ok(result) => Some(result),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "checkpoint: snapshot failed, turn continues without one"
+                );
+                None
+            }
+        }
+    }
+
+    /// Snapshots the working tree for `session_id`'s upcoming turn and
+    /// journals it as a `checkpoint` event. Called once per turn, right
+    /// after the `turn_start` event is appended in `reply()`'s envelope, so
+    /// the tree it captures reflects state *before* the turn's own tool
+    /// calls run: `captured: "pre_turn"` in the payload names that
+    /// explicitly (premortem PM1 — moving this call to `turn_end` would
+    /// silently invert what `/restore <turn>` undoes).
+    ///
+    /// `boundary_message_id` is `session_manager`'s last persisted message
+    /// at this point, which already includes this turn's own user message
+    /// (`reply_impl` persists it before this envelope ever runs, so it is
+    /// always the most recent row by the time we get here). Restore's
+    /// conversation truncation keys off that message id rather than a
+    /// timestamp, so the mapping survives compaction rewriting `messages`
+    /// (premortem PM3).
+    ///
+    /// `store.snapshot(...)` is synchronous `std::process::Command` I/O
+    /// (`subprocess::git_command()`), so it runs inside `spawn_blocking` to
+    /// avoid stalling the async executor. Entirely non-fatal end to end: see
+    /// `resolve_checkpoint_snapshot`.
+    async fn snapshot_checkpoint(
+        session_manager: &SessionManager,
+        store: Arc<CheckpointStore>,
+        project: PathBuf,
+        session_id: &str,
+        turn_seq: i64,
+    ) {
+        let boundary_message_id = match session_manager.last_message_id(session_id).await {
+            Ok(id) => id,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "checkpoint: last_message_id lookup failed, boundary will be null"
+                );
+                None
+            }
+        };
+
+        let label = format!("turn-{turn_seq}");
+        let snapshot = tokio::task::spawn_blocking(move || store.snapshot(&project, &label))
+            .await
+            .unwrap_or_else(|join_error| {
+                Err(anyhow!("checkpoint snapshot task panicked: {join_error}"))
+            });
+
+        let Some((checkpoint_id, tree_sha)) = Self::resolve_checkpoint_snapshot(snapshot) else {
+            return;
+        };
+
+        let payload = serde_json::json!({
+            "checkpoint_id": checkpoint_id.0,
+            "tree_sha": tree_sha,
+            "captured": "pre_turn",
+            "boundary_message_id": boundary_message_id,
+        })
+        .to_string();
+
+        if let Err(error) = session_manager
+            .append_event(session_id, turn_seq, "checkpoint", &payload)
+            .await
+        {
+            warn!(?error, "event log append failed for checkpoint");
+        }
+    }
+
     #[instrument(
         skip(self, user_message, session_config, cancel_token),
         fields(
@@ -1983,6 +2128,8 @@ impl Agent {
             "kaji_mode": kaji_mode,
         })
         .to_string();
+        let checkpoint_store = self.checkpoint_store.clone();
+        let checkpoint_project = self.checkpoint_project();
 
         Ok(Box::pin(async_stream::try_stream! {
             if let Some(turn_seq) = turn_seq {
@@ -1991,6 +2138,11 @@ impl Agent {
                     .await
                 {
                     warn!(?error, "event log append failed for turn_start");
+                }
+
+                if let (Some(store), Some(project)) = (checkpoint_store, checkpoint_project) {
+                    Self::snapshot_checkpoint(&session_manager, store, project, &session_id, turn_seq)
+                        .await;
                 }
             }
 
@@ -4168,7 +4320,6 @@ mod tests {
     use crate::session::session_manager::SessionType;
     use kaji_providers::conversation::token_usage::{ProviderUsage, Usage};
     use rmcp::model::Tool;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
@@ -5656,6 +5807,144 @@ echo start >> "$PLUGIN_ROOT/hook.log"
              KAJI_STATE_MACHINE, since Agent::reply() is the single point where both loops \
              converge before the log wraps the stream"
         );
+        Ok(())
+    }
+
+    // Checkpoints (docs/superpowers/specs/2026-08-12-checkpoints-design.md):
+    // a pre-turn snapshot is taken right after `turn_start` is journaled,
+    // non-fatally, reusing the `create_test_agent`/`CountingTextProvider`/
+    // `run_stop_hook_test_turn` harness above.
+
+    /// Builds a real, on-disk `CheckpointStore` for `project`. The caller
+    /// must already hold an `env_lock::lock_env` guard with `KAJI_PATH_ROOT`
+    /// set (see the two tests below): `env_lock`'s mutex guards the *entire*
+    /// process environment, not per-variable, so nesting a second
+    /// `lock_env` call inside an already-held guard deadlocks — combine every
+    /// override this test needs into one `lock_env` call instead.
+    fn checkpoint_store_for_test(project: &std::path::Path) -> Arc<CheckpointStore> {
+        Arc::new(CheckpointStore::for_project(project).expect("checkpoint store"))
+    }
+
+    #[tokio::test]
+    async fn a_completed_turn_logs_a_checkpoint_event_with_pre_turn_boundary() -> Result<()> {
+        let data_root = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let _guard = env_lock::lock_env([
+            ("KAJI_STATE_MACHINE", None::<&str>),
+            (
+                "KAJI_PATH_ROOT",
+                Some(data_root.path().to_str().expect("utf8 temp path")),
+            ),
+        ]);
+        let store = checkpoint_store_for_test(project_dir.path());
+
+        let temp_dir = tempfile::tempdir()?;
+        let hook_manager = crate::hooks::HookManager::from_plugins_for_test(vec![]);
+        let provider = Arc::new(CountingTextProvider::new());
+        let (mut agent, session_id) =
+            create_test_agent(temp_dir.path().join("data"), hook_manager, provider).await?;
+        agent.set_checkpoint_store_for_test(store, project_dir.path().to_path_buf());
+
+        run_stop_hook_test_turn(&agent, &session_id, "hello").await?;
+
+        let events = agent
+            .config
+            .session_manager
+            .events_for_session(&session_id)
+            .await?;
+        let checkpoint_event = events
+            .iter()
+            .find(|event| event.kind == "checkpoint")
+            .expect("a completed turn must log a checkpoint event");
+        let payload: serde_json::Value = serde_json::from_str(&checkpoint_event.payload_json)?;
+        assert_eq!(payload["captured"], "pre_turn");
+        assert!(
+            payload["checkpoint_id"].is_string(),
+            "checkpoint_id must be recorded: {payload}"
+        );
+        assert!(
+            payload["boundary_message_id"].is_string(),
+            "boundary_message_id must point at the user message that opened this turn: {payload}"
+        );
+        Ok(())
+    }
+
+    /// ⛔ BARRIER premortem PM4 — a snapshot failure must never abort the
+    /// turn (repeats `a_failed_next_turn_seq_does_not_abort_the_turn`'s
+    /// lesson for checkpoints). The store's `git_dir` is made unwritable
+    /// after construction, so `store.snapshot(...)`'s first `git add -A`
+    /// fails with a permission error while the store itself remains valid —
+    /// the turn must still complete and persist the user's message.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_failed_snapshot_does_not_abort_the_turn() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let data_root = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let _guard = env_lock::lock_env([
+            ("KAJI_STATE_MACHINE", None::<&str>),
+            (
+                "KAJI_PATH_ROOT",
+                Some(data_root.path().to_str().expect("utf8 temp path")),
+            ),
+        ]);
+        let store = checkpoint_store_for_test(project_dir.path());
+
+        let checkpoints_dir = crate::config::paths::Paths::in_data_dir("kaji/checkpoints");
+        let store_git_dir = std::fs::read_dir(&checkpoints_dir)
+            .expect("checkpoints dir must exist after for_project")
+            .next()
+            .expect("exactly one store dir")?
+            .path();
+        std::fs::set_permissions(&store_git_dir, std::fs::Permissions::from_mode(0o500))
+            .expect("make store git_dir unwritable");
+
+        let temp_dir = tempfile::tempdir()?;
+        let hook_manager = crate::hooks::HookManager::from_plugins_for_test(vec![]);
+        let provider = Arc::new(CountingTextProvider::new());
+        let (mut agent, session_id) =
+            create_test_agent(temp_dir.path().join("data"), hook_manager, provider).await?;
+        agent.set_checkpoint_store_for_test(store, project_dir.path().to_path_buf());
+
+        let result = run_stop_hook_test_turn(&agent, &session_id, "hello").await;
+
+        // Restore permissions before any assertion can early-return, so the
+        // TempDirs can always clean themselves up on drop regardless of
+        // pass/fail below.
+        std::fs::set_permissions(&store_git_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore permissions for TempDir cleanup");
+
+        let messages = result?;
+        assert!(
+            !messages.is_empty(),
+            "a turn with a broken checkpoint store must still complete normally"
+        );
+
+        let session = agent
+            .config
+            .session_manager
+            .get_session(&session_id, true)
+            .await?;
+        let conversation = session.conversation.expect("conversation must be loaded");
+        assert!(
+            conversation
+                .messages()
+                .iter()
+                .any(|message| message.role == rmcp::model::Role::User),
+            "the user message must be persisted despite the failed snapshot"
+        );
+
+        let events = agent
+            .config
+            .session_manager
+            .events_for_session(&session_id)
+            .await?;
+        assert!(
+            !events.iter().any(|event| event.kind == "checkpoint"),
+            "a failed snapshot must not produce a checkpoint event"
+        );
+
         Ok(())
     }
 }
