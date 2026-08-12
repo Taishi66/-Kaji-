@@ -271,6 +271,17 @@ pub struct Agent {
     pub(super) goal: Mutex<Option<String>>,
     pub(super) grind: Mutex<Option<String>>,
     steer_queues: Mutex<HashMap<String, SteerQueue>>,
+    /// `turn_seq` of the most recently started turn, for the append-only
+    /// event log (`docs/superpowers/specs/2026-08-12-event-log-design.md`).
+    /// Set once per `reply()` call, read by `handle_confirmation` to tag
+    /// `approval` events with the turn they belong to.
+    current_turn_seq: std::sync::atomic::AtomicI64,
+    /// Session id of the most recently started turn — best-effort context
+    /// for `handle_confirmation`, which has no `session_id` parameter of its
+    /// own. Correct as long as this `Agent` serves one session at a time
+    /// (true for its current callers); a future multi-session-per-`Agent`
+    /// caller could race this alongside `current_turn_seq`.
+    current_session_id: Mutex<Option<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -289,6 +300,66 @@ fn ensure_message_event_id(event: AgentEvent) -> AgentEvent {
     match event {
         AgentEvent::Message(message) => AgentEvent::Message(message.with_generated_id_if_missing()),
         other => other,
+    }
+}
+
+/// `kind` column for a `session_events` row logging this event — see the
+/// `kind` enum in `docs/superpowers/specs/2026-08-12-event-log-design.md`.
+fn agent_event_kind(event: &AgentEvent) -> &'static str {
+    match event {
+        AgentEvent::Message(_) => "message",
+        AgentEvent::Usage(_) => "usage",
+        AgentEvent::MessageUsage { .. } => "message_usage",
+        AgentEvent::McpNotification(_) => "mcp_notification",
+        AgentEvent::HistoryReplaced(_) => "history_replaced",
+    }
+}
+
+/// `payload_json` column for a `session_events` row logging this event.
+fn agent_event_payload(event: &AgentEvent) -> String {
+    match event {
+        AgentEvent::Message(message) => serialize_event_payload(message),
+        AgentEvent::Usage(usage) => serialize_event_payload(usage),
+        AgentEvent::MessageUsage { message_id, usage } => {
+            serialize_event_payload(&serde_json::json!({
+                "message_id": message_id,
+                "usage": usage,
+            }))
+        }
+        AgentEvent::McpNotification((request_id, notification)) => {
+            serialize_event_payload(&serde_json::json!({
+                "request_id": request_id,
+                "notification": notification,
+            }))
+        }
+        AgentEvent::HistoryReplaced(conversation) => serialize_event_payload(conversation),
+    }
+}
+
+/// Serializes an event log payload, falling back to a truncated `Debug`
+/// rendering under a `{"debug": ...}` wrapper if `Serialize` fails at
+/// runtime (e.g. a `NaN`/`Infinity` float, which JSON cannot represent).
+/// The event log is observability, not a critical path — never panics.
+fn serialize_event_payload<T: serde::Serialize + fmt::Debug>(value: &T) -> String {
+    match serde_json::to_string(value) {
+        Ok(json) => json,
+        Err(error) => {
+            warn!(
+                ?error,
+                "event log payload serialization failed, using debug fallback"
+            );
+            let debug: String = format!("{value:?}").chars().take(2000).collect();
+            serde_json::json!({ "debug": debug }).to_string()
+        }
+    }
+}
+
+/// Bounds a query preview to `max_chars`, splitting on char boundaries.
+fn truncate_query_preview(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        text.chars().take(max_chars).collect()
     }
 }
 
@@ -435,6 +506,8 @@ impl Agent {
             goal: Mutex::new(None),
             grind: Mutex::new(None),
             steer_queues: Mutex::new(HashMap::new()),
+            current_turn_seq: std::sync::atomic::AtomicI64::new(0),
+            current_session_id: Mutex::new(None),
         }
     }
 
@@ -1555,6 +1628,8 @@ impl Agent {
         request_id: String,
         confirmation: PermissionConfirmation,
     ) {
+        self.log_approval_event(&request_id, &confirmation).await;
+
         let provider = self.provider.lock().await.clone();
         if let Some(provider) = provider.as_ref() {
             if provider.permission_routing() == PermissionRouting::ActionRequired
@@ -1571,6 +1646,38 @@ impl Agent {
             .await
         {
             error!("Failed to deliver confirmation");
+        }
+    }
+
+    /// Appends an `approval` event to the log for the session/turn most
+    /// recently opened by `reply()` — the only place `handle_confirmation`
+    /// (no `session_id` parameter of its own) can find one. `tool_name` is
+    /// omitted: it isn't resolvable from `PermissionConfirmation` or
+    /// `ToolConfirmationRouter` at this layer without plumbing it in from
+    /// `tool_execution.rs`, out of scope here. Never fails the confirmation.
+    async fn log_approval_event(&self, request_id: &str, confirmation: &PermissionConfirmation) {
+        let Some(session_id) = self.current_session_id.lock().await.clone() else {
+            warn!(
+                %request_id,
+                "event log: no active session for approval, skipping"
+            );
+            return;
+        };
+        let turn_seq = self
+            .current_turn_seq
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let payload = serde_json::json!({
+            "request_id": request_id,
+            "permission": confirmation.permission,
+        })
+        .to_string();
+        if let Err(error) = self
+            .config
+            .session_manager
+            .append_event(&session_id, turn_seq, "approval", &payload)
+            .await
+        {
+            warn!(?error, "event log append failed for approval");
         }
     }
 
@@ -1814,13 +1921,70 @@ impl Agent {
         session_config: SessionConfig,
         cancel_token: Option<CancellationToken>,
     ) -> Result<BoxStream<'_, Result<AgentEvent>>> {
+        let session_id = session_config.id.clone();
+        let query_preview = truncate_query_preview(&agent_visible_message_text(&user_message), 200);
+        let kaji_mode = *self.current_kaji_mode.lock().await;
+
+        // Single insertion point for the append-only event log: `reply()` is where the
+        // legacy loop and the state-machine path (dispatched inside `reply_impl`) converge,
+        // so wrapping here gives parity between both by construction — see
+        // docs/superpowers/specs/2026-08-12-event-log-design.md.
+        let turn_seq = self
+            .config
+            .session_manager
+            .next_turn_seq(&session_id)
+            .await?;
+        self.current_turn_seq
+            .store(turn_seq, std::sync::atomic::Ordering::SeqCst);
+        *self.current_session_id.lock().await = Some(session_id.clone());
+
         let events = self
             .reply_impl(user_message, session_config, cancel_token)
             .await?;
 
         // This is the single live-event identity boundary. Callers that intentionally stream
         // multiple events for one logical message must assign their shared ID before this point.
-        Ok(Box::pin(events.map_ok(ensure_message_event_id)))
+        let events = events.map_ok(ensure_message_event_id);
+
+        let session_manager = self.config.session_manager.clone();
+        let turn_start_payload = serde_json::json!({
+            "query_preview": query_preview,
+            "kaji_mode": kaji_mode,
+        })
+        .to_string();
+
+        Ok(Box::pin(async_stream::try_stream! {
+            if let Err(error) = session_manager
+                .append_event(&session_id, turn_seq, "turn_start", &turn_start_payload)
+                .await
+            {
+                warn!(?error, "event log append failed for turn_start");
+            }
+
+            tokio::pin!(events);
+            while let Some(event) = events.next().await {
+                let event = event?;
+                let kind = agent_event_kind(&event);
+                let payload = agent_event_payload(&event);
+                if let Err(error) = session_manager
+                    .append_event(&session_id, turn_seq, kind, &payload)
+                    .await
+                {
+                    warn!(?error, kind = %kind, "event log append failed");
+                }
+                yield event;
+            }
+
+            // Only reached on a clean end of the underlying stream. A dropped stream
+            // (crash/kill/cancel) or a propagated error above skips this — that absence
+            // is exactly the "turn interrupted" signal `last_turn_is_interrupted` detects.
+            if let Err(error) = session_manager
+                .append_event(&session_id, turn_seq, "turn_end", "{}")
+                .await
+            {
+                warn!(?error, "event log append failed for turn_end");
+            }
+        }))
     }
 
     async fn reply_impl(
@@ -5154,5 +5318,139 @@ echo start >> "$PLUGIN_ROOT/hook.log"
             .expect("usage must remain stored on the hidden assistant message");
         assert_eq!(stored.input_tokens, Some(1200));
         assert_eq!(stored.output_tokens, Some(340));
+    }
+
+    // Event log (docs/superpowers/specs/2026-08-12-event-log-design.md): a
+    // turn drives session_events append-only via the single `reply()`
+    // insertion point, wrapping both the legacy loop and the state-machine
+    // path. Reuses the `create_test_agent`/`CountingTextProvider`/
+    // `run_stop_hook_test_turn` harness above (stop-hook tests) rather than
+    // inventing a new one.
+
+    #[tokio::test]
+    async fn a_completed_turn_logs_start_events_and_end_in_order() -> Result<()> {
+        let _guard = env_lock::lock_env([("KAJI_STATE_MACHINE", None::<&str>)]);
+        let temp_dir = tempfile::tempdir()?;
+        let hook_manager = crate::hooks::HookManager::from_plugins_for_test(vec![]);
+        let provider = Arc::new(CountingTextProvider::new());
+        let (agent, session_id) =
+            create_test_agent(temp_dir.path().join("data"), hook_manager, provider).await?;
+
+        run_stop_hook_test_turn(&agent, &session_id, "hello").await?;
+
+        let events = agent
+            .config
+            .session_manager
+            .events_for_session(&session_id)
+            .await?;
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds.first(),
+            Some(&"turn_start"),
+            "log must open with turn_start: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.last(),
+            Some(&"turn_end"),
+            "a normally-completed turn must close with turn_end: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"message"),
+            "the provider's reply must be logged as a message event: {kinds:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_dropped_stream_does_not_log_turn_end() -> Result<()> {
+        let _guard = env_lock::lock_env([("KAJI_STATE_MACHINE", None::<&str>)]);
+        let temp_dir = tempfile::tempdir()?;
+        let hook_manager = crate::hooks::HookManager::from_plugins_for_test(vec![]);
+        let provider = Arc::new(CountingTextProvider::new());
+        let (agent, session_id) =
+            create_test_agent(temp_dir.path().join("data"), hook_manager, provider).await?;
+
+        let session_config = SessionConfig {
+            id: session_id.clone(),
+            schedule_id: None,
+            max_turns: Some(10),
+            retry_config: None,
+        };
+        let mut stream = agent
+            .reply(Message::user().with_text("hello"), session_config, None)
+            .await?;
+        // Poll once so the async_stream body actually starts (append-only
+        // writes happen lazily, on first poll) without draining it to
+        // completion — simulates a crash/kill/Esc-cancel mid-turn.
+        let first = stream.next().await;
+        assert!(
+            first.is_some(),
+            "expected at least one event before dropping the stream"
+        );
+        drop(stream);
+
+        let interrupted = agent
+            .config
+            .session_manager
+            .last_turn_is_interrupted(&session_id)
+            .await?;
+        assert!(
+            interrupted.is_some(),
+            "dropping the stream before exhaustion must leave the turn without a turn_end"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn event_sequence_is_identical_across_legacy_and_state_machine() -> Result<()> {
+        async fn run_scenario(state_machine: Option<&str>) -> Result<Vec<String>> {
+            let _guard = env_lock::lock_env([("KAJI_STATE_MACHINE", state_machine)]);
+            let temp_dir = tempfile::tempdir()?;
+            let hook_manager = crate::hooks::HookManager::from_plugins_for_test(vec![]);
+            let provider = Arc::new(CountingTextProvider::new());
+            let (agent, session_id) =
+                create_test_agent(temp_dir.path().join("data"), hook_manager, provider).await?;
+
+            run_stop_hook_test_turn(&agent, &session_id, "hello").await?;
+
+            let events = agent
+                .config
+                .session_manager
+                .events_for_session(&session_id)
+                .await?;
+            Ok(events.into_iter().map(|e| e.kind).collect())
+        }
+
+        let legacy_kinds = run_scenario(None).await?;
+        let state_machine_kinds = run_scenario(Some("1")).await?;
+
+        // Both loops must open/close the turn identically...
+        assert_eq!(legacy_kinds.first(), Some(&"turn_start".to_string()));
+        assert_eq!(state_machine_kinds.first(), Some(&"turn_start".to_string()));
+        assert_eq!(legacy_kinds.last(), Some(&"turn_end".to_string()));
+        assert_eq!(state_machine_kinds.last(), Some(&"turn_end".to_string()));
+
+        // ...and log the same *set* of AgentEvent kinds, proving the envelope in
+        // `reply()` is applied identically on both paths (nothing added or
+        // dropped by the hook itself). This does NOT assert the same *order*:
+        // for this scenario the legacy loop yields `usage` before `message`
+        // while the state machine yields `message` before `usage` — a
+        // pre-existing divergence between the two loops' emission order,
+        // unrelated to the event log (the log only records whatever order
+        // each loop already yields; reordering either loop is out of scope
+        // for the append-only log and belongs to the agent-loop migration
+        // itself, see AGENTS.md "Agent Loop Migration").
+        let mut sorted_legacy = legacy_kinds.clone();
+        let mut sorted_state_machine = state_machine_kinds.clone();
+        sorted_legacy.sort();
+        sorted_state_machine.sort();
+        assert_eq!(
+            sorted_legacy, sorted_state_machine,
+            "legacy kinds {legacy_kinds:?} vs state-machine kinds {state_machine_kinds:?}: \
+             the event log must see the same multiset of AgentEvent kinds regardless of \
+             KAJI_STATE_MACHINE, since Agent::reply() is the single point where both loops \
+             converge before the log wraps the stream"
+        );
+        Ok(())
     }
 }
