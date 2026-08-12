@@ -93,29 +93,58 @@ fn build_header(session_id: &str) -> String {
     format!("{session_id} · {provider}/{model}")
 }
 
-fn push_welcome(app: &mut App) {
-    app.push_system("鍛冶 bienvenue dans kaji");
-    app.push_system("tape ton message puis Entrée");
+/// `emphasized` selects the render register: `false` is the startup banner
+/// (dim ambiance, via `App::push_system`); `true` is `/help` invoked
+/// on-demand, which must read as a normal answer instead of background
+/// noise — routed through `App::push_system_lines` (the same pre-rendered,
+/// per-role-styled path `/cost` and `/docker` already use) with each line
+/// styled `theme::text()`.
+fn push_welcome(app: &mut App, emphasized: bool) {
+    push_welcome_line(app, "鍛冶 bienvenue dans kaji", emphasized);
+    push_welcome_line(app, "tape ton message puis Entrée", emphasized);
     for cmd in crate::tui::app::COMMANDS {
-        app.push_system(&format!("{}  {}", cmd.name, cmd.desc));
+        push_welcome_line(app, &format!("{}  {}", cmd.name, cmd.desc), emphasized);
     }
     // Souris OFF (KAJI_MOUSE=0): the wheel isn't captured and ↑/↓ go back to
     // legacy line-scroll (App::mouse_enabled guard in on_event) instead of
     // prompt-history recall — advertising either would describe controls
     // that don't work.
     if app.mouse_enabled {
-        app.push_system(
+        push_welcome_line(
+            app,
             "PageUp/PageDown/Home/End font défiler le chat · molette = 3 lignes par cran",
+            emphasized,
         );
-        app.push_system(
+        push_welcome_line(
+            app,
             "Ctrl+↑/↓ saute au tour précédent/suivant · ↑/↓ rappelle l'historique de prompts",
+            emphasized,
         );
-        app.push_system("Option/Shift+glisser dans le terminal pour sélectionner du texte");
+        push_welcome_line(
+            app,
+            "Option/Shift+glisser dans le terminal pour sélectionner du texte",
+            emphasized,
+        );
     } else {
-        app.push_system("PageUp/PageDown/Home/End font défiler le chat");
-        app.push_system("Ctrl+↑/↓ saute au tour précédent/suivant");
+        push_welcome_line(
+            app,
+            "PageUp/PageDown/Home/End font défiler le chat",
+            emphasized,
+        );
+        push_welcome_line(app, "Ctrl+↑/↓ saute au tour précédent/suivant", emphasized);
     }
-    app.push_system("Esc interrompt · Ctrl+C quitte");
+    push_welcome_line(app, "Esc interrompt · Ctrl+C quitte", emphasized);
+}
+
+fn push_welcome_line(app: &mut App, text: &str, emphasized: bool) {
+    if emphasized {
+        app.push_system_lines(vec![Line::from(Span::styled(
+            text.to_string(),
+            theme::text(),
+        ))]);
+    } else {
+        app.push_system(text);
+    }
 }
 
 /// Résumé git dim pour le header — `None` si `dir` n'est pas un dépôt ou si
@@ -334,7 +363,7 @@ async fn event_loop(
                             app.push_system(&format!("✗ {} refusé", req.tool_name));
                         }
                     }
-                    Action::Help => push_welcome(&mut app),
+                    Action::Help => push_welcome(&mut app, true),
                     Action::Cost => {
                         let report = cost_report(&session_manager, session_id).await;
                         app.push_system_lines(report);
@@ -475,7 +504,7 @@ fn seed_chat(app: &mut App, conversation: &kaji::conversation::Conversation) {
 /// pages of history reads as a bug, not onboarding.
 fn maybe_push_welcome(app: &mut App) {
     if app.chat.is_empty() {
-        push_welcome(app);
+        push_welcome(app, false);
     }
 }
 
@@ -700,7 +729,7 @@ mod tests {
         let mut app = App::new(None);
         app.mouse_enabled = true;
 
-        push_welcome(&mut app);
+        push_welcome(&mut app, false);
 
         let text = welcome_text(&app);
         assert!(text.contains("molette"));
@@ -716,7 +745,7 @@ mod tests {
         let mut app = App::new(None);
         app.mouse_enabled = false;
 
-        push_welcome(&mut app);
+        push_welcome(&mut app, false);
 
         let text = welcome_text(&app);
         assert!(!text.contains("molette"));
@@ -728,7 +757,7 @@ mod tests {
     #[test]
     fn push_welcome_lists_every_command_from_the_table() {
         let mut app = App::new(None);
-        push_welcome(&mut app);
+        push_welcome(&mut app, false);
         let text = welcome_text(&app);
         for cmd in crate::tui::app::COMMANDS {
             assert!(
@@ -737,5 +766,59 @@ mod tests {
                 cmd.name
             );
         }
+    }
+
+    fn welcome_line_fg(app: &App, needle: &str) -> ratatui::style::Color {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(120, 60);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| ui::draw(frame, app))
+            .expect("draw must succeed against a TestBackend");
+        let buffer = terminal.backend().buffer();
+        let target = needle.chars().next().expect("non-empty needle");
+
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect();
+            if !row.contains(needle) {
+                continue;
+            }
+            for x in 0..buffer.area.width {
+                if buffer[(x, y)].symbol() == target.to_string() {
+                    return buffer[(x, y)].fg;
+                }
+            }
+        }
+        panic!("row containing {needle:?} not found in rendered buffer");
+    }
+
+    #[test]
+    fn help_command_renders_in_normal_text_style() {
+        let mut app = App::new(None);
+
+        push_welcome(&mut app, true);
+
+        assert_eq!(
+            welcome_line_fg(&app, "bienvenue"),
+            theme::ENCRE,
+            "/help must render like a normal answer, not the dim welcome ambiance"
+        );
+    }
+
+    #[test]
+    fn startup_welcome_stays_dim() {
+        let mut app = App::new(None);
+
+        push_welcome(&mut app, false);
+
+        assert_eq!(
+            welcome_line_fg(&app, "bienvenue"),
+            ratatui::style::Color::DarkGray,
+            "the startup banner must keep its dim ambiance style"
+        );
     }
 }
