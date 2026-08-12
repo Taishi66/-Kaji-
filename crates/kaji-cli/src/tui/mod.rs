@@ -17,6 +17,7 @@ use kaji::session::SessionManager;
 use kaji_core::sdd::SpecDoc;
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use std::future::Future;
 use std::io::stdout;
@@ -93,58 +94,114 @@ fn build_header(session_id: &str) -> String {
     format!("{session_id} · {provider}/{model}")
 }
 
-/// `emphasized` selects the render register: `false` is the startup banner
-/// (dim ambiance, via `App::push_system`); `true` is `/help` invoked
-/// on-demand, which must read as a normal answer instead of background
-/// noise — routed through `App::push_system_lines` (the same pre-rendered,
-/// per-role-styled path `/cost` and `/docker` already use) with each line
-/// styled `theme::text()`.
+/// Each welcome/help section renders as ONE `ChatLine` (via
+/// `App::push_system_lines`), never one `ChatLine` per row: `ui::draw_chat`
+/// appends a blank line after every `ChatLine`, so one row per push used to
+/// blow a blank line in between every single command and nav hint. Grouping
+/// rows into a block keeps that blank line where the approved mockup wants
+/// it — between sections, not inside them.
+///
+/// `emphasized` selects the content register: `false` is the startup banner
+/// (dim ambiance); `true` is `/help` invoked on-demand, which must read as a
+/// normal answer instead of background noise. Section titles (`commandes`,
+/// `navigation`) always use `theme::title()` (or patiné) in both registers —
+/// only the row content switches between `theme::dim()` and `theme::text()`.
+///
+/// `App::push_system_lines` splices the `· ` system marker onto the first
+/// line of each block only (`ui::push_rendered_lines`), landing it on the
+/// welcome banner line and on each section's title row — the same spot
+/// `/cost`/`/docker` already put it, not something new here.
 fn push_welcome(app: &mut App, emphasized: bool) {
-    push_welcome_line(app, "鍛冶 bienvenue dans kaji", emphasized);
-    push_welcome_line(app, "tape ton message puis Entrée", emphasized);
-    for cmd in crate::tui::app::COMMANDS {
-        push_welcome_line(app, &format!("{}  {}", cmd.name, cmd.desc), emphasized);
-    }
-    // Souris OFF (KAJI_MOUSE=0): the wheel isn't captured and ↑/↓ go back to
-    // legacy line-scroll (App::mouse_enabled guard in on_event) instead of
-    // prompt-history recall — advertising either would describe controls
-    // that don't work.
-    if app.mouse_enabled {
-        push_welcome_line(
-            app,
-            "PageUp/PageDown/Home/End font défiler le chat · molette = 3 lignes par cran",
-            emphasized,
-        );
-        push_welcome_line(
-            app,
-            "Ctrl+↑/↓ saute au tour précédent/suivant · ↑/↓ rappelle l'historique de prompts",
-            emphasized,
-        );
-        push_welcome_line(
-            app,
-            "Option/Shift+glisser dans le terminal pour sélectionner du texte",
-            emphasized,
-        );
+    let content_style = if emphasized {
+        theme::text()
     } else {
-        push_welcome_line(
-            app,
-            "PageUp/PageDown/Home/End font défiler le chat",
-            emphasized,
-        );
-        push_welcome_line(app, "Ctrl+↑/↓ saute au tour précédent/suivant", emphasized);
-    }
-    push_welcome_line(app, "Esc interrompt · Ctrl+C quitte", emphasized);
+        theme::dim()
+    };
+
+    app.push_system_lines(vec![Line::from(Span::styled(
+        "鍛冶 bienvenue dans kaji — tape ton message puis Entrée",
+        content_style,
+    ))]);
+    app.push_system_lines(commands_section(content_style));
+    app.push_system_lines(navigation_section(app.mouse_enabled, content_style));
 }
 
-fn push_welcome_line(app: &mut App, text: &str, emphasized: bool) {
-    if emphasized {
-        app.push_system_lines(vec![Line::from(Span::styled(
-            text.to_string(),
-            theme::text(),
-        ))]);
-    } else {
-        app.push_system(text);
+fn commands_section(content_style: Style) -> Vec<Line<'static>> {
+    let name_width = crate::tui::app::COMMANDS
+        .iter()
+        .map(|cmd| cmd.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines = vec![Line::from(Span::styled("commandes", theme::title()))];
+    for cmd in crate::tui::app::COMMANDS {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {:<name_width$}   {}",
+                cmd.name,
+                welcome_command_desc(cmd)
+            ),
+            content_style,
+        )));
     }
+    lines
+}
+
+/// The command palette (`ui::draw_palette`) and
+/// `push_welcome_lists_every_command_from_the_table` both read
+/// `Command::desc` straight off `COMMANDS` — that table stays the single
+/// source of command copy. A few descriptions overflow the welcome's
+/// aligned column layout (env var asides, "affiche/masque" duplication), so
+/// this shortens just those for the welcome/help block; anything not listed
+/// here falls back to `cmd.desc` unchanged.
+fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
+    match cmd.name {
+        "/sdd" => "démarre une passe SDD (SPEC.md ou --spec)",
+        "/spec" => "(F2) panneau SPEC on/off",
+        "/think" => "(F3) raisonnement du modèle (思考中)",
+        "/cost" => "usage tokens/coût (session, 5 h, 7 j)",
+        "/docker" => "conteneurs en cours",
+        _ => cmd.desc,
+    }
+}
+
+/// Souris OFF (`KAJI_MOUSE=0`): the wheel isn't captured and ↑/↓ go back to
+/// legacy line-scroll (`App::mouse_enabled` guard in `on_event`) instead of
+/// prompt-history recall — advertising either would describe controls that
+/// don't work. Keeps the pre-mouse-support sentences verbatim (commit
+/// 26bd297c8) instead of the aligned key/description rows below, since they
+/// were never key/desc pairs to begin with.
+fn navigation_section(mouse_enabled: bool, content_style: Style) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled("navigation", theme::title()))];
+    if mouse_enabled {
+        let rows: [(&str, &str); 6] = [
+            ("molette", "défile le chat (3 lignes/cran)"),
+            ("PageUp/PageDown", "défile par page · Home/End"),
+            ("Ctrl+↑/↓", "saute au tour précédent/suivant"),
+            ("↑/↓", "historique de prompts"),
+            ("Esc", "interrompt · Ctrl+C quitte"),
+            ("Option+glisser", "sélectionner du texte"),
+        ];
+        let key_width = rows
+            .iter()
+            .map(|(key, _)| key.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (key, desc) in rows {
+            lines.push(Line::from(Span::styled(
+                format!("  {key:<key_width$}   {desc}"),
+                content_style,
+            )));
+        }
+    } else {
+        for text in [
+            "PageUp/PageDown/Home/End font défiler le chat",
+            "Ctrl+↑/↓ saute au tour précédent/suivant",
+            "Esc interrompt · Ctrl+C quitte",
+        ] {
+            lines.push(Line::from(Span::styled(text, content_style)));
+        }
+    }
+    lines
 }
 
 /// Résumé git dim pour le header — `None` si `dir` n'est pas un dépôt ou si
@@ -733,7 +790,8 @@ mod tests {
 
         let text = welcome_text(&app);
         assert!(text.contains("molette"));
-        assert!(text.contains("↑/↓ rappelle l'historique"));
+        assert!(text.contains("↑/↓"));
+        assert!(text.contains("historique de prompts"));
     }
 
     /// Souris OFF (`KAJI_MOUSE=0`) — the arrows go back to line-scrolling
@@ -768,6 +826,30 @@ mod tests {
         }
     }
 
+    /// Renders `app` against a fixed-size `TestBackend` and returns each row
+    /// as a plain string, one cell per character — wide-glyph continuation
+    /// cells come back empty from `symbol()` and fall back to a space here,
+    /// which keeps column offsets in the returned strings matching terminal
+    /// columns 1:1.
+    fn rendered_rows(app: &App) -> Vec<String> {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(120, 60);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| ui::draw(frame, app))
+            .expect("draw must succeed against a TestBackend");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
     fn welcome_line_fg(app: &App, needle: &str) -> ratatui::style::Color {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
@@ -780,20 +862,90 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let target = needle.chars().next().expect("non-empty needle");
 
-        for y in 0..buffer.area.height {
-            let row: String = (0..buffer.area.width)
-                .map(|x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
-                .collect();
+        for (y, row) in rendered_rows(app).iter().enumerate() {
             if !row.contains(needle) {
                 continue;
             }
             for x in 0..buffer.area.width {
-                if buffer[(x, y)].symbol() == target.to_string() {
-                    return buffer[(x, y)].fg;
+                if buffer[(x, y as u16)].symbol() == target.to_string() {
+                    return buffer[(x, y as u16)].fg;
                 }
             }
         }
         panic!("row containing {needle:?} not found in rendered buffer");
+    }
+
+    /// The old design pushed one `ChatLine` per row, so `draw_chat`'s
+    /// per-`ChatLine` trailing blank line landed after every single command
+    /// and nav hint — flat and over-aired. Grouping rows into one
+    /// `ChatLine` per section (see `push_welcome`) means that blank line
+    /// only falls between sections now; this locks that shape in.
+    #[test]
+    fn welcome_renders_as_compact_sections() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+
+        push_welcome(&mut app, false);
+
+        let rows = rendered_rows(&app);
+        let commands_row = rows
+            .iter()
+            .position(|r| r.contains("commandes"))
+            .expect("commandes section header must render");
+        let navigation_row = rows
+            .iter()
+            .position(|r| r.contains("navigation"))
+            .expect("navigation section header must render");
+        assert!(
+            navigation_row > commands_row,
+            "navigation section must render after commandes"
+        );
+
+        for (name, next_name) in [
+            ("/sdd", "/spec"),
+            ("/spec", "/think"),
+            ("/think", "/cost"),
+            ("/cost", "/docker"),
+            ("/docker", "/help"),
+            ("/help", "/quit"),
+        ] {
+            let row = rows
+                .iter()
+                .position(|r| r.contains(name))
+                .unwrap_or_else(|| panic!("{name} row missing from welcome"));
+            assert!(
+                rows[row + 1].contains(next_name),
+                "expected {next_name} on the row right after {name} (no blank line \
+                 between commands), got {:?}",
+                rows[row + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn welcome_command_names_are_column_aligned() {
+        let mut app = App::new(None);
+
+        push_welcome(&mut app, false);
+
+        let rows = rendered_rows(&app);
+        let sdd_row = rows
+            .iter()
+            .find(|r| r.contains("/sdd"))
+            .expect("/sdd row must render");
+        let docker_row = rows
+            .iter()
+            .find(|r| r.contains("/docker"))
+            .expect("/docker row must render");
+
+        let sdd_desc_col = sdd_row.find("démarre").expect("/sdd description text");
+        let docker_desc_col = docker_row
+            .find("conteneurs")
+            .expect("/docker description text");
+        assert_eq!(
+            sdd_desc_col, docker_desc_col,
+            "command descriptions must start at the same column regardless of name length"
+        );
     }
 
     #[test]
