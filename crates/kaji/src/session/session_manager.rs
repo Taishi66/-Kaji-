@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use tracing::{info, warn};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 15;
+pub const CURRENT_SCHEMA_VERSION: i32 = 16;
 pub const SESSIONS_FOLDER: &str = "sessions";
 pub const DB_NAME: &str = "sessions.db";
 const MILLISECOND_TIMESTAMP_THRESHOLD: i64 = 10_000_000_000;
@@ -417,6 +417,26 @@ pub struct SessionNameUpdate {
     pub user_set_name: bool,
 }
 
+/// Une ligne append-only de `session_events` — journal d'un tour au fil de
+/// l'eau (restart-safe, audit des approbations, trace prompt→issue).
+#[derive(Debug, Clone)]
+pub struct SessionEvent {
+    pub id: i64,
+    pub turn_seq: i64,
+    pub ts_ms: i64,
+    pub kind: String,
+    pub payload_json: String,
+}
+
+/// Résultat de `last_turn_is_interrupted` : le dernier tour de la session a
+/// un `turn_start` sans `turn_end` correspondant (crash/kill/annulation).
+#[derive(Debug, Clone)]
+pub struct InterruptedTurn {
+    pub turn_seq: i64,
+    pub event_count: i64,
+    pub query_preview: Option<String>,
+}
+
 impl SessionManager {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
@@ -735,6 +755,40 @@ impl SessionManager {
         self.storage
             .update_tool_request_meta(session_id, tool_call_id, patch)
             .await
+    }
+
+    /// Journalise un événement append-only pour `session_id`/`turn_seq`.
+    /// Table `session_events` — voir `docs/superpowers/specs/2026-08-12-event-log-design.md`.
+    pub async fn append_event(
+        &self,
+        session_id: &str,
+        turn_seq: i64,
+        kind: &str,
+        payload_json: &str,
+    ) -> Result<()> {
+        self.storage
+            .append_event(session_id, turn_seq, kind, payload_json)
+            .await
+    }
+
+    /// Prochain `turn_seq` pour la session : `MAX(turn_seq) + 1`, `1` si vide.
+    /// Lecture pure, aucun effet de bord.
+    pub async fn next_turn_seq(&self, session_id: &str) -> Result<i64> {
+        self.storage.next_turn_seq(session_id).await
+    }
+
+    /// Tous les `session_events` de la session, ordonnés par `id` croissant.
+    pub async fn events_for_session(&self, session_id: &str) -> Result<Vec<SessionEvent>> {
+        self.storage.events_for_session(session_id).await
+    }
+
+    /// `Some` ssi le dernier tour de la session a un `turn_start` sans
+    /// `turn_end` correspondant (tour interrompu par crash/kill/annulation).
+    pub async fn last_turn_is_interrupted(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<InterruptedTurn>> {
+        self.storage.last_turn_is_interrupted(session_id).await
     }
 }
 
@@ -1121,6 +1175,22 @@ impl SessionStorage {
         .execute(&mut *tx)
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS session_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id  TEXT    NOT NULL,
+                turn_seq    INTEGER NOT NULL,
+                ts_ms       INTEGER NOT NULL,
+                kind        TEXT    NOT NULL,
+                payload_json TEXT   NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            )
+        "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)")
             .execute(&mut *tx)
             .await?;
@@ -1143,6 +1213,11 @@ impl SessionStorage {
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_usage_ledger_session ON usage_ledger(session_id)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, turn_seq, id)",
         )
         .execute(&mut *tx)
         .await?;
@@ -1605,6 +1680,28 @@ impl SessionStorage {
                 .await?;
                 sqlx::query(
                     "CREATE INDEX IF NOT EXISTS idx_usage_ledger_session ON usage_ledger(session_id)",
+                )
+                .execute(&mut **tx)
+                .await?;
+            }
+            16 => {
+                sqlx::query(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS session_events (
+                        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id  TEXT    NOT NULL,
+                        turn_seq    INTEGER NOT NULL,
+                        ts_ms       INTEGER NOT NULL,
+                        kind        TEXT    NOT NULL,
+                        payload_json TEXT   NOT NULL,
+                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                    )
+                    "#,
+                )
+                .execute(&mut **tx)
+                .await?;
+                sqlx::query(
+                    "CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, turn_seq, id)",
                 )
                 .execute(&mut **tx)
                 .await?;
@@ -2410,6 +2507,106 @@ impl SessionStorage {
             total_tokens: row.2.unwrap_or(0),
             cost: row.3,
         })
+    }
+
+    async fn append_event(
+        &self,
+        session_id: &str,
+        turn_seq: i64,
+        kind: &str,
+        payload_json: &str,
+    ) -> Result<()> {
+        let pool = self.pool().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO session_events (session_id, turn_seq, ts_ms, kind, payload_json)
+            VALUES (?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(session_id)
+        .bind(turn_seq)
+        .bind(Utc::now().timestamp_millis())
+        .bind(kind)
+        .bind(payload_json)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn next_turn_seq(&self, session_id: &str) -> Result<i64> {
+        let pool = self.pool().await?;
+        let max_turn_seq: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(turn_seq) FROM session_events WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_one(pool)
+                .await?;
+        Ok(max_turn_seq.map_or(1, |seq| seq + 1))
+    }
+
+    async fn events_for_session(&self, session_id: &str) -> Result<Vec<SessionEvent>> {
+        let pool = self.pool().await?;
+        let rows = sqlx::query_as::<_, (i64, i64, i64, String, String)>(
+            "SELECT id, turn_seq, ts_ms, kind, payload_json FROM session_events WHERE session_id = ? ORDER BY id ASC",
+        )
+        .bind(session_id)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, turn_seq, ts_ms, kind, payload_json)| SessionEvent {
+                id,
+                turn_seq,
+                ts_ms,
+                kind,
+                payload_json,
+            })
+            .collect())
+    }
+
+    async fn last_turn_is_interrupted(&self, session_id: &str) -> Result<Option<InterruptedTurn>> {
+        let pool = self.pool().await?;
+
+        let max_turn_seq: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(turn_seq) FROM session_events WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_one(pool)
+                .await?;
+
+        let Some(turn_seq) = max_turn_seq else {
+            return Ok(None);
+        };
+
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT kind, payload_json FROM session_events WHERE session_id = ? AND turn_seq = ? ORDER BY id ASC",
+        )
+        .bind(session_id)
+        .bind(turn_seq)
+        .fetch_all(pool)
+        .await?;
+
+        let has_start = rows.iter().any(|(kind, _)| kind == "turn_start");
+        let has_end = rows.iter().any(|(kind, _)| kind == "turn_end");
+
+        if !has_start || has_end {
+            return Ok(None);
+        }
+
+        let query_preview = rows
+            .iter()
+            .find(|(kind, _)| kind == "turn_start")
+            .and_then(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .and_then(|v| {
+                v.get("query_preview")
+                    .and_then(|q| q.as_str())
+                    .map(str::to_string)
+            });
+
+        Ok(Some(InterruptedTurn {
+            turn_seq,
+            event_count: rows.len() as i64,
+            query_preview,
+        }))
     }
 
     async fn export_session(&self, id: &str) -> Result<String> {
@@ -4778,5 +4975,140 @@ mod tests {
         assert_eq!(aggregate.output_tokens, 0);
         assert_eq!(aggregate.total_tokens, 0);
         assert_eq!(aggregate.cost, None);
+    }
+
+    #[tokio::test]
+    async fn session_events_table_survives_migration_and_appends() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = new_session(&sm).await;
+
+        let seq = sm.next_turn_seq(&sid).await.unwrap();
+        assert_eq!(seq, 1, "première séquence de tour");
+        sm.append_event(&sid, seq, "turn_start", r#"{"query_preview":"salut"}"#)
+            .await
+            .unwrap();
+        sm.append_event(&sid, seq, "message", r#"{"role":"assistant"}"#)
+            .await
+            .unwrap();
+        let evs = sm.events_for_session(&sid).await.unwrap();
+        assert_eq!(evs.len(), 2);
+        assert_eq!(evs[0].kind, "turn_start");
+        assert_eq!(evs[0].turn_seq, 1);
+        assert_eq!(
+            sm.next_turn_seq(&sid).await.unwrap(),
+            2,
+            "seq suivant après un tour ouvert"
+        );
+    }
+
+    #[tokio::test]
+    async fn last_turn_interrupted_iff_turn_start_without_turn_end() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = new_session(&sm).await;
+
+        sm.append_event(&sid, 1, "turn_start", r#"{"query_preview":"q1"}"#)
+            .await
+            .unwrap();
+        sm.append_event(&sid, 1, "message", "{}").await.unwrap();
+        sm.append_event(&sid, 1, "turn_end", "{}").await.unwrap();
+        assert!(
+            sm.last_turn_is_interrupted(&sid).await.unwrap().is_none(),
+            "tour clos → pas d'interruption"
+        );
+
+        sm.append_event(&sid, 2, "turn_start", r#"{"query_preview":"q2"}"#)
+            .await
+            .unwrap();
+        sm.append_event(&sid, 2, "message", "{}").await.unwrap();
+        let it = sm
+            .last_turn_is_interrupted(&sid)
+            .await
+            .unwrap()
+            .expect("tour 2 ouvert → interrompu");
+        assert_eq!(it.turn_seq, 2);
+        assert_eq!(it.query_preview.as_deref(), Some("q2"));
+    }
+
+    #[tokio::test]
+    async fn session_events_migration_from_v15_preserves_messages() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join(SESSIONS_FOLDER).join(DB_NAME);
+
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+
+        SessionStorage::create_schema(&pool).await.unwrap();
+
+        // Recreate a v15-shaped database: no session_events table yet.
+        sqlx::query("DROP TABLE session_events")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE schema_version SET version = 15")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO sessions (id, name, user_set_name, session_type, working_dir, extension_data, kaji_mode)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("v15_id")
+        .bind("Pre-migration session")
+        .bind(false)
+        .bind("user")
+        .bind("/tmp")
+        .bind("{}")
+        .bind("auto")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO messages (message_id, session_id, role, content_json, created_timestamp)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("msg_1")
+        .bind("v15_id")
+        .bind("user")
+        .bind(r#"[{"type":"text","text":"hi"}]"#)
+        .bind(1_700_000_000_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool.close().await;
+
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        sm.storage().pool().await.unwrap(); // Triggers migration v15 -> v16
+
+        let session = sm.get_session("v15_id", true).await.unwrap();
+        assert_eq!(
+            session.message_count, 1,
+            "les messages pré-migration survivent"
+        );
+
+        let seq = sm.next_turn_seq("v15_id").await.unwrap();
+        assert_eq!(
+            seq, 1,
+            "session_events vide après migration mais table utilisable"
+        );
+        sm.append_event("v15_id", seq, "turn_start", "{}")
+            .await
+            .unwrap();
+        let events = sm.events_for_session("v15_id").await.unwrap();
+        assert_eq!(events.len(), 1);
     }
 }
