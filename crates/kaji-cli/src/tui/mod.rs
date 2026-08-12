@@ -9,11 +9,13 @@ use app::{Action, App, PassDriver};
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use kaji::agents::{Agent, AgentEvent, SessionConfig};
+use kaji::checkpoint::{CheckpointId, CheckpointStore};
+use kaji::checkpoint_restore::{restore_checkpoint, RestoreOutcome};
 use kaji::config::Config;
 use kaji::conversation::message::Message;
 use kaji::permission::permission_confirmation::PrincipalType;
 use kaji::permission::{Permission, PermissionConfirmation};
-use kaji::session::session_manager::InterruptedTurn;
+use kaji::session::session_manager::{InterruptedTurn, SessionEvent};
 use kaji::session::SessionManager;
 use kaji_core::sdd::SpecDoc;
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
@@ -307,6 +309,71 @@ fn docker_report() -> Vec<Line<'static>> {
     }
 }
 
+/// Builds the `/checkpoints` listing from the session's full event log —
+/// pure (no `SessionManager`) so the formatting is unit-testable on its own,
+/// mirroring `interrupted_turn_line`. The `checkpoint` event's own payload
+/// (`checkpoint_id`/`tree_sha`/`captured`/`boundary_message_id`, see
+/// `Agent::snapshot_checkpoint`) carries no prompt text, so the preview
+/// prefers the sibling `turn_start` event's `query_preview` (same
+/// `turn_seq`) — falling back to the checkpoint's own `boundary_message_id`,
+/// then a placeholder, if that event is missing (e.g. an old/replayed log).
+fn checkpoints_lines(events: &[SessionEvent]) -> Vec<Line<'static>> {
+    events
+        .iter()
+        .filter(|event| event.kind == "checkpoint")
+        .filter_map(|checkpoint| {
+            let payload: serde_json::Value = serde_json::from_str(&checkpoint.payload_json).ok()?;
+            let preview = events
+                .iter()
+                .find(|event| event.kind == "turn_start" && event.turn_seq == checkpoint.turn_seq)
+                .and_then(|turn_start| {
+                    serde_json::from_str::<serde_json::Value>(&turn_start.payload_json).ok()
+                })
+                .and_then(|v| {
+                    v.get("query_preview")
+                        .and_then(|q| q.as_str())
+                        .map(str::to_string)
+                })
+                .or_else(|| {
+                    payload
+                        .get("boundary_message_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "(sans aperçu)".to_string());
+            let preview = crate::tui::ui::sanitize_for_display(&preview);
+            Some(Line::from(Span::styled(
+                format!("tour {} · {preview}", checkpoint.turn_seq),
+                theme::system(),
+            )))
+        })
+        .collect()
+}
+
+/// Resolves the current directory's checkpoint store and drives the coupled
+/// restore (`crate`'s own git tree + this session's conversation) through to
+/// completion. `restore_checkpoint` is itself `async` and does its blocking
+/// git I/O via `tokio::task::block_in_place` internally (requires the
+/// multi-thread runtime `main.rs` builds — see `Builder::new_multi_thread`),
+/// so this just awaits it directly on `event_loop`'s existing runtime; no
+/// extra `spawn`/`block_in_place` wrapping needed here.
+async fn perform_restore(
+    session_manager: &SessionManager,
+    session_id: &str,
+    checkpoint_id: &str,
+) -> Result<RestoreOutcome> {
+    let project = std::env::current_dir().context("resolving current directory for restore")?;
+    let store = CheckpointStore::for_project(&project).context("opening checkpoint store")?;
+    restore_checkpoint(
+        &store,
+        session_manager,
+        &project,
+        session_id,
+        &CheckpointId(checkpoint_id.to_string()),
+    )
+    .await
+}
+
 fn input_thread(tx: mpsc::Sender<Event>) {
     loop {
         match event::poll(Duration::from_millis(50)) {
@@ -439,6 +506,35 @@ async fn event_loop(
                         let report = docker_report();
                         app.push_system_lines(report);
                     }
+                    Action::Checkpoints => {
+                        match session_manager.events_for_session(session_id).await {
+                            Ok(events) => {
+                                let lines = checkpoints_lines(&events);
+                                if lines.is_empty() {
+                                    app.push_system("aucun checkpoint");
+                                } else {
+                                    app.push_system_lines(lines);
+                                }
+                            }
+                            Err(e) => app.push_system(&format!("erreur /checkpoints : {e}")),
+                        }
+                    }
+                    // Only opens the confirmation modal — spec §3: "jamais
+                    // automatique", the actual store/session mutation only
+                    // ever runs from `Action::RestoreConfirm` below.
+                    Action::Restore(id) => app.open_restore_confirm(id),
+                    Action::RestoreConfirm => {
+                        if let Some(id) = app.take_pending_restore() {
+                            match perform_restore(&session_manager, session_id, &id).await {
+                                Ok(outcome) => app.push_system(&format!(
+                                    "⚠ restauré au tour {} — arbre et conversation alignés",
+                                    outcome.restored_turn
+                                )),
+                                Err(e) => app.push_system(&format!("erreur restore : {e}")),
+                            }
+                        }
+                    }
+                    Action::RestoreCancel => app.push_system("restore annulé"),
                     Action::None => {}
                 }
             }
@@ -1056,7 +1152,8 @@ mod tests {
             ("/spec", "/think"),
             ("/think", "/cost"),
             ("/cost", "/docker"),
-            ("/docker", "/help"),
+            ("/docker", "/checkpoints"),
+            ("/checkpoints", "/help"),
             ("/help", "/quit"),
         ] {
             let row = rows

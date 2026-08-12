@@ -69,6 +69,13 @@ pub enum Action {
     Help,
     Cost,
     Docker,
+    Checkpoints,
+    /// Parsed `/restore <id>` — carries the checkpoint id, not yet
+    /// confirmed. `event_loop` opens the y/n modal on receipt; the modal
+    /// itself resolves to `RestoreConfirm`/`RestoreCancel`.
+    Restore(String),
+    RestoreConfirm,
+    RestoreCancel,
 }
 
 pub struct Command {
@@ -116,6 +123,11 @@ pub const COMMANDS: &[Command] = &[
         run: |_| Action::Docker,
     },
     Command {
+        name: "/checkpoints",
+        desc: "liste les snapshots pris avant chaque tour",
+        run: |_| Action::Checkpoints,
+    },
+    Command {
         name: "/help",
         desc: "réaffiche l'aide",
         run: |_| Action::Help,
@@ -126,6 +138,25 @@ pub const COMMANDS: &[Command] = &[
         run: |_| Action::Quit,
     },
 ];
+
+/// Parses a trimmed input line as a `/restore` invocation, returning the
+/// (possibly empty, untrimmed-of-inner-content) argument slice — `None` when
+/// the input isn't `/restore` at all. Deliberately NOT in `COMMANDS`: that
+/// table only holds arg-less commands the palette can autocomplete and run
+/// standalone (`Command::run` takes no argument), while `/restore` always
+/// needs an id.
+///
+/// `strip_prefix("/restore")` alone would also match a hypothetical future
+/// `/restorepoint` as `"point"` — checking the remainder starts with a space
+/// (or is empty) keeps `/restore` a whole word.
+fn restore_command_arg(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("/restore")?;
+    if rest.is_empty() || rest.starts_with(' ') {
+        Some(rest.trim())
+    } else {
+        None
+    }
+}
 
 pub struct App {
     pub header: String,
@@ -167,6 +198,12 @@ pub struct App {
     pub pass: SddPass,
     pub gate_open: bool,
     pub tool_approval: Option<ToolApprovalRequest>,
+    /// Checkpoint id awaiting y/n confirmation from `/restore <id>` — mirrors
+    /// `tool_approval`'s shape (an `Option` carrying the payload the modal
+    /// needs, taken by `event_loop` rather than cleared inline in
+    /// `on_event`) rather than `gate_open`'s bare bool, since a restore needs
+    /// to remember *which* checkpoint it's confirming.
+    pub pending_restore: Option<String>,
     pub driver: PassDriver,
     pub scroll_offset: u16,
     /// Real overflow (wrapped rows beyond the viewport) measured by
@@ -248,6 +285,7 @@ impl App {
             pass: SddPass::new(),
             gate_open: false,
             tool_approval: None,
+            pending_restore: None,
             driver: PassDriver::Idle,
             scroll_offset: 0,
             chat_overflow: Cell::new(0),
@@ -598,12 +636,27 @@ impl App {
         self.tool_approval.take()
     }
 
-    /// A y/n modal (tool approval or gate) is on screen and owns the
-    /// keyboard — the palette must not open underneath it, and the plain
-    /// arrows must fall back to chat scroll instead of history recall (see
-    /// `on_event`'s `modal_active` local).
+    /// Arms the `/restore <id>` y/n modal — mirrors `start_pass` pushing its
+    /// "Intent : …" line before setting `gate_open`. Destructive by design
+    /// (spec §3: "jamais automatique" — always confirmed): this only ever
+    /// records intent, never touches the checkpoint store itself.
+    pub fn open_restore_confirm(&mut self, id: String) {
+        self.push_system(&format!(
+            "restaurer le checkpoint {id} ? l'arbre de travail et la conversation seront ramenés à cet état — y/n"
+        ));
+        self.pending_restore = Some(id);
+    }
+
+    pub fn take_pending_restore(&mut self) -> Option<String> {
+        self.pending_restore.take()
+    }
+
+    /// A y/n modal (tool approval, gate, or restore confirmation) is on
+    /// screen and owns the keyboard — the palette must not open underneath
+    /// it, and the plain arrows must fall back to chat scroll instead of
+    /// history recall (see `on_event`'s `modal_active` local).
     pub fn modal_active(&self) -> bool {
-        self.tool_approval.is_some() || self.gate_open
+        self.tool_approval.is_some() || self.gate_open || self.pending_restore.is_some()
     }
 
     /// Commands whose name starts with the current input, trimmed — empty
@@ -746,6 +799,13 @@ impl App {
                 _ => Action::None,
             };
         }
+        if self.pending_restore.is_some() {
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Action::RestoreConfirm,
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::RestoreCancel,
+                _ => Action::None,
+            };
+        }
         match key.code {
             KeyCode::Backspace
                 if key
@@ -785,7 +845,16 @@ impl App {
                 Action::None
             }
             KeyCode::Esc if self.turn_active || self.turn_pending => Action::CancelTurn,
-            KeyCode::Enter if self.turn_active || self.turn_pending => {
+            // `/restore` carves itself out of the blanket "no input while a
+            // turn is running" guard below: it needs to reach the general
+            // Enter arm even mid-turn so it can push its OWN barrier message
+            // (premortem PM6 — "termine ou annule le tour avant de
+            // restaurer") instead of the generic "tour en cours". Every other
+            // command/message still gets the generic guard untouched.
+            KeyCode::Enter
+                if (self.turn_active || self.turn_pending)
+                    && restore_command_arg(self.input.trim()).is_none() =>
+            {
                 self.push_system("tour en cours — Esc pour annuler d'abord");
                 Action::None
             }
@@ -804,6 +873,20 @@ impl App {
                     Action::None
                 } else {
                     self.push_history(&text);
+                    if let Some(arg) = restore_command_arg(&text) {
+                        if arg.is_empty() {
+                            self.push_system("usage : /restore <id>");
+                            return Action::None;
+                        }
+                        // premortem PM6: the store's bare-repo index is not
+                        // safe under concurrent git ops — refuse rather than
+                        // let a restore race a snapshot still in flight.
+                        if self.turn_active || self.turn_pending {
+                            self.push_system("termine ou annule le tour avant de restaurer");
+                            return Action::None;
+                        }
+                        return Action::Restore(arg.to_string());
+                    }
                     // Unreachable today: any trimmed input that names a command
                     // keeps the palette visible (see `palette_matches`), so this
                     // branch never runs for typed input — kept as a safety net
@@ -1185,6 +1268,44 @@ mod tests {
             app.on_event(&key(KeyCode::Char(c)));
         }
         assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::StartPass);
+    }
+
+    #[test]
+    fn slash_checkpoints_returns_the_list_action() {
+        let mut app = App::new(None);
+        for c in "/checkpoints".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::Checkpoints);
+    }
+
+    #[test]
+    fn slash_restore_with_id_parses_the_argument() {
+        let mut app = App::new(None);
+        for c in "/restore a1b2c3".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            app.on_event(&key(KeyCode::Enter)),
+            Action::Restore("a1b2c3".to_string())
+        );
+    }
+
+    /// ⛔ BARRIÈRE premortem PM6 — /restore refusé pendant un tour actif
+    /// (l'index du store et l'arbre ne doivent pas bouger sous un tour).
+    #[test]
+    fn restore_is_refused_while_a_turn_is_active() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+        for c in "/restore a1b2c3".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        let action = app.on_event(&key(KeyCode::Enter));
+        assert_eq!(action, Action::None);
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains("termine ou annule le tour")));
     }
 
     #[test]
