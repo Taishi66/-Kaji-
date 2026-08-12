@@ -435,20 +435,105 @@ fn draw_gate_modal(frame: &mut Frame) {
     frame.render_widget(paragraph, area);
 }
 
+/// Anti-masquage : rend visible tout caractère qui pourrait cacher une
+/// partie d'une commande à l'humain qui approuve — tabs qui poussent du
+/// contenu hors champ, contrôles C0/C1 et ESC (tue les séquences ANSI à la
+/// source), zero-width/invisibles, overrides et isolats bidi qui
+/// inversent l'ordre visuel. `\n` est préservé : le rendu multi-ligne de
+/// `Paragraph` (`Text::from(&str)`, qui découpe sur `\n`) en dépend.
+fn sanitize_for_display(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push(c),
+            '\u{0000}'..='\u{001F}' => {
+                // Unicode "Control Pictures" block mirrors C0 1:1 at
+                // 0x2400 + code point (TAB 0x09 → ␉ U+2409, ESC 0x1B → ␛
+                // U+241B, CR 0x0D → ␍ U+240D, ...).
+                out.push(char::from_u32(0x2400 + c as u32).expect("C0 control picture"));
+            }
+            '\u{007F}' => out.push('\u{2421}'),
+            '\u{0080}'..='\u{009F}' => out.push('\u{FFFD}'),
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => out.push('·'),
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => out.push_str("‹bidi›"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Measures wrapped rows against the modal's actual wrap mode (`Wrap {
+/// trim: true }`) — same idiom as `line_wrapped_rows`, targeted at this
+/// modal's own wrap setting rather than the chat's.
+fn modal_wrapped_rows(text: &str, width: u16) -> usize {
+    Paragraph::new(text)
+        .wrap(Wrap { trim: true })
+        .line_count(width.max(1))
+}
+
+/// `Paragraph` neither scrolls nor truncates on its own: content past
+/// `height` wrapped rows is simply not painted — confirmed against this
+/// exact modal by `approval_modal_renders_hostile_command_with_visible_markers`
+/// before this function existed (hostile separators vanished with no
+/// indication anything was cut). Anti-masquage forbids a silent hidden
+/// tail, so this clips the sanitized body itself and appends an explicit
+/// `… (+N car.)` marker sized to what's actually hidden. Bounds the search
+/// to `width * height` chars up front — the maximum ever paintable
+/// regardless of wrapping — so a pathologically long hostile string can't
+/// turn this into quadratic work.
+fn truncate_for_modal(text: &str, width: u16, height: u16) -> String {
+    let width = width.max(1);
+    let height = height.max(1);
+    if modal_wrapped_rows(text, width) <= height as usize {
+        return text.to_string();
+    }
+    let total_chars = text.chars().count();
+    let budget = (width as usize).saturating_mul(height as usize);
+    let chars: Vec<char> = text.chars().take(budget.min(total_chars)).collect();
+
+    let fits = |cut: usize| -> bool {
+        let hidden = total_chars - cut;
+        let candidate = format!(
+            "{}… (+{hidden} car.)",
+            chars[..cut].iter().collect::<String>()
+        );
+        modal_wrapped_rows(&candidate, width) <= height as usize
+    };
+
+    let mut lo = 0usize;
+    let mut hi = chars.len();
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let hidden = total_chars - lo;
+    format!(
+        "{}… (+{hidden} car.)",
+        chars[..lo].iter().collect::<String>()
+    )
+}
+
 fn draw_tool_approval_modal(frame: &mut Frame, approval: &ToolApprovalRequest) {
     let area = centered_rect(60, 20, frame.area());
+    let tool_name = sanitize_for_display(&approval.tool_name);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::border_active())
         .title(format!(
             " {} confirmation d'outil — {} (y/n) ",
             theme::GATE_SYMBOL,
-            approval.tool_name
+            tool_name
         ));
-    let body = approval
+    let inner = block.inner(area);
+    let raw_body = approval
         .prompt
         .clone()
         .unwrap_or_else(|| "y = autoriser une fois   n / Esc = refuser".to_string());
+    let body = truncate_for_modal(&sanitize_for_display(&raw_body), inner.width, inner.height);
     let paragraph = Paragraph::new(body).block(block).wrap(Wrap { trim: true });
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
@@ -968,5 +1053,149 @@ mod tests {
         terminal
             .draw(|f| draw(f, &full_app))
             .expect("draw() must not panic on a narrow terminal with the SPEC panel visible");
+    }
+
+    /// Anti-masquage — tabs (push content out of the box) and ESC (kills
+    /// ANSI sequences at the source) must become visible control pictures;
+    /// the raw bytes must never survive into what the approver reads.
+    #[test]
+    fn sanitize_reveals_tabs_and_controls() {
+        let hostile = "echo ok\t\x1b[2K && rm -rf /";
+        let sanitized = sanitize_for_display(hostile);
+
+        assert!(
+            sanitized.contains('␉'),
+            "tab must surface as a visible control picture, got: {sanitized:?}"
+        );
+        assert!(
+            sanitized.contains('␛'),
+            "ESC must surface as a visible control picture, got: {sanitized:?}"
+        );
+        assert!(!sanitized.contains('\t'), "raw tab must not survive");
+        assert!(!sanitized.contains('\x1b'), "raw ESC must not survive");
+    }
+
+    /// Zero-width chars (invisible padding/joiners) and bidi overrides
+    /// (visual reordering) are the other two masking primitives from the
+    /// Claude Code 2.1.223 bypass set — both must leave a visible trace.
+    #[test]
+    fn sanitize_reveals_zero_width_and_bidi() {
+        let hostile = "rm\u{200B} -rf\u{202E} /tmp";
+        let sanitized = sanitize_for_display(hostile);
+
+        assert!(
+            sanitized.contains('·'),
+            "zero-width space must surface as a visible marker, got: {sanitized:?}"
+        );
+        assert!(
+            sanitized.contains("‹bidi›"),
+            "RLO bidi override must surface as a visible marker, got: {sanitized:?}"
+        );
+        assert!(
+            !sanitized.contains('\u{200B}'),
+            "raw zero-width space must not survive"
+        );
+        assert!(
+            !sanitized.contains('\u{202E}'),
+            "raw RLO override must not survive"
+        );
+    }
+
+    /// The helper must be a no-op for legitimate text — plain ASCII
+    /// commands and non-Latin scripts (CJK here) pass through byte-for-byte
+    /// identical, or this would break every ordinary approval prompt.
+    #[test]
+    fn sanitize_leaves_legitimate_text_untouched() {
+        assert_eq!(
+            sanitize_for_display("cargo test -p kaji-cli"),
+            "cargo test -p kaji-cli"
+        );
+        assert_eq!(sanitize_for_display("鍛冶"), "鍛冶");
+    }
+
+    /// End-to-end: a hostile tool confirmation (tab + zero-width space in
+    /// the params/prompt) must render with visible markers in the actual
+    /// modal buffer — not just in the pure helper. This is what an approver
+    /// would actually see on screen.
+    #[test]
+    fn approval_modal_renders_hostile_command_with_visible_markers() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        let hostile_prompt = "Exécuter `echo ok\t\u{200B}rm -rf /`\u{202E} ?".to_string();
+        let msg = Message::assistant().with_action_required(
+            "req-hostile".to_string(),
+            "shell".to_string(),
+            Default::default(),
+            Some(hostile_prompt),
+        );
+        app.apply_agent_event(&AgentEvent::Message(msg));
+        assert!(
+            app.tool_approval.is_some(),
+            "test setup: modal must be open"
+        );
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must succeed against a TestBackend");
+        let content = buffer_as_string(terminal.backend().buffer());
+
+        assert!(
+            content.contains('␉'),
+            "rendered modal must reveal the tab, got:\n{content}"
+        );
+        assert!(
+            content.contains('·'),
+            "rendered modal must reveal the zero-width space, got:\n{content}"
+        );
+        assert!(
+            content.contains("‹bidi›"),
+            "rendered modal must reveal the bidi override, got:\n{content}"
+        );
+        assert!(
+            !content.contains('\t'),
+            "raw tab must never reach the rendered buffer"
+        );
+    }
+
+    /// `Paragraph` silently clips content past its rendered height — proven
+    /// by `approval_modal_renders_hostile_command_with_visible_markers`'s
+    /// pre-fix buffer dump above (a hostile string's tail vanished with no
+    /// on-screen indication). A long prompt must instead surface an
+    /// explicit `… (+N car.)` marker so the approver knows text was cut,
+    /// rather than unknowingly approving a truncated view of the command.
+    #[test]
+    fn approval_modal_marks_truncation_explicitly_instead_of_clipping_silently() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        let long_prompt = format!("rm -rf {}", "x".repeat(2000));
+        let msg = Message::assistant().with_action_required(
+            "req-long".to_string(),
+            "shell".to_string(),
+            Default::default(),
+            Some(long_prompt),
+        );
+        app.apply_agent_event(&AgentEvent::Message(msg));
+        assert!(
+            app.tool_approval.is_some(),
+            "test setup: modal must be open"
+        );
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must succeed against a TestBackend");
+        let content = buffer_as_string(terminal.backend().buffer());
+
+        assert!(
+            content.contains("car.)"),
+            "an overflowing prompt must carry an explicit truncation marker, got:\n{content}"
+        );
     }
 }
