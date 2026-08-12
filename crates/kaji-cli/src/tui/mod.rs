@@ -13,6 +13,7 @@ use kaji::config::Config;
 use kaji::conversation::message::Message;
 use kaji::permission::permission_confirmation::PrincipalType;
 use kaji::permission::{Permission, PermissionConfirmation};
+use kaji::session::session_manager::InterruptedTurn;
 use kaji::session::SessionManager;
 use kaji_core::sdd::SpecDoc;
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
@@ -32,6 +33,7 @@ pub async fn run(
     session_id: String,
     conversation: kaji::conversation::Conversation,
     spec: Option<SpecDoc>,
+    resume: bool,
 ) -> Result<()> {
     let header = build_header(&session_id);
     let (input_tx, input_rx) = mpsc::channel::<Event>(64);
@@ -50,6 +52,7 @@ pub async fn run(
         spec,
         header,
         input_rx,
+        resume,
     )
     .await;
     if mouse {
@@ -341,6 +344,7 @@ async fn event_loop(
     spec: Option<SpecDoc>,
     header: String,
     mut input_rx: mpsc::Receiver<Event>,
+    resume: bool,
 ) -> Result<()> {
     let mut app = App::new(spec);
     app.header = header;
@@ -349,6 +353,12 @@ async fn event_loop(
     seed_chat(&mut app, &conversation);
     maybe_push_welcome(&mut app);
     let session_manager = SessionManager::instance();
+    if resume {
+        apply_interrupted_turn_marker(
+            &mut app,
+            session_manager.last_turn_is_interrupted(session_id).await,
+        );
+    }
     let session_config = SessionConfig {
         id: session_id.to_string(),
         schedule_id: None,
@@ -565,6 +575,34 @@ fn maybe_push_welcome(app: &mut App) {
     }
 }
 
+/// Formats the system-line text for a detected interrupted turn — kept pure
+/// (no `App`/`SessionManager`) so the wording is unit-testable on its own.
+fn interrupted_turn_line(it: &InterruptedTurn) -> String {
+    let mut line = format!(
+        "⚠ tour interrompu au resume — {} événements journalisés non terminés",
+        it.event_count
+    );
+    if let Some(preview) = &it.query_preview {
+        line.push_str(&format!(" · dernier prompt : \"{preview}\""));
+    }
+    line
+}
+
+/// Applies the outcome of `SessionManager::last_turn_is_interrupted` to the
+/// chat: pushes a system line iff the last turn was left open, stays silent
+/// on a clean close, and never blocks the resume on a read error — logged,
+/// not surfaced, per the spec ("ne jamais bloquer l'ouverture"). Takes the
+/// already-resolved `Result` rather than the session/id so the plumbing
+/// (this function + `interrupted_turn_line`) is testable without a live
+/// `SessionManager`.
+fn apply_interrupted_turn_marker(app: &mut App, interrupted: Result<Option<InterruptedTurn>>) {
+    match interrupted {
+        Ok(Some(it)) => app.push_system(&interrupted_turn_line(&it)),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("échec de la détection de tour interrompu au resume: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,6 +788,89 @@ mod tests {
         assert!(app.chat.iter().any(|l| l.text.contains('✗')
             && l.text.contains("shell")
             && l.text.contains("interrompu")));
+    }
+
+    #[tokio::test]
+    async fn resume_surfaces_an_interrupted_turn_marker() {
+        use kaji::config::KajiMode;
+        use kaji::session::SessionType;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = sm
+            .create_session(
+                PathBuf::from("/tmp"),
+                "s".to_string(),
+                SessionType::User,
+                KajiMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.append_event(&sid, 1, "turn_start", r#"{"query_preview":"q1"}"#)
+            .await
+            .unwrap();
+        sm.append_event(&sid, 1, "message", "{}").await.unwrap();
+
+        let mut app = App::new(None);
+        apply_interrupted_turn_marker(&mut app, sm.last_turn_is_interrupted(&sid).await);
+
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.sender == Sender::System && l.text.contains("tour interrompu")));
+    }
+
+    #[tokio::test]
+    async fn resume_stays_silent_when_last_turn_closed_cleanly() {
+        use kaji::config::KajiMode;
+        use kaji::session::SessionType;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = sm
+            .create_session(
+                PathBuf::from("/tmp"),
+                "s".to_string(),
+                SessionType::User,
+                KajiMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.append_event(&sid, 1, "turn_start", r#"{"query_preview":"q1"}"#)
+            .await
+            .unwrap();
+        sm.append_event(&sid, 1, "turn_end", "{}").await.unwrap();
+
+        let mut app = App::new(None);
+        apply_interrupted_turn_marker(&mut app, sm.last_turn_is_interrupted(&sid).await);
+
+        assert!(!app.chat.iter().any(|l| l.text.contains("tour interrompu")));
+    }
+
+    #[test]
+    fn interrupted_turn_line_includes_event_count_and_query_preview() {
+        let it = InterruptedTurn {
+            turn_seq: 2,
+            event_count: 3,
+            query_preview: Some("q2".to_string()),
+        };
+
+        let line = interrupted_turn_line(&it);
+
+        assert!(line.contains("tour interrompu"));
+        assert!(line.contains('3'));
+        assert!(line.contains("q2"));
+    }
+
+    #[test]
+    fn apply_interrupted_turn_marker_stays_silent_on_read_error() {
+        let mut app = App::new(None);
+
+        apply_interrupted_turn_marker(&mut app, Err(anyhow::anyhow!("boom")));
+
+        assert!(app.chat.is_empty());
     }
 
     #[test]

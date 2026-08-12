@@ -22,5 +22,5 @@ pub async fn handle_tui(
     })
     .await;
     let (agent, session_id, conversation) = session.into_parts();
-    crate::tui::run(agent, session_id, conversation, spec).await
+    crate::tui::run(agent, session_id, conversation, spec, resume).await
 }
