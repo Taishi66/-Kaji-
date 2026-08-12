@@ -46,8 +46,9 @@ en cours de transformation produit. Quatre exigences pilotent chaque choix :
                                                                     │ processus enfant auto-géré
                                                        ┌────────────┴────────────┐
                                                        │  Desktop Tauri v2 (cible)│
-                                                       │  actuellement Electron   │
-                                                       │  (`ui/desktop/`)         │
+                                                       │  pas encore implémenté   │
+                                                       │  (Electron `ui/desktop/` │
+                                                       │  retiré du repo)         │
                                                        └──────────────────────────┘
 ```
 
@@ -74,12 +75,12 @@ l'atteignent par deux chemins distincts :
   (`kaji acp` sur stdio). Authentification par secret partagé
   `KAJI_SERVER__SECRET_KEY`, confinement loopback + confiance TLS par
   empreinte de certificat. Ce transport est **déjà implémenté et éprouvé** :
-  c'est le mécanisme que le desktop Electron actuel (`ui/desktop/src/main.ts`)
-  utilise en production pour parler à son backend (`checkBackendStatus`,
-  `KAJI_EXTERNAL_BACKEND`, `trustBackendCertificate`). La cible porte ce même
-  pattern vers un shell Tauri v2 — **aucune dépendance `tauri` n'existe encore
-  dans le repo** ; le desktop Electron (`ui/desktop/`, forge/electron-builder)
-  reste le client réel aujourd'hui.
+  c'est le mécanisme que le desktop Electron (`ui/desktop/src/main.ts`, retiré
+  du repo — voir AGENTS.md) utilisait en production pour parler à son backend
+  (`checkBackendStatus`, `KAJI_EXTERNAL_BACKEND`, `trustBackendCertificate`).
+  La cible porte ce même pattern vers un shell Tauri v2 — **aucune dépendance
+  `tauri` n'existe encore dans le repo** ; il n'y a aujourd'hui **aucun client
+  desktop réel** dans le repo, seule la TUI in-process.
 
 Un seul binaire, deux entrées : `kaji tui` (in-process, cible) et `kaji serve`
 (ACP réseau local, piloté par le parent desktop) partagent le même exécutable
@@ -148,7 +149,7 @@ et la même mémoire une fois posés.
 | `agents/state_machine/` | **Gardé**, boucle par défaut cible | présent, activé par `KAJI_STATE_MACHINE=1` ; legacy `agents/agent.rs` toujours en parallèle (migration en cours, cf. AGENTS.md) |
 | `providers/` (trait `Provider`) | **Gardé** tel quel | présent (`kaji-provider-types`, `kaji-providers`) |
 | `session/` | **Gardé** | présent (`crates/kaji/src/session/`) |
-| Desktop Electron (`ui/desktop/`) | **Jeté** à terme (cible Tauri v2) | **toujours le client réel aujourd'hui** — dépendances `electron-forge` en place, pas de `tauri` dans le repo |
+| Desktop Electron (`ui/desktop/`) | **Jeté** (cible Tauri v2) | retiré du repo (2026-08-12) — plus aucun client desktop réel ; pas de `tauri` dans le repo non plus, Tauri v2 reste à implémenter |
 | TUI JS (`ui/text/`) | **Jeté**, déjà mort | confirmé : README marque le projet déprécié, source retirée ; plus aucune invocation node/npx — `kaji tui` est désormais la TUI Ratatui native in-process (`crates/kaji-cli/src/tui/`) |
 | `kaji-mcp` (ex `goose-mcp`) | Élagage partiel | crate toujours présente dans le workspace, pas de suppression totale constatée |
 
@@ -161,9 +162,9 @@ locaux mal confinés (rebinding DNS, origines non validées ; motif observé sur
 plusieurs CVEs de backends MCP locaux courant 2026) — pour un bénéfice nul
 quand la TUI tourne dans le même utilisateur, sur la même machine, au même
 instant que le Core. La TUI in-process ferme cette surface par construction ;
-seul le desktop, qui a réellement besoin d'un canal réseau local (process Tauri
-séparé du Core), porte la frontière ACP — et cette frontière est déjà
-production-éprouvée côté Electron.
+seul un futur desktop, qui aurait réellement besoin d'un canal réseau local
+(process Tauri séparé du Core), porterait la frontière ACP — et cette
+frontière a déjà été production-éprouvée côté Electron avant son retrait.
 
 Conséquence assumée : la frontière TUI in-process est réversible
 localement (`two-way`) ; la frontière ACP desktop devient une porte

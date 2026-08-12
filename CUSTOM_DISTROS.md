@@ -20,7 +20,8 @@ kaji's architecture is designed for extensibility. Organizations can create "rem
 │                        User Interfaces                          │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
 │  │  CLI        │  │  Desktop    │  │  Your Custom UI         │  │
-│  │  (kaji-cli)│  │  (Electron) │  │  (web, mobile, etc.)    │  │
+│  │  (kaji-cli)│  │  (planned,  │  │  (web, mobile, etc.)    │  │
+│  │             │  │  Tauri v2)  │  │                         │  │
 │  └──────┬──────┘  └──────┬──────┘  └────────────┬────────────┘  │
 └─────────┼────────────────┼──────────────────────┼───────────────┘
           │                │                      │
@@ -46,9 +47,9 @@ kaji's architecture is designed for extensibility. Organizations can create "rem
 |---------------|---------------|------------|
 | Preconfigure a model/provider | `config.yaml`, `init-config.yaml`, environment variables | Low |
 | Add custom AI providers | `crates/kaji/src/providers/declarative/` | Low |
-| Bundle custom MCP extensions | `config.yaml` extensions section, `ui/desktop/src/built-in-extensions.json`, `ui/desktop/src/components/settings/extensions/bundled-extensions.json` | Medium |
+| Bundle custom MCP extensions | `config.yaml` extensions section (desktop-side bundled-extension catalog planned for the future Tauri client, not yet implemented) | Medium |
 | Modify system prompts | `crates/kaji/src/prompts/` | Low |
-| Customize desktop branding | `ui/desktop/` (icons, names, colors) | Medium |
+| Customize desktop branding | Not applicable — desktop app not yet implemented (Tauri v2 planned) | Medium |
 | Build a new UI (web, mobile) | Integrate with `kaji serve` over ACP | High |
 | Create guided workflows | Recipes (YAML-based task definitions) | Low |
 | Build complex multi-step workflows | Recipes with sub-recipes and subagents | Medium |
@@ -70,7 +71,7 @@ cd kaji
 
 ### 3. Build and Distribute
 
-See [BUILDING_LINUX.md](BUILDING_LINUX.md) and [ui/desktop/README.md](ui/desktop/README.md) for platform-specific build instructions.
+See [BUILDING_LINUX.md](BUILDING_LINUX.md) (stale — describes the removed Electron desktop) for historical build instructions.
 
 ## Important Considerations
 
@@ -127,7 +128,7 @@ export KAJI_MODEL=qwen3-coder:latest
 export OLLAMA_HOST=http://localhost:11434  # Or your hosted instance
 ```
 
-3. **Optionally hide provider selection** in the UI by modifying `ui/desktop/src/` components.
+3. **Optionally hide provider selection** in the UI once a desktop client exists (not yet implemented — Tauri v2 planned).
 
 ### Technical Details
 
@@ -191,9 +192,9 @@ async def query_data_lake(query: str) -> str:
     return results
 ```
 
-2. **Bundle as a built-in extension** by adding to either:
-   - `ui/desktop/src/built-in-extensions.json` (core built-ins surfaced in extension UI)
-   - `ui/desktop/src/components/settings/extensions/bundled-extensions.json` (bundled extension catalog in Settings)
+2. **Bundle as a built-in extension** via a desktop-side bundled-extension catalog once the
+   Tauri v2 desktop client exists (not yet implemented). Until then, distribute via the
+   `config.yaml` extensions section instead.
 
 Example:
 
@@ -236,6 +237,10 @@ extensions:
 ---
 
 ## D. Custom Branding and UI
+
+> **Stale.** This section describes the Electron desktop app (`ui/desktop/`), which has been
+> removed from the repo. The desktop target is now Tauri v2 on ACP, not yet implemented — see
+> AGENTS.md. Kept for historical reference until the new client ships its own branding hooks.
 
 **Goal**: Rebrand the desktop application with your organization's identity.
 

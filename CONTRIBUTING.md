@@ -94,7 +94,8 @@ are in a hurry.
    
 ## Prerequisites
 
-kaji includes Rust binaries alongside an electron app for the GUI.
+kaji is a Rust CLI today; a native desktop app (Tauri v2 on ACP) is planned but not yet
+implemented.
 
 We use [Hermit][hermit] to manage development dependencies (Rust, Node, pnpm, just, etc.).
 Activate Hermit when entering the project:
@@ -161,27 +162,10 @@ cargo clippy --all-targets -- -D warnings # run the linter
 
 ### Node
 
-To run the app:
-
-```
-just run-ui
-```
-
-This command builds a release build of Rust (equivalent to `cargo build -r`) and starts the Electron process.
-The app opens a window and displays first-time setup. After completing setup, kaji is ready for use.
-
-Make GUI changes in `ui/desktop`.
-
-#### Troubleshooting: blank screen on `just run-ui`
-
-If the app opens to a blank window (logs show `Cannot read properties of null (reading 'useRef')`), your `node_modules` is out of date and is loading two copies of React. Delete it and reinstall:
-
-```
-rm -rf ui/desktop/node_modules
-cd ui && pnpm install
-```
-
-See #8757.
+There is currently no desktop GUI to build (the legacy Electron app under `ui/desktop` was
+removed; the desktop target is Tauri v2 on ACP, not yet implemented — see AGENTS.md). The `ui/`
+directory today holds the ACP TypeScript SDK (`ui/sdk`) and the deprecated TUI JS shim
+(`ui/text`).
 
 ### Debugging
 
@@ -192,18 +176,9 @@ export KAJI_SERVER__SECRET_KEY=test
 cargo run --package kaji-cli --bin kaji -- serve --platform desktop --enable-scheduler --host 127.0.0.1 --port 3000
 ```
 
-The `debug-ui` recipe connects to `http://127.0.0.1:3000` by default. If the
-backend uses another port, set `KAJI_PORT` when starting the UI, or set
-`KAJI_EXTERNAL_BACKEND_URL` to the backend's HTTP base URL.
-
-Once the backend is running, start a UI and connect it to the backend by running:
-
-```
-just debug-ui
-```
-
-The UI connects to the backend started in the IDE, allowing breakpoints
-and stepping through the backend code while interacting with the UI.
+Any ACP client (HTTP/WebSocket on `http://127.0.0.1:3000`, or `kaji acp` over stdio) can connect
+to this backend for breakpoints and stepping through the backend code — see
+[Agent Client Protocol clients](documentation/docs/guides/acp-clients.md).
 
 ## Creating a fork
 

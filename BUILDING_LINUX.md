@@ -1,5 +1,10 @@
 # Building kaji Desktop on Linux
 
+> **Stale.** The Electron desktop app (`ui/desktop/`) described below has been removed from
+> this repo. The desktop target is now Tauri v2 on ACP (not yet implemented — see AGENTS.md
+> and ADR `2026-08-08-ipc-core-lib-tui-inprocess-desktop-acp`). Kept for historical reference
+> only; none of the commands below work against the current tree.
+
 This guide covers building the kaji Desktop application from source on various Linux distributions.
 
 ## Prerequisites

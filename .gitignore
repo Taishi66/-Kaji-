@@ -26,11 +26,6 @@ target/
 
 # UI
 node_modules
-./ui/desktop/out
-
-# Generated kaji DLLs (built at build time, not checked in)
-ui/desktop/src/bin/kaji_ffi.dll
-ui/desktop/src/bin/kaji_llm.dll
 
 # Hermit
 .hermit/
@@ -55,12 +50,8 @@ benchmark-*
 benchconf.json
 scripts/fake.sh
 do_not_version/
-/ui/desktop/src/bin/temporal
 /temporal-service/temporal.db
-/ui/desktop/src/bin/temporal.db
 /temporal.db
-/ui/desktop/src/bin/kaji-scheduler-executor
-/ui/desktop/src/bin/kaji
 /.env
 
 /working_dir

@@ -104,7 +104,6 @@ build_linux_docker() {
     --exclude='.git/' \
     --exclude='node_modules/' \
     --exclude='documentation/' \
-    --exclude='ui/desktop/' \
     --exclude='ui/kaji-binary/*/bin/' \
     --exclude='evals/' \
     --exclude='.hermit/' \

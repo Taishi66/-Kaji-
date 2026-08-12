@@ -117,12 +117,12 @@ export const aiTools = {
   }),
   view_codebase: tool({
     description:
-      "View source code file(s) from the kaji codebase. Paths are relative to the repository root (e.g., 'crates/kaji/src/agents/agent.rs' or 'ui/desktop/src/App.tsx').",
+      "View source code file(s) from the kaji codebase. Paths are relative to the repository root (e.g., 'crates/kaji/src/agents/agent.rs' or 'ui/sdk/src/kaji-client.ts').",
     inputSchema: z.object({
       filePaths: z
         .union([z.string(), z.array(z.string())])
         .describe(
-          "Path or array of paths to source files relative to the repo root (example: 'crates/kaji/src/agents/agent.rs' or ['ui/desktop/src/main.ts', 'crates/kaji/src/acp/server.rs'])",
+          "Path or array of paths to source files relative to the repo root (example: 'crates/kaji/src/agents/agent.rs' or ['ui/sdk/src/kaji-client.ts', 'crates/kaji/src/acp/server.rs'])",
         ),
       startLine: z
         .number()
@@ -156,7 +156,7 @@ export const aiTools = {
       directory: z
         .string()
         .describe(
-          "Directory path relative to repo root (example: 'crates/kaji/src', 'ui/desktop/src/components')",
+          "Directory path relative to repo root (example: 'crates/kaji/src', 'ui/sdk/src')",
         ),
     }),
     execute: async ({ directory }) => {

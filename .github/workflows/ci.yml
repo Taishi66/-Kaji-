@@ -208,8 +208,7 @@ jobs:
       - name: Install Node.js Dependencies
         run: |
           source ./bin/activate-hermit
-          cd ui/desktop && pnpm install --frozen-lockfile
-          cd ../sdk && pnpm install --frozen-lockfile
+          cd ui/sdk && pnpm install --frozen-lockfile
 
       - name: Check ACP Schema is Up-to-Date
         run: |
@@ -222,24 +221,3 @@ jobs:
           cd ui/sdk
           pnpm test
           pnpm run typecheck:test
-
-  desktop-lint:
-    name: Test and Lint Electron Desktop App
-    runs-on: macos-latest
-    needs: changes
-    if: needs.changes.outputs.code == 'true' || github.event_name != 'pull_request'
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Install Dependencies
-        run: source ../../bin/activate-hermit && pnpm install --frozen-lockfile
-        working-directory: ui/desktop
-
-      - name: Run Lint
-        run: source ../../bin/activate-hermit && pnpm run lint:check
-        working-directory: ui/desktop
-
-      - name: Run Tests
-        run: source ../../bin/activate-hermit && pnpm run test:run
-        working-directory: ui/desktop

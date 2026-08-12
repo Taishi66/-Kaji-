@@ -2,7 +2,7 @@
 
 # kaji
 
-_your native open source AI agent — desktop app, CLI, and API — for code, workflows, and everything in between_
+_your native open source AI agent — CLI and API, with a desktop app on the way — for code, workflows, and everything in between_
 
 <p align="center">
   <a href="https://opensource.org/licenses/Apache-2.0"
@@ -22,7 +22,7 @@ _your native open source AI agent — desktop app, CLI, and API — for code, wo
 
 kaji is a general-purpose AI agent that runs on your machine. Not just for code — use it for research, writing, automation, data analysis, or anything you need to get done.
 
-A native desktop app for macOS, Linux, and Windows. A full CLI for terminal workflows. An API to embed it anywhere. Built in Rust for performance and portability.
+A full CLI for terminal workflows. An API to embed it anywhere. A native desktop app (Tauri v2 on ACP) is planned but not yet implemented. Built in Rust for performance and portability.
 
 kaji works with 15+ providers — Anthropic, OpenAI, Google, Ollama, OpenRouter, Azure, Bedrock, and more. Use API keys or your existing Claude, ChatGPT, or Gemini subscriptions via [ACP](https://goose-docs.ai/docs/guides/acp-providers). Connect to 70+ extensions via the [Model Context Protocol](https://modelcontextprotocol.io/) open standard.
 
@@ -30,9 +30,7 @@ kaji is part of the [Agentic AI Foundation (AAIF)](https://aaif.io/) at the Linu
 
 # Get started
 
-**[Download the desktop app](https://goose-docs.ai/docs/getting-started/installation)** for macOS, Linux, and Windows.
-
-Or install the CLI:
+Install the CLI:
 
 ```bash
 curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash

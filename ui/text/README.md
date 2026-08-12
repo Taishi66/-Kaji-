@@ -11,7 +11,8 @@
 ## What to use instead
 
 - **CLI** — use the `kaji` command line interface (`crates/kaji-cli`).
-- **Desktop app** — use the kaji desktop application (`ui/desktop`).
+- **Native in-process TUI** — `kaji tui` (Ratatui, `crates/kaji-cli/src/tui/`).
+- **Desktop app** — planned as a Tauri v2 client on ACP; not yet implemented.
 - Any ACP based TUI from https://agentclientprotocol.com/get-started/clients#cli-and-tui
 
 All of these options are actively maintained and receive ongoing feature work.

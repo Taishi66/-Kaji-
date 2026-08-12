@@ -5,9 +5,6 @@ target/
 # Node modules and build outputs
 node_modules/
 **/node_modules/
-ui/desktop/out/
-ui/desktop/dist/
-ui/desktop/src/bin/
 
 # Git
 .git/
@@ -97,7 +94,3 @@ ehthumbs.db
 # Session files
 *.jsonl
 sessions/
-
-# Generated files
-ui/desktop/openapi.json
-ui/desktop/src/api/

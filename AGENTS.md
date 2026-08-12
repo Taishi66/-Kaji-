@@ -1,6 +1,6 @@
 # AGENTS Instructions
 
-kaji is an AI agent framework in Rust with CLI and Electron desktop interfaces.
+kaji is an AI agent framework in Rust with a CLI interface. The desktop UI target is Tauri v2 on ACP (not yet implemented — see ADR `2026-08-08-ipc-core-lib-tui-inprocess-desktop-acp`); the legacy Electron desktop (`ui/desktop`) has been removed.
 
 ## Contribution Workflow
 
@@ -51,13 +51,6 @@ cargo fmt
 cargo clippy --all-targets -- -D warnings
 ```
 
-### UI
-```bash
-just run-ui                  # start desktop
-cd ui/desktop && pnpm run typecheck
-cd ui/desktop && pnpm test   # test UI
-```
-
 ## Structure
 ```
 crates/
@@ -67,8 +60,6 @@ crates/
 ├── kaji-mcp          # MCP extensions
 ├── kaji-test         # test utilities
 └── kaji-test-support # test helpers
-
-ui/desktop/            # Electron app
 ```
 
 ## Development Loop
@@ -92,7 +83,6 @@ ui/desktop/            # Electron app
 - Error: Use anyhow::Result
 - Provider: Implement Provider trait see providers/base.rs
 - MCP: Extensions in crates/kaji-mcp/
-- UI Desktop: Use ACP SDK types or local `src/types/*` types. Do not import generated OpenAPI types/client code from `ui/desktop/src/api`
 
 ## Code Quality
 
@@ -107,7 +97,6 @@ ui/desktop/            # Electron app
 
 ## Never
 
-- Never: Recreate `ui/desktop/src/api` or add `@hey-api/openapi-ts` to `ui/desktop`
 - Cargo.toml: For human-authored dependency changes, use `cargo add` instead of manually editing dependency entries unless there is a specific reason not to.
 - Cargo.toml: Automated dependency bump PRs are exempt; when manual edits are necessary, keep `Cargo.lock` consistent.
 - Never: Skip cargo fmt
@@ -117,5 +106,4 @@ ui/desktop/            # Electron app
 
 ## Entry Points
 - CLI: crates/kaji-cli/src/main.rs
-- UI: ui/desktop/src/main.ts
 - Agent: crates/kaji/src/agents/agent.rs

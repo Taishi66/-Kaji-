@@ -1,8 +1,0 @@
-[Desktop Entry]
-Name=Kaji
-Exec=/usr/lib/Kaji/Kaji %U
-Icon=/usr/share/pixmaps/Kaji.png
-Terminal=false
-Type=Application
-Categories=Development;
-MimeType=x-scheme-handler/kaji;

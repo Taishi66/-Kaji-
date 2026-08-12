@@ -11,8 +11,6 @@ check-everything:
     cargo fmt --all
     @echo "  → Running clippy linting..."
     cargo clippy --all-targets -- -D warnings
-    @echo "  → Checking UI code formatting..."
-    cd ui/desktop && pnpm run lint:check
     @echo ""
     @echo "✅ All style checks passed!"
 
@@ -20,7 +18,6 @@ check-everything:
 release-binary:
     @echo "Building release version..."
     cargo build --release -p kaji-cli --bin kaji
-    @just copy-binary
 
 # Build Windows executable on a Windows host
 [unix]
@@ -36,106 +33,6 @@ release-windows:
 release-intel:
     @echo "Building release version for Intel Mac..."
     cargo build --release --target x86_64-apple-darwin
-    @just copy-binary-intel
-
-copy-binary BUILD_MODE="release":
-    @rm -f ./ui/desktop/src/bin/kajid
-    @if [ -f ./target/{{BUILD_MODE}}/kaji ]; then \
-        echo "Copying kaji CLI binary from target/{{BUILD_MODE}}..."; \
-        rm -f ./ui/desktop/src/bin/kaji; \
-        cp -p ./target/{{BUILD_MODE}}/kaji ./ui/desktop/src/bin/; \
-    else \
-        echo "kaji CLI binary not found in target/{{BUILD_MODE}}"; \
-        exit 1; \
-    fi
-
-# Copy binary command for Intel build
-copy-binary-intel:
-    @rm -f ./ui/desktop/src/bin/kajid
-    @if [ -f ./target/x86_64-apple-darwin/release/kaji ]; then \
-        echo "Copying Intel kaji CLI binary to ui/desktop/src/bin..."; \
-        rm -f ./ui/desktop/src/bin/kaji; \
-        cp -p ./target/x86_64-apple-darwin/release/kaji ./ui/desktop/src/bin/; \
-    else \
-        echo "Intel kaji CLI binary not found."; \
-        exit 1; \
-    fi
-
-# Copy Windows binary command on a Windows host
-[unix]
-copy-binary-windows:
-    @echo "just copy-binary-windows requires a Windows host because it copies the MSVC build output."
-    @exit 1
-
-[windows]
-copy-binary-windows:
-    @powershell.exe -NoProfile -ExecutionPolicy Bypass -Command 'if (Test-Path ./target/x86_64-pc-windows-msvc/release/kaji.exe) { \
-        Write-Host "Copying Windows binary to ui/desktop/src/bin..."; \
-        New-Item -ItemType Directory -Force "./ui/desktop/src/bin" | Out-Null; \
-        Remove-Item -Path "./ui/desktop/src/bin/kajid.exe" -Force -ErrorAction SilentlyContinue; \
-        Copy-Item -Path "./target/x86_64-pc-windows-msvc/release/kaji.exe" -Destination "./ui/desktop/src/bin/" -Force; \
-    } else { \
-        Write-Host "Windows binary not found." -ForegroundColor Red; \
-        exit 1; \
-    }'
-
-# Run UI with latest
-run-ui:
-    @just release-binary
-    @echo "Running UI..."
-    cd ui/desktop && pnpm install && pnpm run start-gui
-
-run-ui-playwright:
-    #!/usr/bin/env sh
-    just release-binary
-    echo "Running UI with Playwright debugging..."
-    RUN_DIR="$HOME/kaji-runs/$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$RUN_DIR"
-    echo "Using isolated directory: $RUN_DIR"
-    cd ui/desktop && ENABLE_PLAYWRIGHT=true KAJI_PATH_ROOT="$RUN_DIR" pnpm run start-gui
-
-run-ui-only:
-    @echo "Running UI..."
-    cd ui/desktop && pnpm install && pnpm run start-gui
-
-debug-ui:
-    @echo "🚀 Starting kaji frontend in external ACP backend mode"
-    cd ui/desktop && \
-    export KAJI_EXTERNAL_BACKEND=true && \
-    export KAJI_SERVER__SECRET_KEY="${KAJI_SERVER__SECRET_KEY:-test}" && \
-    pnpm install && \
-    pnpm run start-gui
-
-# Run UI with main process debugging enabled
-# To debug main process:
-# 1. Run: just debug-ui-main-process
-# 2. Open Chrome → chrome://inspect
-# 3. Click "Open dedicated DevTools for Node"
-# 4. If not auto-detected, click "Configure" and add: localhost:9229
-
-debug-ui-main-process:
-	@echo "🔍 Starting kaji UI with main process debugging enabled"
-	@just release-binary
-	cd ui/desktop && \
-	pnpm install && \
-	pnpm run start-gui-debug
-
-# Package the desktop app locally for testing (macOS)
-# Applies ad-hoc code signing with entitlements (needed for mic access, etc.)
-package-ui:
-    @just release-binary
-    @echo "Packaging desktop app..."
-    cd ui/desktop && pnpm install && pnpm run package
-    @echo "Signing with entitlements..."
-    codesign --force --deep --sign - --entitlements ui/desktop/entitlements.plist ui/desktop/out/Kaji-darwin-arm64/Kaji.app
-    @echo "Done! Launch with: open ui/desktop/out/Kaji-darwin-arm64/Kaji.app"
-
-# Run UI with latest (Windows version)
-run-ui-windows:
-    @just release-windows
-    @powershell.exe -Command "Write-Host 'Copying Windows binary...'"
-    @just copy-binary-windows
-    @powershell.exe -Command "Write-Host 'Running UI...'; Set-Location ui/desktop; pnpm install; pnpm run start-gui"
 
 # Run Docusaurus server for documentation
 run-docs:
@@ -185,45 +82,8 @@ generate-manpages:
     cargo run -p kaji-cli --bin generate_manpages
     @echo "Manpages generated at target/man/"
 
-# make GUI with latest binary
-lint-ui:
-    cd ui/desktop && pnpm run lint:check
-
-# make GUI with latest binary
-make-ui:
-    @just release-binary
-    cd ui/desktop && pnpm run bundle:default
-
-# make GUI with latest Windows binary on a Windows host
-[unix]
-make-ui-windows:
-    @echo "just make-ui-windows requires a Windows host because Kaji Windows releases build the MSVC target. Use .github/workflows/bundle-windows.yml for CI builds."
-    @exit 1
-
-[windows]
-make-ui-windows:
-    @just release-windows
-    @just copy-binary-windows
-    @powershell.exe -NoProfile -ExecutionPolicy Bypass -Command 'Set-Location ui/desktop; $env:ELECTRON_PLATFORM="win32"; node scripts/prepare-platform-binaries.js; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; pnpm run make --platform=win32 --arch=x64; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Write-Host "Windows package build complete!"'
-
-# make GUI with latest binary
-make-ui-intel:
-    @just release-intel
-    cd ui/desktop && pnpm run bundle:intel
-
-
-
-# Run UI with debug build
-run-dev:
-    @echo "Building development version..."
-    cargo build
-    @just copy-binary debug
-    @echo "Running UI..."
-    cd ui/desktop && pnpm run start-gui
-
 # Install all dependencies (run once after fresh clone)
 install-deps:
-    cd ui/desktop && pnpm install
     cd documentation && yarn
 
 ensure-release-branch:
@@ -287,7 +147,6 @@ get-prior-version version:
 bump-version version:
     @just validate {{ version }} || exit 1
     @uvx --from=toml-cli toml set --toml-path=Cargo.toml "workspace.package.version" {{ version }}
-    @cd ui/desktop && npm pkg set "version={{ version }}"
     # update Cargo.lock after bumping versions in Cargo.toml
     @cargo update --workspace
 
@@ -302,7 +161,6 @@ prepare-release version:
     @git add \
         Cargo.toml \
         Cargo.lock \
-        ui/desktop/package.json \
         ui/pnpm-lock.yaml \
         crates/kaji-provider-types/src/canonical/data/canonical_models.json \
         crates/kaji-provider-types/src/canonical/data/provider_metadata.json
@@ -359,59 +217,6 @@ win-bld-rls:
 ### Build release and test, examples, ...
 win-bld-rls-all:
   just win-bld "--release" "--workspace --all-targets --all-features"
-
-### Install pnpm stuff
-win-app-deps:
-  cd ui{{s}}desktop ; pnpm install
-
-### Windows copy {release|debug} files to ui\desktop\src\bin
-### s = os dependent file separator
-### profile = release or debug
-win-copy-win profile:
-  copy target{{s}}{{profile}}{{s}}*.exe ui{{s}}desktop{{s}}src{{s}}bin
-  copy target{{s}}{{profile}}{{s}}*.dll ui{{s}}desktop{{s}}src{{s}}bin
-  if exist ui{{s}}desktop{{s}}src{{s}}bin{{s}}kajid.exe del /f /q ui{{s}}desktop{{s}}src{{s}}bin{{s}}kajid.exe
-
-### "Other" copy {release|debug} files to ui/desktop/src/bin
-### s = os dependent file separator
-### profile = release or debug
-win-copy-oth profile:
-  find target{{s}}{{profile}}{{s}} -maxdepth 1 -type f -executable -print -exec cp {} ui{{s}}desktop{{s}}src{{s}}bin \;
-
-### copy files depending on OS
-### profile = release or debug
-win-app-copy profile="release":
-  just win-copy-{{ if os() == "windows" { "win" } else { "oth" } }} {{profile}}
-
-### Only copy binaries, pnpm install, start-gui
-### profile = release or debug
-### s = os dependent file separator
-win-app-run profile:
-  just win-app-copy {{profile}}
-  just win-app-deps
-  cd ui{{s}}desktop ; pnpm run start-gui
-
-### Only run debug desktop, no build
-win-run-dbg:
-  just win-app-run "debug"
-
-### Only run release desktop, nu build
-win-run-rls:
-  just win-app-run "release"
-
-### Build and run debug desktop. tot = cli and desktop
-### allparam = nothing or -all passed on command line
-### -all = build with --workspace --all-targets --all-features
-win-total-dbg *allparam:
-  just win-bld-dbg{{allparam}}
-  just win-run-dbg
-
-### Build and run release desktop
-### allparam = nothing or -all passed on command line
-### -all = build with --workspace --all-targets --all-features
-win-total-rls *allparam:
-  just win-bld-rls{{allparam}}
-  just win-run-rls
 
 build-test-tools:
   cargo build -p kaji-test

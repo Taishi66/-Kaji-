@@ -62,7 +62,7 @@ Rebrand complet effectué (commit `fc96153f9`) : 12 crates `goose*` → `kaji*`
   changement dans un seul chemin est un bug de parité, pas une simplification.
 - **Jamais écraser un binaire vivant en place** — `cp`/copie directe sur un
   exécutable en cours d'exécution provoque un SIGKILL macOS ("Code Signature
-  Invalid"). `just copy-binary` fait déjà l'unlink correct
+  Invalid"). `just install` fait déjà l'unlink correct
   (`rm -f` puis `cp -p`) ; ne pas le contourner.
 
 ## Workflow
@@ -73,6 +73,7 @@ Rebrand complet effectué (commit `fc96153f9`) : 12 crates `goose*` → `kaji*`
 - Tests par crate ciblé (`cargo test -p kaji-core`, `cargo test -p kaji-cli`,
   etc.) plutôt que la suite complète pendant l'itération ; `cargo test -p
   kaji --test <nom>` pour un fichier précis sous `crates/kaji/tests/`.
-- `just release-binary` reste la voie release complète (build + copie vers
-  `ui/desktop/src/bin/`) — pas un `cargo build --release` nu si le binaire
-  doit être consommé par le desktop.
+- `just release-binary` build le CLI en release (`cargo build --release -p
+  kaji-cli --bin kaji`) — plus de copie vers un desktop depuis le retrait
+  d'`ui/desktop`. Pour un binaire installé localement (unlink + codesign),
+  utiliser `just install`.

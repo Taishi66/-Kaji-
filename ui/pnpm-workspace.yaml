@@ -1,6 +1,5 @@
 packages:
   - 'sdk'
-  - 'desktop'
   - 'kaji-binary/*'
 
 registry: https://registry.npmjs.org/
@@ -14,8 +13,4 @@ overrides:
   react-dom: ^19.2.8
 allowBuilds:
   '@modelcontextprotocol/ext-apps': true
-  electron: true
-  electron-winstaller: true
   esbuild: true
-# Electron Forge resolves @electron/node-gyp from git.
-blockExoticSubdeps: false

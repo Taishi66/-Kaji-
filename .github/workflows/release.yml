@@ -13,18 +13,13 @@ name: Release
 permissions:
   contents: read
 
-env:
-  # Set this repository Actions variable to "true" in GitHub Settings > Secrets and variables
-  # > Actions > Variables after a release containing desktop app-update.yml has shipped.
-  ENABLE_MAC_NATIVE_AUTO_UPDATE: ${{ vars.ENABLE_MAC_NATIVE_AUTO_UPDATE || 'false' }}
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   # ------------------------------------
-  # 1) Build CLI targets not produced by desktop workflows
+  # 1) Build CLI targets not produced by the macOS/Windows bundle workflows
   # ------------------------------------
   build-cli-linux:
     uses: ./.github/workflows/build-cli-linux.yml
@@ -43,7 +38,7 @@ jobs:
           path: download_cli.sh
 
   # ------------------------------------------------------------
-  # 3) Bundle CLI and Desktop (macOS ARM64)
+  # 3) Bundle CLI (macOS ARM64)
   # ------------------------------------------------------------
   bundle-macos-arm64:
     uses: ./.github/workflows/bundle-macos.yml
@@ -52,13 +47,10 @@ jobs:
     with:
       target: aarch64-apple-darwin
       package_cli: true
-      package_desktop: true
-      signing: ${{ startsWith(github.ref, 'refs/tags/') }}
-      environment: ${{ startsWith(github.ref, 'refs/tags/') && 'signing' || '' }}
     secrets: inherit
 
   # ------------------------------------------------------------
-  # 4) Bundle CLI and Desktop (macOS x64)
+  # 4) Bundle CLI (macOS x64)
   # ------------------------------------------------------------
   bundle-macos-x64:
     uses: ./.github/workflows/bundle-macos.yml
@@ -67,19 +59,10 @@ jobs:
     with:
       target: x86_64-apple-darwin
       package_cli: true
-      package_desktop: true
-      signing: ${{ startsWith(github.ref, 'refs/tags/') }}
-      environment: ${{ startsWith(github.ref, 'refs/tags/') && 'signing' || '' }}
     secrets: inherit
 
   # ------------------------------------------------------------
-  # 5) Bundle Desktop App (Linux)
-  # ------------------------------------------------------------
-  bundle-desktop-linux:
-    uses: ./.github/workflows/bundle-desktop-linux.yml
-
-  # ------------------------------------------------------------
-  # 6) Bundle CLI and Desktop (Windows)
+  # 5) Bundle CLI (Windows)
   # ------------------------------------------------------------
   bundle-windows:
     uses: ./.github/workflows/bundle-windows.yml
@@ -88,9 +71,6 @@ jobs:
       contents: read
     with:
       package_cli: true
-      package_desktop: true
-      signing: ${{ startsWith(github.ref, 'refs/tags/') }}
-      environment: ${{ startsWith(github.ref, 'refs/tags/') && 'signing' || '' }}
     secrets: inherit
 
   bundle-windows-cuda:
@@ -100,20 +80,17 @@ jobs:
       contents: read
     with:
       package_cli: true
-      package_desktop: true
-      signing: ${{ startsWith(github.ref, 'refs/tags/') }}
-      environment: ${{ startsWith(github.ref, 'refs/tags/') && 'signing' || '' }}
       windows_variant: cuda
     secrets: inherit
 
   # ------------------------------------
-  # 7) Create/Update GitHub Release
+  # 6) Create/Update GitHub Release
   # ------------------------------------
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-    needs: [build-cli-linux, install-script, bundle-macos-arm64, bundle-macos-x64, bundle-desktop-linux, bundle-windows, bundle-windows-cuda]
+    needs: [build-cli-linux, install-script, bundle-macos-arm64, bundle-macos-x64, bundle-windows, bundle-windows-cuda]
     permissions:
       contents: write
       id-token: write      # Required for Sigstore OIDC signing
@@ -134,16 +111,6 @@ jobs:
           pattern: '!internal-*'
           merge-multiple: true
 
-      - name: Generate macOS update manifest
-        if: ${{ env.ENABLE_MAC_NATIVE_AUTO_UPDATE == 'true' }}
-        run: node ui/desktop/scripts/generate-mac-update-manifest.js --version "${GITHUB_REF_NAME}" --directory .
-
-      - name: Attest macOS update manifest
-        if: ${{ env.ENABLE_MAC_NATIVE_AUTO_UPDATE == 'true' }}
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
-        with:
-          subject-path: latest-mac.yml
-
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
@@ -151,10 +118,6 @@ jobs:
             kaji-*.tar.bz2
             kaji-*.tar.gz
             kaji-*.zip
-            Kaji*.zip
-            *.deb
-            *.rpm
-            *.flatpak
             download_cli.sh
 
       # Create/update the versioned release
@@ -166,10 +129,6 @@ jobs:
             kaji-*.tar.bz2
             kaji-*.tar.gz
             kaji-*.zip
-            Kaji*.zip
-            *.deb
-            *.rpm
-            *.flatpak
             download_cli.sh
           allowUpdates: true
           omitBody: true
@@ -186,19 +145,7 @@ jobs:
             kaji-*.tar.bz2
             kaji-*.tar.gz
             kaji-*.zip
-            Kaji*.zip
-            *.deb
-            *.rpm
-            *.flatpak
             download_cli.sh
           allowUpdates: true
           omitBody: true
           omitPrereleaseDuringUpdate: true
-
-      - name: Upload macOS update manifest
-        if: ${{ env.ENABLE_MAC_NATIVE_AUTO_UPDATE == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "${GITHUB_REF_NAME}" latest-mac.yml --clobber
-          gh release upload stable latest-mac.yml --clobber

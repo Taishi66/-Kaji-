@@ -57,11 +57,6 @@
 - `cargo test --jobs 2` - All tests
 - `cargo clippy --all-targets -- -D warnings` - Linting (clippy)
 
-**Desktop app checks:**
-- `pnpm install --frozen-lockfile` - Fresh dependency install (in `ui/desktop/`)
-- `pnpm run lint:check` - ESLint + Prettier
-- `pnpm run test:run` - Vitest tests
-
 **Setup steps CI performs:**
 - Installs system dependencies (libdbus, gnome-keyring, libxcb)
 - Activates hermit environment (`source bin/activate-hermit`)
