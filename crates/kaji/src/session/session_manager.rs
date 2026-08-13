@@ -10,7 +10,7 @@ use crate::session::extension_data::ExtensionData;
 use crate::session::session_naming::{
     generate_session_name, MSG_COUNT_FOR_SESSION_NAME_GENERATION,
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
 use chrono::{DateTime, TimeZone, Utc};
 use kaji_providers::conversation::token_usage::Usage;
 use kaji_providers::model::ModelConfig;
@@ -795,9 +795,10 @@ impl SessionManager {
     /// persistés de la session. La frontière d'un restore couplé est lue du
     /// payload de l'event `checkpoint` mais peut avoir été supprimée depuis
     /// (compaction, troncature d'un restore précédent) —
-    /// `truncate_conversation_from_message` sur un id absent est un no-op
-    /// silencieux, donc le restore doit re-vérifier ici AVANT de toucher à
-    /// l'arbre.
+    /// `truncate_conversation_from_message` échoue désormais sur frontière
+    /// absente (fail-closed, finding D5), mais le restore doit re-vérifier
+    /// ici AVANT de toucher à l'arbre, pour refuser sans avoir commencé un
+    /// restore git coûteux.
     pub async fn message_exists(&self, session_id: &str, message_id: &str) -> Result<bool> {
         self.storage.message_exists(session_id, message_id).await
     }
@@ -2772,17 +2773,27 @@ impl SessionStorage {
         .fetch_optional(&mut *tx)
         .await?;
 
-        if let Some((boundary_id, boundary_timestamp)) = boundary {
-            sqlx::query(
-                "DELETE FROM messages WHERE session_id = ? AND (created_timestamp > ? OR (created_timestamp = ? AND id >= ?))",
-            )
-            .bind(session_id)
-            .bind(boundary_timestamp)
-            .bind(boundary_timestamp)
-            .bind(boundary_id)
-            .execute(&mut *tx)
-            .await?;
-        }
+        // Fail-closed (finding D5, Minor): a vanished boundary used to be a
+        // silent no-op — which let a restore claiming success leave the
+        // conversation untruncated, and let compaction erase the boundary
+        // without the event log ever finding out. Refuse loudly instead;
+        // callers (restore_checkpoint) re-check existence *before* mutating
+        // the tree, so this is defense-in-depth, not the first line.
+        let Some((boundary_id, boundary_timestamp)) = boundary else {
+            bail!(
+                "troncature conversation impossible : la frontière ({message_id}) n'existe pas dans messages"
+            );
+        };
+
+        sqlx::query(
+            "DELETE FROM messages WHERE session_id = ? AND (created_timestamp > ? OR (created_timestamp = ? AND id >= ?))",
+        )
+        .bind(session_id)
+        .bind(boundary_timestamp)
+        .bind(boundary_timestamp)
+        .bind(boundary_id)
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
         Ok(())

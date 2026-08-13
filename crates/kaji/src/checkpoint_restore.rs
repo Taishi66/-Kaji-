@@ -9,17 +9,26 @@ use tracing::warn;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreOutcome {
     pub restored_turn: i64,
+    /// `true` when the restored-to checkpoint was a pre-restore net: only the
+    /// working tree was rewound, the conversation was left untouched (see
+    /// `restore_checkpoint`). The TUI must surface this — announcing
+    /// "arbre et conversation alignés" for a files-only restore would be a
+    /// lie.
+    pub files_only: bool,
 }
 
 /// Finds `target`'s `checkpoint` event in `events` and returns its
-/// `(boundary_message_id, turn_seq)`. `turn_seq` comes off the event row
-/// itself (not the payload) — it is the same column every other event kind
-/// uses. `session_id` is only for the error message.
+/// `(boundary_message_id, turn_seq, is_pre_restore)`. `turn_seq` comes off
+/// the event row itself (not the payload) — it is the same column every
+/// other event kind uses. `is_pre_restore` distinguishes the undo-the-undo
+/// net from a per-turn snapshot, which routes the restore down one of two
+/// very different paths in `restore_checkpoint`. `session_id` is only for
+/// the error message.
 fn checkpoint_boundary(
     events: &[SessionEvent],
     session_id: &str,
     target: &CheckpointId,
-) -> Result<(Option<String>, i64)> {
+) -> Result<(Option<String>, i64, bool)> {
     for event in events {
         if event.kind != "checkpoint" {
             continue;
@@ -34,12 +43,42 @@ fn checkpoint_boundary(
             .get("boundary_message_id")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        return Ok((boundary_message_id, event.turn_seq));
+        let is_pre_restore =
+            payload.get("captured").and_then(|v| v.as_str()) == Some("pre_restore");
+        return Ok((boundary_message_id, event.turn_seq, is_pre_restore));
     }
     bail!(
         "checkpoint {} introuvable pour la session {session_id}",
         target.0
     )
+}
+
+/// The one message a coupled restore's truncation will keep: the message
+/// immediately preceding `target_boundary` in the session's message list
+/// (`truncate_conversation_from_message` removes the boundary itself and
+/// everything after it). `None` when the boundary is the session's first
+/// message — nothing survives. This is the boundary a pre-restore net taken
+/// for that restore must carry, or a later `/restore <net>` would refuse at
+/// the message-existence gate (finding D5).
+async fn last_message_before(
+    sm: &SessionManager,
+    session_id: &str,
+    target_boundary: Option<&str>,
+) -> Option<String> {
+    let target_boundary = target_boundary?;
+    let Ok(session) = sm.get_session(session_id, true).await else {
+        return None;
+    };
+    let messages = session
+        .conversation
+        .map(|conversation| conversation.messages().to_vec())?;
+    let boundary_index = messages
+        .iter()
+        .position(|m| m.id.as_deref() == Some(target_boundary))?;
+    boundary_index
+        .checked_sub(1)
+        .and_then(|index| messages.get(index))
+        .and_then(|message| message.id.clone())
 }
 
 /// The store's git I/O is synchronous subprocess work. `block_in_place`
@@ -61,22 +100,29 @@ fn run_store_blocking<T>(f: impl FnOnce() -> T) -> T {
 /// session's latest `turn_seq`. Best-effort: a failed append costs only the
 /// *visibility* of the net (the snapshot itself is already in the store),
 /// never the restore.
+///
+/// The net's *own* boundary must survive the truncation this restore is
+/// about to do, or a later `/restore <net>` would refuse at the
+/// message-existence gate (finding D5). Which message survives follows the
+/// target:
+///
+/// - a coupled (pre-turn) restore truncates from `target_boundary` onward,
+///   so the surviving anchor is the message right before it;
+/// - a files-only net restore truncates nothing, so the current last
+///   message survives untouched.
 async fn journal_pre_restore(
     sm: &SessionManager,
     session_id: &str,
     events: &[SessionEvent],
     id: CheckpointId,
     tree_sha: String,
+    target_is_net: bool,
+    target_boundary: Option<&str>,
 ) {
-    let boundary_message_id = match sm.last_message_id(session_id).await {
-        Ok(id) => id,
-        Err(error) => {
-            warn!(
-                ?error,
-                "checkpoint: last_message_id lookup failed, pre-restore boundary will be null"
-            );
-            None
-        }
+    let boundary_message_id = if target_is_net {
+        sm.last_message_id(session_id).await.ok().flatten()
+    } else {
+        last_message_before(sm, session_id, target_boundary).await
     };
     let turn_seq = events.iter().map(|event| event.turn_seq).max().unwrap_or(0);
     let payload = serde_json::json!({
@@ -94,15 +140,22 @@ async fn journal_pre_restore(
     }
 }
 
-/// Restores a project's working tree *and* its session's conversation to the
-/// state captured by `target`, as one logical transaction.
+/// Restores a session to `target`'s checkpoint state.
 ///
-/// The order below — and step 5's fatality in particular — are safety
-/// invariants, not style choices: see premortem PM2
-/// (`09 - Meta/premortems/kaji-checkpoints-2026-08-12.md`), which is exactly
-/// the "restore left files and conversation out of sync" failure mode this
-/// function exists to prevent.
+/// Two very different paths exist, selected by the target event's
+/// `captured` value (`is_pre_restore`):
 ///
+/// - **Coupled restore** (`captured != "pre_restore"`): rewinds the working
+///   tree *and* truncates the conversation at the checkpoint's boundary
+///   message, as one logical transaction.
+/// - **Net restore** (`captured == "pre_restore"`, the "undo-the-undo"
+///   safety net taken before a previous restore): **files-only**. The
+///   messages its snapshot covered are the very ones the restore that took
+///   it deleted, so a coupled rewind is impossible by definition — the tree
+///   is rewound and the conversation is left untouched, with `files_only`
+///   set so no caller can claim "arbre et conversation alignés".
+///
+/// Coupled path, order of operations (do not reorder):
 /// 1. **Pre-restore snapshot** ("undo-the-undo"), taken before any mutation
 ///    of the project or the conversation. Best-effort: if it fails, the only
 ///    thing lost is the safety net for *this* restore — the restore itself
@@ -114,16 +167,14 @@ async fn journal_pre_restore(
 ///      half of a coupled restore is meaningless: refuse loudly rather than
 ///      truncate at a guess;
 ///    - the boundary message must *still exist* in `messages`: compaction
-///      (or a previous restore's truncation) may have deleted it, and
-///      `truncate_conversation_from_message` on a vanished id is a silent
-///      no-op — the restore would then "succeed" having restored files but
-///      left the conversation untouched, the exact PM2 divergence.
+///      (or a previous restore's truncation) may have deleted it — refuse
+///      without touching the tree.
 /// 3. **Journal the pre-restore snapshot** as a `checkpoint` event — after
 ///    the gates (a refused restore leaves no event noise), before the git
 ///    restore (if step 5 fails, the net is already visible in
-///    `/checkpoints`). Its own boundary points at a message step 5 is about
-///    to delete, so a coupled restore *back* will refuse at gate 2c: the net
-///    is a files-level net, recovered via the store's git history.
+///    `/checkpoints`). The net's own boundary is the message that will
+///    *survive* this restore's truncation (the one before the target
+///    boundary), so the net is itself restorable later (finding D5).
 /// 4. **Git restore** of the working tree. On error, abort: nothing about
 ///    the conversation has been touched yet, so the session stays intact.
 /// 5. **Truncate the conversation** from the checkpoint's boundary message.
@@ -131,6 +182,12 @@ async fn journal_pre_restore(
 ///    tree — a silently-swallowed failure here would be precisely the
 ///    half-restored, files-and-chat-disagree state PM2 warns about. This
 ///    step must stay `?` + `.context(...)`, never `warn!` + continue.
+///
+/// Returns `RestoreOutcome { restored_turn, files_only }`.
+///
+/// Errors (never silent): the checkpoint event is missing, its boundary
+/// message is null, or the boundary message was deleted since (compaction /
+/// previous restore / truncation) — in every case the tree is left intact.
 pub async fn restore_checkpoint(
     store: &CheckpointStore,
     sm: &SessionManager,
@@ -149,7 +206,36 @@ pub async fn restore_checkpoint(
     };
 
     let events = sm.events_for_session(session_id).await?;
-    let (boundary_message_id, turn_seq) = checkpoint_boundary(&events, session_id, target)?;
+    let (boundary_message_id, turn_seq, is_pre_restore) =
+        checkpoint_boundary(&events, session_id, target)?;
+
+    // Undo-the-undo safety net: files-only by construction (see the doc
+    // comment above). Its boundary's messages were deleted by the very
+    // restore that took the net — a coupled rewind would always refuse at
+    // the existence gate, making the announced net unreachable (finding D5).
+    // Rewind the tree, leave the conversation untouched, say so via
+    // `files_only`.
+    if is_pre_restore {
+        if let Some((pre_restore_id, pre_restore_tree)) = pre_restore {
+            journal_pre_restore(
+                sm,
+                session_id,
+                &events,
+                pre_restore_id,
+                pre_restore_tree,
+                true,
+                boundary_message_id.as_deref(),
+            )
+            .await;
+        }
+        run_store_blocking(|| store.restore(target))
+            .context("restore de l'arbre a échoué — conversation intacte")?;
+        return Ok(RestoreOutcome {
+            restored_turn: turn_seq,
+            files_only: true,
+        });
+    }
+
     let Some(message_id) = boundary_message_id else {
         bail!("restore couplé impossible : frontière conversation absente pour ce checkpoint");
     };
@@ -160,7 +246,16 @@ pub async fn restore_checkpoint(
     }
 
     if let Some((pre_restore_id, pre_restore_tree)) = pre_restore {
-        journal_pre_restore(sm, session_id, &events, pre_restore_id, pre_restore_tree).await;
+        journal_pre_restore(
+            sm,
+            session_id,
+            &events,
+            pre_restore_id,
+            pre_restore_tree,
+            false,
+            Some(&message_id),
+        )
+        .await;
     }
 
     run_store_blocking(|| store.restore(target))
@@ -174,6 +269,7 @@ pub async fn restore_checkpoint(
 
     Ok(RestoreOutcome {
         restored_turn: turn_seq,
+        files_only: false,
     })
 }
 
@@ -439,6 +535,14 @@ mod tests {
         let sm = SessionManager::new(session_root.path().to_path_buf());
         let sid = new_session(&sm).await;
 
+        // A prior turn whose message survives the truncation: the net must
+        // anchor on it, not on the pre-restore last message — that one is
+        // deleted by the very restore that journaled it, which made every
+        // `/restore <net>` refused at the message-existence gate (finding
+        // D5).
+        sm.add_message(&sid, &Message::user().with_text("turn 0").with_id("m0"))
+            .await
+            .unwrap();
         sm.add_message(&sid, &Message::user().with_text("turn 1").with_id("m1"))
             .await
             .unwrap();
@@ -491,8 +595,132 @@ mod tests {
         );
         assert_eq!(
             payload.get("boundary_message_id").and_then(|v| v.as_str()),
-            Some("m2"),
-            "la frontière du pre-restore est le dernier message AVANT troncature"
+            Some("m0"),
+            "la frontière du pre-restore est le dernier message qui SURVIT à la troncature (m0), pas le dernier message pré-troncature (m2) — sinon /restore <filet> refuserait toujours"
+        );
+    }
+
+    /// finding-D5 — the "undo-the-undo" net announced by `/restore` must be
+    /// restorable. Before the fix, `/restore <net>` always refused, blaming
+    /// compaction: the net's boundary was the pre-restore last message,
+    /// destroyed by the truncation of the restore that had just created it.
+    /// The net is now a FILES-ONLY restore — tree rewound to the pre-restore
+    /// state, conversation left as-is — and `files_only` says so loudly.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restoring_the_pre_restore_net_rewinds_files_only_and_never_refuses() {
+        let data_root = TempDir::new().unwrap();
+        let project_root = TempDir::new().unwrap();
+        let session_root = TempDir::new().unwrap();
+        let _guard = env_lock::lock_env([(
+            "KAJI_PATH_ROOT",
+            Some(data_root.path().to_str().expect("utf8 temp path")),
+        )]);
+        let project = project_root.path();
+        let store = store_for(project);
+        let sm = SessionManager::new(session_root.path().to_path_buf());
+        let sid = new_session(&sm).await;
+
+        sm.add_message(&sid, &Message::user().with_text("turn 0").with_id("m0"))
+            .await
+            .unwrap();
+        sm.add_message(&sid, &Message::user().with_text("turn 1").with_id("m1"))
+            .await
+            .unwrap();
+        fs::write(project.join("a.txt"), "v1").unwrap();
+        let (checkpoint_id, tree1) = store.snapshot("turn-1").unwrap();
+        let payload = serde_json::json!({
+            "checkpoint_id": checkpoint_id.0,
+            "tree_sha": tree1,
+            "captured": "pre_turn",
+            "boundary_message_id": "m1",
+        })
+        .to_string();
+        sm.append_event(&sid, 1, "checkpoint", &payload)
+            .await
+            .unwrap();
+
+        // Turn 1 modifies files and adds a message — the state the first
+        // restore will rewind.
+        fs::write(project.join("a.txt"), "v2").unwrap();
+        fs::write(project.join("b.txt"), "new").unwrap();
+        sm.add_message(&sid, &Message::assistant().with_text("done").with_id("m2"))
+            .await
+            .unwrap();
+
+        // First restore (coupled, pre-turn): rewinds files to v1, truncates
+        // the conversation from m1 (m1/m2 gone, m0 survives), and journals a
+        // pre-restore net first.
+        restore_checkpoint(&store, &sm, &sid, &checkpoint_id)
+            .await
+            .expect("premier restore couplé ok");
+        assert_eq!(
+            fs::read_to_string(project.join("a.txt")).unwrap(),
+            "v1",
+            "le restore couplé a rembobiné a.txt"
+        );
+        assert!(
+            !project.join("b.txt").exists(),
+            "le restore couplé a supprimé b.txt"
+        );
+        assert_eq!(
+            sm.last_message_id(&sid).await.unwrap().as_deref(),
+            Some("m0"),
+            "la conversation est tronquée à m0 — m1/m2 supprimés"
+        );
+
+        let events = sm.events_for_session(&sid).await.unwrap();
+        let net_id = events
+            .iter()
+            .filter(|event| event.kind == "checkpoint")
+            .filter_map(|event| {
+                serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    .ok()
+                    .map(|payload| (event.turn_seq, payload))
+            })
+            .find(|(_, payload)| {
+                payload.get("captured").and_then(|v| v.as_str()) == Some("pre_restore")
+            })
+            .map(|(_, payload)| {
+                payload
+                    .get("checkpoint_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .expect("le filet doit avoir été journalisé");
+
+        // The decisive scenario: /restore <net> must SUCCEED (it never did
+        // before D5), rewind files to the pre-restore state (a.txt v2 +
+        // b.txt), and leave the already-truncated conversation untouched.
+        let outcome = restore_checkpoint(&store, &sm, &sid, &CheckpointId(net_id))
+            .await
+            .expect("le restore du filet ne doit PLUS refuser (résultat D5)");
+
+        assert!(
+            outcome.files_only,
+            "un filet est fichiers-seule par construction"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("a.txt")).unwrap(),
+            "v2",
+            "le filet rembobine les fichiers à l'état pré-restore"
+        );
+        assert!(
+            project.join("b.txt").exists(),
+            "b.txt (créé au tour 1) revient avec le filet"
+        );
+        assert_eq!(
+            sm.last_message_id(&sid).await.unwrap().as_deref(),
+            Some("m0"),
+            "le filet ne touche PAS la conversation — elle reste tronquée à m0"
+        );
+        assert!(
+            store_commit_messages()
+                .iter()
+                .filter(|message| message.as_str() == "pre-restore")
+                .count()
+                >= 2,
+            "un second filet est pris pendant le restore du filet (le net du net)"
         );
     }
 

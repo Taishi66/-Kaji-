@@ -1,5 +1,6 @@
 use kaji::agents::AgentEvent;
 use kaji::conversation::message::{ActionRequiredData, Message, MessageContentBlock};
+use kaji::conversation::Conversation;
 use kaji::providers::base::ProviderUsage;
 use kaji_core::sdd::{SddPass, SpecDoc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -204,6 +205,11 @@ pub struct App {
     /// `on_event`) rather than `gate_open`'s bare bool, since a restore needs
     /// to remember *which* checkpoint it's confirming.
     pub pending_restore: Option<String>,
+    /// `true` when the checkpoint awaiting confirmation is a pre-restore
+    /// safety net (captured "pre_restore") — such a restore is files-only by
+    /// construction, which the confirm modal and the success message must
+    /// say honestly.
+    pub pending_restore_files_only: bool,
     pub driver: PassDriver,
     pub scroll_offset: u16,
     /// Real overflow (wrapped rows beyond the viewport) measured by
@@ -286,6 +292,7 @@ impl App {
             gate_open: false,
             tool_approval: None,
             pending_restore: None,
+            pending_restore_files_only: false,
             driver: PassDriver::Idle,
             scroll_offset: 0,
             chat_overflow: Cell::new(0),
@@ -640,15 +647,41 @@ impl App {
     /// "Intent : …" line before setting `gate_open`. Destructive by design
     /// (spec §3: "jamais automatique" — always confirmed): this only ever
     /// records intent, never touches the checkpoint store itself.
-    pub fn open_restore_confirm(&mut self, id: String) {
-        self.push_system(&format!(
-            "restaurer le checkpoint {id} ? l'arbre de travail et la conversation seront ramenés à cet état — y/n"
-        ));
+    pub fn open_restore_confirm(&mut self, id: String, files_only: bool) {
+        if files_only {
+            self.push_system(&format!(
+                "restaurer le filet {id} ? l'arbre de travail sera rembobiné (fichiers seuls — la conversation ne sera pas touchée) — y/n"
+            ));
+        } else {
+            self.push_system(&format!(
+                "restaurer le checkpoint {id} ? l'arbre de travail et la conversation seront ramenés à cet état — y/n"
+            ));
+        }
+        // The prompt was just pushed — make sure the user sees it even if
+        // they had scrolled up.
+        self.scroll_offset = 0;
         self.pending_restore = Some(id);
+        self.pending_restore_files_only = files_only;
     }
 
     pub fn take_pending_restore(&mut self) -> Option<String> {
+        self.pending_restore_files_only = false;
         self.pending_restore.take()
+    }
+
+    /// Replaces the chat view with `conversation`'s current messages. A
+    /// restore just changed the session's real conversation (coupled:
+    /// truncated at the boundary; net: untouched) — stale lines would make
+    /// the screen claim a conversation the session no longer holds. The
+    /// y/n prompt and any pre-restore chatter are dropped too; the honest
+    /// success message is pushed by the caller *after* this call.
+    pub fn reseed_chat(&mut self, conversation: &Conversation) {
+        self.chat.clear();
+        self.reset_agent_merge_ids();
+        for message in conversation.messages() {
+            self.apply_agent_event(&AgentEvent::Message(message.clone()));
+        }
+        self.close_orphaned_tool_requests();
     }
 
     /// A y/n modal (tool approval, gate, or restore confirmation) is on

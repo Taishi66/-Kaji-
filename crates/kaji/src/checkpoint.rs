@@ -2,9 +2,11 @@ use crate::config::paths::Paths;
 use crate::subprocess::git_command;
 use crate::utils::bytes_to_hex;
 use anyhow::{bail, Context, Result};
+use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::ffi::OsStr;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -33,14 +35,21 @@ pub struct CheckpointStore {
     /// premortem PM6: a bare repo has a single on-disk index. Concurrent
     /// `git` invocations against the same `--git-dir` (snapshot racing a
     /// restore, or two snapshots) fight over `index.lock` and can corrupt
-    /// it. Serialization lives HERE, in the store, rather than being
-    /// inherited from whatever single-threaded loop happens to call it
-    /// today — a future concurrent caller (gateway/ACP) must not be able
-    /// to bypass it. `restore` holds this lock for its *entire* compound
-    /// operation (tree lookup, created-files diff, read-tree,
-    /// checkout-index, cleanup) — see the `*_locked` helpers below — not
-    /// once per sub-step, so a concurrent `snapshot` can never interleave
-    /// with a restore in progress.
+    /// it. Two layers serialize:
+    ///
+    /// - `lock: Mutex<()>` covers *intra-process* callers — a future
+    ///   concurrent caller (gateway/ACP) must not be able to bypass it.
+    ///   `restore` holds it for its *entire* compound operation (tree
+    ///   lookup, created-files diff, read-tree, checkout-index, cleanup) —
+    ///   see the `*_locked` helpers below — not once per sub-step, so a
+    ///   concurrent `snapshot` can never interleave with a restore in
+    ///   progress.
+    ///
+    /// - `acquire_store_lock` adds an advisory exclusive flock — non-blocking,
+    ///   *refusing loudly* rather than waiting — to cover *inter-process*
+    ///   callers (a second kaji session on the same project): the Mutex is
+    ///   per-instance, so it can't serialize two processes sharing this
+    ///   `git_dir`. Held for the same compound window as the Mutex.
     lock: Mutex<()>,
 }
 
@@ -102,6 +111,31 @@ fn init_bare(git_dir: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Inter-process serialization for one store (see `CheckpointStore::lock`'s
+/// doc comment): an advisory exclusive flock on `<git_dir>/kaji-store.lock`,
+/// acquired NON-blocking. A held lock means another kaji process is
+/// mid-operation on the same store (a snapshot or — worse — a compound
+/// restore) — refuse loudly instead of waiting: an interleaved `add -A` /
+/// `read-tree` / `checkout-index` sequence across processes is precisely the
+/// index corruption premortem PM6 exists to prevent. The returned `File`
+/// keeps the lock while it lives; dropping it releases it.
+fn acquire_store_lock(git_dir: &Path) -> Result<File> {
+    let path = git_dir.join("kaji-store.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("ouverture de {}", path.display()))?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => bail!(
+            "store occupé par une autre instance kaji (snapshot ou restore en cours) — opération refusée, réessaye dans un instant"
+        ),
+        Err(error) => Err(error).with_context(|| format!("flock sur {}", path.display())),
+    }
 }
 
 fn run_git<I, S>(git_dir: &Path, work_tree: &Path, args: I) -> Result<String>
@@ -281,6 +315,7 @@ impl CheckpointStore {
     /// store's commit history is a linear timeline of snapshots.
     pub fn snapshot(&self, label: &str) -> Result<(CheckpointId, String)> {
         let _guard = self.lock.lock().unwrap();
+        let _store_lock = acquire_store_lock(&self.git_dir)?;
         run_git(&self.git_dir, &self.work_tree, ["add", "-A"])?;
         let tree = run_git(&self.git_dir, &self.work_tree, ["write-tree"])?
             .trim()
@@ -327,6 +362,7 @@ impl CheckpointStore {
     /// removal must be a visible, deliberate act, not an inlined detail.
     pub fn files_created_since(&self, target_tree: &str) -> Result<Vec<PathBuf>> {
         let _guard = self.lock.lock().unwrap();
+        let _store_lock = acquire_store_lock(&self.git_dir)?;
         self.files_created_since_locked(target_tree)
     }
 
@@ -441,6 +477,7 @@ impl CheckpointStore {
         validate_checkpoint_id(&target.0)?;
 
         let _guard = self.lock.lock().unwrap();
+        let _store_lock = acquire_store_lock(&self.git_dir)?;
         let tree = self.tree_of_locked(target)?;
         let created = self.files_created_since_locked(&tree)?;
         let target_paths = self.tree_paths_locked(&tree)?;
@@ -817,5 +854,109 @@ mod tests {
             k, "cf9dea7f52710123",
             "project_key ne doit jamais changer sans migration"
         );
+    }
+
+    /// ⛔ BARRIÈRE premortem PM6 (finding D2) — le `Mutex` d'instance ne
+    /// sérialise que l'intra-processus : deux sessions kaji sur le même
+    /// projet partagent le même `git_dir` et se battent sur `index.lock`
+    /// sans qu'aucun verrou ne les arrête. La sérialisation inter-processus
+    /// est un flock exclusif NON-bloquant sur `<git_dir>/kaji-store.lock` :
+    /// quand une autre instance le tient, l'opération est REFUSÉE
+    /// explicitement (principe « refuser plutôt que perdre des données »),
+    /// jamais mise en attente ni intercalée.
+    #[test]
+    fn snapshot_refuses_when_another_process_holds_the_store_lock() {
+        let data_root = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let proj = root.path();
+        let _guard = env_lock::lock_env([(
+            "KAJI_PATH_ROOT",
+            Some(data_root.path().to_str().expect("utf8 temp path")),
+        )]);
+        fs::write(proj.join("a.txt"), "v1").unwrap();
+        let store = CheckpointStore::for_project(proj).expect("store");
+
+        let git_dir = Paths::in_data_dir("kaji/checkpoints")
+            .join(format!("{}.git", project_key(&resolve_work_tree(proj))));
+        let lock_path = git_dir.join("kaji-store.lock");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let holder = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        holder.lock_exclusive().unwrap();
+
+        let result = store.snapshot("t1");
+        let error =
+            result.expect_err("un store tenu par un autre processus doit refuser le snapshot");
+        assert!(
+            error.to_string().contains("occupé"),
+            "le refus doit être explicite, pas un deadlock git: {error}"
+        );
+    }
+
+    /// Miroir du test ci-dessus sur le restore : refuser AVANT toute mutation
+    /// de l'arbre est le comportement attendu quand un autre processus tient
+    /// le store.
+    #[test]
+    fn restore_refuses_when_another_process_holds_the_store_lock() {
+        let data_root = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let proj = root.path();
+        let _guard = env_lock::lock_env([(
+            "KAJI_PATH_ROOT",
+            Some(data_root.path().to_str().expect("utf8 temp path")),
+        )]);
+        fs::write(proj.join("a.txt"), "v1").unwrap();
+        let store = CheckpointStore::for_project(proj).expect("store");
+        let (id, _) = store.snapshot("t1").unwrap();
+
+        let git_dir = Paths::in_data_dir("kaji/checkpoints")
+            .join(format!("{}.git", project_key(&resolve_work_tree(proj))));
+        let holder = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(git_dir.join("kaji-store.lock"))
+            .unwrap();
+        holder.lock_exclusive().unwrap();
+
+        fs::write(proj.join("a.txt"), "v2").unwrap();
+        let result = store.restore(&id);
+        let error =
+            result.expect_err("un store tenu par un autre processus doit refuser le restore");
+        assert!(
+            error.to_string().contains("occupé"),
+            "le refus doit nommer la cause: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(proj.join("a.txt")).unwrap(),
+            "v2",
+            "le restore refusé ne doit rien avoir muté"
+        );
+    }
+
+    /// When the lock is free, a second acquisition in the *same* process
+    /// still works (flock is advisory between independent open file
+    /// descriptions) — guards against the flock ever becoming sticky after a
+    /// normal op.
+    #[test]
+    fn store_ops_succeed_when_the_lock_is_free() {
+        let data_root = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let proj = root.path();
+        let _guard = env_lock::lock_env([(
+            "KAJI_PATH_ROOT",
+            Some(data_root.path().to_str().expect("utf8 temp path")),
+        )]);
+        fs::write(proj.join("a.txt"), "v1").unwrap();
+        let store = CheckpointStore::for_project(proj).expect("store");
+
+        let (id, _) = store.snapshot("t1").expect("snapshot sans contention");
+        fs::write(proj.join("a.txt"), "v2").unwrap();
+        store.restore(&id).expect("restore sans contention");
+        assert_eq!(fs::read_to_string(proj.join("a.txt")).unwrap(), "v1");
     }
 }

@@ -43,6 +43,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     if app.gate_open {
         draw_gate_modal(frame);
+    } else if app.pending_restore.is_some() {
+        draw_restore_confirm_modal(frame, app.pending_restore_files_only);
     } else if let Some(approval) = &app.tool_approval {
         draw_tool_approval_modal(frame, approval);
     }
@@ -425,6 +427,32 @@ fn draw_spec(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(theme::border_inactive())
         .title(" SPEC ");
     frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+}
+
+/// The `/restore` y/n confirmation. When the target is a pre-restore
+/// safety net (`files_only`), the modal must say so: the tree is rewound
+/// but the conversation is left untouched, and announcing anything else
+/// would be a lie.
+fn draw_restore_confirm_modal(frame: &mut Frame, files_only: bool) {
+    let area = centered_rect(60, 20, frame.area());
+    let title = if files_only {
+        format!(" {} restaurer le filet ? (y/n) ", theme::GATE_SYMBOL)
+    } else {
+        format!(" {} restaurer le checkpoint ? (y/n) ", theme::GATE_SYMBOL)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::title())
+        .title(title);
+    let body = if files_only {
+        "Filet de sécurité (pre-restore) : FICHIERS SEULS.
+L'arbre de travail sera rembobiné; la conversation est laissée telle quelle, ses messages supprimés sont irrécupérables."
+    } else {
+        "L'arbre de travail et la conversation seront ramenés à l'état de ce checkpoint."
+    };
+    let paragraph = Paragraph::new(body).block(block).wrap(Wrap { trim: true });
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
 }
 
 fn draw_gate_modal(frame: &mut Frame) {

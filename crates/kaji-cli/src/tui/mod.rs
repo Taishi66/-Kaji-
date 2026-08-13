@@ -542,7 +542,16 @@ async fn event_loop(
                     // Only opens the confirmation modal — spec §3: "jamais
                     // automatique", the actual store/session mutation only
                     // ever runs from `Action::RestoreConfirm` below.
-                    Action::Restore(id) => app.open_restore_confirm(id),
+                    Action::Restore(id) => {
+                        let is_net = match session_manager.events_for_session(session_id).await {
+                            Ok(events) => is_pre_restore_checkpoint(&events, &id),
+                            Err(e) => {
+                                app.push_system(&format!("erreur /restore : {e}"));
+                                false
+                            }
+                        };
+                        app.open_restore_confirm(id, is_net);
+                    }
                     Action::RestoreConfirm => {
                         if let Some(id) = app.take_pending_restore() {
                             // The agent's own store, pinned to
@@ -552,10 +561,30 @@ async fn event_loop(
                                     match perform_restore(&store, &session_manager, session_id, &id)
                                         .await
                                     {
-                                        Ok(outcome) => app.push_system(&format!(
-                                            "⚠ restauré au tour {} — arbre et conversation alignés",
-                                            outcome.restored_turn
-                                        )),
+                                        Ok(outcome) => {
+                                            // The session's real conversation
+                                            // (truncated for a coupled restore)
+                                            // is what the screen must show now.
+                                            if let Ok(session) = session_manager
+                                                .get_session(session_id, true)
+                                                .await
+                                            {
+                                                if let Some(current) = session.conversation {
+                                                    app.reseed_chat(&current);
+                                                }
+                                            }
+                                            if outcome.files_only {
+                                                app.push_system(&format!(
+                                                    "⚠ filet de sécurité restauré (tour {}) — arbre de travail rembobiné, conversation laissée telle quelle (messages supprimés irrécupérables)",
+                                                    outcome.restored_turn
+                                                ));
+                                            } else {
+                                                app.push_system(&format!(
+                                                    "⚠ restauré au tour {} — arbre et conversation alignés",
+                                                    outcome.restored_turn
+                                                ));
+                                            }
+                                        }
                                         Err(e) => app.push_system(&format!("erreur restore : {e}")),
                                     }
                                 }
@@ -684,6 +713,24 @@ pub fn resolve_spec(spec_path: Option<PathBuf>) -> Result<Option<SpecDoc>> {
         .exists()
         .then(|| SpecDoc::load(&default).ok())
         .flatten())
+}
+
+/// `true` when `id` is the checkpoint event of a pre-restore safety net
+/// (`captured == "pre_restore"`). Such checkpoints are files-only by
+/// construction — `restore_checkpoint` rewinds the tree and leaves the
+/// conversation untouched, so the confirm modal and the success message
+/// must both say so instead of promising a full rewind.
+fn is_pre_restore_checkpoint(events: &[SessionEvent], id: &str) -> bool {
+    events.iter().any(|event| {
+        if event.kind != "checkpoint" {
+            return false;
+        }
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json) else {
+            return false;
+        };
+        payload.get("checkpoint_id").and_then(|v| v.as_str()) == Some(id)
+            && payload.get("captured").and_then(|v| v.as_str()) == Some("pre_restore")
+    })
 }
 
 fn seed_chat(app: &mut App, conversation: &kaji::conversation::Conversation) {
@@ -926,6 +973,52 @@ mod tests {
             "un snapshot pre-restore doit être distinguable d'un pre-turn : {text}"
         );
         assert!(text.contains("fedcba987654"), "id restaurable : {text}");
+    }
+
+    #[test]
+    fn is_pre_restore_checkpoint_only_matches_pre_restore_nets() {
+        let events = vec![
+            SessionEvent {
+                id: 1,
+                turn_seq: 1,
+                ts_ms: 0,
+                kind: "checkpoint".into(),
+                payload_json: r#"{"checkpoint_id":"a1b2c3d4e5f6","tree_sha":"t","captured":"pre_restore","boundary_message_id":"m9"}"#.into(),
+            },
+            SessionEvent {
+                id: 2,
+                turn_seq: 1,
+                ts_ms: 0,
+                kind: "checkpoint".into(),
+                payload_json: r#"{"checkpoint_id":"bbbbbbbbbbbb","tree_sha":"t","captured":"pre_turn"}"#.into(),
+            },
+        ];
+
+        assert!(
+            is_pre_restore_checkpoint(&events, "a1b2c3d4e5f6"),
+            "le filet pre-restore doit être identifié comme fichiers-seule"
+        );
+        assert!(
+            !is_pre_restore_checkpoint(&events, "bbbbbbbbbbbb"),
+            "un checkpoint pre-turn n'est pas un filet"
+        );
+        assert!(
+            !is_pre_restore_checkpoint(&events, "inconnu"),
+            "un id absent ne doit pas matcher"
+        );
+        assert!(
+            !is_pre_restore_checkpoint(
+                &[SessionEvent {
+                    id: 3,
+                    turn_seq: 1,
+                    ts_ms: 0,
+                    kind: "checkpoint".into(),
+                    payload_json: "pas du json".into(),
+                }],
+                "a1b2c3d4e5f6"
+            ),
+            "un payload illisible ne doit pas être un filet"
+        );
     }
 
     #[test]
