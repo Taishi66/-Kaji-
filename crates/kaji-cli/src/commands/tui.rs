@@ -21,6 +21,11 @@ pub async fn handle_tui(
         ..Default::default()
     })
     .await;
-    let (agent, session_id, conversation) = session.into_parts();
+    let (mut agent, session_id, conversation) = session.into_parts();
+    // Only the TUI exposes `/checkpoints` and `/restore`, so this is the
+    // sole production caller that needs a `CheckpointStore` wired in — see
+    // `Agent::wire_checkpoint_store`'s doc comment for why other
+    // `build_session` callers (kaji run, doctor, review, ...) skip it.
+    agent.wire_checkpoint_store(&session_id).await;
     crate::tui::run(agent, session_id, conversation, spec, resume).await
 }

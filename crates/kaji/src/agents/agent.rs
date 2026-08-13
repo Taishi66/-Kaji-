@@ -289,12 +289,15 @@ pub struct Agent {
     /// when checkpointing isn't wired up for this `Agent` — most unit-test
     /// call sites (and any caller with no real project directory to
     /// snapshot) construct an `Agent` without one, and `reply()` treats that
-    /// as "checkpointing disabled", not an error.
+    /// as "checkpointing disabled", not an error. Production callers wire
+    /// this via `wire_checkpoint_store`, called once the session (and
+    /// therefore its `working_dir`) is known — see that method's doc
+    /// comment for why this can't happen inside `with_config` itself.
     checkpoint_store: Option<Arc<CheckpointStore>>,
-    /// Test-only override of the directory `checkpoint_store` snapshots —
-    /// lets tests inject a project path without mutating the real process
-    /// `current_dir` (unsafe to do per-test under a shared test binary). See
-    /// `checkpoint_project`.
+    /// Test-only override of the directory `checkpoint_project` resolves —
+    /// lets tests inject a project path without a real session lookup or
+    /// mutating the real process `current_dir` (unsafe to do per-test under
+    /// a shared test binary). See `checkpoint_project`.
     #[cfg(test)]
     checkpoint_project_override: Option<PathBuf>,
 }
@@ -552,6 +555,59 @@ impl Agent {
     ) {
         self.checkpoint_store = Some(store);
         self.checkpoint_project_override = Some(project);
+    }
+
+    /// Wires a real `CheckpointStore` into this `Agent`, resolved from
+    /// `session_id`'s own persisted `working_dir` (`Session::working_dir`)
+    /// — never `std::env::current_dir()`. See `checkpoint_project`, which
+    /// resolves the per-turn gate the same way and for the same reason: a
+    /// resumed session's process cwd can legitimately diverge from the
+    /// directory its conversation is actually about (the interactive
+    /// resume prompt in `crates/kaji-cli/src/session/builder.rs` lets a
+    /// user decline switching back to it).
+    ///
+    /// Called once, after the session id — and therefore its `working_dir`
+    /// — is known; `with_config` runs before that, so it can't do this
+    /// itself. Production's only caller today is the TUI entry point
+    /// (`crates/kaji-cli/src/commands/tui.rs`), the sole surface that
+    /// exposes `/checkpoints` and `/restore`: other `build_session` callers
+    /// (`kaji run`, `doctor`, `review`, ...) have no command to act on a
+    /// checkpoint even if one existed, so leaving their `checkpoint_store`
+    /// `None` skips the per-turn `git add -A` cost for no loss of
+    /// functionality.
+    ///
+    /// Best-effort like `resolve_checkpoint_snapshot`: a missing session or
+    /// an unusable project directory disables checkpointing for this
+    /// `Agent` (`warn!`) rather than failing session construction —
+    /// checkpoints are a recoverability nicety, never a hard requirement to
+    /// start kaji.
+    pub async fn wire_checkpoint_store(&mut self, session_id: &str) {
+        let session = match self
+            .config
+            .session_manager
+            .get_session(session_id, false)
+            .await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    session_id = %session_id,
+                    "checkpoint: could not read session, checkpointing disabled"
+                );
+                return;
+            }
+        };
+        match CheckpointStore::for_project(&session.working_dir) {
+            Ok(store) => self.checkpoint_store = Some(Arc::new(store)),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    path = %session.working_dir.display(),
+                    "checkpoint: could not initialize store, checkpointing disabled"
+                );
+            }
+        }
     }
 
     pub(crate) fn stop_hook_block_cap(&self) -> u32 {
@@ -1964,27 +2020,46 @@ impl Agent {
         }
     }
 
-    /// Directory `checkpoint_store` should snapshot for the upcoming turn,
-    /// or `None` to skip checkpointing this turn entirely. Best-effort like
-    /// `resolve_turn_seq`: `std::env::current_dir()` can fail (deleted cwd,
-    /// permission), which must never fail the turn — see
-    /// `snapshot_checkpoint`. Tests inject a project via
-    /// `set_checkpoint_store_for_test` instead of mutating the real,
-    /// process-wide `current_dir`.
-    fn checkpoint_project(&self) -> Option<PathBuf> {
+    /// Gates whether the upcoming turn should be checkpointed: `None` skips
+    /// it entirely. Sourced from `session_id`'s own persisted `working_dir`
+    /// (`Session::working_dir`) — never `std::env::current_dir()`, which is
+    /// process-wide, mutable state that can legitimately diverge from the
+    /// directory a resumed session's conversation is actually about (see
+    /// `wire_checkpoint_store`, which wires the store itself the same way).
+    /// Falls back to `current_dir()` — with a `warn!` — only when the
+    /// session lookup itself fails; best-effort like `resolve_turn_seq`,
+    /// since a lookup failure here must never fail the turn. Tests inject a
+    /// project via `set_checkpoint_store_for_test` instead of exercising
+    /// the real session lookup.
+    async fn checkpoint_project(&self, session_id: &str) -> Option<PathBuf> {
         #[cfg(test)]
         if let Some(project) = &self.checkpoint_project_override {
             return Some(project.clone());
         }
 
-        match std::env::current_dir() {
-            Ok(dir) => Some(dir),
+        match self
+            .config
+            .session_manager
+            .get_session(session_id, false)
+            .await
+        {
+            Ok(session) => Some(session.working_dir),
             Err(error) => {
                 warn!(
                     ?error,
-                    "checkpoint: could not resolve current_dir, skipping snapshot"
+                    session_id = %session_id,
+                    "checkpoint: could not read session working_dir, falling back to process cwd"
                 );
-                None
+                match std::env::current_dir() {
+                    Ok(dir) => Some(dir),
+                    Err(cwd_error) => {
+                        warn!(
+                            ?cwd_error,
+                            "checkpoint: could not resolve current_dir either, skipping snapshot"
+                        );
+                        None
+                    }
+                }
             }
         }
     }
@@ -2032,11 +2107,31 @@ impl Agent {
     /// `store.snapshot(...)` is synchronous `std::process::Command` I/O
     /// (`subprocess::git_command()`), so it runs inside `spawn_blocking` to
     /// avoid stalling the async executor. Entirely non-fatal end to end: see
-    /// `resolve_checkpoint_snapshot`.
+    /// `resolve_checkpoint_snapshot`. Takes no `project` parameter: `store`
+    /// already resolved and pinned its own work-tree once in
+    /// `CheckpointStore::for_project` (see that type's doc comment), so
+    /// every git operation it runs targets that path regardless of what
+    /// caller invokes it — `checkpoint_project` only decides *whether* to
+    /// call this at all, not where it writes.
+    ///
+    /// Deliberately fully awaited by the caller before `reply()`'s stream
+    /// yields its first event, rather than detached into a background task
+    /// (premortem PM4(b), `09 - Meta/premortems/kaji-checkpoints-2026-08-12.md`
+    /// in the Shosoin vault). This is a considered trade-off, not an
+    /// oversight: `captured: "pre_turn"` below is only true if the snapshot
+    /// finishes staging the tree *before* this turn's own tool calls can
+    /// mutate it — a detached snapshot would race the turn's tool
+    /// execution and could capture a partially-mutated tree, silently
+    /// corrupting what `/restore <turn>` undoes. `git add -A` respects
+    /// `.gitignore`, so the common case (a normal repo with `target/`,
+    /// `node_modules/`, etc. ignored — this repo included) stays fast; the
+    /// worst-case multi-second scan only hits projects with large
+    /// *non-gitignored* directories, which is a project misconfiguration
+    /// this store can't fix for them. Correctness of the undo boundary
+    /// outweighs that bounded, mitigable latency cost.
     async fn snapshot_checkpoint(
         session_manager: &SessionManager,
         store: Arc<CheckpointStore>,
-        project: PathBuf,
         session_id: &str,
         turn_seq: i64,
     ) {
@@ -2052,7 +2147,7 @@ impl Agent {
         };
 
         let label = format!("turn-{turn_seq}");
-        let snapshot = tokio::task::spawn_blocking(move || store.snapshot(&project, &label))
+        let snapshot = tokio::task::spawn_blocking(move || store.snapshot(&label))
             .await
             .unwrap_or_else(|join_error| {
                 Err(anyhow!("checkpoint snapshot task panicked: {join_error}"))
@@ -2129,7 +2224,15 @@ impl Agent {
         })
         .to_string();
         let checkpoint_store = self.checkpoint_store.clone();
-        let checkpoint_project = self.checkpoint_project();
+        // Skip the session lookup entirely when no store is wired — true for
+        // every non-TUI `build_session` caller and most tests — rather than
+        // paying a per-turn DB round trip whose result would be discarded
+        // immediately below.
+        let checkpoint_project = if checkpoint_store.is_some() {
+            self.checkpoint_project(&session_id).await
+        } else {
+            None
+        };
 
         Ok(Box::pin(async_stream::try_stream! {
             if let Some(turn_seq) = turn_seq {
@@ -2140,8 +2243,8 @@ impl Agent {
                     warn!(?error, "event log append failed for turn_start");
                 }
 
-                if let (Some(store), Some(project)) = (checkpoint_store, checkpoint_project) {
-                    Self::snapshot_checkpoint(&session_manager, store, project, &session_id, turn_seq)
+                if let (Some(store), Some(_project)) = (checkpoint_store, checkpoint_project) {
+                    Self::snapshot_checkpoint(&session_manager, store, &session_id, turn_seq)
                         .await;
                 }
             }
@@ -5944,6 +6047,135 @@ echo start >> "$PLUGIN_ROOT/hook.log"
             !events.iter().any(|event| event.kind == "checkpoint"),
             "a failed snapshot must not produce a checkpoint event"
         );
+
+        Ok(())
+    }
+
+    /// FIX B1 — production wiring: `wire_checkpoint_store` (not the
+    /// `#[cfg(test)]`-only `set_checkpoint_store_for_test` setter every
+    /// other checkpoint test above uses) must populate `checkpoint_store`
+    /// from a session that has a real `working_dir`. This is the exact
+    /// method the TUI entry point (`crates/kaji-cli/src/commands/tui.rs`)
+    /// calls once `build_session` has resolved the session id — see
+    /// `wire_checkpoint_store`'s doc comment.
+    #[tokio::test]
+    async fn checkpoint_store_is_wired_when_a_working_dir_is_available() -> Result<()> {
+        let data_root = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let _guard = env_lock::lock_env([
+            ("KAJI_STATE_MACHINE", None::<&str>),
+            (
+                "KAJI_PATH_ROOT",
+                Some(data_root.path().to_str().expect("utf8 temp path")),
+            ),
+        ]);
+
+        let temp_dir = tempfile::tempdir()?;
+        let session_manager = Arc::new(SessionManager::new(temp_dir.path().join("data")));
+        let permission_manager = Arc::new(PermissionManager::new(temp_dir.path().join("data")));
+        let config = AgentConfig::new(
+            session_manager.clone(),
+            permission_manager,
+            None,
+            KajiMode::Auto,
+            true,
+            KajiPlatform::KajiCli,
+        );
+        let mut agent = Agent::with_config(config);
+        let session = session_manager
+            .create_session(
+                project_dir.path().to_path_buf(),
+                "test".to_string(),
+                SessionType::Hidden,
+                KajiMode::Auto,
+            )
+            .await?;
+
+        assert!(
+            agent.checkpoint_store.is_none(),
+            "a freshly constructed Agent must not auto-wire a checkpoint store"
+        );
+
+        agent.wire_checkpoint_store(&session.id).await;
+
+        assert!(
+            agent.checkpoint_store.is_some(),
+            "wire_checkpoint_store must populate checkpoint_store from the session's own \
+             working_dir ({}) — the production construction path (kaji-cli's TUI entry \
+             point), not the #[cfg(test)]-only set_checkpoint_store_for_test setter",
+            project_dir.path().display()
+        );
+        Ok(())
+    }
+
+    /// FIX B4 — parity with `AGENTS.md`'s "implement and test in both
+    /// paths" rule (see `event_sequence_is_identical_across_legacy_and_state_machine`
+    /// above for the same principle applied to the event log generally):
+    /// the two checkpoint tests above only ever force the legacy loop
+    /// (`KAJI_STATE_MACHINE=None`). This drives the identical scenario
+    /// through the state-machine path too and asserts both produce an
+    /// equivalent `checkpoint` event — guarding the parity that today only
+    /// a code comment on `reply()` asserts (both loops persist the turn's
+    /// user message before `reply()`'s shared envelope ever runs
+    /// `snapshot_checkpoint`, so `boundary_message_id` always includes it).
+    #[tokio::test]
+    async fn checkpoint_event_is_logged_under_state_machine_matching_legacy() -> Result<()> {
+        async fn run_scenario(state_machine: Option<&str>) -> Result<serde_json::Value> {
+            let data_root = TempDir::new().unwrap();
+            let project_dir = TempDir::new().unwrap();
+            let _guard = env_lock::lock_env([
+                ("KAJI_STATE_MACHINE", state_machine),
+                (
+                    "KAJI_PATH_ROOT",
+                    Some(data_root.path().to_str().expect("utf8 temp path")),
+                ),
+            ]);
+            let store = checkpoint_store_for_test(project_dir.path());
+
+            let temp_dir = tempfile::tempdir()?;
+            let hook_manager = crate::hooks::HookManager::from_plugins_for_test(vec![]);
+            let provider = Arc::new(CountingTextProvider::new());
+            let (mut agent, session_id) =
+                create_test_agent(temp_dir.path().join("data"), hook_manager, provider).await?;
+            agent.set_checkpoint_store_for_test(store, project_dir.path().to_path_buf());
+
+            run_stop_hook_test_turn(&agent, &session_id, "hello").await?;
+
+            let events = agent
+                .config
+                .session_manager
+                .events_for_session(&session_id)
+                .await?;
+            let checkpoint_event = events
+                .iter()
+                .find(|event| event.kind == "checkpoint")
+                .unwrap_or_else(|| {
+                    panic!("expected a checkpoint event under KAJI_STATE_MACHINE={state_machine:?}")
+                });
+            Ok(serde_json::from_str(&checkpoint_event.payload_json)?)
+        }
+
+        let legacy_payload = run_scenario(None).await?;
+        let state_machine_payload = run_scenario(Some("1")).await?;
+
+        for (label, payload) in [
+            ("legacy", &legacy_payload),
+            ("state machine", &state_machine_payload),
+        ] {
+            assert_eq!(
+                payload["captured"], "pre_turn",
+                "{label}: checkpoint must capture pre-turn state: {payload}"
+            );
+            assert!(
+                payload["checkpoint_id"].is_string(),
+                "{label}: checkpoint_id must be recorded: {payload}"
+            );
+            assert!(
+                payload["boundary_message_id"].is_string(),
+                "{label}: boundary_message_id must point at the user message that opened \
+                 this turn: {payload}"
+            );
+        }
 
         Ok(())
     }
