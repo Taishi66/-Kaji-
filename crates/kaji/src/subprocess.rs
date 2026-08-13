@@ -22,6 +22,18 @@ fn configure_parent_death_signal(command: &mut Command) {
     }
 }
 
+/// SIGKILL the entire process group led by `pid`.
+///
+/// The subprocess must have been spawned in its own process group (via
+/// [`configure_subprocess`]); on cancel/timeout we kill the whole group rather
+/// than just the leader so backgrounded grandchildren are not orphaned.
+#[cfg(unix)]
+pub fn kill_process_group(pid: u32) {
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+}
+
 pub trait SubprocessExt {
     fn set_no_window(&mut self) -> &mut Self;
 }

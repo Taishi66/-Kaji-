@@ -21,7 +21,7 @@ use tokio_stream::{wrappers::SplitStream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::tool_execution::ToolCallNotificationEmitter;
-use crate::subprocess::SubprocessExt;
+use crate::subprocess::configure_subprocess;
 
 pub use super::shell_output_streaming::{
     parse_shell_output_notification, ShellOutputNotificationChunk, ShellOutputNotificationParams,
@@ -536,6 +536,21 @@ struct ExecutionOutput {
     output_collection_error: Option<String>,
 }
 
+/// Kill the shell and everything in its process group.
+///
+/// `start_kill()` alone only signals the direct child; backgrounded
+/// grandchildren (e.g. `some_server &`) would survive as orphans. Because the
+/// shell is spawned in its own process group (`configure_subprocess`), SIGKILL
+/// to `-pid` reaches the whole tree.
+async fn kill_child(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        crate::subprocess::kill_process_group(pid);
+    }
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
 fn resolve_shell_timeout(timeout_secs: Option<u64>) -> u64 {
     timeout_secs.unwrap_or_else(|| {
         crate::config::Config::global()
@@ -592,14 +607,12 @@ async fn run_command(
                     .code(),
                 Err(_) => {
                     timed_out = true;
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
+                    kill_child(&mut child).await;
                     None
                 }
             },
             _ = cancellation_token.cancelled() => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+                kill_child(&mut child).await;
                 None
             }
         }
@@ -609,8 +622,7 @@ async fn run_command(
                 .map_err(|error| format!("Failed waiting on shell command: {}", error))?
                 .code(),
             _ = cancellation_token.cancelled() => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+                kill_child(&mut child).await;
                 None
             }
         }
@@ -734,7 +746,7 @@ fn build_shell_command(
 
     #[cfg(windows)]
     apply_session_environment(&mut command, session_id);
-    command.set_no_window();
+    configure_subprocess(&mut command);
     command
 }
 
@@ -1077,6 +1089,80 @@ mod tests {
                 vec![expected]
             );
         }
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn shell_kills_entire_process_group_on_cancellation() {
+        use std::path::PathBuf;
+        use std::process::Command as StdCommand;
+
+        fn pid_is_alive(pid: i32) -> bool {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        }
+
+        let tool = ShellTool::new_for_test().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let marker: PathBuf = dir.path().join("bgpid");
+        let marker_for_cancel = marker.clone();
+
+        let token = CancellationToken::new();
+        let token_clone = token.clone();
+        tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while !marker_for_cancel.exists() && std::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            token_clone.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let _result = tool
+            .shell_with_cwd(
+                ShellParams {
+                    command: format!("sleep 30 & echo $! > {} ; wait", marker.display()),
+                    timeout_secs: None,
+                },
+                None,
+                None,
+                token,
+            )
+            .await;
+
+        let bg_pid: i32 = std::fs::read_to_string(&marker)
+            .expect("background pid should have been written")
+            .trim()
+            .parse()
+            .expect("background pid should parse");
+        let _cleanup = {
+            struct KillOnDrop(i32);
+            impl Drop for KillOnDrop {
+                fn drop(&mut self) {
+                    let _ = StdCommand::new("kill")
+                        .args(["-9", &self.0.to_string()])
+                        .status();
+                }
+            }
+            KillOnDrop(bg_pid)
+        };
+
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "shell should return quickly after cancellation"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while pid_is_alive(bg_pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !pid_is_alive(bg_pid),
+            "backgrounded grandchild should be killed with the process group"
+        );
     }
 
     #[cfg(not(windows))]
