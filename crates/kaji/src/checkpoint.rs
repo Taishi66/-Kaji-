@@ -142,6 +142,16 @@ fn split_nul_separated_paths(out: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Path of one `ls-tree -r -z` entry (`<mode> SP <type> SP <sha> TAB
+/// <path>`), or `None` when the entry is not a blob — in practice a gitlink
+/// (`160000 commit`), which names a nested git repository the store never
+/// captures and `checkout-index` never writes. See `tree_paths_locked`.
+fn parse_ls_tree_blob_path(entry: &str) -> Option<PathBuf> {
+    let (meta, path) = entry.split_once('\t')?;
+    let object_type = meta.split(' ').nth(1)?;
+    (object_type == "blob").then(|| PathBuf::from(path))
+}
+
 /// Regex-equivalent check for `^[0-9a-f]{6,40}$` — the shape of every id
 /// `CheckpointStore` itself ever generates (`snapshot`'s `commit.chars().take(12)`).
 /// `restore`'s `target` ultimately comes from user input (`/restore <id>` in
@@ -332,7 +342,15 @@ impl CheckpointStore {
             &self.git_dir,
             &self.work_tree,
             [
+                // `--no-renames` is load-bearing, not a micro-optimization:
+                // with rename detection on (git's default since 2.9), a
+                // renamed file is reported as `R100 old new` and emits no
+                // `A` line at all, so the restore left the rename target in
+                // place while recreating the original — a duplicate, on a
+                // tree it then announced as aligned. See
+                // `files_created_since_sees_a_renamed_file_as_created`.
                 "diff",
+                "--no-renames",
                 "-z",
                 "--name-only",
                 "--diff-filter=A",
@@ -347,13 +365,26 @@ impl CheckpointStore {
     /// directory entries), used by `refuse_on_destructive_type_conflict` to
     /// find file/directory disagreements between `tree` and the live work
     /// tree. Assumes `self.lock` is already held.
+    ///
+    /// Gitlinks (`160000 commit`, i.e. a nested git repository that `add -A`
+    /// recorded as a submodule-style entry) are excluded: `ls-tree
+    /// --name-only` renders them as a plain path, which the type-conflict
+    /// check would then read as "target wants a file, disk has a directory"
+    /// and refuse every restore in the project. `checkout-index` never
+    /// materializes a gitlink either, so these entries name nothing the
+    /// restore will write. See
+    /// `restore_ignores_nested_git_repository_gitlinks`.
     fn tree_paths_locked(&self, tree: &str) -> Result<Vec<PathBuf>> {
         let out = run_git(
             &self.git_dir,
             &self.work_tree,
-            ["ls-tree", "-r", "--name-only", "-z", tree],
+            ["ls-tree", "-r", "-z", tree],
         )?;
-        Ok(split_nul_separated_paths(&out))
+        Ok(out
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .filter_map(parse_ls_tree_blob_path)
+            .collect())
     }
 
     /// Assumes `self.lock` is already held — see `restore`.
@@ -533,6 +564,103 @@ mod tests {
         let created = store.files_created_since(&tree).unwrap();
 
         assert_eq!(created, vec![std::path::PathBuf::from("c.txt")]);
+    }
+
+    /// BARRIÈRE — un refactor qui renomme un fichier est le cas le plus banal
+    /// d'un tour d'agent. `git diff --diff-filter=A` avec la détection de
+    /// rename (`diff.renames=true` par défaut depuis git 2.9) rend
+    /// `a.txt → b.txt` comme un `R100` et n'émet AUCUNE ligne `A` : mesuré
+    /// vide sur git 2.50.1. `b.txt` n'entrait donc pas dans `created`, le
+    /// restore recréait `a.txt` sans supprimer `b.txt`, et annonçait
+    /// « arbre aligné » sur un arbre qui contenait un doublon — avec un
+    /// comportement dépendant de la config git du poste.
+    #[test]
+    fn files_created_since_sees_a_renamed_file_as_created() {
+        let data_root = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let proj = root.path();
+        fs::write(proj.join("a.txt"), "v1").unwrap();
+        let store = store_for(data_root.path(), proj);
+
+        let (id, tree) = store.snapshot("t1").unwrap();
+        fs::rename(proj.join("a.txt"), proj.join("b.txt")).unwrap();
+
+        let created = store.files_created_since(&tree).unwrap();
+        assert_eq!(
+            created,
+            vec![std::path::PathBuf::from("b.txt")],
+            "la cible d'un renommage est un fichier créé depuis le checkpoint"
+        );
+
+        store.restore(&id).unwrap();
+        assert_eq!(
+            fs::read_to_string(proj.join("a.txt")).unwrap(),
+            "v1",
+            "le fichier d'origine est restauré"
+        );
+        assert!(
+            !proj.join("b.txt").exists(),
+            "le restore doit supprimer la cible du renommage, pas laisser un doublon"
+        );
+    }
+
+    /// BARRIÈRE — un dépôt git imbriqué non-gitignoré (submodule, clone
+    /// vendored) est enregistré par `add -A` comme gitlink (`160000 commit`),
+    /// que `ls-tree -r --name-only` rend comme un chemin PLAT. Sur disque
+    /// c'est un dossier : le cas 1 de `refuse_on_destructive_type_conflict`
+    /// walkait donc son contenu, n'en trouvait aucun dans `created` (le diff
+    /// ne voit que l'entrée gitlink) et refusait TOUS les restores du projet,
+    /// définitivement, en accusant le submodule. `checkout-index` ne
+    /// matérialise de toute façon jamais un gitlink : ces entrées n'ont rien
+    /// à faire dans la liste des chemins que le restore va écrire.
+    #[test]
+    fn restore_ignores_nested_git_repository_gitlinks() {
+        let data_root = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let proj = root.path();
+        fs::write(proj.join("a.txt"), "v1").unwrap();
+
+        let nested = proj.join("vendor/lib");
+        fs::create_dir_all(&nested).unwrap();
+        for args in [
+            vec!["init", "-q", nested.to_str().unwrap()],
+            vec![
+                "-C",
+                nested.to_str().unwrap(),
+                "config",
+                "user.email",
+                "t@e.st",
+            ],
+            vec!["-C", nested.to_str().unwrap(), "config", "user.name", "t"],
+        ] {
+            assert!(git_command().args(&args).status().unwrap().success());
+        }
+        fs::write(nested.join("lib.txt"), "libv1").unwrap();
+        for args in [
+            vec!["-C", nested.to_str().unwrap(), "add", "-A"],
+            vec!["-C", nested.to_str().unwrap(), "commit", "-qm", "init"],
+        ] {
+            assert!(git_command().args(&args).status().unwrap().success());
+        }
+
+        let store = store_for(data_root.path(), proj);
+        let (id, _tree) = store.snapshot("t1").unwrap();
+        fs::write(proj.join("a.txt"), "v2").unwrap();
+
+        store
+            .restore(&id)
+            .expect("un dépôt imbriqué ne doit pas rendre le restore impossible");
+
+        assert_eq!(
+            fs::read_to_string(proj.join("a.txt")).unwrap(),
+            "v1",
+            "le reste de l'arbre est bien restauré"
+        );
+        assert_eq!(
+            fs::read_to_string(nested.join("lib.txt")).unwrap(),
+            "libv1",
+            "le contenu du dépôt imbriqué est laissé intact (jamais capturé, jamais écrasé)"
+        );
     }
 
     /// Fix A4 — RED avant `-z`: `git diff --name-only` (sans `-z`) octal-
