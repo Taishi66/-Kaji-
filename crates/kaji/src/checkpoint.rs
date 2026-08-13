@@ -121,20 +121,40 @@ fn init_bare(git_dir: &Path) -> Result<()> {
 /// `read-tree` / `checkout-index` sequence across processes is precisely the
 /// index corruption premortem PM6 exists to prevent. The returned `File`
 /// keeps the lock while it lives; dropping it releases it.
+///
+/// Retries a few times on `EWOULDBLOCK` before refusing: macOS releases an
+/// `flock` asynchronously, so right after a lock is dropped a fresh open +
+/// flock on the same path can spuriously report busy for ~1 ms even though
+/// nothing holds it (F_GETLK then names the current process itself,
+/// `l_pid = -1`; the lag is amplified by concurrent flock churn in parallel
+/// test runs). A store that is *really* held by another process stays busy
+/// for tens of ms, so the bounded retry absorbs the ghost without masking
+/// genuine contention — a real competitor is still refused loudly.
 fn acquire_store_lock(git_dir: &Path) -> Result<File> {
     let path = git_dir.join("kaji-store.lock");
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("ouverture de {}", path.display()))?;
-    match file.try_lock_exclusive() {
-        Ok(()) => Ok(file),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => bail!(
-            "store occupé par une autre instance kaji (snapshot ou restore en cours) — opération refusée, réessaye dans un instant"
-        ),
-        Err(error) => Err(error).with_context(|| format!("flock sur {}", path.display())),
+    let mut attempts = 0;
+    loop {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("ouverture de {}", path.display()))?;
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                attempts += 1;
+                if attempts >= 4 {
+                    bail!(
+                        "store occupé par une autre instance kaji (snapshot ou restore en cours) — opération refusée, réessaye dans un instant"
+                    )
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("flock sur {}", path.display()))
+            }
+        }
     }
 }
 
@@ -475,7 +495,6 @@ impl CheckpointStore {
     /// or mutate the store mid-restore.
     pub fn restore(&self, target: &CheckpointId) -> Result<()> {
         validate_checkpoint_id(&target.0)?;
-
         let _guard = self.lock.lock().unwrap();
         let _store_lock = acquire_store_lock(&self.git_dir)?;
         let tree = self.tree_of_locked(target)?;
