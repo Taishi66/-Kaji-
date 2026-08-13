@@ -1,7 +1,6 @@
 use crate::checkpoint::{CheckpointId, CheckpointStore};
-use crate::session::session_manager::SessionManager;
+use crate::session::session_manager::{SessionEvent, SessionManager};
 use anyhow::{bail, Context, Result};
-use std::path::Path;
 use tracing::warn;
 
 /// Outcome of a successful [`restore_checkpoint`]: the `turn_seq` of the
@@ -12,17 +11,16 @@ pub struct RestoreOutcome {
     pub restored_turn: i64,
 }
 
-/// Finds `target`'s `checkpoint` event for `session_id` and returns its
+/// Finds `target`'s `checkpoint` event in `events` and returns its
 /// `(boundary_message_id, turn_seq)`. `turn_seq` comes off the event row
 /// itself (not the payload) — it is the same column every other event kind
-/// uses.
-async fn checkpoint_boundary(
-    sm: &SessionManager,
+/// uses. `session_id` is only for the error message.
+fn checkpoint_boundary(
+    events: &[SessionEvent],
     session_id: &str,
     target: &CheckpointId,
 ) -> Result<(Option<String>, i64)> {
-    let events = sm.events_for_session(session_id).await?;
-    for event in &events {
+    for event in events {
         if event.kind != "checkpoint" {
             continue;
         }
@@ -44,10 +42,62 @@ async fn checkpoint_boundary(
     )
 }
 
+/// The store's git I/O is synchronous subprocess work. `block_in_place`
+/// keeps the executor healthy on the multi-thread runtime but *panics* on a
+/// current-thread one — there, run inline: that runtime has a single caller
+/// by construction (tokio-test defaults, one-shot tools), and briefly
+/// blocking it is the only remaining option.
+fn run_store_blocking<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
+/// Journals a pre-restore snapshot as a `checkpoint` event (payload shape of
+/// `Agent::snapshot_checkpoint`, `captured: "pre_restore"`), on the
+/// session's latest `turn_seq`. Best-effort: a failed append costs only the
+/// *visibility* of the net (the snapshot itself is already in the store),
+/// never the restore.
+async fn journal_pre_restore(
+    sm: &SessionManager,
+    session_id: &str,
+    events: &[SessionEvent],
+    id: CheckpointId,
+    tree_sha: String,
+) {
+    let boundary_message_id = match sm.last_message_id(session_id).await {
+        Ok(id) => id,
+        Err(error) => {
+            warn!(
+                ?error,
+                "checkpoint: last_message_id lookup failed, pre-restore boundary will be null"
+            );
+            None
+        }
+    };
+    let turn_seq = events.iter().map(|event| event.turn_seq).max().unwrap_or(0);
+    let payload = serde_json::json!({
+        "checkpoint_id": id.0,
+        "tree_sha": tree_sha,
+        "captured": "pre_restore",
+        "boundary_message_id": boundary_message_id,
+    })
+    .to_string();
+    if let Err(error) = sm
+        .append_event(session_id, turn_seq, "checkpoint", &payload)
+        .await
+    {
+        warn!(?error, "event log append failed for pre-restore checkpoint");
+    }
+}
+
 /// Restores a project's working tree *and* its session's conversation to the
 /// state captured by `target`, as one logical transaction.
 ///
-/// The order below — and step 4's fatality in particular — are safety
+/// The order below — and step 5's fatality in particular — are safety
 /// invariants, not style choices: see premortem PM2
 /// (`09 - Meta/premortems/kaji-checkpoints-2026-08-12.md`), which is exactly
 /// the "restore left files and conversation out of sync" failure mode this
@@ -57,38 +107,63 @@ async fn checkpoint_boundary(
 ///    of the project or the conversation. Best-effort: if it fails, the only
 ///    thing lost is the safety net for *this* restore — the restore itself
 ///    must still proceed (`warn!`, never `?`).
-/// 2. **Boundary lookup**, also before any mutation. A checkpoint whose
-///    `boundary_message_id` is `null` (no message had been persisted yet
-///    when it was captured) makes the conversation half of a coupled
-///    restore meaningless — refuse loudly here rather than truncate at a
-///    guess.
-/// 3. **Git restore** of the working tree. On error, abort: nothing about
+/// 2. **Read-only gates**, all before any mutation:
+///    - the target's `checkpoint` event must exist;
+///    - its `boundary_message_id` must be non-`null` (no message had been
+///      persisted yet when it was captured) — otherwise the conversation
+///      half of a coupled restore is meaningless: refuse loudly rather than
+///      truncate at a guess;
+///    - the boundary message must *still exist* in `messages`: compaction
+///      (or a previous restore's truncation) may have deleted it, and
+///      `truncate_conversation_from_message` on a vanished id is a silent
+///      no-op — the restore would then "succeed" having restored files but
+///      left the conversation untouched, the exact PM2 divergence.
+/// 3. **Journal the pre-restore snapshot** as a `checkpoint` event — after
+///    the gates (a refused restore leaves no event noise), before the git
+///    restore (if step 5 fails, the net is already visible in
+///    `/checkpoints`). Its own boundary points at a message step 5 is about
+///    to delete, so a coupled restore *back* will refuse at gate 2c: the net
+///    is a files-level net, recovered via the store's git history.
+/// 4. **Git restore** of the working tree. On error, abort: nothing about
 ///    the conversation has been touched yet, so the session stays intact.
-/// 4. **Truncate the conversation** from the checkpoint's boundary message.
-///    By the time this runs, step 3 has already overwritten the working
+/// 5. **Truncate the conversation** from the checkpoint's boundary message.
+///    By the time this runs, step 4 has already overwritten the working
 ///    tree — a silently-swallowed failure here would be precisely the
 ///    half-restored, files-and-chat-disagree state PM2 warns about. This
 ///    step must stay `?` + `.context(...)`, never `warn!` + continue.
 pub async fn restore_checkpoint(
     store: &CheckpointStore,
     sm: &SessionManager,
-    project: &Path,
     session_id: &str,
     target: &CheckpointId,
 ) -> Result<RestoreOutcome> {
-    if let Err(error) = tokio::task::block_in_place(|| store.snapshot(project, "pre-restore")) {
-        warn!(
-            ?error,
-            "checkpoint: pre-restore snapshot failed, continuing restore without an undo-the-undo net"
-        );
-    }
+    let pre_restore = match run_store_blocking(|| store.snapshot("pre-restore")) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            warn!(
+                ?error,
+                "checkpoint: pre-restore snapshot failed, continuing restore without an undo-the-undo net"
+            );
+            None
+        }
+    };
 
-    let (boundary_message_id, turn_seq) = checkpoint_boundary(sm, session_id, target).await?;
+    let events = sm.events_for_session(session_id).await?;
+    let (boundary_message_id, turn_seq) = checkpoint_boundary(&events, session_id, target)?;
     let Some(message_id) = boundary_message_id else {
         bail!("restore couplé impossible : frontière conversation absente pour ce checkpoint");
     };
+    if !sm.message_exists(session_id, &message_id).await? {
+        bail!(
+            "restore couplé impossible : la frontière conversation ({message_id}) a été supprimée depuis (compaction ?) — arbre et conversation laissés intacts"
+        );
+    }
 
-    tokio::task::block_in_place(|| store.restore(project, target))
+    if let Some((pre_restore_id, pre_restore_tree)) = pre_restore {
+        journal_pre_restore(sm, session_id, &events, pre_restore_id, pre_restore_tree).await;
+    }
+
+    run_store_blocking(|| store.restore(target))
         .context("restore de l'arbre a échoué — conversation intacte")?;
 
     sm.truncate_conversation_from_message(session_id, &message_id)
@@ -110,7 +185,7 @@ mod tests {
     use crate::session::session_manager::SessionType;
     use crate::subprocess::git_command;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     fn store_for(project: &Path) -> CheckpointStore {
@@ -179,7 +254,7 @@ mod tests {
             .await
             .unwrap();
         fs::write(project.join("a.txt"), "v1").unwrap();
-        let (checkpoint_id, tree1) = store.snapshot(project, "turn-1").unwrap();
+        let (checkpoint_id, tree1) = store.snapshot("turn-1").unwrap();
         let payload = serde_json::json!({
             "checkpoint_id": checkpoint_id.0,
             "tree_sha": tree1,
@@ -198,7 +273,7 @@ mod tests {
             .await
             .unwrap();
 
-        let outcome = restore_checkpoint(&store, &sm, project, &sid, &checkpoint_id)
+        let outcome = restore_checkpoint(&store, &sm, &sid, &checkpoint_id)
             .await
             .expect("restore should succeed");
 
@@ -253,7 +328,7 @@ mod tests {
             .await
             .unwrap();
         fs::write(project.join("a.txt"), "v1").unwrap();
-        let (checkpoint_id, tree1) = store.snapshot(project, "turn-1").unwrap();
+        let (checkpoint_id, tree1) = store.snapshot("turn-1").unwrap();
         let payload = serde_json::json!({
             "checkpoint_id": checkpoint_id.0,
             "tree_sha": tree1,
@@ -266,13 +341,18 @@ mod tests {
             .unwrap();
         fs::write(project.join("a.txt"), "v2").unwrap();
 
+        // The injected failure must hit the truncation's DELETE itself — a
+        // dropped table would already trip the read-only existence gate and
+        // refuse before any mutation, which is the *other* barrier test.
         let pool = sm.storage().pool().await.unwrap();
-        sqlx::query("DROP TABLE messages")
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER block_deletes BEFORE DELETE ON messages BEGIN SELECT RAISE(ABORT, 'delete blocked by test'); END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
 
-        let result = restore_checkpoint(&store, &sm, project, &sid, &checkpoint_id).await;
+        let result = restore_checkpoint(&store, &sm, &sid, &checkpoint_id).await;
 
         assert!(
             result.is_err(),
@@ -283,6 +363,178 @@ mod tests {
             "v1",
             "the tree restore itself did succeed before truncation failed (documents the ordering)"
         );
+    }
+
+    /// BARRIER — la frontière est relue de `messages` juste avant de
+    /// trancher : si la compaction (ou la troncature d'un restore précédent)
+    /// l'a supprimée, `truncate_conversation_from_message` serait un no-op
+    /// silencieux (`fetch_optional` → `None` → `Ok(())`), produisant
+    /// précisément l'état demi-restauré — fichiers changés, conversation
+    /// intacte — que PM2 interdit. Le refus doit précéder toute mutation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_refuses_when_boundary_message_was_deleted_by_compaction() {
+        let data_root = TempDir::new().unwrap();
+        let project_root = TempDir::new().unwrap();
+        let session_root = TempDir::new().unwrap();
+        let _guard = env_lock::lock_env([(
+            "KAJI_PATH_ROOT",
+            Some(data_root.path().to_str().expect("utf8 temp path")),
+        )]);
+        let project = project_root.path();
+        let store = store_for(project);
+        let sm = SessionManager::new(session_root.path().to_path_buf());
+        let sid = new_session(&sm).await;
+
+        sm.add_message(&sid, &Message::user().with_text("turn 1").with_id("m1"))
+            .await
+            .unwrap();
+        fs::write(project.join("a.txt"), "v1").unwrap();
+        let (checkpoint_id, tree1) = store.snapshot("turn-1").unwrap();
+        let payload = serde_json::json!({
+            "checkpoint_id": checkpoint_id.0,
+            "tree_sha": tree1,
+            "captured": "pre_turn",
+            "boundary_message_id": "m1",
+        })
+        .to_string();
+        sm.append_event(&sid, 1, "checkpoint", &payload)
+            .await
+            .unwrap();
+
+        sm.truncate_conversation_from_message(&sid, "m1")
+            .await
+            .unwrap();
+        assert!(
+            !sm.message_exists(&sid, "m1").await.unwrap(),
+            "précondition : la frontière a bien disparu de `messages`"
+        );
+        fs::write(project.join("a.txt"), "v2").unwrap();
+
+        let result = restore_checkpoint(&store, &sm, &sid, &checkpoint_id).await;
+
+        let error =
+            result.expect_err("a vanished boundary message must refuse the coupled restore");
+        assert!(
+            error.to_string().contains("supprimée"),
+            "error must name the deleted boundary: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("a.txt")).unwrap(),
+            "v2",
+            "the tree must NOT have been restored — the existence check runs before any mutation"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_journals_the_pre_restore_snapshot_as_a_checkpoint_event() {
+        let data_root = TempDir::new().unwrap();
+        let project_root = TempDir::new().unwrap();
+        let session_root = TempDir::new().unwrap();
+        let _guard = env_lock::lock_env([(
+            "KAJI_PATH_ROOT",
+            Some(data_root.path().to_str().expect("utf8 temp path")),
+        )]);
+        let project = project_root.path();
+        let store = store_for(project);
+        let sm = SessionManager::new(session_root.path().to_path_buf());
+        let sid = new_session(&sm).await;
+
+        sm.add_message(&sid, &Message::user().with_text("turn 1").with_id("m1"))
+            .await
+            .unwrap();
+        fs::write(project.join("a.txt"), "v1").unwrap();
+        let (checkpoint_id, tree1) = store.snapshot("turn-1").unwrap();
+        let payload = serde_json::json!({
+            "checkpoint_id": checkpoint_id.0,
+            "tree_sha": tree1,
+            "captured": "pre_turn",
+            "boundary_message_id": "m1",
+        })
+        .to_string();
+        sm.append_event(&sid, 1, "checkpoint", &payload)
+            .await
+            .unwrap();
+        fs::write(project.join("a.txt"), "v2").unwrap();
+        sm.add_message(&sid, &Message::assistant().with_text("done").with_id("m2"))
+            .await
+            .unwrap();
+
+        restore_checkpoint(&store, &sm, &sid, &checkpoint_id)
+            .await
+            .expect("restore should succeed");
+
+        let events = sm.events_for_session(&sid).await.unwrap();
+        let pre_restore = events
+            .iter()
+            .filter(|event| event.kind == "checkpoint")
+            .filter_map(|event| {
+                serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    .ok()
+                    .map(|payload| (event.turn_seq, payload))
+            })
+            .find(|(_, payload)| {
+                payload.get("captured").and_then(|v| v.as_str()) == Some("pre_restore")
+            })
+            .expect("the pre-restore snapshot must be journaled as a checkpoint event");
+        let (event_turn_seq, payload) = pre_restore;
+        assert_eq!(
+            event_turn_seq, 1,
+            "l'event pre-restore porte le turn_seq courant (le dernier de la session)"
+        );
+        let pre_restore_id = payload
+            .get("checkpoint_id")
+            .and_then(|v| v.as_str())
+            .expect("pre-restore event carries its own restorable id");
+        assert_ne!(
+            pre_restore_id, checkpoint_id.0,
+            "l'event pre-restore référence SON snapshot, pas la cible"
+        );
+        assert_eq!(
+            payload.get("boundary_message_id").and_then(|v| v.as_str()),
+            Some("m2"),
+            "la frontière du pre-restore est le dernier message AVANT troncature"
+        );
+    }
+
+    /// BARRIER — `block_in_place` panique sur un runtime current-thread ;
+    /// le restore doit fonctionner sur les deux flavors (les tests tokio par
+    /// défaut et tout futur appelant one-shot sont current-thread).
+    #[tokio::test]
+    async fn restore_succeeds_on_a_current_thread_runtime() {
+        let data_root = TempDir::new().unwrap();
+        let project_root = TempDir::new().unwrap();
+        let session_root = TempDir::new().unwrap();
+        let _guard = env_lock::lock_env([(
+            "KAJI_PATH_ROOT",
+            Some(data_root.path().to_str().expect("utf8 temp path")),
+        )]);
+        let project = project_root.path();
+        let store = store_for(project);
+        let sm = SessionManager::new(session_root.path().to_path_buf());
+        let sid = new_session(&sm).await;
+
+        sm.add_message(&sid, &Message::user().with_text("turn 1").with_id("m1"))
+            .await
+            .unwrap();
+        fs::write(project.join("a.txt"), "v1").unwrap();
+        let (checkpoint_id, tree1) = store.snapshot("turn-1").unwrap();
+        let payload = serde_json::json!({
+            "checkpoint_id": checkpoint_id.0,
+            "tree_sha": tree1,
+            "captured": "pre_turn",
+            "boundary_message_id": "m1",
+        })
+        .to_string();
+        sm.append_event(&sid, 1, "checkpoint", &payload)
+            .await
+            .unwrap();
+        fs::write(project.join("a.txt"), "v2").unwrap();
+
+        restore_checkpoint(&store, &sm, &sid, &checkpoint_id)
+            .await
+            .expect("restore must not panic nor fail on a current-thread runtime");
+
+        assert_eq!(fs::read_to_string(project.join("a.txt")).unwrap(), "v1");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -300,7 +552,7 @@ mod tests {
         let sid = new_session(&sm).await;
 
         fs::write(project.join("a.txt"), "v1").unwrap();
-        let (checkpoint_id, tree1) = store.snapshot(project, "turn-1").unwrap();
+        let (checkpoint_id, tree1) = store.snapshot("turn-1").unwrap();
         let payload = serde_json::json!({
             "checkpoint_id": checkpoint_id.0,
             "tree_sha": tree1,
@@ -313,7 +565,7 @@ mod tests {
             .unwrap();
         fs::write(project.join("a.txt"), "v2").unwrap();
 
-        let result = restore_checkpoint(&store, &sm, project, &sid, &checkpoint_id).await;
+        let result = restore_checkpoint(&store, &sm, &sid, &checkpoint_id).await;
 
         let error = result.expect_err("a null boundary_message_id must refuse the coupled restore");
         assert!(

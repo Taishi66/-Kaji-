@@ -791,6 +791,17 @@ impl SessionManager {
         self.storage.last_message_id(session_id).await
     }
 
+    /// `true` ssi `message_id` est encore présent parmi les messages
+    /// persistés de la session. La frontière d'un restore couplé est lue du
+    /// payload de l'event `checkpoint` mais peut avoir été supprimée depuis
+    /// (compaction, troncature d'un restore précédent) —
+    /// `truncate_conversation_from_message` sur un id absent est un no-op
+    /// silencieux, donc le restore doit re-vérifier ici AVANT de toucher à
+    /// l'arbre.
+    pub async fn message_exists(&self, session_id: &str, message_id: &str) -> Result<bool> {
+        self.storage.message_exists(session_id, message_id).await
+    }
+
     /// `Some` ssi le dernier tour de la session a un `turn_start` sans
     /// `turn_end` correspondant (tour interrompu par crash/kill/annulation).
     pub async fn last_turn_is_interrupted(
@@ -2583,6 +2594,18 @@ impl SessionStorage {
         .await?
         .flatten();
         Ok(message_id)
+    }
+
+    async fn message_exists(&self, session_id: &str, message_id: &str) -> Result<bool> {
+        let pool = self.pool().await?;
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = ? AND message_id = ?)",
+        )
+        .bind(session_id)
+        .bind(message_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(exists != 0)
     }
 
     async fn last_turn_is_interrupted(&self, session_id: &str) -> Result<Option<InterruptedTurn>> {
@@ -5045,6 +5068,31 @@ mod tests {
             sm.last_message_id(&sid).await.unwrap().as_deref(),
             Some("m2"),
             "dernier message persisté = frontière de restore couplé"
+        );
+    }
+
+    #[tokio::test]
+    async fn message_exists_reflects_presence_and_later_deletion() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = new_session(&sm).await;
+
+        assert!(
+            !sm.message_exists(&sid, "m1").await.unwrap(),
+            "message jamais persisté → absent"
+        );
+
+        sm.add_message(&sid, &Message::user().with_text("m1").with_id("m1"))
+            .await
+            .unwrap();
+        assert!(sm.message_exists(&sid, "m1").await.unwrap());
+
+        sm.truncate_conversation_from_message(&sid, "m1")
+            .await
+            .unwrap();
+        assert!(
+            !sm.message_exists(&sid, "m1").await.unwrap(),
+            "frontière supprimée (compaction/troncature) → un restore couplé doit pouvoir le détecter"
         );
     }
 

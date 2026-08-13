@@ -311,18 +311,32 @@ fn docker_report() -> Vec<Line<'static>> {
 
 /// Builds the `/checkpoints` listing from the session's full event log —
 /// pure (no `SessionManager`) so the formatting is unit-testable on its own,
-/// mirroring `interrupted_turn_line`. The `checkpoint` event's own payload
-/// (`checkpoint_id`/`tree_sha`/`captured`/`boundary_message_id`, see
-/// `Agent::snapshot_checkpoint`) carries no prompt text, so the preview
-/// prefers the sibling `turn_start` event's `query_preview` (same
-/// `turn_seq`) — falling back to the checkpoint's own `boundary_message_id`,
-/// then a placeholder, if that event is missing (e.g. an old/replayed log).
+/// mirroring `interrupted_turn_line`. Each line carries the
+/// `checkpoint_id` — it is the handle `/restore <id>` takes, so a listing
+/// without it would make restore un-typable. Pre-restore snapshots
+/// (`captured: "pre_restore"`, journaled by `restore_checkpoint`) are marked
+/// as such to distinguish them from the per-turn ones. The payload carries
+/// no prompt text, so the preview prefers the sibling `turn_start` event's
+/// `query_preview` (same `turn_seq`) — falling back to the checkpoint's own
+/// `boundary_message_id`, then a placeholder, if that event is missing
+/// (e.g. an old/replayed log).
 fn checkpoints_lines(events: &[SessionEvent]) -> Vec<Line<'static>> {
     events
         .iter()
         .filter(|event| event.kind == "checkpoint")
         .filter_map(|checkpoint| {
             let payload: serde_json::Value = serde_json::from_str(&checkpoint.payload_json).ok()?;
+            let id = payload
+                .get("checkpoint_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string();
+            let marker = if payload.get("captured").and_then(|v| v.as_str()) == Some("pre_restore")
+            {
+                " · pre-restore"
+            } else {
+                ""
+            };
             let preview = events
                 .iter()
                 .find(|event| event.kind == "turn_start" && event.turn_seq == checkpoint.turn_seq)
@@ -343,7 +357,7 @@ fn checkpoints_lines(events: &[SessionEvent]) -> Vec<Line<'static>> {
                 .unwrap_or_else(|| "(sans aperçu)".to_string());
             let preview = crate::tui::ui::sanitize_for_display(&preview);
             Some(Line::from(Span::styled(
-                format!("tour {} · {preview}", checkpoint.turn_seq),
+                format!("tour {} · {id}{marker} · {preview}", checkpoint.turn_seq),
                 theme::system(),
             )))
         })
@@ -367,7 +381,6 @@ async fn perform_restore(
     restore_checkpoint(
         &store,
         session_manager,
-        &project,
         session_id,
         &CheckpointId(checkpoint_id.to_string()),
     )
@@ -772,6 +785,61 @@ mod tests {
 
         assert_eq!(spec.title, "Demo");
         assert_eq!(spec.body, "# Demo\ncorps");
+    }
+
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn checkpoints_lines_show_the_restorable_id_and_prompt_preview() {
+        let events = vec![
+            SessionEvent {
+                id: 1,
+                turn_seq: 1,
+                ts_ms: 0,
+                kind: "turn_start".into(),
+                payload_json: r#"{"query_preview":"corrige le bug"}"#.into(),
+            },
+            SessionEvent {
+                id: 2,
+                turn_seq: 1,
+                ts_ms: 0,
+                kind: "checkpoint".into(),
+                payload_json: r#"{"checkpoint_id":"a1b2c3d4e5f6","tree_sha":"t","captured":"pre_turn","boundary_message_id":"m1"}"#.into(),
+            },
+        ];
+
+        let lines = checkpoints_lines(&events);
+
+        assert_eq!(lines.len(), 1);
+        let text = line_text(&lines[0]);
+        assert!(
+            text.contains("a1b2c3d4e5f6"),
+            "sans l'id dans la ligne, /restore <id> est impossible à saisir : {text}"
+        );
+        assert!(text.contains("corrige le bug"), "aperçu du prompt : {text}");
+    }
+
+    #[test]
+    fn checkpoints_lines_mark_pre_restore_snapshots() {
+        let events = vec![SessionEvent {
+            id: 3,
+            turn_seq: 2,
+            ts_ms: 0,
+            kind: "checkpoint".into(),
+            payload_json: r#"{"checkpoint_id":"fedcba987654","tree_sha":"t","captured":"pre_restore","boundary_message_id":"m9"}"#.into(),
+        }];
+
+        let lines = checkpoints_lines(&events);
+
+        assert_eq!(lines.len(), 1);
+        let text = line_text(&lines[0]);
+        assert!(
+            text.contains("pre-restore"),
+            "un snapshot pre-restore doit être distinguable d'un pre-turn : {text}"
+        );
+        assert!(text.contains("fedcba987654"), "id restaurable : {text}");
     }
 
     #[test]
