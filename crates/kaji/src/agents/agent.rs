@@ -610,6 +610,22 @@ impl Agent {
         }
     }
 
+    /// The store this agent's snapshots are written to, `None` when
+    /// checkpointing is disabled for this session.
+    ///
+    /// `/restore` must restore through *this* store rather than deriving one
+    /// from the process's current directory: `wire_checkpoint_store` pins it
+    /// to `session.working_dir`, and a resumed session is allowed to run
+    /// from a different directory (see `handle_resumed_session_workdir` in
+    /// kaji-cli, which lets the user decline switching back). Deriving a
+    /// second store from the cwd would key a *different* on-disk store than
+    /// the one holding this session's snapshots — restoring the session's
+    /// own checkpoints would be impossible, and the pre-restore snapshot
+    /// would `git add -A` an unrelated directory.
+    pub fn checkpoint_store(&self) -> Option<Arc<CheckpointStore>> {
+        self.checkpoint_store.clone()
+    }
+
     pub(crate) fn stop_hook_block_cap(&self) -> u32 {
         #[cfg(test)]
         if let Some(cap) = self.stop_hook_block_cap_override {

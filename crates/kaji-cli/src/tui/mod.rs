@@ -364,22 +364,29 @@ fn checkpoints_lines(events: &[SessionEvent]) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Resolves the current directory's checkpoint store and drives the coupled
-/// restore (`crate`'s own git tree + this session's conversation) through to
-/// completion. `restore_checkpoint` is itself `async` and does its blocking
-/// git I/O via `tokio::task::block_in_place` internally (requires the
-/// multi-thread runtime `main.rs` builds — see `Builder::new_multi_thread`),
-/// so this just awaits it directly on `event_loop`'s existing runtime; no
-/// extra `spawn`/`block_in_place` wrapping needed here.
+/// Drives the coupled restore (the session project's tree + this session's
+/// conversation) through to completion on the store the caller already has.
+///
+/// `store` is the agent's own wired store (`Agent::checkpoint_store`, pinned
+/// to `session.working_dir`) — never one derived here from
+/// `std::env::current_dir()`: a resumed session may run from a different
+/// directory, and a cwd-derived store keys a different on-disk store than
+/// the one holding this session's snapshots. See
+/// `perform_restore_uses_the_passed_store_not_the_process_cwd`.
+///
+/// `restore_checkpoint` is itself `async` and does its blocking git I/O via
+/// `tokio::task::block_in_place` internally (requires the multi-thread
+/// runtime `main.rs` builds — see `Builder::new_multi_thread`), so this just
+/// awaits it directly on `event_loop`'s existing runtime; no extra
+/// `spawn`/`block_in_place` wrapping needed here.
 async fn perform_restore(
+    store: &CheckpointStore,
     session_manager: &SessionManager,
     session_id: &str,
     checkpoint_id: &str,
 ) -> Result<RestoreOutcome> {
-    let project = std::env::current_dir().context("resolving current directory for restore")?;
-    let store = CheckpointStore::for_project(&project).context("opening checkpoint store")?;
     restore_checkpoint(
-        &store,
+        store,
         session_manager,
         session_id,
         &CheckpointId(checkpoint_id.to_string()),
@@ -538,12 +545,23 @@ async fn event_loop(
                     Action::Restore(id) => app.open_restore_confirm(id),
                     Action::RestoreConfirm => {
                         if let Some(id) = app.take_pending_restore() {
-                            match perform_restore(&session_manager, session_id, &id).await {
-                                Ok(outcome) => app.push_system(&format!(
-                                    "⚠ restauré au tour {} — arbre et conversation alignés",
-                                    outcome.restored_turn
-                                )),
-                                Err(e) => app.push_system(&format!("erreur restore : {e}")),
+                            // The agent's own store, pinned to
+                            // `session.working_dir` — see `perform_restore`.
+                            match agent.checkpoint_store() {
+                                Some(store) => {
+                                    match perform_restore(&store, &session_manager, session_id, &id)
+                                        .await
+                                    {
+                                        Ok(outcome) => app.push_system(&format!(
+                                            "⚠ restauré au tour {} — arbre et conversation alignés",
+                                            outcome.restored_turn
+                                        )),
+                                        Err(e) => app.push_system(&format!("erreur restore : {e}")),
+                                    }
+                                }
+                                None => app.push_system(
+                                    "restore indisponible : aucun store de checkpoints pour cette session",
+                                ),
                             }
                         }
                     }
@@ -789,6 +807,74 @@ mod tests {
 
     fn line_text(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// BARRIER — a restore must operate on the store the session's snapshots
+    /// were written to, never one derived from the process's current
+    /// directory: a resumed session may legitimately run from elsewhere
+    /// (`handle_resumed_session_workdir` lets the user decline switching
+    /// back), and a cwd-derived store keys a different on-disk store — the
+    /// session's own checkpoints become unrestorable and the pre-restore
+    /// snapshot `git add -A`s an unrelated directory. The test's own cwd is
+    /// the kaji repo, deliberately *not* the project being restored.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn perform_restore_uses_the_passed_store_not_the_process_cwd() {
+        use kaji::conversation::message::Message;
+        use kaji::session::session_manager::SessionType;
+
+        let data_root = tempfile::tempdir().unwrap();
+        let project_root = tempfile::tempdir().unwrap();
+        let session_root = tempfile::tempdir().unwrap();
+        let _guard = env_lock::lock_env([(
+            "KAJI_PATH_ROOT",
+            Some(data_root.path().to_str().expect("utf8 temp path")),
+        )]);
+        let project = project_root.path();
+        let store = CheckpointStore::for_project(project).expect("store for the session project");
+        let session_manager = SessionManager::new(session_root.path().to_path_buf());
+        let session = session_manager
+            .create_session(
+                project.to_path_buf(),
+                "restore-cwd".to_string(),
+                SessionType::User,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        session_manager
+            .add_message(&session.id, &Message::user().with_text("t1").with_id("m1"))
+            .await
+            .unwrap();
+        std::fs::write(project.join("a.txt"), "v1").unwrap();
+        let (checkpoint_id, tree) = store.snapshot("turn-1").unwrap();
+        session_manager
+            .append_event(
+                &session.id,
+                1,
+                "checkpoint",
+                &serde_json::json!({
+                    "checkpoint_id": checkpoint_id.0,
+                    "tree_sha": tree,
+                    "captured": "pre_turn",
+                    "boundary_message_id": "m1",
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+        std::fs::write(project.join("a.txt"), "v2").unwrap();
+
+        let outcome = perform_restore(&store, &session_manager, &session.id, &checkpoint_id.0)
+            .await
+            .expect("restore must find the checkpoint in the session's own store");
+
+        assert_eq!(outcome.restored_turn, 1);
+        assert_eq!(
+            std::fs::read_to_string(project.join("a.txt")).unwrap(),
+            "v1",
+            "le work-tree de la session est restauré, pas celui du cwd du process"
+        );
     }
 
     #[test]
