@@ -305,18 +305,26 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(theme::border_inactive())
         .title(Span::styled(title, title_style));
     let inner = block.inner(area);
+    // Left breathing room so the text/cursor doesn't collide with the border,
+    // mirroring the chat's `CHAT_HORIZONTAL_MARGIN`.
+    let content = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(1),
+        ..inner
+    };
 
     let paragraph = if app.input.is_empty() && !app.turn_active {
         Paragraph::new("écris ici…").style(theme::dim())
     } else {
         Paragraph::new(app.input.as_str()).style(theme::text())
     };
-    let scroll_x = app.input_scroll_x(inner.width.max(1));
-    frame.render_widget(paragraph.block(block).scroll((0, scroll_x)), area);
+    let scroll_x = app.input_scroll_x(content.width.max(1));
+    frame.render_widget(block, area);
+    frame.render_widget(paragraph.scroll((0, scroll_x)), content);
 
     let cursor_x =
-        inner.x + (app.input_cursor_chars() - scroll_x).min(inner.width.saturating_sub(1));
-    frame.set_cursor_position((cursor_x, inner.y));
+        content.x + (app.input_cursor_chars() - scroll_x).min(content.width.saturating_sub(1));
+    frame.set_cursor_position((cursor_x, content.y));
 }
 
 /// Command palette (T5) — overlay anchored just above the input box, drawn
