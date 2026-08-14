@@ -1138,6 +1138,7 @@ config_value!(KAJI_PROMPT_EDITOR, Option<String>);
 config_value!(KAJI_PROMPT_EDITOR_ALWAYS, Option<bool>);
 config_value!(KAJI_MAX_ACTIVE_AGENTS, usize);
 config_value!(KAJI_DISABLE_SESSION_NAMING, bool);
+config_value!(KAJI_TOOL_SHORT_DESCRIPTIONS, bool);
 
 impl Config {
     pub fn get_kaji_context_limit(&self) -> Result<Option<usize>, ConfigError> {

@@ -175,6 +175,7 @@ These variables control how kaji manages conversation sessions and context.
 | `KAJI_TOOL_CALL_CUTOFF` | Number of tool calls to keep in full detail before summarizing older tool outputs to help maintain efficient context usage | Integer (e.g., 5, 10, 20) | Computed from the model context limit and auto-compaction threshold |
 | `KAJI_MOIM_MESSAGE_TEXT` | Injects persistent text into kaji's [working memory](/docs/guides/context-engineering/using-persistent-instructions) every turn. Useful for behavioral guardrails or persistent reminders. | Any text string | Not set |
 | `KAJI_MOIM_MESSAGE_FILE` | Path to a file whose contents are injected into kaji's [working memory](/docs/guides/context-engineering/using-persistent-instructions) every turn. Supports `~/`. Max 64 KB per file. | File path | Not set |
+| `KAJI_TOOL_SHORT_DESCRIPTIONS` | Caps each tool description at 120 characters (cut at a word boundary, ellipsis appended) before it is sent to the model. Shrinks the tool surface for small-context models at the cost of descriptive fidelity. | "1", "true" (case-insensitive) to enable | false |
 
 **Examples**
 

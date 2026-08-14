@@ -300,12 +300,44 @@ pub(crate) fn prepare_tools_for_provider(
     system_prompt: String,
     model_config: &ModelConfig,
 ) -> (Vec<Tool>, Vec<Tool>, String) {
+    let tools = maybe_shorten_tool_descriptions(tools);
     if model_config.toolshim {
         let system_prompt = modify_system_prompt_for_tool_json(&system_prompt, &tools);
         (Vec::new(), tools, system_prompt)
     } else {
         (tools, Vec::new(), system_prompt)
     }
+}
+
+/// Cap every tool description at SHORT_TOOL_DESCRIPTION_MAX_CHARS when
+/// `KAJI_TOOL_SHORT_DESCRIPTIONS` is enabled, so small-context models get a
+/// leaner tool surface. Truncation cuts at the last word boundary and appends
+/// an ellipsis so the model still sees a coherent sentence.
+fn maybe_shorten_tool_descriptions(mut tools: Vec<Tool>) -> Vec<Tool> {
+    let enabled = Config::global()
+        .get_kaji_tool_short_descriptions()
+        .unwrap_or(false);
+    if !enabled {
+        return tools;
+    }
+    const SHORT_TOOL_DESCRIPTION_MAX_CHARS: usize = 120;
+    for tool in &mut tools {
+        if let Some(description) = tool.description.as_ref() {
+            let trimmed = description.trim();
+            if trimmed.chars().count() > SHORT_TOOL_DESCRIPTION_MAX_CHARS {
+                let mut shortened: String = trimmed
+                    .chars()
+                    .take(SHORT_TOOL_DESCRIPTION_MAX_CHARS)
+                    .collect();
+                if let Some(space) = shortened.rfind([' ', '\n']) {
+                    shortened.truncate(space);
+                }
+                shortened.push('…');
+                tool.description = Some(shortened.into());
+            }
+        }
+    }
+    tools
 }
 
 #[tracing::instrument(
@@ -1818,5 +1850,34 @@ mod tests {
             "no content chunk observed means no TTFT"
         );
         assert!(stats.elapsed_ms.expect("elapsed_ms must be filled") >= 100);
+    }
+
+    #[test]
+    fn maybe_shorten_tool_descriptions_sticks_to_word_boundary() {
+        let long_description = "Performs a detailed multi-step analysis of the given codebase including dependency resolution, test discovery, and historical trend computation.".repeat(3);
+        let description: &'static str = Box::leak(long_description.clone().into_boxed_str());
+        let tools = vec![Tool::new(
+            "analyze",
+            description,
+            object!({"type": "object"}),
+        )];
+
+        let config = Config::global();
+        // Write the flag so the function reads it back through the real path.
+        config
+            .set_kaji_tool_short_descriptions(true)
+            .expect("flag must be settable");
+        let shortened = maybe_shorten_tool_descriptions(tools);
+        config
+            .set_kaji_tool_short_descriptions(false)
+            .expect("flag must be resettable");
+
+        let text = shortened[0].description.as_ref().expect("description kept");
+        assert!(text.chars().count() < long_description.chars().count());
+        assert!(text.ends_with('…'), "truncated text keeps an ellipsis");
+        assert!(
+            !text.ends_with(' '),
+            "truncation must not leave a trailing space"
+        );
     }
 }
