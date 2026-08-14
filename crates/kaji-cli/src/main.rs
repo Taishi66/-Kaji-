@@ -16,7 +16,39 @@ fn enable_windows_vt_processing() {
     let _ = console::Term::stderr().features().colors_supported();
 }
 
+/// Apply `--profile <name>` from the raw argv before config is first touched.
+///
+/// `Config::global()` can be initialized as early as `setup_logging` (otel/layers
+/// read it), which runs before clap parses. Scanning argv here guarantees the
+/// profile is visible to `Config::default()` regardless of the code path.
+fn apply_profile_from_argv() {
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--profile" => {
+                if let Some(value) = args.get(i + 1) {
+                    std::env::set_var("KAJI_PROFILE", value);
+                    return;
+                }
+            }
+            flag if flag.starts_with("--profile=") => {
+                if let Some(value) = flag.strip_prefix("--profile=") {
+                    if !value.is_empty() {
+                        std::env::set_var("KAJI_PROFILE", value);
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
 async fn run() -> Result<()> {
+    apply_profile_from_argv();
+
     if let Err(e) = kaji_cli::logging::setup_logging(None) {
         eprintln!("Warning: Failed to initialize logging: {}", e);
     }

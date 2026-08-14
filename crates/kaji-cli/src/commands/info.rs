@@ -12,9 +12,8 @@ fn print_aligned(label: &str, value: &str, width: usize) {
     println!("  {:<width$} {}", label, value, width = width);
 }
 
-use kaji::config::base::CONFIG_YAML_NAME;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn check_path_status(path: &Path) -> String {
     if path.exists() {
@@ -108,7 +107,7 @@ pub async fn handle_info(verbose: bool, check: bool) -> Result<()> {
     let sessions_db = sessions_dir.join(DB_NAME);
     let config = Config::global();
     let config_dir = Paths::config_dir();
-    let config_yaml_file = config_dir.join(CONFIG_YAML_NAME);
+    let config_yaml_file = PathBuf::from(config.path());
 
     let paths = [
         ("Config dir:", &config_dir),

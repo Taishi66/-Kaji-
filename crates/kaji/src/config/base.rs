@@ -169,10 +169,47 @@ fn additional_config_paths_from_env() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// Resolve the active settings profile from `KAJI_PROFILE`.
+///
+/// A profile replaces the user `config.yaml` layer wholesale with
+/// `config_dir/<name>.yaml` (no inheritance from `config.yaml`), mirroring
+/// Ante's named profiles. Returns `None` when no profile is requested, so the
+/// default `config.yaml` layer is used.
+fn active_profile_name() -> Option<String> {
+    env::var("KAJI_PROFILE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_profile_name(name: &str) -> Result<(), ConfigError> {
+    if name
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
+        && !name.is_empty()
+    {
+        Ok(())
+    } else {
+        Err(ConfigError::DirectoryError(format!(
+            "invalid KAJI_PROFILE name: {name:?} (use lowercase letters, digits, '-', '_')"
+        )))
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         let config_dir = Paths::config_dir();
-        let user_config_path = config_dir.join(CONFIG_YAML_NAME);
+        let user_config_name = match active_profile_name() {
+            Some(profile) if validate_profile_name(&profile).is_ok() => format!("{profile}.yaml"),
+            Some(invalid) => {
+                tracing::warn!(
+                    "Ignoring invalid KAJI_PROFILE {invalid:?} (use lowercase letters, digits, '-', '_'); falling back to config.yaml"
+                );
+                CONFIG_YAML_NAME.to_string()
+            }
+            None => CONFIG_YAML_NAME.to_string(),
+        };
+        let user_config_path = config_dir.join(user_config_name);
 
         let mut config_paths = vec![system_config_path()];
         config_paths.extend(additional_config_paths_from_env());
@@ -1269,6 +1306,94 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use tempfile::{NamedTempFile, TempDir};
+    #[test]
+    fn test_active_profile_name() {
+        let _guard = env_lock::lock_env([
+            ("KAJI_PROFILE", Some("work")),
+            ("KAJI_PATH_ROOT", None::<&str>),
+        ]);
+        assert_eq!(active_profile_name().as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn test_active_profile_name_ignores_blank() {
+        let _guard = env_lock::lock_env([
+            ("KAJI_PROFILE", Some("  ")),
+            ("KAJI_PATH_ROOT", None::<&str>),
+        ]);
+        assert_eq!(active_profile_name(), None);
+    }
+
+    #[test]
+    fn test_active_profile_name_none_when_unset() {
+        let _guard = env_lock::lock_env([
+            ("KAJI_PROFILE", None::<&str>),
+            ("KAJI_PATH_ROOT", None::<&str>),
+        ]);
+        assert_eq!(active_profile_name(), None);
+    }
+
+    #[test]
+    fn test_validate_profile_name_accepts_slug() {
+        assert!(validate_profile_name("bare").is_ok());
+        assert!(validate_profile_name("sdd_aiad").is_ok());
+        assert!(validate_profile_name("foo-bar-2").is_ok());
+    }
+
+    #[test]
+    fn test_validate_profile_name_rejects_unsafe() {
+        assert!(validate_profile_name("foo/bar").is_err());
+        assert!(validate_profile_name("..").is_err());
+        assert!(validate_profile_name("").is_err());
+        assert!(validate_profile_name("Foo Bar").is_err());
+    }
+
+    #[test]
+    fn test_default_uses_profile_file_when_set() {
+        let _guard = env_lock::lock_env([
+            ("KAJI_PROFILE", Some("work")),
+            ("KAJI_ADDITIONAL_CONFIG_FILES", None::<&str>),
+            ("KAJI_DISABLE_KEYRING", Some("1")),
+        ]);
+        let temp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("KAJI_PATH_ROOT", temp.path());
+
+        let config = Config::default();
+
+        std::env::remove_var("KAJI_PATH_ROOT");
+        assert!(
+            config.path().ends_with("config/work.yaml"),
+            "expected profile file, got {} (config_yaml_name={}, config_dir={})",
+            config.path(),
+            CONFIG_YAML_NAME,
+            config
+                .path()
+                .rsplit_once('/')
+                .map(|(d, _)| d)
+                .unwrap_or_default(),
+        );
+    }
+
+    #[test]
+    fn test_default_uses_config_yaml_without_profile() {
+        let _guard = env_lock::lock_env([
+            ("KAJI_PROFILE", None::<&str>),
+            ("KAJI_ADDITIONAL_CONFIG_FILES", None::<&str>),
+            ("KAJI_DISABLE_KEYRING", Some("1")),
+        ]);
+        let temp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("KAJI_PATH_ROOT", temp.path());
+
+        let config = Config::default();
+
+        std::env::remove_var("KAJI_PATH_ROOT");
+        assert!(
+            config.path().ends_with(CONFIG_YAML_NAME),
+            "expected config.yaml, got {}",
+            config.path()
+        );
+    }
+
     #[test]
     fn test_basic_config() -> Result<(), ConfigError> {
         let config = new_test_config();

@@ -67,6 +67,15 @@ impl From<ServePlatform> for KajiPlatform {
 #[derive(Parser)]
 #[command(name = "kaji", author, version, display_name = "", about, long_about = None)]
 pub struct Cli {
+    #[arg(
+        long = "profile",
+        value_name = "NAME",
+        global = true,
+        help = "Use a named settings profile instead of config.yaml",
+        long_help = "Replace the user config.yaml layer wholesale with a separate <NAME>.yaml settings file (no inheritance from config.yaml). Values omitted from the profile fall back to kaji defaults. Equivalent to setting KAJI_PROFILE."
+    )]
+    pub profile: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -2299,6 +2308,10 @@ pub async fn cli() -> anyhow::Result<()> {
     register_builtin_extensions(kaji_mcp::BUILTIN_EXTENSIONS.clone());
 
     let cli = Cli::parse();
+
+    if let Some(profile) = &cli.profile {
+        std::env::set_var("KAJI_PROFILE", profile);
+    }
 
     let command_name = get_command_name(&cli.command);
     tracing::info!(
