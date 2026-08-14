@@ -1,11 +1,11 @@
 use crate::tui::app::{App, ChatLine, Sender, ToolApprovalRequest};
 use crate::tui::{markdown, theme};
 use kaji_core::sdd::StageStatus;
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
-use ratatui::Frame;
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let root = Layout::default()
@@ -301,6 +301,14 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         (format!(" ⏳ {elapsed}s — Esc annule "), theme::accent())
     } else {
         (" message ".to_string(), theme::title())
+    };
+    let (title, title_style) = if app.steer_len() > 0 {
+        (
+            format!("{title} 🔀 {} en file — Ctrl+S ", app.steer_len()),
+            theme::accent(),
+        )
+    } else {
+        (title, title_style)
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -630,8 +638,8 @@ mod tests {
 
     #[test]
     fn palette_renders_filtered_commands_above_the_input() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new(None);
         for c in "/s".chars() {
@@ -652,8 +660,8 @@ mod tests {
 
     #[test]
     fn palette_is_absent_without_slash_input_and_without_matches() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         for input in ["", "hello", "/xyz"] {
             let mut app = App::new(None);
@@ -681,8 +689,8 @@ mod tests {
     /// can't pass by construction.
     #[test]
     fn line_wrapped_rows_matches_ratatui_actual_wrap_for_cjk_text() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let text = "鍛冶".repeat(5); // 10 CJK chars, 20 cells wide
         let line = Line::from(text.clone());
@@ -839,8 +847,8 @@ mod tests {
     /// rendered `Line` of that block.
     #[test]
     fn streaming_agent_line_carries_the_blade_cursor() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new(None);
         app.begin_turn();
@@ -883,8 +891,8 @@ mod tests {
 
     #[test]
     fn blade_cursor_absent_once_turn_has_finished() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new(None);
         app.begin_turn();
@@ -905,8 +913,8 @@ mod tests {
 
     #[test]
     fn blade_cursor_absent_for_tool_line() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new(None);
         app.begin_turn();
@@ -929,8 +937,8 @@ mod tests {
 
     #[test]
     fn blade_cursor_absent_for_thinking_line() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new(None);
         app.begin_turn();
@@ -951,8 +959,8 @@ mod tests {
 
     #[test]
     fn blade_cursor_absent_for_system_line() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new(None);
         app.begin_turn();
@@ -980,8 +988,8 @@ mod tests {
     /// would move these numbers, not just their relative order.
     #[test]
     fn draw_chat_records_a_row_offset_for_every_user_turn() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new(None);
         app.push_system("intro");
@@ -1013,8 +1021,8 @@ mod tests {
 
     #[test]
     fn draw_chat_clears_stale_user_turn_rows_when_no_user_lines_remain() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new(None);
         app.user_turn_rows.borrow_mut().push(7);
@@ -1043,8 +1051,8 @@ mod tests {
     /// column, masking the very bug this test targets.
     #[test]
     fn palette_does_not_panic_nor_overflow_on_a_narrow_terminal() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new(None);
         for c in "/s".chars() {
@@ -1161,8 +1169,8 @@ mod tests {
     /// would actually see on screen.
     #[test]
     fn approval_modal_renders_hostile_command_with_visible_markers() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new(None);
         let hostile_prompt = "Exécuter `echo ok\t\u{200B}rm -rf /`\u{202E} ?".to_string();
@@ -1211,8 +1219,8 @@ mod tests {
     /// rather than unknowingly approving a truncated view of the command.
     #[test]
     fn approval_modal_marks_truncation_explicitly_instead_of_clipping_silently() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new(None);
         let long_prompt = format!("rm -rf {}", "x".repeat(2000));

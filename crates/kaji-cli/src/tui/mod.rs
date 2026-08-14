@@ -6,17 +6,17 @@ pub mod ui;
 
 use anyhow::{Context, Result};
 use app::{Action, App, PassDriver};
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use kaji::agents::{Agent, AgentEvent, SessionConfig};
 use kaji::checkpoint::{CheckpointId, CheckpointStore};
-use kaji::checkpoint_restore::{restore_checkpoint, RestoreOutcome};
+use kaji::checkpoint_restore::{RestoreOutcome, restore_checkpoint};
 use kaji::config::Config;
 use kaji::conversation::message::Message;
 use kaji::permission::permission_confirmation::PrincipalType;
 use kaji::permission::{Permission, PermissionConfirmation};
-use kaji::session::session_manager::{InterruptedTurn, SessionEvent};
 use kaji::session::SessionManager;
+use kaji::session::session_manager::{InterruptedTurn, SessionEvent};
 use kaji_core::sdd::SpecDoc;
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
@@ -178,11 +178,15 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
 fn navigation_section(mouse_enabled: bool, content_style: Style) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled("navigation", theme::title()))];
     if mouse_enabled {
-        let rows: [(&str, &str); 6] = [
+        let rows: [(&str, &str); 7] = [
             ("molette", "défile le chat (3 lignes/cran)"),
             ("PageUp/PageDown", "défile par page · Home/End"),
             ("Ctrl+↑/↓", "saute au tour précédent/suivant"),
             ("↑/↓", "historique de prompts"),
+            (
+                "Ctrl+S",
+                "steer : envoie les messages en file au tour en cours",
+            ),
             ("Esc", "interrompt · Ctrl+C quitte"),
             ("Option+glisser", "sélectionner du texte"),
         ];
@@ -201,6 +205,7 @@ fn navigation_section(mouse_enabled: bool, content_style: Style) -> Vec<Line<'st
         for text in [
             "PageUp/PageDown/Home/End font défiler le chat",
             "Ctrl+↑/↓ saute au tour précédent/suivant",
+            "Ctrl+S steer : envoie les messages en file au tour en cours",
             "Esc interrompt · Ctrl+C quitte",
         ] {
             lines.push(Line::from(Span::styled(text, content_style)));
@@ -488,6 +493,37 @@ async fn event_loop(
                             app.pass_abort("tour annulé — passe interrompue");
                         }
                     }
+                    Action::SteerNow => {
+                        // Live guidance (item 2 ante): interrupt the running
+                        // turn — the queued message then auto-submits on the
+                        // turn's natural teardown path below, exactly like the
+                        // auto-flush at turn end.
+                        if let Some(token) = &cancel {
+                            token.cancel();
+                        }
+                        if app.turn_pending {
+                            pending = None;
+                            cancel = None;
+                            app.turn_pending = false;
+                            app.status.clear();
+                        }
+                        if app.driver != PassDriver::Idle {
+                            app.pass_abort("tour steeré — passe interrompue");
+                        }
+                        if !app.turn_active {
+                            // No stream is running to drain the queue on
+                            // teardown (cancel of a pending setup falls here) —
+                            // flush the queue straight into a fresh turn.
+                            flush_steer_queue(
+                                &mut app,
+                                agent,
+                                &session_config,
+                                &mut pending,
+                                &mut cancel,
+                            );
+                        }
+                        app.push_system("🔀 steering — message injecté comme guidance");
+                    }
                     Action::Submit(text) => {
                         app.push_user(&text);
                         pending = Some(begin_setup(&mut app, agent, &session_config, &text, &mut cancel));
@@ -629,6 +665,16 @@ async fn event_loop(
                         teardown_turn(&mut app);
                         if let Some(prompt) = app.turn_end() {
                             pending = Some(begin_setup(&mut app, agent, &session_config, &prompt, &mut cancel));
+                        } else if flush_steer_queue(
+                            &mut app,
+                            agent,
+                            &session_config,
+                            &mut pending,
+                            &mut cancel,
+                        ) {
+                            // Queued steering message auto-submitted as a new
+                            // turn (item 2 ante "do nothing — queued messages
+                            // are submitted automatically once the turn ends").
                         } else {
                             app.suggestion_loading = true;
                             suggest_next_prompt(agent, session_id, &conversation, &suggestion_tx).await;
@@ -718,6 +764,25 @@ fn teardown_turn(app: &mut App) {
     app.git_status = refresh_git_status();
 }
 
+/// Submits the next queued steering message as a fresh turn (item 2 ante).
+/// Returns `true` when a message was consumed and a setup future armed, so
+/// the caller knows the queue is non-empty at this point. Used both by the
+/// turn-end auto-flush and by `Ctrl+S` when no stream is running to drain.
+fn flush_steer_queue<'a>(
+    app: &mut App,
+    agent: &'a Agent,
+    session_config: &SessionConfig,
+    pending: &mut Option<Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'a>>> + 'a>>>,
+    cancel: &mut Option<CancellationToken>,
+) -> bool {
+    let Some(text) = app.next_steer() else {
+        return false;
+    };
+    app.push_user(&text);
+    *pending = Some(begin_setup(app, agent, session_config, &text, cancel));
+    true
+}
+
 /// Next-prompt ghost (item 7): spawns a best-effort, off-critical-path task
 /// that asks the active provider for a short "what to do next" suggestion
 /// after a turn ends cleanly, delivering it over `suggestion_tx`. Strictly
@@ -762,7 +827,11 @@ async fn suggest_next_prompt(
         )
         .await
         {
-            let text = response.user_visible_content().as_concat_text().trim().to_string();
+            let text = response
+                .user_visible_content()
+                .as_concat_text()
+                .trim()
+                .to_string();
             if !text.is_empty() {
                 let _ = tx.send(text).await;
             }
@@ -1119,10 +1188,11 @@ mod tests {
         assert!(!app.show_thinking);
         seed_chat(&mut app, &conversation);
 
-        assert!(!app
-            .chat
-            .iter()
-            .any(|l| matches!(l.sender, Sender::Thinking)));
+        assert!(
+            !app.chat
+                .iter()
+                .any(|l| matches!(l.sender, Sender::Thinking))
+        );
     }
 
     #[test]
@@ -1137,10 +1207,11 @@ mod tests {
 
         seed_chat(&mut app, &conversation);
 
-        assert!(app
-            .chat
-            .iter()
-            .any(|l| l.text.contains('✓') && l.text.contains("shell")));
+        assert!(
+            app.chat
+                .iter()
+                .any(|l| l.text.contains('✓') && l.text.contains("shell"))
+        );
         assert!(!app.chat.iter().any(|l| l.tool.is_some()));
     }
 
@@ -1153,10 +1224,11 @@ mod tests {
         seed_chat(&mut app, &conversation);
 
         assert!(!app.chat.iter().any(|l| l.tool.is_some()));
-        assert!(app
-            .chat
-            .iter()
-            .any(|l| l.text.contains("interrompu") && l.text.contains("shell")));
+        assert!(
+            app.chat
+                .iter()
+                .any(|l| l.text.contains("interrompu") && l.text.contains("shell"))
+        );
     }
 
     /// Finding 1: a session interrupted mid-approval persists its
@@ -1232,10 +1304,11 @@ mod tests {
         let mut app = App::new(None);
         apply_interrupted_turn_marker(&mut app, sm.last_turn_is_interrupted(&sid).await);
 
-        assert!(app
-            .chat
-            .iter()
-            .any(|l| l.sender == Sender::System && l.text.contains("tour interrompu")));
+        assert!(
+            app.chat
+                .iter()
+                .any(|l| l.sender == Sender::System && l.text.contains("tour interrompu"))
+        );
     }
 
     #[tokio::test]
@@ -1393,8 +1466,8 @@ mod tests {
     /// which keeps column offsets in the returned strings matching terminal
     /// columns 1:1.
     fn rendered_rows(app: &App) -> Vec<String> {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let backend = TestBackend::new(120, 60);
         let mut terminal = Terminal::new(backend).expect("test backend terminal");
@@ -1412,8 +1485,8 @@ mod tests {
     }
 
     fn welcome_line_fg(app: &App, needle: &str) -> ratatui::style::Color {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let backend = TestBackend::new(120, 60);
         let mut terminal = Terminal::new(backend).expect("test backend terminal");

@@ -1,6 +1,6 @@
 use kaji::agents::AgentEvent;
-use kaji::conversation::message::{ActionRequiredData, Message, MessageContentBlock};
 use kaji::conversation::Conversation;
+use kaji::conversation::message::{ActionRequiredData, Message, MessageContentBlock};
 use kaji::providers::base::ProviderUsage;
 use kaji_core::sdd::{SddPass, SpecDoc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -77,6 +77,8 @@ pub enum Action {
     Restore(String),
     RestoreConfirm,
     RestoreCancel,
+    /// `Ctrl+S` — flush queued steer messages into the running turn.
+    SteerNow,
 }
 
 pub struct Command {
@@ -276,6 +278,11 @@ pub struct App {
     agent_stream_idx: Option<usize>,
     pending_tools: HashMap<String, usize>,
     spec_panel_forced: Option<bool>,
+    /// Messages typed while a turn is running (item 2 ante "steering"):
+    /// Enter queues them instead of dropping them, `Ctrl+S` flushes them into
+    /// the running turn as live guidance, and they auto-submit when the turn
+    /// ends. Kept in submit order, drained FIFO.
+    pub steer_queue: Vec<String>,
 }
 
 impl App {
@@ -320,6 +327,7 @@ impl App {
             agent_stream_idx: None,
             pending_tools: HashMap::new(),
             spec_panel_forced: None,
+            steer_queue: Vec::new(),
         }
     }
 
@@ -431,6 +439,28 @@ impl App {
     pub fn finish_turn(&mut self) {
         self.turn_active = false;
         self.turn_started = None;
+    }
+
+    /// Queues a steering message typed while a turn is running (item 2 ante).
+    /// Returns the queue depth after pushing — the caller surfaces it so the
+    /// user sees how many messages are waiting.
+    pub fn queue_steer(&mut self, text: &str) -> usize {
+        self.steer_queue.push(text.to_string());
+        self.steer_queue.len()
+    }
+
+    pub fn steer_len(&self) -> usize {
+        self.steer_queue.len()
+    }
+
+    /// Takes the next queued steering message, FIFO. Returns `None` when the
+    /// queue is empty.
+    pub fn next_steer(&mut self) -> Option<String> {
+        if self.steer_queue.is_empty() {
+            None
+        } else {
+            Some(self.steer_queue.remove(0))
+        }
     }
 
     /// Called from every turn-begin path (`begin_setup`, covering Submit,
@@ -886,6 +916,19 @@ impl App {
                 self.delete_last_word();
                 Action::None
             }
+            // Steering flush (item 2 ante): `Ctrl+S` while a turn is running
+            // (or with messages queued) — `event_loop` cancels the running
+            // turn and submits the queued message as live guidance.
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.steer_queue.is_empty() {
+                    self.push_system(
+                        "rien en file — tape un message pendant un tour pour le steer",
+                    );
+                    Action::None
+                } else {
+                    Action::SteerNow
+                }
+            }
             KeyCode::Char(c) => {
                 self.exit_history_navigation();
                 self.reset_palette_selection();
@@ -919,18 +962,28 @@ impl App {
                 Action::None
             }
             KeyCode::Esc if self.turn_active || self.turn_pending => Action::CancelTurn,
-            // `/restore` carves itself out of the blanket "no input while a
-            // turn is running" guard below: it needs to reach the general
-            // Enter arm even mid-turn so it can push its OWN barrier message
-            // (premortem PM6 — "termine ou annule le tour avant de
-            // restaurer") instead of the generic "tour en cours". Every other
-            // command/message still gets the generic guard untouched.
+            // Steering (item 2 ante): while a turn is running, Enter queues
+            // the draft instead of dropping it — `Ctrl+S` flushes it into the
+            // running turn, and anything still queued auto-submits at turn
+            // end. `/restore` carves itself out of the blanket queue below:
+            // it needs to reach the general Enter arm even mid-turn so it can
+            // push its OWN barrier message (premortem PM6) instead of the
+            // queue path. Every other command/message still gets the queue.
             KeyCode::Enter
                 if (self.turn_active || self.turn_pending)
                     && restore_command_arg(self.input.trim()).is_none() =>
             {
-                self.push_system("tour en cours — Esc pour annuler d'abord");
-                Action::None
+                let text = self.input.trim().to_string();
+                self.input.clear();
+                if text.is_empty() {
+                    Action::None
+                } else {
+                    let depth = self.queue_steer(&text);
+                    self.push_system(&format!(
+                        "🔀 mis en file ({depth}) — Ctrl+S pour steer, envoi auto en fin de tour"
+                    ));
+                    Action::None
+                }
             }
             KeyCode::Enter => {
                 if self.palette_visible() {
@@ -1376,10 +1429,11 @@ mod tests {
         }
         let action = app.on_event(&key(KeyCode::Enter));
         assert_eq!(action, Action::None);
-        assert!(app
-            .chat
-            .iter()
-            .any(|l| l.text.contains("termine ou annule le tour")));
+        assert!(
+            app.chat
+                .iter()
+                .any(|l| l.text.contains("termine ou annule le tour"))
+        );
     }
 
     #[test]
@@ -1397,18 +1451,21 @@ mod tests {
     }
 
     #[test]
-    fn enter_during_active_turn_does_not_submit() {
+    fn enter_during_active_turn_queues_steer() {
         let mut app = App::new(None);
         app.turn_active = true;
         app.on_event(&key(KeyCode::Char('h')));
         app.on_event(&key(KeyCode::Char('i')));
         let action = app.on_event(&key(KeyCode::Enter));
         assert_eq!(action, Action::None);
-        assert_eq!(app.input, "hi");
-        assert!(app
-            .chat
-            .iter()
-            .any(|l| l.text.contains("tour en cours") && l.text.contains("Esc")));
+        assert_eq!(app.input, "");
+        assert_eq!(app.steer_len(), 1);
+        assert_eq!(app.next_steer().as_deref(), Some("hi"));
+        assert!(
+            app.chat
+                .iter()
+                .any(|l| l.text.contains("mis en file") && l.text.contains("Ctrl+S"))
+        );
     }
 
     #[test]
@@ -1419,18 +1476,56 @@ mod tests {
     }
 
     #[test]
-    fn enter_during_pending_setup_does_not_submit() {
+    fn enter_during_pending_setup_queues_steer() {
         let mut app = App::new(None);
         app.turn_pending = true;
         app.on_event(&key(KeyCode::Char('h')));
         app.on_event(&key(KeyCode::Char('i')));
         let action = app.on_event(&key(KeyCode::Enter));
         assert_eq!(action, Action::None);
-        assert_eq!(app.input, "hi");
-        assert!(app
-            .chat
-            .iter()
-            .any(|l| l.text.contains("tour en cours") && l.text.contains("Esc")));
+        assert_eq!(app.input, "");
+        assert_eq!(app.steer_len(), 1);
+    }
+
+    #[test]
+    fn ctrl_s_with_queue_returns_steer_now() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+        app.queue_steer("use the helper");
+        assert_eq!(
+            app.on_event(&ctrl_key(KeyCode::Char('s'))),
+            Action::SteerNow
+        );
+    }
+
+    #[test]
+    fn ctrl_s_without_queue_is_noop_with_hint() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+        assert_eq!(app.on_event(&ctrl_key(KeyCode::Char('s'))), Action::None);
+        assert_eq!(app.steer_len(), 0);
+        assert!(app.chat.iter().any(|l| l.text.contains("rien en file")));
+    }
+
+    #[test]
+    fn ctrl_s_when_idle_returns_steer_now_if_queue_has_items() {
+        let mut app = App::new(None);
+        app.queue_steer("resume");
+        assert_eq!(
+            app.on_event(&ctrl_key(KeyCode::Char('s'))),
+            Action::SteerNow
+        );
+    }
+
+    #[test]
+    fn steer_queue_is_fifo() {
+        let mut app = App::new(None);
+        app.queue_steer("first");
+        app.queue_steer("second");
+        assert_eq!(app.steer_len(), 2);
+        assert_eq!(app.next_steer().as_deref(), Some("first"));
+        assert_eq!(app.next_steer().as_deref(), Some("second"));
+        assert_eq!(app.next_steer(), None);
     }
 
     #[test]
@@ -1929,11 +2024,12 @@ mod tests {
         app.start_pass();
         assert!(app.gate_open);
         assert_eq!(app.pass.current(), Some(kaji_core::sdd::SddStage::Gate));
-        assert!(!app
-            .pass
-            .stages()
-            .iter()
-            .any(|(_, status)| *status == kaji_core::sdd::StageStatus::Failed));
+        assert!(
+            !app.pass
+                .stages()
+                .iter()
+                .any(|(_, status)| *status == kaji_core::sdd::StageStatus::Failed)
+        );
     }
 
     #[test]
@@ -1948,10 +2044,11 @@ mod tests {
         assert_eq!(app.driver, PassDriver::Idle);
         assert!(app.pass.drifted());
         assert!(app.validate_buffer.is_empty());
-        assert!(app
-            .chat
-            .iter()
-            .any(|l| l.text.contains("échec du démarrage")));
+        assert!(
+            app.chat
+                .iter()
+                .any(|l| l.text.contains("échec du démarrage"))
+        );
     }
 
     #[test]
@@ -2005,10 +2102,11 @@ mod tests {
         assert_eq!(agent_lines.len(), 2);
         assert_eq!(agent_lines[0].text, "Bon");
         assert_eq!(agent_lines[1].text, "jour");
-        assert!(app
-            .chat
-            .iter()
-            .any(|l| matches!(l.sender, Sender::System) && l.text.contains("outil")));
+        assert!(
+            app.chat
+                .iter()
+                .any(|l| matches!(l.sender, Sender::System) && l.text.contains("outil"))
+        );
     }
 
     #[test]
@@ -2390,10 +2488,11 @@ mod tests {
         app.apply_agent_event(&AgentEvent::Message(resp_msg));
 
         assert!(!app.chat.iter().any(|l| l.text.contains("⚙ shell")));
-        assert!(app
-            .chat
-            .iter()
-            .any(|l| l.text.contains('✓') && l.text.contains("shell")));
+        assert!(
+            app.chat
+                .iter()
+                .any(|l| l.text.contains('✓') && l.text.contains("shell"))
+        );
         assert!(!app.chat.iter().any(|l| l.tool.is_some()));
     }
 
@@ -2414,10 +2513,11 @@ mod tests {
         );
         app.apply_agent_event(&AgentEvent::Message(resp_msg));
 
-        assert!(app
-            .chat
-            .iter()
-            .any(|l| l.text.contains('✗') && l.text.contains("compile")));
+        assert!(
+            app.chat
+                .iter()
+                .any(|l| l.text.contains('✗') && l.text.contains("compile"))
+        );
     }
 
     #[test]
@@ -2640,10 +2740,11 @@ mod tests {
         }
         assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
         assert!(app.show_thinking);
-        assert!(app
-            .chat
-            .iter()
-            .any(|l| matches!(l.sender, Sender::System) && l.text.contains("思考中")));
+        assert!(
+            app.chat
+                .iter()
+                .any(|l| matches!(l.sender, Sender::System) && l.text.contains("思考中"))
+        );
 
         for c in "/think".chars() {
             app.on_event(&key(KeyCode::Char(c)));
@@ -2666,10 +2767,11 @@ mod tests {
     fn thinking_block_is_dropped_when_show_thinking_is_off() {
         let mut app = App::new(None);
         agent_thinks(&mut app, "m1", "raisonnement caché");
-        assert!(!app
-            .chat
-            .iter()
-            .any(|l| matches!(l.sender, Sender::Thinking)));
+        assert!(
+            !app.chat
+                .iter()
+                .any(|l| matches!(l.sender, Sender::Thinking))
+        );
     }
 
     #[test]
