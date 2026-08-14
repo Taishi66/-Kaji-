@@ -6187,6 +6187,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaji-exec"
+version = "1.45.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "pretty_assertions",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "kaji-local-inference"
 version = "0.1.0-alpha.5"
 dependencies = [
