@@ -299,7 +299,7 @@ struct CachedToken {
 }
 
 /// Response structure for token exchange requests.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct TokenResponse {
     /// The access token string
     access_token: String,
@@ -794,8 +794,24 @@ iXVBc2YmAuU8hiOFUPxtyQfNzG5fQ0rhJSewdtyWxIadJSLj6fsK+AEsNQ==
 
     #[tokio::test]
     async fn test_token_refresh_race_condition() {
+        // Local mock of the token endpoint so the test is deterministic and
+        // needs no network or TLS backend.
+        let mock_server = MockServer::start().await;
+        let mut creds = mock_service_account();
+        creds.token_uri = format!("{}/token", mock_server.uri());
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(TokenResponse {
+                access_token: "refreshed_token".to_string(),
+                expires_in: 3600,
+                token_type: "Bearer".to_string(),
+            }))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
         let auth = Arc::new(GcpAuth {
-            credentials: RwLock::new(AdcCredentials::ServiceAccount(mock_service_account())),
+            credentials: RwLock::new(AdcCredentials::ServiceAccount(creds)),
             client: reqwest::Client::new(),
             cached_token: Arc::new(RwLock::new(Some(CachedToken {
                 token: AuthToken {
@@ -815,34 +831,36 @@ iXVBc2YmAuU8hiOFUPxtyQfNzG5fQ0rhJSewdtyWxIadJSLj6fsK+AEsNQ==
                 let result = auth_clone.get_token().await;
                 match result {
                     Ok(token) => {
-                        // Should be the cached token since we can't actually exchange tokens in tests
-                        assert_eq!(
-                            token.token_value, "about_to_expire",
-                            "Expected cached token, got: {}",
+                        // Calls before expiry keep the cached token; after it,
+                        // every caller shares the single refreshed token.
+                        assert!(
+                            token.token_value == "about_to_expire"
+                                || token.token_value == "refreshed_token",
+                            "Unexpected token value: {}",
                             token.token_value
                         );
+                        token.token_value
                     }
-                    Err(e) => {
-                        match e {
-                            AuthError::TokenExchange(err) => {
-                                // This is expected - we can't actually exchange tokens in tests
-                                assert!(
-                                    err.contains("invalid_scope") || err.contains("400"),
-                                    "Unexpected error message: {}",
-                                    err
-                                );
-                            }
-                            other => panic!("Unexpected error type: {:?}", other),
-                        }
-                    }
+                    other => panic!("Unexpected error: {:?}", other),
                 }
             }));
         }
 
         // Wait for all handles
-        for handle in handles {
-            handle.await.unwrap();
-        }
+        let values: Vec<String> = {
+            let mut values = vec![];
+            for handle in handles {
+                values.push(handle.await.unwrap());
+            }
+            values
+        };
+
+        // The refresh must be single-flight: exactly one token exchange.
+        mock_server.verify().await;
+        assert!(
+            values.iter().any(|v| v == "refreshed_token"),
+            "expected at least one caller to observe the refreshed token, got: {values:?}"
+        );
     }
 
     #[tokio::test]

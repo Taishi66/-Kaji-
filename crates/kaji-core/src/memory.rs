@@ -271,14 +271,20 @@ impl Memory {
         let sql_side = "SELECT id, text, entities, body, ts, ttl_ms, session_id
                         FROM memory_entries
                         WHERE session_id = ?1
-                          AND (ttl_ms IS NULL OR ts + ttl_ms >= ?2)
-                        ORDER BY {dir} LIMIT ?3";
+                          AND id != ?2
+                          AND (ttl_ms IS NULL OR ts + ttl_ms >= ?3)
+                        ORDER BY {dir} LIMIT ?4";
         let opening = self
             .conn
             .prepare(&sql_side.replace("{dir}", "ts ASC, id ASC"))
             .ok()?
             .query_map(
-                rusqlite::params![hit.session_id, as_of_ms(now_secs()), bookend as i64],
+                rusqlite::params![
+                    hit.session_id,
+                    hit.id as i64,
+                    as_of_ms(now_secs()),
+                    bookend as i64
+                ],
                 row_to_entry,
             )
             .ok()?
@@ -290,7 +296,12 @@ impl Memory {
             .ok()?;
         let mut resolution_raw = stmt
             .query_map(
-                rusqlite::params![hit.session_id, as_of_ms(now_secs()), bookend as i64],
+                rusqlite::params![
+                    hit.session_id,
+                    hit.id as i64,
+                    as_of_ms(now_secs()),
+                    bookend as i64
+                ],
                 row_to_entry,
             )
             .ok()?

@@ -25,6 +25,11 @@ use crate::config::paths::Paths;
 /// Rendered prefix for the memory block in a system prompt.
 const BLOCK_HEADER: &str = "## KAJI memory — recalled across sessions";
 
+/// Largest body stored as a memory fact. Payloads above this are kept in the
+/// conversation only, so recalling a giant message can't balloon every future
+/// system prompt (or exceed the model's context limit).
+const MAX_FACT_LEN: usize = 4_000;
+
 /// File (relative to the memory dir) holding the shared cross-session store.
 const SHARED_FILE: &str = "shared.db";
 
@@ -89,11 +94,13 @@ impl SessionMemory {
         self.store.should_compact(usage_ratio)
     }
 
-    /// Record a fact about the session, skipping it if already stored. Entity
-    /// extraction is zero-token: content words (length > 3, stopword-filtered)
-    /// become the FTS5-weighted entities column.
+    /// Record a fact about the session, skipping it if already stored or too
+    /// large to be a concise fact (big payloads live in the conversation, not
+    /// in memory, where recall re-injects them into every future system prompt).
+    /// Entity extraction is zero-token: content words (length > 3,
+    /// stopword-filtered) become the FTS5-weighted entities column.
     pub fn ingest(&mut self, text: &str) {
-        if text.trim().is_empty() || self.store.contains_body(text) {
+        if text.trim().is_empty() || text.len() > MAX_FACT_LEN || self.store.contains_body(text) {
             return;
         }
         let entities = extract_entities(text);

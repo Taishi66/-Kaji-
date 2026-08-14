@@ -23,9 +23,13 @@ async fn proactive_and_manual_compaction_continue_with_replaced_usage() -> Resul
         .reply("continued after compaction");
     api.on("after manual compaction").reply("still working");
 
+    // Seed below the auto-compaction threshold (0.6) but above the advisory
+    // band (0.5×threshold) so the <compaction> marker appears without
+    // triggering compaction. context_limit/2 would exceed 0.6 once the system
+    // prompt and memory-recall block are counted by the mock.
     let half_full = format!(
         "fill the context {}",
-        "x".repeat(pipeline.context_limit() / 2)
+        "x".repeat(pipeline.context_limit() / 3)
     );
     pipeline.run([half_full.as_str()]).await?;
     let budget = pipeline.run(["check the budget"]).await?;
@@ -389,8 +393,10 @@ async fn parallel_and_failed_tool_pairs_are_compacted_as_complete_messages() -> 
 #[tokio::test]
 async fn a_small_model_compacts_a_large_tool_result_out_of_the_conversation() -> Result<()> {
     let (pipeline, api) = test_pipeline().await?;
-    let pipeline = pipeline.with_model("gpt-3.5-turbo").await;
-    let large_result = "x".repeat(2_000);
+    // gpt-3.5-turbo's 16k window cannot fit kaji's system prompt + tool
+    // definitions, so the small-model role falls to the fast model.
+    let pipeline = pipeline.with_model("gpt-4o-mini").await;
+    let large_result = "x".repeat(50_000);
 
     let request = Message::assistant().with_tool_request(
         "large-result",

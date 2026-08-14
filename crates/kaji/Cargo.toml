@@ -52,7 +52,6 @@ rustls-tls = [
     "rmcp/reqwest",
     "smithy-transport-reqwest?/rustls",
     "sqlx/runtime-tokio-rustls",
-    "jsonwebtoken/aws_lc_rs",
     "oauth2/reqwest",
     "oauth2/rustls-tls",
     "kaji-providers/rustls-tls",
@@ -70,7 +69,6 @@ native-tls = [
     "rmcp/reqwest-native-tls",
     "smithy-transport-reqwest?/native-tls",
     "sqlx/runtime-tokio-native-tls",
-    "jsonwebtoken/rust_crypto",
     "oauth2/reqwest",
     "oauth2/native-tls",
     "kaji-providers/native-tls",
@@ -161,7 +159,7 @@ smithy-transport-reqwest = { version = "0.1", default-features = false, features
 aws-sdk-sagemakerruntime = { version = "1.104", default-features = false, features = ["rt-tokio"], optional = true }
 
 # For GCP Vertex AI provider auth
-jsonwebtoken = { version = "11.0", default-features = false, features = ["use_pem"] }
+jsonwebtoken = { version = "11.0", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 
 blake3 = { version = "1", default-features = false, features = ["std"] }
 fs2 = { workspace = true }
