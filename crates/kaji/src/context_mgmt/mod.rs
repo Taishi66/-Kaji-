@@ -177,6 +177,17 @@ pub async fn compact_messages(
     let (merged_continuation, _issues) = merge_consecutive_messages(continuation_messages);
     final_messages.extend(merged_continuation);
 
+    // User-visible transcript marker so the compaction point is legible in the
+    // UI and on resume. Kept out of the agent-visible context (`user_only`).
+    // `created` is pinned to the continuation so reload (which orders by
+    // created_timestamp) keeps it right after the summary and before the
+    // preserved prompt.
+    let mut compacted_marker = Message::assistant()
+        .with_text("* Compacted")
+        .with_metadata(MessageMetadata::user_only());
+    compacted_marker.created = continuation_created;
+    final_messages.push(compacted_marker);
+
     if let Some(mut user_msg) = preserved_user_message {
         user_msg.created = continuation_created;
         final_messages.push(user_msg);
@@ -1053,6 +1064,62 @@ mod tests {
         assert!(
             continuation.contains(CONVERSATION_CONTINUATION_TEXT),
             "a trailing turn-context event must not demote the compaction to a tool-loop continuation"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_adds_user_visible_marker_kept_out_of_agent_context() {
+        let conversation = Conversation::new_unvalidated([
+            Message::user().with_text("earlier request"),
+            Message::assistant().with_text("earlier response"),
+            Message::user().with_text("the preserved prompt"),
+        ]);
+        let provider = MockProvider::new(Message::assistant().with_text("summary"), 1000);
+
+        let compacted = compact_messages(
+            &provider,
+            &provider.config,
+            "test-session-id",
+            &conversation,
+            false,
+        )
+        .await
+        .unwrap()
+        .conversation;
+
+        let marker = compacted
+            .messages()
+            .iter()
+            .find(|message| message.as_concat_text() == "* Compacted")
+            .expect("compaction must leave a `* Compacted` marker in the transcript");
+        assert!(marker.is_user_visible());
+        assert!(!marker.is_agent_visible());
+        assert_eq!(marker.role, Role::Assistant);
+
+        let marker_idx = compacted
+            .messages()
+            .iter()
+            .position(|m| m.as_concat_text() == "* Compacted")
+            .unwrap();
+        let after_marker = &compacted.messages()[marker_idx + 1..];
+        let preserved = after_marker
+            .iter()
+            .find(|m| m.as_concat_text().contains("the preserved prompt"))
+            .expect("the preserved prompt must follow the marker");
+        assert!(
+            preserved.is_agent_visible() && !preserved.is_user_visible(),
+            "the preserved prompt is an agent replay that trails the transcript marker"
+        );
+
+        let agent_text = compacted
+            .agent_visible_messages()
+            .iter()
+            .map(Message::as_concat_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !agent_text.contains("* Compacted"),
+            "the marker must not leak into the agent-visible context"
         );
     }
 
