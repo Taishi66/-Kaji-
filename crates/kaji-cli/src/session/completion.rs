@@ -243,6 +243,7 @@ impl KajiCompleter {
             "/builtin".to_string(),
             "/mode".to_string(),
             "/model".to_string(),
+            "/effort".to_string(),
             "/recipe".to_string(),
         ];
         commands.extend(

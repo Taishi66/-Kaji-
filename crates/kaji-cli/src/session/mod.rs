@@ -670,6 +670,10 @@ impl CliSession {
                 history.save(editor);
                 self.handle_model(options).await?;
             }
+            InputResult::Effort(options) => {
+                history.save(editor);
+                self.handle_effort(options).await?;
+            }
             InputResult::Plan(options) => {
                 self.handle_plan_mode(options).await?;
             }
@@ -1017,6 +1021,69 @@ impl CliSession {
             output::kaji_mode_message(&format!(
                 "Session switched from provider '{}' / model '{}' to provider '{}' / model '{}'",
                 current_provider_name, current_model_name, target_provider_name, target_model_name
+            ));
+        }
+        Ok(())
+    }
+
+    async fn handle_effort(&mut self, options: input::EffortCommandOptions) -> Result<()> {
+        let provider = self.agent.provider().await?;
+        let provider_name = provider.get_name().to_string();
+
+        if provider_name.ends_with("-acp") {
+            output::render_error(
+                "Session thinking-effort switching is not supported for ACP providers in the CLI.",
+            );
+            return Ok(());
+        }
+
+        if provider.manages_own_context() {
+            output::render_error(&format!(
+                "Session thinking-effort switching is not supported for provider '{}' because it manages its own conversation context.",
+                provider_name
+            ));
+            return Ok(());
+        }
+
+        let current_model_config = self
+            .agent
+            .model_config_for_session(&self.session_id)
+            .await?;
+        let configured_effort = Config::global().get_kaji_thinking_effort();
+        let current_effort = current_model_config.thinking_effort().or(configured_effort);
+        let effort_was_set = options.effort.is_some();
+
+        let target_effort = match options.effort {
+            Some(level) => match level.parse::<kaji_providers::thinking::ThinkingEffort>() {
+                Ok(effort) => effort,
+                Err(_) => {
+                    output::render_error(&format!(
+                        "Unknown thinking effort '{}'. Use one of: off, low, medium, high, max.",
+                        level
+                    ));
+                    return Ok(());
+                }
+            },
+            None => {
+                let next = next_thinking_effort(current_effort);
+                output::kaji_mode_message(&format!(
+                    "Thinking effort for this session: {} -> {}",
+                    display_effort(current_effort),
+                    next
+                ));
+                next
+            }
+        };
+
+        self.agent
+            .update_thinking_effort(&self.session_id, target_effort)
+            .await?;
+
+        if effort_was_set {
+            output::kaji_mode_message(&format!(
+                "Session thinking effort set to '{}' (was {})",
+                target_effort,
+                display_effort(current_effort)
             ));
         }
         Ok(())
@@ -2605,6 +2672,26 @@ fn build_switched_model_config(
         .map_err(|e| anyhow::anyhow!("Failed to create model configuration: {e}"))
 }
 
+fn next_thinking_effort(
+    current: Option<kaji_providers::thinking::ThinkingEffort>,
+) -> kaji_providers::thinking::ThinkingEffort {
+    use kaji_providers::thinking::ThinkingEffort;
+    match current {
+        None | Some(ThinkingEffort::Off) => ThinkingEffort::Low,
+        Some(ThinkingEffort::Low) => ThinkingEffort::Medium,
+        Some(ThinkingEffort::Medium) => ThinkingEffort::High,
+        Some(ThinkingEffort::High) => ThinkingEffort::Max,
+        Some(ThinkingEffort::Max) => ThinkingEffort::Off,
+    }
+}
+
+fn display_effort(effort: Option<kaji_providers::thinking::ThinkingEffort>) -> String {
+    match effort {
+        Some(effort) => format!("'{effort}'"),
+        None => "provider default".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2878,6 +2965,42 @@ mod tests {
 
         assert_eq!(switched.model_name, current.model_name);
         assert_ne!(switched.thinking_effort(), current.thinking_effort());
+    }
+
+    #[test]
+    fn next_thinking_effort_cycles_through_levels() {
+        use kaji_providers::thinking::ThinkingEffort;
+
+        assert_eq!(next_thinking_effort(None), ThinkingEffort::Low);
+        assert_eq!(
+            next_thinking_effort(Some(ThinkingEffort::Off)),
+            ThinkingEffort::Low
+        );
+        assert_eq!(
+            next_thinking_effort(Some(ThinkingEffort::Low)),
+            ThinkingEffort::Medium
+        );
+        assert_eq!(
+            next_thinking_effort(Some(ThinkingEffort::Medium)),
+            ThinkingEffort::High
+        );
+        assert_eq!(
+            next_thinking_effort(Some(ThinkingEffort::High)),
+            ThinkingEffort::Max
+        );
+        assert_eq!(
+            next_thinking_effort(Some(ThinkingEffort::Max)),
+            ThinkingEffort::Off
+        );
+    }
+
+    #[test]
+    fn thinking_effort_parses_levels() {
+        use kaji_providers::thinking::ThinkingEffort;
+
+        assert_eq!("off".parse::<ThinkingEffort>(), Ok(ThinkingEffort::Off));
+        assert_eq!("max".parse::<ThinkingEffort>(), Ok(ThinkingEffort::Max));
+        assert!("bogus".parse::<ThinkingEffort>().is_err());
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub enum InputResult {
     PromptCommand(PromptCommandOptions),
     KajiMode(String),
     Model(ModelCommandOptions),
+    Effort(EffortCommandOptions),
     Plan(PlanCommandOptions),
     EndPlan,
     Clear,
@@ -51,6 +52,11 @@ pub struct PlanCommandOptions {
 pub struct ModelCommandOptions {
     pub provider: Option<String>,
     pub model: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct EffortCommandOptions {
+    pub effort: Option<String>,
 }
 
 struct CtrlCHandler {
@@ -236,6 +242,8 @@ fn handle_slash_command(input: &str) -> Option<InputResult> {
     const CMD_MODE: &str = "/mode ";
     const CMD_MODEL: &str = "/model";
     const CMD_MODEL_WITH_SPACE: &str = "/model ";
+    const CMD_EFFORT: &str = "/effort";
+    const CMD_EFFORT_WITH_SPACE: &str = "/effort ";
     const CMD_PLAN: &str = "/plan";
     const CMD_ENDPLAN: &str = "/endplan";
     const CMD_CLEAR: &str = "/clear";
@@ -332,6 +340,17 @@ fn handle_slash_command(input: &str) -> Option<InputResult> {
         }
         s if s.starts_with(CMD_PLAN) => {
             parse_plan_command(s.get(CMD_PLAN.len()..).unwrap_or("").trim().to_string())
+        }
+        s if s == CMD_EFFORT => Some(InputResult::Effort(EffortCommandOptions { effort: None })),
+        s if s.starts_with(CMD_EFFORT_WITH_SPACE) => {
+            let rest = s
+                .get(CMD_EFFORT_WITH_SPACE.len()..)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            Some(InputResult::Effort(EffortCommandOptions {
+                effort: (!rest.is_empty()).then_some(rest),
+            }))
         }
         s if s == CMD_ENDPLAN => Some(InputResult::EndPlan),
         s if s == CMD_CLEAR => Some(InputResult::Clear),
@@ -477,6 +496,7 @@ fn help_text() -> String {
 /mode <name> - Set the kaji mode to use ({modes})
 /model [name] - Show the current model, or switch models for this session while keeping the same provider
 /model --provider <name> [model] - Switch to a different provider (optionally specifying a model)
+/effort [off|low|medium|high|max] - Show the current thinking effort, or set it for this session (without argument, cycles to the next level)
 /plan <message_text> -  Enters 'plan' mode with optional message. Create a plan based on the current messages and asks user if they want to act on it.
                         If user acts on the plan, kaji mode is set to 'auto' and returns to 'normal' kaji mode.
                         To warm up kaji before using '/plan', we recommend setting '/mode approve' & putting appropriate context into kaji.
@@ -662,6 +682,22 @@ mod tests {
         } else {
             panic!("Expected Model with extra whitespace handled");
         }
+
+        // Test effort command
+        assert!(matches!(
+            handle_slash_command("/effort"),
+            Some(InputResult::Effort(EffortCommandOptions { effort: None }))
+        ));
+        assert!(matches!(
+            handle_slash_command("/effort   "),
+            Some(InputResult::Effort(EffortCommandOptions { effort: None }))
+        ));
+        if let Some(InputResult::Effort(options)) = handle_slash_command("/effort high") {
+            assert_eq!(options.effort.as_deref(), Some("high"));
+        } else {
+            panic!("Expected Effort with level");
+        }
+        assert!(handle_slash_command("/effortxyz").is_none());
 
         // Test unknown commands
         assert!(handle_slash_command("/unknown").is_none());
