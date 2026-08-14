@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::agents::{extension::ExtensionInfo, moim};
 use crate::hints::load_hints::build_gitignore;
-use crate::hints::{get_context_filenames, load_hint_files, SubdirectoryHintTracker};
+use crate::hints::{get_context_filenames, SubdirectoryHintTracker};
 use crate::{
     config::{Config, KajiMode},
     prompt_template,
@@ -112,7 +112,11 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
         let hints_filenames = get_context_filenames();
         let ignore_patterns = build_gitignore(working_dir);
 
-        let hints = load_hint_files(working_dir, &hints_filenames, &ignore_patterns);
+        let hints = crate::hints::load_hint_files_with_fallback(
+            working_dir,
+            &hints_filenames,
+            &ignore_patterns,
+        );
 
         if !hints.is_empty() {
             self.hints = Some(hints);

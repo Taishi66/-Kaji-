@@ -9,6 +9,7 @@ use crate::hints::import_files::read_referenced_files;
 
 pub const KAJI_HINTS_FILENAME: &str = ".kajihints";
 pub const AGENTS_MD_FILENAME: &str = "AGENTS.md";
+pub const CLAUDE_MD_FILENAME: &str = "CLAUDE.md";
 
 pub fn get_context_filenames() -> Vec<String> {
     use crate::config::Config;
@@ -310,6 +311,22 @@ pub fn load_hint_files(
     hints
 }
 
+/// Aggregate hints, falling back to `CLAUDE.md` when none of the configured
+/// context files produced any content. `CLAUDE.md` is the de-facto standard
+/// across agents (Claude Code et al.), so a project that only carries it
+/// still gets its instructions without requiring a kaji-specific file.
+pub fn load_hint_files_with_fallback(
+    cwd: &Path,
+    hints_filenames: &[String],
+    ignore_patterns: &Gitignore,
+) -> String {
+    let hints = load_hint_files(cwd, hints_filenames, ignore_patterns);
+    if !hints.is_empty() || hints_filenames.contains(&CLAUDE_MD_FILENAME.to_string()) {
+        return hints;
+    }
+    load_hint_files(cwd, &[CLAUDE_MD_FILENAME.to_string()], ignore_patterns)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +349,84 @@ mod tests {
         let hints = load_hint_files(dir.path(), &[KAJI_HINTS_FILENAME.to_string()], &gitignore);
 
         assert!(hints.contains("Test hint content"));
+    }
+
+    #[test]
+    fn test_fallback_reads_claude_md_when_no_kaji_hints() {
+        let dir = TempDir::new().unwrap();
+
+        fs::write(
+            dir.path().join(CLAUDE_MD_FILENAME),
+            "Instructions from CLAUDE.md",
+        )
+        .unwrap();
+        let gitignore = create_dummy_gitignore();
+        let hints = load_hint_files_with_fallback(
+            dir.path(),
+            &[KAJI_HINTS_FILENAME.to_string()],
+            &gitignore,
+        );
+
+        assert!(hints.contains("Instructions from CLAUDE.md"));
+    }
+
+    #[test]
+    fn test_fallback_skipped_when_kaji_hints_present() {
+        let dir = TempDir::new().unwrap();
+
+        fs::write(dir.path().join(KAJI_HINTS_FILENAME), "Kaji hint content").unwrap();
+        fs::write(
+            dir.path().join(CLAUDE_MD_FILENAME),
+            "Instructions from CLAUDE.md",
+        )
+        .unwrap();
+        let gitignore = create_dummy_gitignore();
+        let hints = load_hint_files_with_fallback(
+            dir.path(),
+            &[KAJI_HINTS_FILENAME.to_string()],
+            &gitignore,
+        );
+
+        assert!(hints.contains("Kaji hint content"));
+        assert!(!hints.contains("Instructions from CLAUDE.md"));
+    }
+
+    #[test]
+    fn test_fallback_skipped_when_claude_md_already_configured() {
+        let dir = TempDir::new().unwrap();
+
+        fs::write(
+            dir.path().join(CLAUDE_MD_FILENAME),
+            "Instructions from CLAUDE.md",
+        )
+        .unwrap();
+        let gitignore = create_dummy_gitignore();
+        let hints = load_hint_files_with_fallback(
+            dir.path(),
+            &[CLAUDE_MD_FILENAME.to_string()],
+            &gitignore,
+        );
+
+        assert_eq!(
+            hints.matches("Instructions from CLAUDE.md").count(),
+            1,
+            "CLAUDE.md should be loaded exactly once when it is already in the configured list"
+        );
+    }
+
+    #[test]
+    fn test_fallback_empty_when_no_files() {
+        let dir = TempDir::new().unwrap();
+
+        let gitignore = create_dummy_gitignore();
+        let hints = load_hint_files_with_fallback(
+            dir.path(),
+            &[KAJI_HINTS_FILENAME.to_string()],
+            &gitignore,
+        );
+
+        assert!(!hints.contains("Project Hints"));
+        assert!(!hints.contains("Global Hints"));
     }
 
     #[test]
