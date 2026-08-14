@@ -867,6 +867,16 @@ enum Command {
     #[command(about = "Check that your Kaji setup is working")]
     Doctor {},
 
+    /// Package a redacted diagnostics bundle for bug reports
+    #[command(about = "Package a redacted diagnostics bundle for bug reports")]
+    Rage {
+        #[command(flatten)]
+        identifier: Option<Identifier>,
+
+        #[arg(short = 'o', long, help = "Output path for the rage bundle")]
+        output: Option<PathBuf>,
+    },
+
     /// Manage system prompts and behaviors
     #[command(about = "Run one of the mcp servers bundled with kaji")]
     Mcp {
@@ -1397,6 +1407,7 @@ fn get_command_name(command: &Option<Command>) -> &'static str {
     match command {
         Some(Command::Configure {}) => "configure",
         Some(Command::Doctor {}) => "doctor",
+        Some(Command::Rage { .. }) => "rage",
         Some(Command::Info { .. }) => "info",
         Some(Command::Mcp { .. }) => "mcp",
         Some(Command::Acp { .. }) => "acp",
@@ -2304,6 +2315,13 @@ pub async fn cli() -> anyhow::Result<()> {
         }
         Some(Command::Configure {}) => handle_configure().await,
         Some(Command::Doctor {}) => crate::commands::doctor::handle_doctor().await,
+        Some(Command::Rage { identifier, output }) => {
+            let session_id = match identifier {
+                Some(id) => Some(lookup_session_id(id).await?),
+                None => None,
+            };
+            crate::commands::session::handle_rage(session_id, output).await
+        }
         Some(Command::Info { verbose, check }) => handle_info(verbose, check).await,
         Some(Command::Mcp { server }) => handle_mcp_command(server).await,
         Some(Command::Acp {

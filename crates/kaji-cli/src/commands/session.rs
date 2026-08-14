@@ -7,8 +7,8 @@ use kaji::config::Config;
 #[cfg(feature = "nostr")]
 use kaji::session::nostr_share;
 use kaji::session::{
-    export_session_to_markdown, generate_diagnostics, DiagnosticsLevel, Session, SessionManager,
-    SessionType,
+    export_session_to_markdown, generate_diagnostics, generate_rage_bundle, DiagnosticsLevel,
+    Session, SessionManager, SessionType,
 };
 use kaji::utils::safe_truncate;
 use regex::Regex;
@@ -361,6 +361,38 @@ pub async fn handle_diagnostics(session_id: &str, output_path: Option<PathBuf>) 
         .context("Failed to write diagnostics data")?;
 
     println!("Diagnostics report saved to: {}", output_file.display());
+
+    Ok(())
+}
+
+/// Package a redacted diagnostics bundle for bug reports.
+pub async fn handle_rage(session_id: Option<String>, output_path: Option<PathBuf>) -> Result<()> {
+    let session_manager = SessionManager::instance();
+    let bundle = generate_rage_bundle(&session_manager, session_id, output_path).await?;
+
+    match &bundle.session_id {
+        Some(id) => println!(
+            "Rage bundle for session '{}' saved to: {}",
+            id,
+            bundle.path.display()
+        ),
+        None => println!(
+            "Rage bundle (no session) saved to: {}",
+            bundle.path.display()
+        ),
+    }
+    let bytes = fs::metadata(&bundle.path)
+        .map(|meta| meta.len())
+        .unwrap_or_default();
+    println!(
+        "{} secrets masked in {} ({} bytes)",
+        bundle.redaction_count,
+        match bundle.level {
+            DiagnosticsLevel::Full => "full report",
+            DiagnosticsLevel::Summary => "summary report",
+        },
+        bytes
+    );
 
     Ok(())
 }
