@@ -1,0 +1,33 @@
+{
+  "name": "ali_coding_plan",
+  "engine": "anthropic",
+  "display_name": "Ali Coding Plan",
+  "description": "Alibaba Cloud Coding Plan (bulk subscription quotas) via Anthropic-compatible API.",
+  "api_key_env": "ALI_CODING_PLAN_API_KEY",
+  "base_url": "${ALI_CODING_PLAN_BASE_URL}",
+  "env_vars": [
+    {
+      "name": "ALI_CODING_PLAN_BASE_URL",
+      "required": false,
+      "secret": false,
+      "default": "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic",
+      "description": "Ali Coding Plan Anthropic-compatible API base URL. Use https://coding.dashscope.aliyuncs.com/apps/anthropic for mainland China."
+    }
+  ],
+  "catalog_provider_id": "ali_coding_plan",
+  "model_doc_link": "https://help.aliyun.com/zh/model-studio/coding-plan",
+  "fast_model": "qwen-plus",
+  "preserves_thinking": true,
+  "dynamic_models": false,
+  "models": [
+    {"name": "qwen3.5-plus", "context_limit": 1000000},
+    {"name": "qwen3.6-plus", "context_limit": 1000000},
+    {"name": "glm-5.1", "context_limit": 200000},
+    {"name": "MiniMax-M2.5", "context_limit": 205000},
+    {"name": "qwen3-max-2026-01-23", "context_limit": 1000000},
+    {"name": "qwen3-coder-next", "context_limit": 1000000},
+    {"name": "qwen3-coder-plus", "context_limit": 1000000},
+    {"name": "qwen-plus", "context_limit": 1000000}
+  ],
+  "supports_streaming": true
+}

@@ -14,6 +14,7 @@ pub(crate) mod declarative_providers {
 
     expose_declarative_providers!(
         alibaba,
+        ali_coding_plan,
         atomic_chat,
         celeris,
         cerebras,
