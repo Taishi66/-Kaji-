@@ -2,19 +2,15 @@
 
 kaji is an AI agent framework in Rust with a CLI interface. The desktop UI target is Tauri v2 on ACP (not yet implemented — see ADR `2026-08-08-ipc-core-lib-tui-inprocess-desktop-acp`); the legacy Electron desktop (`ui/desktop`) has been removed.
 
-## Contribution Workflow
+## Workflow
 
-The issue is the source of truth for work intended for an upstream pull request. Track issue status on the [Kaji Issues board](https://github.com/orgs/aaif-goose/projects/1).
+Kaji is an independent product, maintained directly from this repository. There is no upstream target: work is tracked in the repo's own issues, and changes land on `main` via the maintainer's local branch workflow.
 
-- Before implementing an issue for a pull request, confirm that it is on the board with Status **Ready**.
-- Do not implement issues in **Inbox**, **Needs info**, or **Accepted / design**. Help resolve the issue discussion instead.
+- The issue is the source of truth when a change is worth tracking before implementation.
+- Features that are purely local or exploratory (this session, this machine) do not require an issue.
 - Read the agreed design, constraints, non-goals, and verification plan before changing code.
-- Keep the implementation within the issue's agreed scope.
-- If implementation reveals a material design change, return to the issue before continuing.
-- Every external pull request must link the Ready issue it implements and explain how the verification plan was performed.
+- Keep the implementation within the intended scope; if implementation reveals a material design change, stop and reassess before continuing.
 - Structure new issues on the matching template in `.github/ISSUE_TEMPLATE/` and set the issue type (e.g. Bug, Feature). `gh issue create` does not apply templates automatically.
-
-Maintainer-directed work, urgent security fixes, release automation, and local or exploratory changes do not require a Ready issue.
 
 ## Agent Loop Migration
 

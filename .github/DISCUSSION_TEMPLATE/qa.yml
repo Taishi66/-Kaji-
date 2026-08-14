@@ -5,8 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        💡 Before posting, please attach your **diagnostics zip** — it helps the Kaji team debug faster and saves everyone time.  
-        [How to capture and share diagnostics](https://goose-docs.ai/docs/troubleshooting/diagnostics-and-reporting/)
+        💡 Before posting, please attach your **rage bundle** — it helps debug faster and saves everyone time.  
+        Run `kaji rage` and attach the generated `kaji-rage-*.json`.
   - type: textarea
     id: problem
     attributes:

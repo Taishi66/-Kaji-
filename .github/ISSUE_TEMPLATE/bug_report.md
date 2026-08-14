@@ -8,15 +8,7 @@ assignees: ''
 
 **Describe the bug**
 
-💡 Before filing, please check common issues:  
-https://goose-docs.ai/docs/troubleshooting  
-
-📦 To help us debug faster, attach your **diagnostics zip** if possible.  
-👉 How to capture it: https://goose-docs.ai/docs/troubleshooting/diagnostics-and-reporting/
-
 A clear and concise description of what the bug is.
-
----
 
 **To Reproduce**
 Steps to reproduce the behavior:
@@ -37,6 +29,12 @@ If applicable, add screenshots to help explain your problem.
 
 ---
 
+**Diagnostics**
+
+📦 To help us debug faster, run `kaji rage` and attach the generated JSON bundle, or describe what you can observe of the failure.
+
+---
+
 **Please provide the following information**
 - **OS & Arch:** [e.g. Ubuntu 22.04 x86]
 - **Interface:** [UI / CLI]
@@ -48,5 +46,3 @@ If applicable, add screenshots to help explain your problem.
 
 **Additional context**
 Add any other context about the problem here.
-
-Do not begin implementation until the issue reaches **Ready** on the [Kaji Issues board](https://github.com/orgs/aaif-goose/projects/1).

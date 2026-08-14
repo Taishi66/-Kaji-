@@ -1,8 +1,6 @@
 # Contribution Guide
 
-kaji is open source, and code is only one way to contribute. Reporting a problem, reproducing it, sharing domain knowledge, shaping the design, implementing the solution, and verifying the result are all valuable work.
-
-We organize this work on the public [Kaji Issues board](https://github.com/orgs/aaif-goose/projects/1). The issue is the main record of a contribution, from the first report through design, implementation, and verification.
+kaji is an independent product maintained directly from this repository. There is no upstream target: work is tracked in the repo's own issues, and changes land on `main` via the maintainer's local branch workflow.
 
 > [!TIP]
 > Beyond code, check out [other ways to contribute](#other-ways-to-contribute)
@@ -11,46 +9,25 @@ We organize this work on the public [Kaji Issues board](https://github.com/orgs/
 
 ## Issue Workflow
 
-Every open issue is tracked on the [Kaji Issues board](https://github.com/orgs/aaif-goose/projects/1):
+The issue is the source of truth when a change is worth tracking before implementation:
 
 - **Inbox**: The issue is waiting for triage.
-- **Needs info**: More information is needed before the issue can progress.
 - **Accepted / design**: We want to solve the problem and are working out the design, constraints, and verification plan.
 - **Ready**: The intended solution is settled and implementation can begin.
 - **In progress**: Implementation is underway.
-- **Verification**: The implementation is ready for a human to confirm that it works.
 - **Done**: The result has been verified and the issue is closed.
 
-Issues we do not plan to pursue are closed with an explanation. We do not use rejection labels.
+Features that are purely local or exploratory (this session, this machine) do not require an issue. Issues we do not plan to pursue are closed with an explanation.
 
 Feature requests should describe a broadly useful problem rather than only a preferred implementation. Adding features is easy; maintaining them is a long-term cost, so we may decline features that add complexity without enough general benefit.
 
-Discord and GitHub Discussions remain useful for informal conversation, but decisions that affect an implementation should be captured in the issue.
+Decisions that affect an implementation should be captured in the issue.
 
 ## How to Contribute
 
-If you find a bug or want a new feature, [open an issue](https://github.com/aaif-goose/goose/issues/new/choose). A good issue explains the problem, who it affects, and why it matters. For bugs, include clear reproduction steps and a diagnostics report when possible.
-Please write the issue yourself. Your agent can do the research and help you explore, but you should understand the issue. You can
-suggest a solution direction, but refrain from a detailed solution especially code.
+If you find a bug or want a new feature, [open an issue](https://github.com/Taishi66/-Kaji-/issues/new/choose). A good issue explains the problem, who it affects, and why it matters. For bugs, include clear reproduction steps and a diagnostics report when possible.
 
-The best place to contribute is the discussion between **Accepted / design** and **Ready**. This is where the engineering happens: turning a worthwhile problem into a specific solution that an agent can implement. Take part in the issue discussion by bringing context and domain knowledge, challenging assumptions, comparing approaches, identifying constraints and trade-offs, and agreeing on how the result will be verified.
-
-Substantial contributors at any stage may be recognized as co-authors. The unit of contribution is taking a problem to a verified solution, not writing the patch.
-
-## From Issue to Pull Request
-
-Do not begin implementation or open a pull request until the issue has reached **Ready** on the Kaji Issues board.
-
-Every external pull request must:
-
-- link the Ready issue it implements;
-- stay within the design and scope agreed in the issue;
-- explain how the issue's verification plan was carried out; and
-- return material design changes to the issue for discussion.
-
-Pull requests that do not implement a Ready issue will be closed. Automated dependency and release pull requests, urgent security fixes, and work explicitly directed by the core team are exempt.
-
-Don't open many pull requests in quick succession. Submit them in order of preference and wait for them to land before opening more.
+Before implementing an issue, read the agreed design, constraints, non-goals, and verification plan. Keep the implementation within the issue's agreed scope. If implementation reveals a material design change, stop and return to the issue before continuing.
 
 ## Agent Loop Migration
 
@@ -180,95 +157,32 @@ Any ACP client (HTTP/WebSocket on `http://127.0.0.1:3000`, or `kaji acp` over st
 to this backend for breakpoints and stepping through the backend code — see
 [Agent Client Protocol clients](documentation/docs/guides/acp-clients.md).
 
-## Creating a fork
+## Creating a branch
 
-To fork the repository:
+kaji is maintained directly from this repository. To make changes:
 
-1. Go to https://github.com/aaif-goose/goose and click “Fork” (top-right corner).
-2. This creates https://github.com/<your-username>/kaji under your GitHub account.
-3. Clone your fork (not the main repo):
+1. Clone the repository and create a branch:
 
 ```
-git clone https://github.com/<your-username>/kaji.git
+git clone https://github.com/Taishi66/-Kaji-.git
 cd kaji
-```
-
-4. Add the main repository as upstream:
-
-```
-git remote add upstream https://github.com/aaif-goose/goose.git
-```
-
-5. Create a branch in your fork for your changes:
-
-```
 git checkout -b my-feature-branch
 ```
 
-6. Sync your fork with the main repo:
+2. Commit your changes on the branch, then push to the repository.
 
-```
-git fetch upstream
-
-# Merge them into your local branch (e.g., 'main' or 'my-feature-branch')
-git checkout main
-git merge upstream/main
-```
-
-7. Push to your fork. Because you’re the owner of the fork, you have permission to push here.
-
-```
-git push origin my-feature-branch
-```
-
-8. Open a Pull Request from your branch on your fork to aaif-kaji/kaji’s main branch.
-
-## Keeping Your Fork Up-to-Date
-
-To ensure a smooth integration of your contributions, it's important that your fork is kept up-to-date with the main 
-repository. This helps avoid conflicts and allows us to merge your pull requests more quickly. Here’s how you can sync your fork:
-
-### Syncing Your Fork with the Main Repository
-
-1. **Add the Main Repository as a Remote** (Skip if you have already set this up):
-
-   ```bash
-   git remote add upstream https://github.com/aaif-goose/goose.git
-   ```
-
-2. **Fetch the Latest Changes from the Main Repository**:
-
-   ```bash
-   git fetch upstream
-   ```
-
-3. **Checkout Your Development Branch**:
-
-   ```bash
-   git checkout your-branch-name
-   ```
-
-4. **Merge Changes from the Main Branch into Your Branch**:
-
-   ```bash
-   git merge upstream/main
-   ```
-
-   Resolve any conflicts that arise and commit the changes.
-
-5. **Push the Merged Changes to Your Fork**:
-
-   ```bash
-   git push origin your-branch-name
-   ```
-
-This process will help you keep your branch aligned with the ongoing changes in the main repository, minimizing integration issues when it comes time to merge!
+3. Open a Pull Request from your branch to `main`.
 
 ### Before Submitting a Pull Request
 
-Before you submit a pull request, please ensure your fork is synchronized as described above. This check ensures your changes are compatible with the latest in the main repository and streamlines the review process.
+Before you submit a pull request, make sure your branch is rebased on the latest `main`:
 
-If you encounter any issues during this process or have any questions, please reach out by [opening an issue][issues], and we'll be happy to help.
+```
+git fetch kaji-origin
+git rebase kaji-origin/main
+```
+
+This ensures your changes are compatible with the latest state of the repository and streamlines the review process.
 
 ## Env Vars
 
@@ -317,20 +231,11 @@ Then you can view your traces at http://localhost:3000
 
 This project follows the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) specification for PR titles. Conventional Commits make it easier to understand the history of a project and facilitate automation around versioning and changelog generation.
 
-[issues]: https://github.com/aaif-goose/goose/issues
 [hermit]: https://cashapp.github.io/hermit/
 [just]: https://github.com/casey/just?tab=readme-ov-file#installation
 
 ## Other Ways to Contribute
 
-There are numerous ways to be an open source contributor and contribute to kaji. We're here to help you on your way! Here are some suggestions to get started. If you have any questions or need help, feel free to reach out to us on [Discord](https://discord.gg/n8R5VaWDAn).
-
-- **Stars on GitHub:** If you resonate with our project and find it valuable, consider starring our kaji on GitHub! 🌟
-- **Ask Questions:** Your questions not only help us improve but also benefit the community. If you have a question, don't hesitate to ask it on [Discord](https://discord.gg/n8R5VaWDAn).
-- **Give Feedback:** Have a feature you want to see or encounter an issue with kaji, [click here to open an issue](https://github.com/aaif-goose/goose/issues/new/choose), [start a discussion](https://github.com/aaif-goose/goose/discussions) or tell us on Discord.
-- **Participate in Community Events:** We host a variety of community events and livestreams on Discord every month, ranging from workshops to brainstorming sessions. You can subscribe to our [events calendar](https://calget.com/c/t7jszrie) or follow us on [social media](https://linktr.ee/goose_oss) to stay in touch.
+- **Stars on GitHub:** If you resonate with our project and find it valuable, consider starring kaji on GitHub! 🌟
+- **Give Feedback:** Have a feature you want to see or encounter an issue with kaji, [click here to open an issue](https://github.com/Taishi66/-Kaji-/issues/new/choose) or [start a discussion](https://github.com/Taishi66/-Kaji-/discussions).
 - **Improve Documentation:** Good documentation is key to the success of any project. You can help improve the quality of our existing docs or add new pages.
-- **Help Other Members:** See another community member stuck? Or a contributor blocked by a question you know the answer to? Reply to community threads or do a code review for others to help.
-- **Showcase Your Work:** Working on a project or written a blog post recently? Share it with the community in our [#share-your-work](https://discord.com/channels/1287729918100246654/1287729920797179958) channel.
-- **Give Shoutouts:** Is there a project you love or a community/staff who's been especially helpful? Feel free to give them a shoutout in our [#general](https://discord.com/channels/1287729918100246654/1287729920797179957) channel.
-- **Spread the Word:** Help us reach more people by sharing kaji's project, website, YouTube, and/or Twitter/X.
