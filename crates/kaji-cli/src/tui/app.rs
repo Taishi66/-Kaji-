@@ -238,6 +238,17 @@ pub struct App {
     /// whenever `input` changes so a narrower filter always starts back at
     /// its first (and often only) match.
     pub palette_selected: usize,
+    /// Next-prompt suggestion generated off the critical path after a turn
+    /// ends (item 7 — ante "dim ghost text, acceptable with Tab"). `Some`
+    /// only when a suggestion is ready to show; rendered as dim ghost text in
+    /// the empty input line, Tab accepts it into `input`. Cleared by any edit
+    /// to `input` (`exit_history_navigation` path) and when a new turn starts.
+    pub suggestion: Option<String>,
+    /// True while the background generation task is in flight — renders a
+    /// "…" hint so the ghost doesn't pop in mid-draw. Never blocks the event
+    /// loop (best-effort, off critical path); a generation failure just
+    /// clears both.
+    pub suggestion_loading: bool,
     /// Set once in `run()` from the `KAJI_MOUSE` kill-switch — defaults to
     /// `false` here so the ~60 existing `App::new` call sites (mostly
     /// tests) keep the legacy arrow-scroll behavior unless the caller
@@ -300,6 +311,8 @@ impl App {
             prompt_history: Vec::new(),
             history_index: None,
             palette_selected: 0,
+            suggestion: None,
+            suggestion_loading: false,
             mouse_enabled: false,
             validate_buffer: String::new(),
             last_agent_msg_id: None,
@@ -428,6 +441,7 @@ impl App {
         self.turn_thinking_shown = false;
         self.last_thinking_msg_id = None;
         self.agent_stream_idx = None;
+        self.clear_suggestion();
     }
 
     pub fn toggle_thinking(&mut self) {
@@ -579,6 +593,7 @@ impl App {
     /// recalling a prompt keeps the edit instead of snapping back.
     fn exit_history_navigation(&mut self) {
         self.history_index = None;
+        self.clear_suggestion();
     }
 
     /// `HISTCONTROL=ignoredups`: an immediately-repeated submit (recalling
@@ -667,6 +682,25 @@ impl App {
     pub fn take_pending_restore(&mut self) -> Option<String> {
         self.pending_restore_files_only = false;
         self.pending_restore.take()
+    }
+
+    /// Accepts the current next-prompt ghost: moves it into `input` (ready to
+    /// edit) and clears the ghost. No-op when there is nothing to accept.
+    pub fn accept_suggestion(&mut self) {
+        if let Some(text) = self.suggestion.take() {
+            self.input = text;
+            self.history_index = None;
+            self.reset_palette_selection();
+        }
+        self.suggestion_loading = false;
+    }
+
+    /// Clears a stale ghost — called on every input edit and at the start
+    /// of a new turn so a suggestion that outlived its turn can never be
+    /// accepted against unrelated text.
+    pub fn clear_suggestion(&mut self) {
+        self.suggestion = None;
+        self.suggestion_loading = false;
     }
 
     /// Replaces the chat view with `conversation`'s current messages. A
@@ -870,6 +904,13 @@ impl App {
                 self.input = name.to_string();
                 self.exit_history_navigation();
                 self.reset_palette_selection();
+                Action::None
+            }
+            // Next-prompt ghost (item 7): Tab accepts the suggestion into the
+            // input when the palette is closed, the input is empty and a
+            // suggestion is ready — it reads as "Tab fills the blank".
+            KeyCode::Tab if self.suggestion.is_some() && self.input.is_empty() => {
+                self.accept_suggestion();
                 Action::None
             }
             KeyCode::Esc if self.palette_visible() => {
@@ -2946,5 +2987,65 @@ mod tests {
                 cmd.name
             );
         }
+    }
+
+    #[test]
+    fn tab_accepts_the_next_prompt_suggestion_into_the_empty_input() {
+        let mut app = App::new(None);
+        app.suggestion = Some("refactoriser le module shell en deux".to_string());
+        let action = app.on_event(&key(KeyCode::Tab));
+        assert_eq!(action, Action::None);
+        assert_eq!(app.input, "refactoriser le module shell en deux");
+        assert!(app.suggestion.is_none(), "le ghost est consommé par Tab");
+    }
+
+    #[test]
+    fn suggestion_is_not_accepted_when_the_input_is_not_empty() {
+        let mut app = App::new(None);
+        app.input = "draft en cours".to_string();
+        app.suggestion = Some("suggestion".to_string());
+        app.on_event(&key(KeyCode::Tab));
+        assert_eq!(
+            app.input, "draft en cours",
+            "input non vide → Tab n'écrase pas le draft"
+        );
+        assert_eq!(
+            app.suggestion,
+            Some("suggestion".to_string()),
+            "et le ghost reste disponible"
+        );
+    }
+
+    #[test]
+    fn tab_without_a_suggestion_is_a_noop() {
+        let mut app = App::new(None);
+        assert_eq!(app.on_event(&key(KeyCode::Tab)), Action::None);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn editing_the_input_clears_a_pending_suggestion() {
+        let mut app = App::new(None);
+        app.suggestion = Some("suggestion".to_string());
+        app.on_event(&key(KeyCode::Char('a')));
+        assert!(app.suggestion.is_none(), "typer invalide le ghost");
+        app.on_event(&key(KeyCode::Tab));
+        assert_eq!(app.input, "a");
+    }
+
+    #[test]
+    fn starting_a_turn_clears_a_pending_suggestion() {
+        let mut app = App::new(None);
+        app.suggestion = Some("suggestion".to_string());
+        app.reset_turn_visibility();
+        assert!(app.suggestion.is_none() && !app.suggestion_loading);
+    }
+
+    #[test]
+    fn accept_suggestion_when_loading_but_none_stays_quiet() {
+        let mut app = App::new(None);
+        app.suggestion_loading = true;
+        app.accept_suggestion();
+        assert!(!app.suggestion_loading && app.input.is_empty());
     }
 }

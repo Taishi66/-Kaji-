@@ -316,7 +316,13 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let paragraph = if app.input.is_empty() && !app.turn_active {
-        Paragraph::new("écris ici…").style(theme::dim())
+        if app.suggestion_loading {
+            Paragraph::new("suggestion…").style(theme::dim())
+        } else if let Some(suggestion) = app.suggestion.as_ref() {
+            Paragraph::new(suggestion.clone()).style(theme::dim())
+        } else {
+            Paragraph::new("écris ici…").style(theme::dim())
+        }
     } else {
         Paragraph::new(app.input.as_str()).style(theme::text())
     };

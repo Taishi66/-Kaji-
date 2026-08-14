@@ -456,6 +456,7 @@ async fn event_loop(
     let mut cancel: Option<CancellationToken> = None;
     let mut pending: Option<Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'_>>> + '_>>> =
         None;
+    let (suggestion_tx, mut suggestion_rx) = mpsc::channel::<String>(1);
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -628,8 +629,23 @@ async fn event_loop(
                         teardown_turn(&mut app);
                         if let Some(prompt) = app.turn_end() {
                             pending = Some(begin_setup(&mut app, agent, &session_config, &prompt, &mut cancel));
+                        } else {
+                            app.suggestion_loading = true;
+                            suggest_next_prompt(agent, session_id, &conversation, &suggestion_tx).await;
                         }
                     }
+                }
+            }
+            // Next-prompt ghost (item 7): the generation task resolves here,
+            // off the input/turn critical path. A stale suggestion that
+            // outlived an input edit is cleared by `exit_history_navigation`,
+            // so a fresh turn can't be polluted — the draw reads `app.state`.
+            maybe = suggestion_rx.recv(), if !app.turn_pending && !app.turn_active => {
+                if let Some(text) = maybe {
+                    app.suggestion = Some(text);
+                    app.suggestion_loading = false;
+                } else {
+                    app.suggestion_loading = false;
                 }
             }
         }
@@ -700,6 +716,58 @@ fn teardown_turn(app: &mut App) {
     app.finish_turn();
     app.close_orphaned_tool_requests();
     app.git_status = refresh_git_status();
+}
+
+/// Next-prompt ghost (item 7): spawns a best-effort, off-critical-path task
+/// that asks the active provider for a short "what to do next" suggestion
+/// after a turn ends cleanly, delivering it over `suggestion_tx`. Strictly
+/// optional: a missing provider, a slow call, or a generation error silently
+/// produce no ghost (the channel just never yields). Uses a small window of
+/// the recent user-visible conversation as context, never the whole transcript.
+async fn suggest_next_prompt(
+    agent: &Agent,
+    session_id: &str,
+    conversation: &kaji::conversation::Conversation,
+    suggestion_tx: &mpsc::Sender<String>,
+) {
+    // Resolve these here — `agent` borrows the event loop, so nothing tied to
+    // its lifetime can move into the spawned task. The Arc clone and model
+    // config are 'static, rendezvous the network call to the task below.
+    let Ok(provider) = agent.provider().await else {
+        return;
+    };
+    let Ok(model_config) = agent.model_config_for_session(session_id).await else {
+        return;
+    };
+    let context = conversation
+        .messages()
+        .iter()
+        .filter(|m| m.is_user_visible())
+        .rev()
+        .take(4)
+        .map(|m| m.as_concat_text())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let tx = suggestion_tx.clone();
+    tokio::task::spawn(async move {
+        let system = "Tu es kaji, un agent de terminal. Après cet échange, propose un seul prochain prompt (une phrase, action concrète, sans préfixe ni citation) que l'utilisateur voudrait probablement envoyer.";
+        let messages = vec![Message::user().with_text(if context.trim().is_empty() {
+            "L'échange est vide — suggère un point de départ pour une nouvelle session."
+        } else {
+            context.trim()
+        })];
+        if let Ok(Ok((response, _))) = tokio::time::timeout(
+            Duration::from_secs(10),
+            provider.complete(&model_config, system, &messages, &[]),
+        )
+        .await
+        {
+            let text = response.user_visible_content().as_concat_text().trim().to_string();
+            if !text.is_empty() {
+                let _ = tx.send(text).await;
+            }
+        }
+    });
 }
 
 pub fn resolve_spec(spec_path: Option<PathBuf>) -> Result<Option<SpecDoc>> {
