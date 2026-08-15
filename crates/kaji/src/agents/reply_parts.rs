@@ -340,6 +340,47 @@ fn maybe_shorten_tool_descriptions(mut tools: Vec<Tool>) -> Vec<Tool> {
     tools
 }
 
+/// The conversation exactly as it leaves for the provider: agent-visible
+/// projection, conversation repair, condensed tool-results, then
+/// consecutive-message merging. Shared by the send path below and
+/// `Agent::context_report`, so the reported `messages` weight is the one
+/// actually sent. The returned stats belong to the caller: only the send path
+/// records them into the process-wide totals `/cost` reads.
+pub(crate) fn provider_view_messages(
+    messages: &[Message],
+) -> (Conversation, crate::context_mgmt::condense::CondenseStats) {
+    let projected =
+        Conversation::new_unvalidated(messages.iter().cloned()).agent_visible_messages();
+    let (filtered_messages, _) = fix_conversation(Conversation::new_unvalidated(projected));
+
+    // Condense old tool-results on the outbound copy only; the stored session
+    // conversation is never touched. Must run before
+    // `merge_consecutive_messages_for_request` and the toolshim conversion,
+    // both of which would otherwise erase the `ToolResponse` variants this
+    // transform needs to see.
+    let (filtered_messages, stats) = if crate::context_mgmt::condense::enabled() {
+        let budget = crate::context_mgmt::condense::CondenseBudget {
+            max_lines: crate::context_mgmt::condense::max_lines(),
+        };
+        let (condensed, stats) = crate::context_mgmt::condense::condense_history(
+            filtered_messages.messages(),
+            crate::context_mgmt::condense::keep_raw_turns(),
+            &budget,
+        );
+        (Conversation::new_unvalidated(condensed), stats)
+    } else {
+        (
+            filtered_messages,
+            crate::context_mgmt::condense::CondenseStats::default(),
+        )
+    };
+
+    let merged = Conversation::new_unvalidated(merge_consecutive_messages_for_request(
+        filtered_messages.messages().clone(),
+    ));
+    (merged, stats)
+}
+
 #[tracing::instrument(
     skip(provider, model_config, session_id, system_prompt, messages, tools, toolshim_tools),
     fields(
@@ -369,43 +410,17 @@ pub(crate) async fn stream_response_from_provider(
 ) -> Result<MessageStream, ProviderError> {
     let config = model_config.clone();
 
-    let projected_messages =
-        Conversation::new_unvalidated(messages.iter().cloned()).agent_visible_messages();
-    let (filtered_messages, _) =
-        fix_conversation(Conversation::new_unvalidated(projected_messages));
-
-    // Condense old tool-results on the outbound copy only; the stored session
-    // conversation (`messages`, above) is never touched. Must run before
-    // `merge_consecutive_messages_for_request` and the toolshim conversion
-    // below, both of which would otherwise erase the `ToolResponse` variants
-    // this transform needs to see.
-    let filtered_messages = if crate::context_mgmt::condense::enabled() {
-        let budget = crate::context_mgmt::condense::CondenseBudget {
-            max_lines: crate::context_mgmt::condense::max_lines(),
-        };
-        let (condensed, stats) = crate::context_mgmt::condense::condense_history(
-            filtered_messages.messages(),
-            crate::context_mgmt::condense::keep_raw_turns(),
-            &budget,
+    let (filtered_messages, stats) = provider_view_messages(messages);
+    if stats.results_touched > 0 {
+        tracing::debug!(
+            results = stats.results_touched,
+            bytes_before = stats.bytes_before,
+            bytes_after = stats.bytes_after,
+            per_tool = ?stats.per_tool,
+            "condense: historique compressé"
         );
-        if stats.results_touched > 0 {
-            tracing::debug!(
-                results = stats.results_touched,
-                bytes_before = stats.bytes_before,
-                bytes_after = stats.bytes_after,
-                per_tool = ?stats.per_tool,
-                "condense: historique compressé"
-            );
-            crate::context_mgmt::condense::record_totals(&stats);
-        }
-        Conversation::new_unvalidated(condensed)
-    } else {
-        filtered_messages
-    };
-
-    let filtered_messages = Conversation::new_unvalidated(merge_consecutive_messages_for_request(
-        filtered_messages.messages().clone(),
-    ));
+        crate::context_mgmt::condense::record_totals(&stats);
+    }
 
     // Convert tool messages to text if toolshim is enabled
     let messages_for_provider = if config.toolshim {

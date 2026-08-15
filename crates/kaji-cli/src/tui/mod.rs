@@ -297,6 +297,38 @@ async fn cost_report(session_manager: &SessionManager, session_id: &str) -> Vec<
     }
 }
 
+/// `working_dir` comes from the session itself — the same source the turn
+/// uses (`Agent::reply` → `session.working_dir`) — never the process cwd,
+/// which a resumed session may no longer be running from.
+async fn context_report_lines(
+    agent: &Agent,
+    session_manager: &SessionManager,
+    session_id: &str,
+) -> Vec<Line<'static>> {
+    let config = Config::global();
+    let provider = config
+        .get_kaji_provider()
+        .unwrap_or_else(|_| "?".to_string());
+    let model = config.get_kaji_model().unwrap_or_else(|_| "?".to_string());
+
+    let report = match session_manager.get_session(session_id, false).await {
+        Ok(session) => {
+            agent
+                .context_report(session_id, session.working_dir.as_path())
+                .await
+        }
+        Err(e) => Err(e),
+    };
+
+    match report {
+        Ok(breakdown) => report::context_table_lines(&breakdown, &provider, &model),
+        Err(e) => vec![Line::from(Span::styled(
+            format!("erreur /context : {e}"),
+            theme::dim(),
+        ))],
+    }
+}
+
 fn docker_report() -> Vec<Line<'static>> {
     let output = std::process::Command::new("docker")
         .args([
@@ -572,6 +604,10 @@ async fn event_loop(
                     Action::Help => push_welcome(&mut app, true),
                     Action::Cost => {
                         let report = cost_report(&session_manager, session_id).await;
+                        app.push_system_lines(report);
+                    }
+                    Action::Context => {
+                        let report = context_report_lines(agent, &session_manager, session_id).await;
                         app.push_system_lines(report);
                     }
                     Action::Docker => {
@@ -1575,7 +1611,8 @@ mod tests {
             ("/sdd", "/spec"),
             ("/spec", "/think"),
             ("/think", "/cost"),
-            ("/cost", "/docker"),
+            ("/cost", "/context"),
+            ("/context", "/docker"),
             ("/docker", "/checkpoints"),
             ("/checkpoints", "/help"),
             ("/help", "/quit"),

@@ -1,5 +1,6 @@
 mod agent;
 pub mod container;
+pub mod context_report;
 pub mod execute_commands;
 pub mod extension;
 pub mod extension_malware_check;
@@ -27,6 +28,7 @@ pub mod validate_extensions;
 
 pub use agent::{Agent, AgentConfig, AgentEvent, ExtensionLoadResult, KajiPlatform};
 pub use container::Container;
+pub use context_report::ContextBreakdown;
 pub use execute_commands::COMPACT_TRIGGERS;
 pub use extension::{ExtensionConfig, ExtensionError};
 pub use extension_manager::ExtensionManager;

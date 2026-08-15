@@ -4,6 +4,7 @@
 //! flux du chat.
 
 use crate::tui::theme;
+use kaji::agents::ContextBreakdown;
 use kaji::context_mgmt::condense::CondenseTotals;
 use kaji::session::{UsageAggregate, UsageWindows};
 use ratatui::style::Style;
@@ -11,6 +12,9 @@ use ratatui::text::{Line, Span};
 
 const GAUGE_WIDTH: usize = 16;
 const GAUGE_DANGER_THRESHOLD: f64 = 0.9;
+const CONTEXT_GAUGE_WIDTH: usize = 30;
+const CONTEXT_CATEGORY_GAUGE_WIDTH: usize = 10;
+const CONTEXT_LABEL_WIDTH: usize = 10;
 
 /// Espace fine insécable — séparateur de milliers à la française.
 const THIN_SPACE: char = '\u{202f}';
@@ -279,6 +283,115 @@ pub fn condense_line(totals: &CondenseTotals) -> Option<Line<'static>> {
     )))
 }
 
+/// Construit le bloc `/context` : jauge d'occupation globale, une ligne par
+/// catégorie (tokens, part de la limite, mini-jauge), le reste libre et le
+/// dernier total rapporté par le provider s'il existe.
+pub fn context_table_lines(
+    breakdown: &ContextBreakdown,
+    provider: &str,
+    model: &str,
+) -> Vec<Line<'static>> {
+    let limit = breakdown.limit as u64;
+    let used = breakdown.used as u64;
+    let ratio = if limit == 0 {
+        0.0
+    } else {
+        used as f64 / limit as f64
+    };
+    let bar_style = if breakdown.used_pct() >= breakdown.compaction_threshold_pct {
+        Style::default().fg(theme::VERMILLON)
+    } else {
+        Style::default().fg(theme::OR_PATINE)
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("/context — {provider}/{model}"),
+            theme::title(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(gauge(ratio, CONTEXT_GAUGE_WIDTH), bar_style),
+            Span::styled(
+                format!(
+                    " {} / {} ({} %) · auto-compact à {} ({} %)",
+                    fmt_tokens(used),
+                    fmt_tokens(limit),
+                    breakdown.used_pct(),
+                    fmt_tokens(breakdown.compact_at() as u64),
+                    breakdown.compaction_threshold_pct
+                ),
+                theme::text(),
+            ),
+        ]),
+        Line::from(""),
+    ];
+
+    for (label, tokens) in [
+        ("système", breakdown.system),
+        ("hints", breakdown.hints),
+        ("skills", breakdown.skills),
+        ("outils", breakdown.tools),
+        ("mcp", breakdown.mcp),
+        ("mémoire", breakdown.memory),
+        ("messages", breakdown.messages),
+    ] {
+        lines.push(context_category_line(label, tokens as u64, limit));
+    }
+
+    lines.push(Line::from(Span::styled(
+        format!(
+            " {:<CONTEXT_LABEL_WIDTH$} {:>8}",
+            "libre",
+            fmt_tokens(breakdown.free() as u64)
+        ),
+        theme::text(),
+    )));
+
+    if let Some(last_reported) = breakdown.last_reported {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "dernier total rapporté par le provider : {}",
+                fmt_tokens(last_reported as u64)
+            ),
+            theme::dim(),
+        )));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "estimation tokenizer o200k — les chiffres exacts sont ceux du provider",
+        theme::dim(),
+    )));
+
+    lines
+}
+
+/// Une catégorie vide n'a ni part ni jauge à montrer : `—` dit « rien ici »
+/// sans imposer une barre à zéro parmi celles qui portent du sens.
+fn context_category_line(label: &str, tokens: u64, limit: u64) -> Line<'static> {
+    if tokens == 0 {
+        return Line::from(Span::styled(
+            format!(" {label:<CONTEXT_LABEL_WIDTH$} {:>8}", "—"),
+            theme::dim(),
+        ));
+    }
+    let ratio = if limit == 0 {
+        0.0
+    } else {
+        tokens as f64 / limit as f64
+    };
+    Line::from(Span::styled(
+        format!(
+            " {label:<CONTEXT_LABEL_WIDTH$} {:>8} {:>3} %  {}",
+            fmt_tokens(tokens),
+            pct(tokens, limit),
+            gauge(ratio, CONTEXT_CATEGORY_GAUGE_WIDTH)
+        ),
+        theme::text(),
+    ))
+}
+
 /// Parse `docker ps --format "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"`
 /// en tableau aligné NOM/IMAGE/STATUT/PORTS, colonnes tronquées avec `…` au
 /// besoin.
@@ -528,6 +641,76 @@ mod tests {
             plain_text(&line),
             "condensé : 3 résultats · ~1\u{202f}000 tok d'historique non envoyés (cumul, est.)"
         );
+    }
+
+    fn fixture_breakdown() -> ContextBreakdown {
+        ContextBreakdown {
+            system: 4_200,
+            hints: 1_100,
+            skills: 0,
+            mcp: 2_500,
+            tools: 3_300,
+            memory: 0,
+            messages: 9_000,
+            used: 20_100,
+            limit: 200_000,
+            last_reported: Some(18_742),
+            compaction_threshold_pct: 60,
+        }
+    }
+
+    #[test]
+    fn context_table_lines_renders_title_gauge_and_every_category() {
+        let lines = context_table_lines(&fixture_breakdown(), "anthropic", "claude-sonnet");
+        let text = plain_lines(&lines);
+
+        assert_eq!(text[0], "/context — anthropic/claude-sonnet");
+        assert_eq!(text[1], "");
+        assert_eq!(
+            text[2],
+            " [███░░░░░░░░░░░░░░░░░░░░░░░░░░░] 20\u{202f}100 / 200\u{202f}000 (10 %) · auto-compact à 120\u{202f}000 (60 %)"
+        );
+        assert_eq!(text[3], "");
+        assert_eq!(text[4], " système       4\u{202f}200   2 %  [░░░░░░░░░░]");
+        assert_eq!(text[5], " hints         1\u{202f}100   1 %  [░░░░░░░░░░]");
+        assert_eq!(text[6], " skills            —");
+        assert_eq!(text[7], " outils        3\u{202f}300   2 %  [░░░░░░░░░░]");
+        assert_eq!(text[8], " mcp           2\u{202f}500   1 %  [░░░░░░░░░░]");
+        assert_eq!(text[9], " mémoire           —");
+        assert_eq!(text[10], " messages      9\u{202f}000   5 %  [░░░░░░░░░░]");
+        assert_eq!(text[11], " libre       179\u{202f}900");
+        assert_eq!(
+            text[12],
+            "dernier total rapporté par le provider : 18\u{202f}742"
+        );
+        assert_eq!(
+            text[13],
+            "estimation tokenizer o200k — les chiffres exacts sont ceux du provider"
+        );
+        assert_eq!(text.len(), 14);
+    }
+
+    #[test]
+    fn context_table_lines_omits_the_provider_total_when_never_reported() {
+        let mut breakdown = fixture_breakdown();
+        breakdown.last_reported = None;
+        let text = plain_lines(&context_table_lines(&breakdown, "ollama", "qwen"));
+        assert!(!text.iter().any(|l| l.contains("dernier total")));
+        assert!(text.last().unwrap().starts_with("estimation tokenizer"));
+    }
+
+    #[test]
+    fn context_table_lines_keep_gauges_at_their_declared_width_when_saturated() {
+        let mut breakdown = fixture_breakdown();
+        breakdown.messages = 500_000;
+        breakdown.used = 512_100;
+        let text = plain_lines(&context_table_lines(&breakdown, "ollama", "qwen"));
+
+        assert!(text[2].contains(&"█".repeat(CONTEXT_GAUGE_WIDTH)));
+        assert!(text[2].contains("(100 %)"));
+        let messages_row = &text[10];
+        assert!(messages_row.contains(&format!("[{}]", "█".repeat(CONTEXT_CATEGORY_GAUGE_WIDTH))));
+        assert!(messages_row.contains("250 %"));
     }
 
     #[test]

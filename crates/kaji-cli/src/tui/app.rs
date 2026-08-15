@@ -69,6 +69,7 @@ pub enum Action {
     ToolDeny,
     Help,
     Cost,
+    Context,
     Docker,
     Checkpoints,
     /// Parsed `/restore <id>` — carries the checkpoint id, not yet
@@ -119,6 +120,11 @@ pub const COMMANDS: &[Command] = &[
         name: "/cost",
         desc: "affiche l'usage tokens/coût (session, 5 h, 7 j) — budgets optionnels via KAJI_BUDGET_5H / KAJI_BUDGET_7J",
         run: |_| Action::Cost,
+    },
+    Command {
+        name: "/context",
+        desc: "répartition du contexte par catégorie",
+        run: |_| Action::Context,
     },
     Command {
         name: "/docker",
@@ -3118,6 +3124,16 @@ mod tests {
             app.on_event(&key(KeyCode::Char(c)));
         }
         assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::Cost);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn slash_context_returns_context_action() {
+        let mut app = App::new(None);
+        for c in "/context".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::Context);
         assert!(app.input.is_empty());
     }
 
