@@ -1920,6 +1920,21 @@ mod tests {
     }
 
     #[test]
+    fn pasting_an_already_prefixed_path_is_not_prefixed_twice() {
+        let (mut app, dir) = app_with_mention_fixture();
+        // A file whose name genuinely starts with `@`: it resolves, so only
+        // the prefix guard keeps the paste from coming back as `@@ref.md`.
+        std::fs::write(dir.path().join("@ref.md"), "x").unwrap();
+        app.on_event(&Event::Paste("@ref.md".to_string()));
+        assert_eq!(app.input, "@ref.md");
+
+        app.input.clear();
+        let mention = format!("@{}", dir.path().join("README.md").display());
+        app.on_event(&Event::Paste(mention.clone()));
+        assert_eq!(app.input, mention);
+    }
+
+    #[test]
     fn pasting_a_missing_path_stays_verbatim() {
         let (mut app, dir) = app_with_mention_fixture();
         let missing = dir.path().join("absent.md").to_string_lossy().into_owned();

@@ -268,12 +268,18 @@ pub fn expand_mentions(text: &str, cwd: &Path) -> String {
 /// one bounded read, not its own size in RAM. `budget` caps the whole block,
 /// wrapper included, so the caller's running total stays exact.
 fn render_file(display: &str, path: &Path, budget: usize) -> Option<String> {
+    render_file_from(std::fs::File::open(path).ok()?, display, budget)
+}
+
+/// Split from `render_file` so the bounded read can be tested against a
+/// reader that refuses to serve more than the budget — the file-based test
+/// only ever sees the trimmed output, which a full read would also produce.
+fn render_file_from(reader: impl Read, display: &str, budget: usize) -> Option<String> {
     let open = format!("\n<attached-file path=\"{display}\">\n");
     let close = "\n</attached-file>\n";
     let content_budget = budget.checked_sub(open.len() + close.len())?;
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
+    reader
         .take(content_budget as u64 + 1)
         .read_to_end(&mut bytes)
         .ok()?;
@@ -311,18 +317,19 @@ fn render_dir(display: &str, path: &Path, budget: usize) -> Option<String> {
     let close = "</attached-directory>\n";
     let listing_budget = budget.checked_sub(open.len() + close.len())?;
     let mut listing = String::new();
+    let mut truncated = false;
     let mut count = 0;
-    let walker = ignore::WalkBuilder::new(path)
+    let mut entries = ignore::WalkBuilder::new(path)
         .hidden(true)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .max_depth(Some(3))
-        .build();
-    for entry in walker.flatten() {
-        if entry.path() == path {
-            continue;
-        }
+        .build()
+        .flatten()
+        .filter(|entry| entry.path() != path)
+        .peekable();
+    while let Some(entry) = entries.next() {
         let rel = entry
             .path()
             .strip_prefix(path)
@@ -334,17 +341,33 @@ fn render_dir(display: &str, path: &Path, budget: usize) -> Option<String> {
         } else {
             ""
         };
+        // Room for the marker is only owed while entries remain: reserving it
+        // for the last one would announce a truncation that never happened.
+        let reserve = if entries.peek().is_some() {
+            MARKER.len()
+        } else {
+            0
+        };
         let line_len = rel.len() + suffix.len() + 1;
-        if count >= MAX_DIR_ENTRIES || listing.len() + line_len + MARKER.len() > listing_budget {
-            if listing.len() + MARKER.len() <= listing_budget {
-                listing.push_str(MARKER);
-            }
+        if count >= MAX_DIR_ENTRIES || listing.len() + line_len + reserve > listing_budget {
+            truncated = true;
             break;
         }
         listing.push_str(&rel);
         listing.push_str(suffix);
         listing.push('\n');
         count += 1;
+    }
+    if truncated {
+        if listing.len() + MARKER.len() > listing_budget {
+            // Not even room to say the listing was cut — say that instead of
+            // shipping entries that would read as the whole directory.
+            let note = format!(
+                "\n<attached-directory path=\"{display}\">(budget exhausted)</attached-directory>\n"
+            );
+            return (note.len() <= budget).then_some(note);
+        }
+        listing.push_str(MARKER);
     }
     Some(format!("{open}{listing}{close}"))
 }
@@ -400,11 +423,40 @@ mod tests {
     }
 
     #[test]
-    fn render_file_never_reads_past_the_budget() {
+    fn render_file_block_fits_the_budget() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("huge.log");
         std::fs::write(&path, "x".repeat(1024 * 1024)).unwrap();
         let block = render_file("huge.log", &path, MAX_FILE_BYTES).unwrap();
+        assert!(block.len() <= MAX_FILE_BYTES, "{}", block.len());
+        assert!(block.contains("… (truncated)"));
+    }
+
+    /// A reader that blows up past `remaining` bytes: an unbounded
+    /// `read_to_end` fails the test instead of looping on infinite input.
+    struct Fuse<R: Read> {
+        inner: R,
+        remaining: usize,
+    }
+
+    impl<R: Read> Read for Fuse<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.remaining = self
+                .remaining
+                .checked_sub(n)
+                .expect("lecture non bornée : plus de budget + 1 octets demandés");
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn render_file_never_requests_more_than_the_budget() {
+        let reader = Fuse {
+            inner: std::io::repeat(b'a'),
+            remaining: MAX_FILE_BYTES + 1,
+        };
+        let block = render_file_from(reader, "infini.log", MAX_FILE_BYTES).unwrap();
         assert!(block.len() <= MAX_FILE_BYTES, "{}", block.len());
         assert!(block.contains("… (truncated)"));
     }
@@ -428,6 +480,29 @@ mod tests {
         let block = render_dir("d/", dir.path(), 600).unwrap();
         assert!(block.len() <= 600, "{}", block.len());
         assert!(block.contains("… (listing truncated)"));
+    }
+
+    #[test]
+    fn render_dir_does_not_claim_truncation_when_everything_fits() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("un-nom-de-fichier-assez-long.txt"), "x").unwrap();
+        let full = render_dir("d/", dir.path(), usize::MAX).unwrap();
+        let exact = render_dir("d/", dir.path(), full.len()).unwrap();
+        assert_eq!(exact, full);
+        assert!(!exact.contains("listing truncated"), "{exact}");
+    }
+
+    #[test]
+    fn render_dir_says_the_budget_is_exhausted_instead_of_cutting_silently() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "un-nom-de-fichier-vraiment-tres-long.txt";
+        std::fs::write(dir.path().join(name), "x").unwrap();
+        let overhead = "\n<attached-directory path=\"d/\">\n</attached-directory>\n".len();
+        let budget = overhead + 20;
+        let block = render_dir("d/", dir.path(), budget).unwrap();
+        assert!(block.contains("(budget exhausted)"), "{block}");
+        assert!(!block.contains(name), "{block}");
+        assert!(block.len() <= budget, "{}", block.len());
     }
 
     #[test]
