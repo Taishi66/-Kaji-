@@ -1,0 +1,228 @@
+# Ante restants — items 4 (fix wave), 11, 12, 3, 5 — Implementation Plan
+
+> Contrôleur : Fable (planifie, review, rulings). Exécuteurs : Opus/Sonnet. Spec de référence : note vault `01 - Projets/KAJI/Ante - analyse de transfert vers KAJI.md` (items 3, 4, 5, 11, 12) — le résumé de chaque item est recopié dans sa Task pour que le brief soit autoportant.
+
+**Goal:** Terminer le transfert ante : durcir l'item 4 (@-mentions, review post-Kimi), livrer `/context` (11), la taxonomy d'erreurs LLM typée (12), les permissions riches (3), les goal sessions (5). Chaque item = commit(s) + `just install` + notes Roadmap/ante.
+
+**Architecture:** kaji = fork goose Rust, 13 crates. TUI Ratatui in-process (`crates/kaji-cli/src/tui/`), CLI session (`crates/kaji-cli/src/session/`), noyau `crates/kaji/src/` (agents legacy `agents/agent.rs` + `agents/state_machine/` — parité obligatoire pour tout ce qui touche le loop), providers `crates/kaji-providers/`.
+
+**Tech Stack:** Rust 2021, tokio, ratatui 0.30 (crossterm), anyhow, serde, sqlx-sqlite (sessions), rusqlite (mémoire).
+
+## Global Constraints (valables pour toutes les Tasks)
+
+- **cargo TOUJOURS foreground**, `timeout: 600000` explicite sur CHAQUE commande cargo, JAMAIS `run_in_background`, JAMAIS `Monitor`, JAMAIS `&`. Un seul cargo à la fois. Si l'outil Bash bascule quand même en background au timeout : NE PAS attendre la notification — boucler en petits appels foreground `ps aux | grep -cE "[c]argo|[r]ustc"` jusqu'à `0`, puis relancer la commande (elle sera incrémentale).
+- Formatage UNIQUEMENT sur les fichiers touchés : `rustfmt --edition 2021 <fichier> …` (⚠ `cargo fmt`, même avec `-- <fichier>`, reformate TOUT le workspace — `crates/kaji-exec` et `tui/report.rs` ont un drift préexistant hors périmètre ; ne jamais lancer `cargo fmt`).
+- Clippy scoped : `cargo clippy -p <crate> --all-targets -- -D warnings` (le workspace complet à froid dépasse le timeout).
+- Tests : `cargo test -p <crate> [--lib] [filtre]` ; suite complète du crate touché une fois avant commit.
+- Règles repo AGENTS.md : code auto-documenté, zéro commentaire qui paraphrase, `anyhow::Result`, pas de code défensif inutile, pas de logs ajoutés hors erreurs.
+- Commit : `git add <fichiers touchés>` explicites (jamais `git add -A`), message en français, sujet `feat(...)`/`fix(...)` + `(item N ante)`. Ne jamais commiter de fichiers hors périmètre.
+- Tout changement de comportement du loop agent → implémenté ET testé dans les 2 chemins (legacy `agent.rs` + `state_machine`), ou branché sur un point de convergence unique (documenté dans le rapport).
+- Zéro subagent côté exécuteur.
+
+---
+
+## Task 1 : Item 4 fix wave — @-mentions (review post-Kimi)
+
+**Contexte.** Commit `70b9af8a7` (Kimi K3) a livré les @-mentions dans le composer TUI (`crates/kaji-cli/src/tui/mentions.rs` + hooks dans `app.rs`, `ui.rs`, `mod.rs`). La review (rapport complet : `/private/tmp/claude-501/-Users-ishaatari-workspace-kaji/88e9dbcc-9f55-4b1a-9152-84bf9d86fd32/scratchpad/research/item4-review-report.md` — **le lire en premier, il contient les file:line exacts**) a produit 2 Critical, 3 Important, 5 Minor. Cette task corrige tout sauf ce qui est explicitement écarté ci-dessous.
+
+**Rulings du contrôleur (à appliquer tels quels) :**
+- **Important « chemins sensibles tapés à la main (`@~/.ssh/id_rsa`) sans gate »** → **écarté** : un `@chemin` tapé explicitement par l'utilisateur vaut consentement (même contrat que Claude Code / ante). Pas de modale d'approbation. Ne rien changer.
+- **Minor « index tronqué à 20k silencieux »** → afficher un hint dim `… index tronqué (20 000 entrées)` en dernière ligne du dropdown quand l'index a atteint le cap (champ `truncated: bool` sur l'index). Petit.
+- Tous les autres Critical/Important/Minor → **à corriger** dans cette task.
+
+**Fichiers :** `crates/kaji-cli/src/tui/mentions.rs`, `crates/kaji-cli/src/tui/app.rs`, `crates/kaji-cli/src/tui/ui.rs`, `crates/kaji-cli/src/tui/mod.rs`.
+
+### Étapes
+
+- [ ] **1.1 Index asynchrone (Critical 1).** Le walk `ignore::WalkBuilder` (jusqu'à 20k entrées) ne doit plus jamais tourner dans la tâche du `tokio::select!` (`mod.rs` boucle `event_loop`). Pattern à suivre : le canal mpsc de la suggestion ghost (`app.suggestion`, tx/rx dédiés créés dans `mod.rs`, bras dans le `select!`). Implémentation :
+  - `App` garde un snapshot `Option<MentionIndex>` (+ `built_at`) et un flag `mention_indexing: bool`.
+  - Quand une complétion projet est demandée (fragment sans préfixe `~/ ./ ../ /`) et que le snapshot est absent **ou** périmé (TTL 60 s) et qu'aucun build n'est en cours → `tokio::task::spawn_blocking(move || MentionIndex::build(root))` puis envoi du résultat sur un canal `mention_index_tx` ; le `select!` reçoit et appelle `app.on_mention_index_ready(index)` qui remplace le snapshot et recalcule `update_mention_matches()`.
+  - Snapshot périmé → on **continue de servir le périmé** pendant le rebuild (jamais de blocage). Snapshot absent → dropdown affiche une ligne dim `indexation…` jusqu'à l'arrivée.
+  - Les listings directs `~/ ./ ../ /` (un `read_dir` d'UN répertoire) restent synchrones — borner à 500 entrées lues max.
+  - `App::on_event` ne doit plus contenir aucun appel à `MentionIndex::build`/`ensure_fresh`. Vérifier avec `grep -n "build\|ensure_fresh" crates/kaji-cli/src/tui/app.rs`.
+  - Tests (unitaires `App`, sans runtime) : (a) fragment `@src` avec snapshot absent → `mention_matches` vide + `mention_indexing == true` + demande de build émise (exposer la demande via un champ testable, ex. `pending_index_request: bool` ou une closure/canal injectable — choisir le plus simple) ; (b) `on_mention_index_ready(index)` → matches calculés, `mention_indexing == false` ; (c) snapshot périmé → matches servis depuis le périmé ET nouvelle demande émise.
+- [ ] **1.2 Lecture bornée (Critical 2).** `render_file` : `File::open` + `Read::take(budget + 1)` (jamais `fs::read` complet) ; sniff binaire sur le préfixe lu ; si plus de `budget` octets lus → tronquer sur frontière char + marqueur `(truncated)`. Test : fichier temp de 1 MiB → sortie ≤ 64 KiB + marqueur, et vérifier qu'aucune lecture complète n'a lieu (asserter la taille du contenu embarqué).
+- [ ] **1.3 Budget des dossiers (Important 1).** `render_dir(path, remaining_budget)` : s'arrête dès que le budget restant est consommé (marqueur `… (truncated)`), et `expand_mentions` déduit la taille réellement émise. Test : deux dossiers longs → `total ≤ MAX_TOTAL_BYTES` strictement.
+- [ ] **1.4 Paste auto-préfixe (Important 2).** Activer `EnableBracketedPaste` au setup (à côté de `EnableMouseCapture`, `mod.rs:~47`) et `DisableBracketedPaste` sur TOUS les chemins de teardown, y compris le hook panic (miroir exact de `DisableMouseCapture` — vérifier le hook panic chaîné). Vérifier que le thread d'entrée forward `Event::Paste` (s'il filtre sur `Event::Key`, l'étendre). Nouveau bras `Event::Paste(text)` dans `App::on_event` :
+  - Normaliser : si l'input est mono-ligne (vérifier comment `input` traite `\n` — s'il ne supporte pas le multi-ligne, remplacer `\r\n`/`\r`/`\n` par un espace).
+  - Si `text.trim()` ne contient aucun espace ET n'est pas déjà préfixé `@` ET (`~` étendu, relatif à cwd, ou absolu) désigne un chemin **existant** → insérer `@` + texte ; sinon insérer le texte tel quel.
+  - Après un paste, ne pas ouvrir le dropdown (chemin complet), c-à-d appeler la même logique d'insertion que `Char` mais avec dropdown supprimé/`update_mention_matches` non déclenché — au choix, mais Esc/Tab ne doivent pas se comporter bizarrement ensuite.
+  - Tests `App` : paste d'un chemin existant (tempdir) → input `@<chemin>` ; paste de texte libre → verbatim ; paste d'un chemin inexistant → verbatim ; paste multi-ligne → une seule ligne (si mono-ligne).
+- [ ] **1.5 Minors.** (a) test `listing_completes_dot_slash_fragments` rendu hermétique (tempdir + `MentionIndex`/listing paramétré par racine, sans `current_dir()`), supprimer le `let cwd…; drop(cwd)` mort ; (b) précalculer la version lowercase des chemins dans l'index (plus de `to_lowercase()` par frappe) ; (c) remplacer les `self.mention_matches.clear()` manuels de `app.rs` (~360/377/382) par l'helper de reset unique ; (d) ajouter le test Esc-mid-turn miroir de `enter_mid_turn_with_dropdown_completes_instead_of_queueing` (Esc ferme le dropdown sans annuler le tour) ; (e) hint `… index tronqué (20 000 entrées)` (ruling ci-dessus).
+- [ ] **1.6 Vérification + commit.** `cargo fmt -- <fichiers touchés>` ; `cargo test -p kaji-cli --lib` (attendu : 495 + nouveaux, 0 échec) ; `cargo clippy -p kaji-cli --all-targets -- -D warnings`. Commit unique : `fix(tui): @-mentions — index asynchrone, lectures bornées, paste auto-préfixe (review item 4 ante)` avec un corps listant les 5 corrections + le ruling « pas de gate sur @chemin explicite ».
+
+---
+
+## Task 2 : Item 11 — `/context` breakdown par catégorie
+
+**Spec (ante item 11).** Commande `/context` (TUI, comme `/cost` — TUI-only, pas de version REPL CLI) : répartition **par catégorie** de ce que kaji enverrait au provider au prochain tour, en tokens et en % de la limite de contexte du modèle, avec une barre d'occupation et le seuil d'auto-compaction. Référence ante `ContextBreakdown` (`ante/crates/protocol-shape/src/msg.rs:602-623`) : `system_prompt_tokens, system_tools_tokens, mcp_tools_tokens, memory_tokens, skills_tokens, messages_tokens, used_tokens, limit_tokens, compact_buffer_tokens`. Objectif : debug compaction + coût — savoir combien pèse chaque bloc.
+
+**Catégories kaji (décision contrôleur) :**
+
+| Clé | Contenu | Mesure |
+|---|---|---|
+| `system` | prompt système de base (template `system.md` + instructions des extensions builtin/platform hors skills) | reste : `total_system − hints − skills − mcp_instructions − memory` (saturating) |
+| `hints` | `.kajihints` / `AGENTS.md` / `CLAUDE.md` (fallback) | `count_tokens(texte de load_hint_files_with_fallback(working_dir))` |
+| `skills` | index `# Skills` (extension platform nommée `skills`) | tokens des `instructions` de l'`ExtensionInfo` dont `name == "skills"` |
+| `mcp` | schémas d'outils MCP + instructions des extensions MCP (config `Stdio`/`StreamableHttp`/`Sse`) | `count_tokens_for_tools(outils MCP)` + tokens des instructions MCP |
+| `tools` | schémas d'outils builtin/platform (config `Builtin`/`Platform`, + frontend tools) | `count_tokens_for_tools(outils non-MCP)` |
+| `memory` | bloc de recall KAJI splicé (`splice_memory_block`) | `count_tokens(prompt_avec_bloc) − count_tokens(prompt_sans_bloc)` |
+| `messages` | vue provider de la conversation (**condensée**, exactement ce que `stream_response_from_provider` envoie) | `count_chat_tokens("", &vue_provider, &[])` |
+| `used` | somme | `system+hints+skills+mcp+tools+memory+messages` |
+| `limit` | limite de contexte | `provider.get_context_limit(&model_config).await.unwrap_or_else(|_| model_config.context_limit())` (même précédence que `check_if_compaction_needed`, `context_mgmt/mod.rs:247-299`) |
+| `compaction_threshold` | seuil auto-compact | même source que `check_if_compaction_needed` (env `KAJI_AUTO_COMPACT_THRESHOLD` / `DEFAULT_COMPACTION_THRESHOLD`, `context_mgmt/mod.rs:29`) |
+| `last_reported` | `session.usage.total_tokens` (dernier total rapporté par le provider) | `Option<usize>` — affiché à titre de comparaison |
+
+**Points d'ancrage (vérifiés par la recherche, file:line indicatifs) :**
+- Assemblage prompt+outils legacy : `Agent::prepare_tools_and_prompt(session_id, working_dir) -> (tools, toolshim_tools, system_prompt, model_config)` (`crates/kaji/src/agents/reply_parts.rs:186-233`). Le chemin state-machine assemble inline (`ops_llm.rs:383-411`) mais passe par le même `SystemPromptBuilder::build()` (`prompt_manager.rs:137-221`) → **ruling : le rapport mesure via `prepare_tools_and_prompt` pour les 2 chemins** (approximation SM documentée dans le pied du rapport : « estimation o200k »).
+- Infos extensions : `extension_manager.get_extensions_info(working_dir)` (`extension_manager.rs:1263-1275`) → `ExtensionInfo{name, instructions, has_resources}` ; configs : `extension_manager.get_extension_configs()` (`extension_manager.rs:1315-1322`) → variante `ExtensionConfig` (`extension.rs:162-252`) pour classer MCP vs builtin ; propriétaire d'un outil = préfixe `{ext}__` du nom (`extension_manager.rs:1479`).
+- Mémoire : `crate::kaji::{splice_memory_block, latest_user_instruction}` (`crates/kaji/src/kaji.rs:197-256`), appelés identiquement `agent.rs:971-978` et `ops_llm.rs:397-405`.
+- Token counter : `crates/kaji/src/token_counter.rs` — `create_token_counter()`, `count_tokens`, `count_tokens_for_tools`, `count_chat_tokens(system, msgs, tools)` (skippe les messages `!agent_visible`).
+- Vue provider des messages : pipeline dans `stream_response_from_provider` (`reply_parts.rs:382-404`) = `agent_visible_messages()` → `fix_conversation` → `condense_history` si `condense::enabled()` → `merge_consecutive_messages_for_request`. **À extraire** en helper `pub(crate) fn provider_view_messages(...)` (dans `reply_parts.rs` ou `context_mgmt/condense.rs`) utilisé par les 2 sites (envoi réel + rapport) → parité par construction. La comptabilité `CondenseStats` (alimente `/cost` « condensé : N résultats ») reste **uniquement** sur le chemin d'envoi.
+- `/cost` à cloner côté TUI : `COMMANDS` + `Command`/`Action` (`crates/kaji-cli/src/tui/app.rs:60-143`), dispatch `Action::Cost` dans `event_loop` (`tui/mod.rs:562-565`), `cost_report()` (`tui/mod.rs:263-288`), `report::cost_table_lines` (`tui/report.rs:127`), `app.push_system_lines`. Complétion/aide/palette suivent la table `COMMANDS` (vérifier `/help` et le welcome).
+- `Agent` : `prompt_manager` est `pub(super)` → la nouvelle méthode vit dans `crates/kaji/src/agents/` (nouveau fichier `context_report.rs`, `impl Agent`, `mod` déclaré dans `agents/mod.rs`).
+
+### Étapes
+
+- [ ] **2.1 `ContextBreakdown` + `Agent::context_report`** (`crates/kaji/src/agents/context_report.rs`) :
+  ```rust
+  #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+  pub struct ContextBreakdown {
+      pub system: usize, pub hints: usize, pub skills: usize, pub mcp: usize,
+      pub tools: usize, pub memory: usize, pub messages: usize,
+      pub used: usize, pub limit: usize, pub last_reported: Option<usize>,
+      pub compaction_threshold_pct: u8,
+  }
+  impl ContextBreakdown {
+      pub fn compact_at(&self) -> usize;   // limit * threshold
+      pub fn free(&self) -> usize;         // limit.saturating_sub(used)
+      pub fn used_pct(&self) -> u8;        // arrondi, clamp 100 (limit 0 → 0)
+  }
+  impl Agent { pub async fn context_report(&self, session_id: &str, working_dir: &Path) -> anyhow::Result<ContextBreakdown> }
+  ```
+  Ré-exporter `ContextBreakdown` depuis `kaji::agents`. Ne pas persister, ne pas logger. Test d'intégration dans `crates/kaji/src/agents/` (module tests existant avec provider mock — s'inspirer des tests `agent.rs` qui construisent un `Agent` + session, ex. les tests de compaction) : session avec 2-3 messages → `used == somme des catégories`, `messages > 0`, `limit == model_config.context_limit()`, `used_pct` cohérent ; test unitaire pur pour `compact_at/free/used_pct` (limit 0, used > limit).
+- [ ] **2.2 Helper `provider_view_messages`** extrait de `stream_response_from_provider` et utilisé aux 2 sites ; les tests condense/prefix_invariance existants doivent rester verts (`cargo test -p kaji --lib condense`, `cargo test -p kaji --test prefix_invariance` si ce binaire existe — vérifier le nom).
+- [ ] **2.3 TUI** : `Action::Context` + entrée `COMMANDS` `/context` (« répartition du contexte par catégorie »), dispatch dans `event_loop` (résoudre `working_dir` comme le fait le tour — regarder comment `event_loop`/`App` connaît le cwd de session ; sinon `session_manager.get_session(id).working_dir`), `context_report_lines()` async dans `tui/mod.rs`, rendu `report::context_table_lines(&b, provider, model) -> Vec<Line<'static>>` dans `tui/report.rs` :
+  - titre `/context — {provider}/{model}` (même style que `/cost`)
+  - barre globale sur 30 cellules `[██████░░░░…] {used} / {limit} ({pct} %) · auto-compact à {compact_at} ({threshold} %)` — couleur accent jusqu'au seuil, vermillon au-delà (utiliser `theme.rs`)
+  - lignes par catégorie dans l'ordre système / hints / skills / outils / mcp / mémoire / messages : `{label:<10} {tokens:>8} {pct:>3} % {mini-barre 10 cellules}` (une catégorie à 0 s'affiche « — » )
+  - ligne `libre {free}` puis, si `last_reported`, `dernier total rapporté par le provider : {n}`
+  - pied dim : `estimation tokenizer o200k — les chiffres exacts sont ceux du provider`
+  - erreur (`context_report` Err) → `app.push_system_lines` d'une ligne d'erreur, jamais de panic.
+  Tests `report` (kaji-cli) : formatage des pourcentages/arrondis, largeur de barre bornée, catégorie 0 → « — », `last_reported` absent → pas de ligne ; test `App` : `/context` présent dans `COMMANDS` → `Action::Context` (miroir du test `/cost` s'il existe).
+- [ ] **2.4 Vérification + commit.** `cargo fmt -- <fichiers>` ; `cargo test -p kaji --lib context_report` + `condense` ; `cargo test -p kaji-cli --lib` (0 échec) ; `cargo clippy -p kaji -p kaji-cli --all-targets -- -D warnings`. Commit : `feat(context): /context — répartition du contexte par catégorie (item 11 ante)`.
+
+## Task 3 : Item 12 — taxonomy d'erreurs LLM typée
+
+**Spec (ante item 12).** Chaque erreur provider/LLM porte un **kind machine-readable** (`authentication`, `rate_limited`, `context_length_exceeded`, `server_error`, `network`, `invalid_request`, `credits_exhausted`, `refusal`, …) qui (a) atteint l'utilisateur avec un **libellé court fiable** (TUI, CLI, ACP), (b) est écrit dans le **event log**, (c) est **testable**. Référence ante : `TurnEndStatus::Error{kind: Option<String>, headline, details}` (`ante/crates/protocol-shape/src/msg.rs:213-236`) — le kind est une string snake_case sur le wire ; on reprend la **forme**, pas une liste littérale.
+
+**État kaji (recherche vérifiée) :**
+- `ProviderError` (`crates/kaji-provider-types/src/errors.rs:8-56`) : `NotConfigured, Authentication, ContextLengthExceeded, RateLimitExceeded{retry_delay}, ServerError, NetworkError, RequestFailed, ExecutionError, UsageError, NotImplemented, EndpointNotFound, CreditsExhausted{top_up_url}, Refusal{category}` ; `telemetry_type()` (`errors.rs:63-79`) = classifieur snake_case **posthog only**. Retry : `should_retry` (`retry.rs:100-109`).
+- Classifieur HTTP partagé : `crates/kaji-providers/src/http_status.rs::map_http_error_to_provider_error` (`:181-249`) — déjà utilisé par quasi tous les providers ; duplication Anthropic `anthropic.rs:241-262` (hors scope, ne pas toucher).
+- **`MessageErrorKind`** (`kaji-provider-types/src/conversation/message.rs:212-228`) : `{ContextLengthExceeded, CreditsExhausted, #[serde(other)] Other}` + `From<&ProviderError>` ; `Message::with_error(kind, msg)` (`:1164-1167`) → `MessageContentBlock::Error(ErrorContent{kind, message})` (sérialisé → déjà dans le payload `message` du event log et sur ACP) ; `Message::from_provider_error` (`:1169-1184`) ; `error_kind()` (`:1186-1190`).
+- Chemins : **state-machine** = un seul site `ops_llm.rs:190` `Message::from_provider_error(err)` ; **legacy** = `agent.rs:3408-3532` (texte à la main par variante, `.with_text`/`.with_system_notification`, **jamais** `with_error` → `error_kind() == None`) ; `Err` du stream = erreurs internes seulement.
+- **TUI** : `apply_assistant_message` (`tui/app.rs:1229-1282`) **jette** `MessageContentBlock::Error` et `SystemNotification` (`_ => {}`) → toute erreur provider SM est invisible dans la TUI. Le CLI (`session/output.rs:275-294, 372-394`) les rend correctement (`error: …` rouge ; `· msg` dim ; credits exhausted dédié).
+- Event log : `agent.rs:2206-2318` (`try_stream!`) ; `turn_end` sur `Err` avec payload `"{}"` (`agent.rs:2284-2299`).
+- ACP : `prompt_error_from_message_content` (`acp/server.rs:1322-1346`) mappe seulement `CreditsExhausted` → JSON-RPC error `data.reason = "credits_exhausted"`.
+- Tests existants : `retry.rs:263-346`, `http_status.rs:311-466`, `state_machine/tests/pipeline.rs:177-222` (assert `error_kind()`), `agent.rs:5879+` `event_sequence_is_identical_across_legacy_and_state_machine`, `crates/kaji/tests/compaction.rs:593-680`.
+
+**Rulings contrôleur :**
+1. **Une seule enum canonique = `MessageErrorKind`** (déjà publique et sérialisée), **étendue** : `ContextLengthExceeded, CreditsExhausted, Authentication, RateLimited, ServerError, Network, InvalidRequest, Refusal, NotConfigured, Execution, Usage, NotImplemented, EndpointNotFound, Other(#[serde(other)])`. Conserver le `rename_all`/les noms sérialisés existants (compat lecture des sessions) ; nouveaux noms snake_case. Ajouter `as_str()` (wire, = nom serde) et `label()` (FR court : « contexte dépassé », « crédits épuisés », « authentification », « limite de débit », « erreur serveur », « réseau », « requête invalide », « refus », « non configuré », « exécution », « usage », « non implémenté », « endpoint introuvable », « erreur »).
+2. `ProviderError::kind() -> MessageErrorKind` (mapping exhaustif : `RequestFailed → InvalidRequest`, `NetworkError → Network`, `RateLimitExceeded → RateLimited`, `ExecutionError → Execution`, `UsageError → Usage`, le reste 1:1) ; `From<&ProviderError> for MessageErrorKind` délègue à `kind()` ; `telemetry_type()` retourne `kind().as_str()` (supprimer la table dupliquée). `should_retry` inchangé.
+3. `Message::from_provider_error` : texte utilisateur = `"{label} — {détail}"` (garder les textes spéciaux existants pour Network et ContextLengthExceeded), kind = `err.kind()`.
+4. **Parité legacy** : dans `agent.rs:3408-3532`, chaque branche qui émet un message d'erreur en `.with_text(...)` passe par `Message::from_provider_error(err)` (kind taggé) — **sans changer le contrôle de flux** (compaction ContextLengthExceeded, `break`, notification `CreditsExhausted` conservée telle quelle car le CLI la rend spécialement). Résultat attendu : `error_kind()` est `Some(kind)` sur les 2 chemins pour la même erreur.
+5. **TUI** : `apply_assistant_message` rend `MessageContentBlock::Error` en ligne d'erreur `✗ {label} — {message}` (couleur d'erreur du thème, style des lignes système) et `SystemNotification` `InlineMessage`/`CreditsExhausted` en ligne système dim `· {msg}` ; `ThinkingMessage`/`ProgressMessage` restent ignorés (spinner). Ne rien casser dans la fusion des chunks (`message.id`).
+6. **Event log** : payload de `turn_end` sur le chemin `Err` = `{"error": "<Display>", "kind": "<kind>"}` (`kind` = `ProviderError::kind().as_str()` si downcast possible, sinon `"internal"`) ; pas de nouveau kind d'événement `error` (le message porte déjà `Error{kind}`).
+7. **ACP** : `prompt_error_from_message_content` inchangé dans son périmètre (CreditsExhausted seul → JSON-RPC error), `reason` = `kind.as_str()`. Pas d'autre changement ACP.
+8. Hors scope : dispatch Anthropic dupliqué, 529 dédié, `SystemNotificationType` (taxonomie parallèle) — les mentionner dans le rapport si vus.
+
+### Étapes
+
+- [ ] **3.1 kaji-provider-types** : enum étendue + `as_str`/`label` + `ProviderError::kind()` + `telemetry_type` délégué + `from_provider_error` mis à jour. Tests : `kind()` pour **chaque** variante ; serde round-trip de chaque kind + `"truc_inconnu"` → `Other` + les anciens noms `context_length_exceeded`/`credits_exhausted`/`other` toujours lus ; `label()` non vide partout.
+- [ ] **3.2 Legacy** (`agent.rs:3408-3532`) : messages d'erreur via `from_provider_error` ; test de parité : provider mock qui échoue en `RateLimitExceeded` (chercher le mock provider utilisé par les tests de compaction / pipeline pour injecter une erreur) → sur les 2 chemins (`KAJI_STATE_MACHINE` 0/1, même mécanisme que `event_sequence_is_identical_across_legacy_and_state_machine`), le dernier message assistant a `error_kind() == Some(MessageErrorKind::RateLimited)`. Suites `crates/kaji/tests/compaction.rs` et `state_machine/tests/pipeline.rs` vertes.
+- [ ] **3.3 Event log** : payload `turn_end` Err enrichi ; adapter/étendre `an_errored_turn_logs_turn_end_and_is_not_flagged_interrupted` (asserter `kind` présent).
+- [ ] **3.4 TUI** : rendu Error/SystemNotification ; tests `App` : message avec `Error{RateLimited}` → ligne contenant « limite de débit » ; `InlineMessage` → ligne dim ; `ThinkingMessage` → rien.
+- [ ] **3.5 ACP** : `reason` via `as_str()` ; test existant `acp/server.rs:2571-2604` vert.
+- [ ] **3.6** fmt fichiers touchés ; `cargo test -p kaji-provider-types` ; `cargo test -p kaji --lib` (attention : lib complète ~ plusieurs minutes — la lancer une fois, foreground, timeout 600000) ; `cargo test -p kaji --test compaction` ; `cargo test -p kaji-cli --lib` ; clippy `-p kaji-provider-types -p kaji -p kaji-cli`. Commit : `feat(errors): taxonomy d'erreurs LLM typée — kind machine-readable, TUI, event log (item 12 ante)`.
+
+## Task 4 : Item 3 — permissions riches — partie core (grants, préfixes, subsumption, session)
+
+**Spec (ante item 3, doc de référence `ante/docs-site/docs/configuration/permission.mdx`).** Approbation d'outil à **4 réponses** : Oui (une fois) / Oui pour la session / Toujours (persisté) / Non. Un « Toujours » sur une commande shell **se généralise à un préfixe 2-token** (`cargo test -p foo` → règle `cargo test *`) sauf cas non-élargissables ; **subsumption** (une règle plus large absorbe les plus étroites, une règle déjà couverte n'est pas ajoutée) ; matchers `tool(spec *)` ; précédence `deny > grants de session > allow persistés > ask (mode) > défauts`. Une commande multi-étapes (`&&`, `||`, `;`, `|`) n'est autorisée par une règle que si **chaque étape** matche indépendamment.
+
+**État kaji (recherche vérifiée) :**
+- Enum de réponse UI : `Permission::{AlwaysAllow, AllowOnce, Cancel, DenyOnce, AlwaysDeny}` (`crates/kaji-provider-types/src/permission.rs:5-11`), portée par `PermissionConfirmation{principal_type, permission}` ; message `ActionRequiredData::ToolConfirmation{id, tool_name, arguments: JsonObject, prompt}` + `ToolConfirmationResponse{id, permission}` (`kaji-provider-types/src/conversation/message.rs:138-161`). **Pas de tier « session »**.
+- Store vivant : `crate::config::permission::PermissionManager` (`crates/kaji/src/config/config/permission.rs` ou `crates/kaji/src/config/permission.rs` — vérifier), fichier `Paths::config_dir()/permission.yaml`, catégories `"user"` et `"smart_approve"`, chacune `PermissionConfig{always_allow, ask_before, never_allow}: Vec<String>` **keyées par nom d'outil entier** (ex. `developer__shell`) ; `PermissionLevel::{AlwaysAllow, AskBefore, NeverAllow}` ; `get_permission(name, principal)`. `permission_store.rs::ToolPermissionStore` = **code mort** (ne pas s'en servir).
+- Décideur : `PermissionInspector` (`permission/permission_inspector.rs:159-195`, impl `ToolInspector`) → `InspectionAction::{Allow, Deny, RequireApproval}` ; ordre : permission user → annotation read-only (SmartApprove) → extension-management → juge LLM (SmartApprove) → RequireApproval. `ToolInspectionManager::update_permission_manager(tool_name, PermissionLevel)` (`tool_inspection.rs:139-149`) = **point de convergence** des 2 chemins pour la persistance.
+- Chemins d'approbation : legacy `agents/tool_execution.rs::handle_approval_tool_requests` (`:149-239`, oneshot via `tool_confirmation_router`, persistance AlwaysAllow/AlwaysDeny `:218-236`) ; state-machine `state_machine/ops_tool_approval.rs::ToolApprovalOperation::run` (`:48-154`, persistance `:66-75`). Livraison de la réponse : `Agent::handle_confirmation` (`agent.rs:1729-1753`), event log `"approval"` (`agent.rs:1761-1796`).
+- Modes : `KajiMode::{Auto, Approve, SmartApprove, Chat}` (`kaji-provider-types/src/kaji_mode.rs:22-32`), `Agent::update_kaji_mode(mode, session_id)` (`agent.rs:3919-3935`), `Agent::kaji_mode()`.
+- Shell : `ShellParams{command: String, timeout_secs}` (`platform_extensions/developer/shell.rs:180-186`), nom complet `developer__shell` ; éditeur : `FileWriteParams{path, content}`, `FileEditParams{path, before, after}` (`developer/edit.rs:22-32`) — vérifier les noms d'outils exacts (`developer__write`/`developer__edit` ou autre).
+- CLI REPL : `session/mod.rs::prompt_tool_confirmation` (`:2172-2219`, `cliclack::select` : Allow / Always Allow / Deny / Cancel).
+
+**Rulings contrôleur (design) :**
+1. **Nouveau variant `Permission::AllowSession`** (kaji-provider-types). Ajout de variant = compatible en lecture des conversations persistées. Si le mapping ACP n'a pas d'équivalent → `AllowSession` non proposé côté ACP (documenter).
+2. **Règles de grant = syntaxe matcher dans `always_allow`** (rétro-compatible) : entrée sans parenthèses = outil entier (comportement actuel) ; entrée `tool_name(spec)` = règle sur l'**argument primaire**. Spec = texte exact, ou préfixe terminé par ` *` (seul glob supporté). Table des arguments primaires : `developer__shell` → `command` ; outils write/edit du developer → `path` ; tout autre outil → pas d'argument primaire (grant par nom, comme aujourd'hui).
+3. **Dérivation du grant « Toujours » / « Session » pour `developer__shell`** : `derive_shell_grant(command) -> String` : découper en tokens sur les blancs ; si la commande contient un opérateur de contrôle (`&&`, `||`, `;`, `|`, `\n`, `$(`, backtick, redirection `>`/`<`) → **exact** ; si < 2 tokens → exact ; si le 2e token commence par `-` → exact ; sinon `"{t0} {t1} *"`. Pour les outils à `path` → exact path. Pas de « classifier dangereux » (kaji n'en a pas ; hors scope).
+4. **Matching** : `rule_matches(spec, arg)` : spec exact ⇒ `arg == spec` ; spec `P *` ⇒ `arg == P || arg.starts_with(P + " ")`. Pour `developer__shell`, l'argument est d'abord découpé en **étapes** sur `&&`, `||`, `;`, `|` (hors guillemets simples/doubles — parseur minimal, fail-closed : si le découpage est incertain (guillemet non fermé), traiter la commande entière comme une seule étape qui doit matcher exactement) ; chaque étape doit matcher au moins une règle. Le nom d'outil sans spec (entrée legacy) matche tout.
+5. **Subsumption à l'écriture** (`PermissionManager::add_grant(tool, spec)`) : si une règle existante couvre la nouvelle → no-op ; sinon supprimer les règles existantes couvertes par la nouvelle, puis ajouter. `covers(a, b)` : a sans spec couvre tout ; `P *` couvre `P`, `P x…`, `P x *` ; exact couvre exact identique.
+6. **Session grants** : tier en mémoire, `HashSet<(tool_name, spec)>` **par session_id** (si l'inspecteur reçoit le session_id ; sinon par Agent — documenter le choix dans le rapport), stocké dans `PermissionInspector`/`ToolInspectionManager` ; API `grant_for_session(session_id, tool, spec)`. Précédence dans `PermissionInspector` : `never_allow` (deny) > session grants > `always_allow` (règles + noms) > reste inchangé.
+7. **Nouveau comportement des réponses** (les 2 chemins d'approbation, via un helper partagé `apply_grant_decision(tool_name, args, permission, session_id)` dans `crates/kaji/src/permission/`) : `AllowOnce` → dispatch ; `AllowSession` → dispatch + `grant_for_session(derived_spec)` ; `AlwaysAllow` → dispatch + `add_grant(tool, derived_spec)` (**et plus le tool-wide `PermissionLevel::AlwaysAllow` pour les outils à argument primaire** — un outil sans argument primaire garde le grant par nom) ; `AlwaysDeny` → inchangé (`NeverAllow` par nom) ; `DenyOnce`/`Cancel` inchangés. La 2e persistance historique par `update_permission_manager(tool, AlwaysAllow)` doit être remplacée, pas doublée.
+8. Le CLI REPL (`prompt_tool_confirmation`) gagne l'option « Allow for this session » ; ses labels existants restent.
+9. `KajiMode` inchangé (pas de renommage strict/auto/yolo).
+
+### Étapes
+
+- [ ] **4.1 Types.** `Permission::AllowSession` + tout ce qui pattern-matche exhaustivement dessus (compiler pour trouver : legacy, SM, TUI, CLI, ACP…). Mapping ACP : chercher les conversions `Permission` ↔ options ACP ; s'il n'y a pas d'équivalent, ne pas l'exposer et le noter.
+- [ ] **4.2 Module `crates/kaji/src/permission/grants.rs`** (pur, testé) : `primary_argument(tool_name, &JsonObject) -> Option<String>` ; `derive_grant_spec(tool_name, args) -> Option<String>` (règle 3) ; `split_shell_stages(command) -> Option<Vec<String>>` (règle 4, `None` = incertain) ; `rule_matches(spec, arg)`, `call_allowed_by(rule: &GrantRule, tool_name, args)`, `GrantRule::parse("developer__shell(cargo test *)")`/`Display` ; `covers(a, b)`. Tests table-driven : dérivation (`cargo test -p foo` → `cargo test *` ; `ls -la` → exact ; `git add -A && git commit -m x` → exact ; `rg` → exact) ; matching multi-étapes (`cargo test * ` n'autorise pas `cargo test && rm -rf /`) ; guillemets (`echo "a && b"` = une étape) ; subsumption.
+- [ ] **4.3 `PermissionManager`** : parse des entrées `always_allow` en `GrantRule` (entrées legacy = règle sans spec) ; `is_call_allowed(tool_name, args, principal)` ; `add_grant(tool, spec)` avec subsumption + save ; test round-trip YAML (fichier temp — vérifier comment les tests existants isolent `permission.yaml`).
+- [ ] **4.4 `PermissionInspector`** : session grants + ordre de précédence de la règle 6 ; tests d'inspection : deny bat session grant ; session grant bat ask ; règle `cargo test *` autorise `cargo test --all` mais pas `cargo test && rm` ; règle legacy par nom autorise tout.
+- [ ] **4.5 Chemins d'approbation** : helper `apply_grant_decision` utilisé par `tool_execution.rs` ET `ops_tool_approval.rs` (règle 7) ; tests des 2 chemins (s'inspirer des tests existants d'approbation dans ces fichiers / `agent.rs`) : `AllowSession` ne persiste rien mais le 2e appel identique n'est plus demandé ; `AlwaysAllow` sur shell persiste `developer__shell(cargo test *)` et non `developer__shell`.
+- [ ] **4.6 CLI REPL** : option « Allow for this session » → `AllowSession`.
+- [ ] **4.7 Vérification + commit.** fmt fichiers touchés ; `cargo test -p kaji-provider-types`, `cargo test -p kaji --lib permission`, `cargo test -p kaji --lib approval` (+ suites touchées), `cargo test -p kaji-cli --lib` ; clippy scoped `-p kaji -p kaji-cli -p kaji-provider-types`. Commit : `feat(permissions): grants à préfixe 2-token, subsumption, tier session (item 3 ante — core)`.
+
+## Task 5 : Item 3 — permissions riches — partie TUI (modale 4 réponses, Tab = détail/diff, Shift+Tab = mode)
+
+**Spec.** Modale d'approbation TUI à 4 réponses ; **Tab** bascule un panneau de détail (diff pour les éditions) ; **Shift+Tab** cycle le mode kaji en live avec badge dans le header.
+
+**État kaji :** `App.tool_approval: Option<ToolApprovalRequest{id, tool_name, prompt}>` (`tui/app.rs:53-57`, **`arguments` jetés** à `app.rs:1264-1277`) ; touches `y`/`n`/`Esc` seulement (`app.rs:944-950`) ; réponse envoyée dans `tui/mod.rs:543-560` (`AllowOnce`/`DenyOnce`) ; rendu `ui.rs::draw_tool_approval_modal` (`ui.rs:624-644`), `sanitize_for_display` (`ui.rs:548-567`), `truncate_for_modal` (`ui.rs:588-622`) ; `KeyCode::BackTab` inutilisé dans tout le repo ; `Tab` libre à l'intérieur de la modale (le gate y/n intercepte tout avant les handlers mentions/palette/ghost).
+
+**Rulings :**
+1. Touches modale : `y` = une fois (`AllowOnce`), `s` = session (`AllowSession`), `a` = toujours (`AlwaysAllow`), `n`/`Esc` = refuser (`DenyOnce`). Le corps affiche **le grant dérivé** pour `s`/`a` (ex. `s = pour la session · a = toujours : cargo test *`) en réutilisant `kaji::permission::grants::derive_grant_spec` (pas de duplication de la logique).
+2. `ToolApprovalRequest` gagne `arguments: JsonObject`.
+3. **Tab** = panneau détail (toggle) : `developer__shell` → commande complète sanitisée ; edit (`before`/`after`) → diff ligne à ligne (utiliser le crate `similar` **s'il est déjà dans `Cargo.lock`** — vérifier ; sinon diff LCS minimal maison en `tui/diff.rs`, testé) ; write → si le fichier existe : diff ancien/nouveau (lecture disque bornée 256 KiB, `spawn_blocking` inutile pour une lecture bornée — mais ne jamais lire plus) sinon `nouveau fichier` + tête du contenu ; autres outils → JSON pretty. Toujours via `sanitize_for_display` + `truncate_for_modal` (marqueur `… (+N car.)`).
+4. **Shift+Tab** (`KeyCode::BackTab`, hors modale, hors palette) : cycle `Approve → SmartApprove → Auto → Approve` via `agent.update_kaji_mode(mode, session_id)` ; `Chat` n'est pas dans le cycle (si le mode courant est `Chat`, Shift+Tab passe à `Approve`) ; persistance globale `Config::set_kaji_mode` **uniquement** pour `Approve`/`SmartApprove` (`Auto` = session seule, miroir ante yolo). Badge mode dans le header (`approve` / `smart` / `auto` / `chat`) + ligne système `mode : …` au changement + entrée dans l'aide/welcome (section navigation).
+5. Pas de nouvelle commande `/mode` TUI dans cette task (Shift+Tab suffit ; à ajouter plus tard si demandé).
+
+### Étapes
+
+- [ ] **5.1** `ToolApprovalRequest.arguments`, 4 touches, texte de la modale avec grant dérivé ; envoi `AllowSession`/`AlwaysAllow`. Tests `App` : chaque touche → bonne `Action`/permission ; texte du grant dérivé présent.
+- [ ] **5.2** Panneau détail Tab (+ `tui/diff.rs` si besoin), rendu testé au `TestBackend` (edit → lignes `-`/`+`, shell → commande, contenu hostile sanitizé, troncature marquée).
+- [ ] **5.3** Shift+Tab + badge header + aide ; test `App` du cycle (Approve→SmartApprove→Auto→Approve, Chat→Approve).
+- [ ] **5.4** fmt fichiers touchés ; `cargo test -p kaji-cli --lib` ; clippy `-p kaji-cli`. Commit : `feat(tui): approbation 4 réponses, Tab détail/diff, Shift+Tab mode (item 3 ante — TUI)`.
+
+## Task 6 : Item 5 — goal sessions `/goal`
+
+**Spec (ante item 5, doc `ante/docs-site/docs/usage/goal-sessions.mdx`).** `/goal <condition>` fixe (ou remplace) un but ; kaji travaille, puis **un évaluateur juge après chaque tour** ; si le but n'est pas atteint, un **tour de continuation portant le feedback de l'évaluateur** relance le travail ; arrêts : **Met**, **Unreachable** (l'évaluateur juge le but inatteignable), **Cleared** (`/goal clear`), **Interrupted** (Esc / steer), + **cap d'itérations** (backstop). `/goal` seul = statut. Complète la passe SDD (`/sdd`) : c'est la boucle d'amélioration non supervisée.
+
+**État kaji (recherche vérifiée) :**
+- Un `/goal` **core** existe déjà (self-nudge, pas d'évaluateur) : `agents/execute_commands.rs:46-53,482-528` (legacy) + `state_machine/ops_retry.rs::RetryOperation` (SM), état `Agent.goal/grind: Mutex<Option<String>>` en mémoire (`agent.rs:3847-3861`) — **ne pas le fusionner ni le casser** ; la TUI ne doit **pas** lui forwarder `/goal …` (vérifier comment la TUI traite un `/xxx` inconnu — s'il part au core, intercepter avant).
+- Driver SDD à imiter : `PassDriver::{Idle, AwaitingGate, Executing, Validating}` (`tui/app.rs:17-22`), `App.pass/driver/gate_open/validate_buffer`, `turn_end() -> Option<String>` (`app.rs:403-440`, chaînage des étapes, verdict = **dernière ligne non vide** de `validate_buffer`, fail-closed), `pass_abort(reason)` (`app.rs:386-394`), capture du texte assistant `apply_assistant_message` (`app.rs:1229-1238`), prompts synthétiques via `begin_setup(app, agent, session_config, prompt, cancel)` (`tui/mod.rs:714-729`, ne fait **pas** `push_user`), ordre du bras `None` de `next_turn_event` : `teardown_turn` → `turn_end()` → steer flush → ghost (`mod.rs:666-687`), abort sur Esc/steer/erreur (`mod.rs:494-496, 512-514, 650-652, 662-664`), bandeau d'étapes `ui.rs:480-486`.
+- Commande avec argument : seul précédent `/restore <id>` (`restore_command_arg`, `app.rs:145-162`, dispatch `app.rs:1100-1113`, hors `COMMANDS`).
+- Event log : `SessionManager::append_event(session_id, turn_seq, kind, payload_json)` (`session_manager.rs:762`), kinds existants `checkpoint`, `approval`, `turn_start`, `turn_end`, `compaction`.
+- Prompt du juge SDD (réfutation active) inline dans `turn_end()` `app.rs:412` — à extraire/paramétrer.
+
+**Rulings contrôleur :**
+1. **Driver TUI** (`GoalDriver`), sibling de `PassDriver` — pas de nouvelle Operation core (le `/goal` core self-nudge reste tel quel pour le REPL/ACP). Un seul driver actif à la fois : `/goal` refusé si une passe SDD tourne, `/sdd` refusé si un goal tourne (message système).
+2. **Évaluateur = un vrai tour** (visible, persisté, peut utiliser les outils pour vérifier — ex. lancer les tests), prompt de réfutation active dérivé du juge SDD, factorisé dans `kaji-core` (`crates/kaji-core/src/goal.rs` : `GoalState{condition, iteration, max_iterations, phase: Working|Evaluating, outcome: Option<GoalOutcome>}`, `GoalOutcome::{Met, Unreachable, Cleared, Interrupted, IterationCap}`, `pub fn evaluator_prompt(condition) -> String`, `pub fn parse_verdict(last_line) -> Option<Verdict>` avec `Verdict::{Met, Continue(feedback), Unreachable(reason)}` ; verdict = dernière ligne non vide `VERDICT: MET | VERDICT: CONTINUE | VERDICT: UNREACHABLE`, **fail-closed : absent/imparsable → Continue** (« verdict absent — on continue par prudence »), et le feedback = les lignes précédant la ligne verdict (bornées à 2 000 caractères) ; stdlib only, tests unitaires kaji-core).
+3. **Cap d'itérations** : `KAJI_GOAL_MAX_ITERATIONS` (défaut **10**), une itération = 1 tour de travail + 1 tour d'évaluation ; le cap atteint → outcome `IterationCap`, message système explicite. Distinct de `max_turns`.
+4. **Prompts synthétiques** : premier tour de travail = `Objectif : {condition}\n\nCommence (ou continue) à travailler vers cet objectif. Quand tu penses avoir terminé, arrête-toi et résume ce qui a été fait.` ; évaluation = `evaluator_prompt` ; continuation = `Le but n'est pas encore atteint. Retour de l'évaluateur :\n{feedback}\n\nContinue le travail vers : {condition}`.
+5. **UI** : bandeau/ligne d'état `目標 {condition tronquée} · it {i}/{max} · {phase}` dans le header ou sous le bandeau SDD (réutiliser le style du bandeau d'étapes) ; messages système à chaque transition (début, verdict, fin avec outcome) ; Esc / steer / erreur de tour → `goal_abort(Interrupted)` (mêmes 4 sites que `pass_abort`).
+6. **Commandes** : `/goal <condition>` (set/replace — remplace et **relance** si un goal tournait), `/goal` (statut : condition, itération, phase, outcome du dernier goal), `/goal clear` (Cleared, stop). Parsing façon `restore_command_arg` (`goal_command_arg`), + entrée `COMMANDS` `/goal` (arg-less = statut) pour la palette/aide. Refus pendant `turn_active`/`turn_pending` sauf `/goal clear` (qui annule aussi le tour courant comme Esc puis clear).
+7. **Persistance** : `append_event` kinds `goal_start` `{condition, max_iterations}`, `goal_iteration` `{iteration, verdict, feedback}`, `goal_end` `{outcome, iteration}` (turn_seq courant via l'API existante — regarder comment `checkpoint` le fait dans `tui/mod.rs`). Au `--resume`, si le dernier `goal_*` n'est pas `goal_end` → ligne système « ⚠ goal interrompu : {condition} (it i/max) — `/goal <condition>` pour relancer » (pas de reprise automatique).
+
+### Étapes
+
+- [ ] **6.1 `kaji-core::goal`** (types, prompts, `parse_verdict`, `advance`/transitions ; tests : verdicts MET/CONTINUE/UNREACHABLE/absent, feedback borné, cap).
+- [ ] **6.2 TUI driver** : `App.goal: Option<GoalState>` + `goal_command_arg`, `Action::{GoalSet(String), GoalStatus, GoalClear}`, chaînage dans `turn_end()` (priorité identique à la passe SDD, exclusivité mutuelle), capture du texte évaluateur (buffer dédié, comme `validate_buffer`), `goal_abort` aux 4 sites, statut/bandeau, aide/welcome/palette. Tests `App` : set → premier prompt ; fin de tour de travail → prompt évaluateur ; verdict CONTINUE → prompt de continuation avec feedback + itération+1 ; MET → fin ; cap → fin ; Esc → Interrupted ; `/goal` pendant `/sdd` refusé ; `/goal clear` ; parsing `goal_command_arg` (`/goalx` non matché).
+- [ ] **6.3 Persistance + resume** : events `goal_*` ; ligne d'avertissement au resume (test avec une session seedée d'un `goal_start` sans `goal_end`, comme le test du tour interrompu).
+- [ ] **6.4** fmt fichiers touchés ; `cargo test -p kaji-core` ; `cargo test -p kaji-cli --lib` ; clippy `-p kaji-core -p kaji-cli`. Commit : `feat(tui): /goal — goal sessions avec évaluateur, feedback et cap d'itérations (item 5 ante)`.
+
