@@ -6132,6 +6132,7 @@ dependencies = [
  "env-lock",
  "etcetera 0.11.0",
  "futures",
+ "ignore",
  "indicatif",
  "kaji",
  "kaji-core",

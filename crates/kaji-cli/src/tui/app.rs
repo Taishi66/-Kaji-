@@ -283,6 +283,17 @@ pub struct App {
     /// the running turn as live guidance, and they auto-submit when the turn
     /// ends. Kept in submit order, drained FIFO.
     pub steer_queue: Vec<String>,
+    /// @-mentions (item 4 ante): project file index backing the `@`
+    /// completion dropdown — rebuilt lazily, TTL-capped inside.
+    pub mention_index: crate::tui::mentions::MentionIndex,
+    /// Current dropdown contents for the active `@` fragment, recomputed on
+    /// every input mutation so `ui` reads them with a shared `&App`.
+    pub mention_matches: Vec<String>,
+    /// Selected row in the mention dropdown — cyclic ↑/↓, reset on edit.
+    pub mention_selected: usize,
+    /// Set by Esc on the dropdown: keeps it closed for the current fragment
+    /// without deleting it. Cleared by any input edit.
+    mention_suppressed: bool,
 }
 
 impl App {
@@ -328,6 +339,12 @@ impl App {
             pending_tools: HashMap::new(),
             spec_panel_forced: None,
             steer_queue: Vec::new(),
+            mention_index: crate::tui::mentions::MentionIndex::new(
+                std::env::current_dir().unwrap_or_default(),
+            ),
+            mention_matches: Vec::new(),
+            mention_selected: 0,
+            mention_suppressed: false,
         }
     }
 
@@ -461,6 +478,45 @@ impl App {
         } else {
             Some(self.steer_queue.remove(0))
         }
+    }
+
+    /// Recomputes the mention dropdown contents from the live `@` fragment.
+    /// Called on every input mutation; Esc suppression holds until the next
+    /// edit — which is exactly when this runs.
+    fn update_mention_matches(&mut self) {
+        self.mention_selected = 0;
+        self.mention_suppressed = false;
+        self.mention_matches = match crate::tui::mentions::active_fragment(&self.input) {
+            Some(fragment) => self.mention_index.complete(fragment),
+            None => Vec::new(),
+        };
+    }
+
+    pub fn mention_dropdown_visible(&self) -> bool {
+        !self.modal_active() && !self.mention_suppressed && !self.mention_matches.is_empty()
+    }
+
+    /// Tab/Enter on the dropdown: replaces the active `@` fragment with the
+    /// selected completion and refreshes — completing a directory exposes its
+    /// children for the next keystroke.
+    fn apply_mention_completion(&mut self) {
+        let Some(completion) = self
+            .mention_matches
+            .get(
+                self.mention_selected
+                    .min(self.mention_matches.len().saturating_sub(1)),
+            )
+            .cloned()
+        else {
+            return;
+        };
+        let fragment_len = crate::tui::mentions::active_fragment(&self.input)
+            .map(str::len)
+            .unwrap_or(0);
+        let keep = self.input.len() - fragment_len;
+        self.input.truncate(keep);
+        self.input.push_str(&completion);
+        self.update_mention_matches();
     }
 
     /// Called from every turn-begin path (`begin_setup`, covering Submit,
@@ -721,6 +777,7 @@ impl App {
             self.input = text;
             self.history_index = None;
             self.reset_palette_selection();
+            self.update_mention_matches();
         }
         self.suggestion_loading = false;
     }
@@ -845,22 +902,30 @@ impl App {
             // legacy line-scroll behavior and leaves history unbound to the
             // arrows (documented degradation).
             KeyCode::Up => {
-                if self.palette_visible() {
+                if self.mention_dropdown_visible() {
+                    let n = self.mention_matches.len();
+                    self.mention_selected = (self.mention_selected + n - 1) % n;
+                } else if self.palette_visible() {
                     let n = self.palette_matches().len();
                     self.palette_selected = (self.palette_selected + n - 1) % n;
                 } else if !modal_active && self.mouse_enabled {
                     self.history_prev();
+                    self.update_mention_matches();
                 } else {
                     self.scroll_line_up();
                 }
                 return Action::None;
             }
             KeyCode::Down => {
-                if self.palette_visible() {
+                if self.mention_dropdown_visible() {
+                    let n = self.mention_matches.len();
+                    self.mention_selected = (self.mention_selected + 1) % n;
+                } else if self.palette_visible() {
                     let n = self.palette_matches().len();
                     self.palette_selected = (self.palette_selected + 1) % n;
                 } else if !modal_active && self.mouse_enabled {
                     self.history_next();
+                    self.update_mention_matches();
                 } else {
                     self.scroll_line_down();
                 }
@@ -910,10 +975,12 @@ impl App {
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.delete_last_word();
+                self.update_mention_matches();
                 Action::None
             }
             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.delete_last_word();
+                self.update_mention_matches();
                 Action::None
             }
             // Steering flush (item 2 ante): `Ctrl+S` while a turn is running
@@ -933,12 +1000,22 @@ impl App {
                 self.exit_history_navigation();
                 self.reset_palette_selection();
                 self.input.push(c);
+                self.update_mention_matches();
                 Action::None
             }
             KeyCode::Backspace => {
                 self.exit_history_navigation();
                 self.reset_palette_selection();
                 self.input.pop();
+                self.update_mention_matches();
+                Action::None
+            }
+            // @-mention dropdown (item 4 ante): Tab completes the selected
+            // path into the input, replacing the live fragment. Before the
+            // palette arm — a `/`-prefixed palette and a `@` fragment can't
+            // be live at once, but the ordering keeps the intent explicit.
+            KeyCode::Tab if self.mention_dropdown_visible() => {
+                self.apply_mention_completion();
                 Action::None
             }
             KeyCode::Tab if self.palette_visible() => {
@@ -947,6 +1024,7 @@ impl App {
                 self.input = name.to_string();
                 self.exit_history_navigation();
                 self.reset_palette_selection();
+                self.update_mention_matches();
                 Action::None
             }
             // Next-prompt ghost (item 7): Tab accepts the suggestion into the
@@ -959,9 +1037,25 @@ impl App {
             KeyCode::Esc if self.palette_visible() => {
                 self.input.clear();
                 self.reset_palette_selection();
+                self.update_mention_matches();
+                Action::None
+            }
+            // Esc on the mention dropdown dismisses it without touching the
+            // input — the fragment stays, any edit re-arms completion.
+            KeyCode::Esc if self.mention_dropdown_visible() => {
+                self.mention_suppressed = true;
+                self.mention_matches.clear();
                 Action::None
             }
             KeyCode::Esc if self.turn_active || self.turn_pending => Action::CancelTurn,
+            // Enter on the mention dropdown confirms the selected path into
+            // the input (it does NOT submit) — ante: "Tab to autocomplete,
+            // then Enter to confirm". Before the mid-turn steer guard so a
+            // completion mid-turn doesn't queue a half-typed fragment.
+            KeyCode::Enter if self.mention_dropdown_visible() => {
+                self.apply_mention_completion();
+                Action::None
+            }
             // Steering (item 2 ante): while a turn is running, Enter queues
             // the draft instead of dropping it — `Ctrl+S` flushes it into the
             // running turn, and anything still queued auto-submits at turn
@@ -975,6 +1069,7 @@ impl App {
             {
                 let text = self.input.trim().to_string();
                 self.input.clear();
+                self.mention_matches.clear();
                 if text.is_empty() {
                     Action::None
                 } else {
@@ -991,10 +1086,12 @@ impl App {
                     let cmd = matches[self.palette_selected.min(matches.len() - 1)];
                     self.input.clear();
                     self.reset_palette_selection();
+                    self.mention_matches.clear();
                     self.push_history(cmd.name);
                     return cmd.run(self);
                 }
                 let text = std::mem::take(&mut self.input);
+                self.mention_matches.clear();
                 let text = text.trim().to_string();
                 if text.is_empty() {
                     Action::None
@@ -1526,6 +1623,103 @@ mod tests {
         assert_eq!(app.next_steer().as_deref(), Some("first"));
         assert_eq!(app.next_steer().as_deref(), Some("second"));
         assert_eq!(app.next_steer(), None);
+    }
+
+    /// Fixture: an App whose mention index walks a tempdir instead of the
+    /// process cwd, so completion is hermetic.
+    fn app_with_mention_fixture() -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/tui")).unwrap();
+        std::fs::write(dir.path().join("src/tui/app.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("README.md"), "x").unwrap();
+        let mut app = App::new(None);
+        app.mention_index = crate::tui::mentions::MentionIndex::new(dir.path().to_path_buf());
+        (app, dir)
+    }
+
+    #[test]
+    fn typing_at_fragment_opens_mention_dropdown() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        for c in "@rea".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert!(app.mention_dropdown_visible());
+        assert!(app.mention_matches.iter().any(|m| m == "README.md"));
+    }
+
+    #[test]
+    fn tab_completes_selected_mention() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        for c in "@rea".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Tab)), Action::None);
+        assert_eq!(app.input, "@README.md");
+    }
+
+    #[test]
+    fn enter_confirms_mention_without_submitting() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        for c in "@rea".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        let action = app.on_event(&key(KeyCode::Enter));
+        assert_eq!(action, Action::None, "Enter confirms the path, no submit");
+        assert_eq!(app.input, "@README.md");
+    }
+
+    #[test]
+    fn esc_dismisses_dropdown_until_next_edit() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        for c in "@rea".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Esc)), Action::None);
+        assert!(!app.mention_dropdown_visible());
+        // Editing re-arms completion.
+        app.on_event(&key(KeyCode::Char('d')));
+        assert!(app.mention_dropdown_visible());
+    }
+
+    #[test]
+    fn completing_a_directory_lists_its_children() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        for c in "@sr".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.on_event(&key(KeyCode::Tab));
+        assert_eq!(app.input, "@src/");
+        assert!(
+            app.mention_dropdown_visible(),
+            "completing into a directory exposes its children"
+        );
+        assert!(app.mention_matches.iter().any(|m| m == "src/tui/"));
+    }
+
+    #[test]
+    fn arrows_cycle_mention_selection() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        for c in "@s".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert!(app.mention_matches.len() >= 2, "{:?}", app.mention_matches);
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.mention_selected, 1);
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.mention_selected, 0, "cyclique en haut");
+    }
+
+    #[test]
+    fn enter_mid_turn_with_dropdown_completes_instead_of_queueing() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.turn_active = true;
+        for c in "@rea".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        let action = app.on_event(&key(KeyCode::Enter));
+        assert_eq!(action, Action::None);
+        assert_eq!(app.input, "@README.md");
+        assert_eq!(app.steer_len(), 0, "completion is not a steer message");
     }
 
     #[test]

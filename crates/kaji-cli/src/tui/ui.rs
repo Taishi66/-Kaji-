@@ -29,6 +29,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_chat(frame, app, left[0]);
         draw_input(frame, app, left[1]);
         draw_palette(frame, app, left[1]);
+        draw_mentions(frame, app, left[1]);
         draw_spec(frame, app, cols[1]);
     } else {
         let left = Layout::default()
@@ -39,6 +40,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_chat(frame, app, left[0]);
         draw_input(frame, app, left[1]);
         draw_palette(frame, app, left[1]);
+        draw_mentions(frame, app, left[1]);
     }
 
     if app.gate_open {
@@ -401,6 +403,58 @@ fn draw_palette(frame: &mut Frame, app: &App, input_area: Rect) {
                 Span::styled(marker, theme::accent()),
                 Span::styled(format!("{:<name_w$}", cmd.name), name_style),
                 Span::styled(format!("  {}", cmd.desc), theme::dim()),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+}
+
+/// @-mention completion dropdown (item 4 ante) — same anchored-above-input
+/// overlay as the command palette, listing path completions for the live
+/// `@` fragment. Selection is cyclic ↑/↓, Tab/Enter confirms.
+fn draw_mentions(frame: &mut Frame, app: &App, input_area: Rect) {
+    if !app.mention_dropdown_visible() {
+        return;
+    }
+    let matches = &app.mention_matches;
+    let inner_w = matches.iter().map(|m| m.chars().count()).max().unwrap_or(0) as u16;
+    let width = (inner_w + 4)
+        .max(20)
+        .min(input_area.width.saturating_sub(2));
+    let height = (matches.len() as u16 + 2).min(input_area.y);
+    if width < 4 || height < 3 {
+        return;
+    }
+    let rows = (height - 2) as usize;
+    let first = app.mention_selected.saturating_sub(rows.saturating_sub(1));
+    let area = Rect {
+        x: input_area.x + 1,
+        y: input_area.y - height,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" fichiers ")
+        .title_bottom(Line::from(" ↑↓ choisir · ⏎/Tab compléter · esc ").style(theme::dim()));
+    let lines: Vec<Line> = matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows)
+        .map(|(i, path)| {
+            let selected = i == app.mention_selected;
+            let marker = if selected { "▸ " } else { "  " };
+            let style = if selected {
+                theme::accent()
+            } else {
+                theme::text()
+            };
+            Line::from(vec![
+                Span::styled(marker, theme::accent()),
+                Span::styled(path.clone(), style),
             ])
         })
         .collect();

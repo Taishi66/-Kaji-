@@ -1,5 +1,6 @@
 pub mod app;
 pub mod markdown;
+pub mod mentions;
 pub mod report;
 pub mod theme;
 pub mod ui;
@@ -462,6 +463,7 @@ async fn event_loop(
     let mut pending: Option<Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'_>>> + '_>>> =
         None;
     let (suggestion_tx, mut suggestion_rx) = mpsc::channel::<String>(1);
+    let cwd = std::env::current_dir().unwrap_or_default();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -520,13 +522,15 @@ async fn event_loop(
                                 &session_config,
                                 &mut pending,
                                 &mut cancel,
+                                &cwd,
                             );
                         }
                         app.push_system("🔀 steering — message injecté comme guidance");
                     }
                     Action::Submit(text) => {
                         app.push_user(&text);
-                        pending = Some(begin_setup(&mut app, agent, &session_config, &text, &mut cancel));
+                        let expanded = mentions::expand_mentions(&text, &cwd);
+                        pending = Some(begin_setup(&mut app, agent, &session_config, &expanded, &mut cancel));
                     }
                     Action::StartPass => app.start_pass(),
                     Action::GateApprove => {
@@ -671,6 +675,7 @@ async fn event_loop(
                             &session_config,
                             &mut pending,
                             &mut cancel,
+                            &cwd,
                         ) {
                             // Queued steering message auto-submitted as a new
                             // turn (item 2 ante "do nothing — queued messages
@@ -774,12 +779,14 @@ fn flush_steer_queue<'a>(
     session_config: &SessionConfig,
     pending: &mut Option<Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'a>>> + 'a>>>,
     cancel: &mut Option<CancellationToken>,
+    cwd: &std::path::Path,
 ) -> bool {
     let Some(text) = app.next_steer() else {
         return false;
     };
     app.push_user(&text);
-    *pending = Some(begin_setup(app, agent, session_config, &text, cancel));
+    let expanded = mentions::expand_mentions(&text, cwd);
+    *pending = Some(begin_setup(app, agent, session_config, &expanded, cancel));
     true
 }
 
