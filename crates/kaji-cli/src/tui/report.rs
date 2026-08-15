@@ -298,10 +298,20 @@ pub fn context_table_lines(
     } else {
         used as f64 / limit as f64
     };
-    let bar_style = if breakdown.used_pct() >= breakdown.compaction_threshold_pct {
-        Style::default().fg(theme::VERMILLON)
-    } else {
-        Style::default().fg(theme::OR_PATINE)
+    // `compaction_threshold_pct == 0` is the "auto-compact off" sentinel: no
+    // target to announce, and no threshold to colour the bar against.
+    let auto_compact = (breakdown.compaction_threshold_pct > 0).then(|| {
+        format!(
+            " · auto-compact à {} ({} %)",
+            fmt_tokens(breakdown.compact_at() as u64),
+            breakdown.compaction_threshold_pct
+        )
+    });
+    let bar_style = match &auto_compact {
+        Some(_) if breakdown.used_pct() >= breakdown.compaction_threshold_pct => {
+            Style::default().fg(theme::VERMILLON)
+        }
+        _ => Style::default().fg(theme::OR_PATINE),
     };
 
     let mut lines = vec![
@@ -315,12 +325,13 @@ pub fn context_table_lines(
             Span::styled(gauge(ratio, CONTEXT_GAUGE_WIDTH), bar_style),
             Span::styled(
                 format!(
-                    " {} / {} ({} %) · auto-compact à {} ({} %)",
+                    " {} / {} ({} %){}",
                     fmt_tokens(used),
                     fmt_tokens(limit),
                     breakdown.used_pct(),
-                    fmt_tokens(breakdown.compact_at() as u64),
-                    breakdown.compaction_threshold_pct
+                    auto_compact
+                        .as_deref()
+                        .unwrap_or(" · auto-compact désactivé")
                 ),
                 theme::text(),
             ),
@@ -688,6 +699,22 @@ mod tests {
             "estimation tokenizer o200k — les chiffres exacts sont ceux du provider"
         );
         assert_eq!(text.len(), 14);
+    }
+
+    #[test]
+    fn context_table_lines_announces_no_target_when_auto_compact_is_disabled() {
+        let mut breakdown = fixture_breakdown();
+        breakdown.compaction_threshold_pct = 0;
+        let text = plain_lines(&context_table_lines(
+            &breakdown,
+            "anthropic",
+            "claude-sonnet",
+        ));
+
+        assert_eq!(
+            text[2],
+            " [███░░░░░░░░░░░░░░░░░░░░░░░░░░░] 20\u{202f}100 / 200\u{202f}000 (10 %) · auto-compact désactivé"
+        );
     }
 
     #[test]

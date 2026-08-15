@@ -27,6 +27,8 @@ pub struct ContextBreakdown {
     pub used: usize,
     pub limit: usize,
     pub last_reported: Option<usize>,
+    /// `0` when auto-compaction is off; an enabled threshold always lands in
+    /// `1..=99`.
     pub compaction_threshold_pct: u8,
 }
 
@@ -61,16 +63,19 @@ impl Agent {
     /// path it mirrors, nothing is persisted and no turn is ingested into
     /// memory.
     ///
-    /// The prompt and tools are assembled through `prepare_tools_and_prompt`
-    /// for both agent-loop paths — the state machine assembles its own inline
-    /// but shares `SystemPromptBuilder`, so the numbers hold there too.
+    /// The prompt and tools are assembled through
+    /// `assemble_tools_and_prompt` — the pure half of the send path's
+    /// `prepare_tools_and_prompt`, whose SmartApprove annotation step would
+    /// rewrite `permission.yaml` — for both agent-loop paths; the state
+    /// machine assembles its own inline but shares `SystemPromptBuilder`, so
+    /// the numbers hold there too.
     pub async fn context_report(
         &self,
         session_id: &str,
         working_dir: &Path,
     ) -> Result<ContextBreakdown> {
         let (tools, toolshim_tools, system_prompt, model_config) = self
-            .prepare_tools_and_prompt(session_id, working_dir)
+            .assemble_tools_and_prompt(session_id, working_dir)
             .await?;
         let counter = create_token_counter()
             .await
@@ -84,6 +89,10 @@ impl Agent {
             .filter(|config| is_mcp_extension(config))
             .map(ExtensionConfig::key)
             .collect();
+        // Second call this turn (`assemble_tools_and_prompt` made the first):
+        // splitting the categories out needs the per-extension instructions,
+        // which that function folds into the prompt and never returns.
+        // Re-querying keeps the hot path's signature untouched.
         let extensions_info = self
             .extension_manager
             .get_extensions_info(working_dir)
@@ -104,8 +113,8 @@ impl Agent {
             .into_iter()
             .chain(toolshim_tools)
             .partition(|tool| get_tool_owner(tool).is_some_and(|owner| mcp_keys.contains(&owner)));
-        let mcp_tools = counter.count_tokens_for_tools(&mcp_tools);
-        let tools = counter.count_tokens_for_tools(&own_tools);
+        let mcp_tools_tokens = counter.count_tokens_for_tools(&mcp_tools);
+        let own_tools_tokens = counter.count_tokens_for_tools(&own_tools);
 
         let hints = counter.count_tokens(&crate::hints::load_hint_files_with_fallback(
             working_dir,
@@ -126,7 +135,11 @@ impl Agent {
             .conversation
             .unwrap_or_else(crate::conversation::Conversation::empty);
 
-        let memory = match crate::kaji::latest_user_instruction(conversation.messages()) {
+        // The recall query must be the one the turn would use: the send path
+        // reads it off the repaired conversation, not the stored one
+        // (`Agent::prepare_reply_context`).
+        let (fixed_conversation, _) = crate::conversation::fix_conversation(conversation.clone());
+        let memory = match crate::kaji::latest_user_instruction(fixed_conversation.messages()) {
             Some(query) => counter
                 .count_tokens(&crate::kaji::splice_memory_block(
                     &system_prompt,
@@ -140,7 +153,7 @@ impl Agent {
         // Under toolshim the tool schemas are rendered into the system prompt
         // itself, so they come off the system remainder to stay counted once.
         let tools_inside_prompt = if model_config.toolshim {
-            mcp_tools + tools
+            mcp_tools_tokens + own_tools_tokens
         } else {
             0
         };
@@ -162,20 +175,28 @@ impl Agent {
         let threshold = crate::config::Config::global()
             .get_param::<f64>("KAJI_AUTO_COMPACT_THRESHOLD")
             .unwrap_or(crate::context_mgmt::DEFAULT_COMPACTION_THRESHOLD);
+        // `0` means "auto-compact off", the same out-of-band threshold
+        // `check_if_compaction_needed` refuses to act on. An enabled threshold
+        // is clamped away from both ends so it can never read as disabled.
+        let compaction_threshold_pct = if threshold <= 0.0 || threshold >= 1.0 {
+            0
+        } else {
+            (threshold * 100.0).round().clamp(1.0, 99.0) as u8
+        };
 
-        let mcp = mcp_instructions + mcp_tools;
+        let mcp = mcp_instructions + mcp_tools_tokens;
         Ok(ContextBreakdown {
             system,
             hints,
             skills,
             mcp,
-            tools,
+            tools: own_tools_tokens,
             memory,
             messages,
-            used: system + hints + skills + mcp + tools + memory + messages,
+            used: system + hints + skills + mcp + own_tools_tokens + memory + messages,
             limit,
             last_reported,
-            compaction_threshold_pct: (threshold * 100.0).round().clamp(0.0, 100.0) as u8,
+            compaction_threshold_pct,
         })
     }
 }
@@ -324,6 +345,87 @@ mod tests {
             ((report.used as f64 / report.limit as f64) * 100.0).round() as u8
         );
         assert_eq!(report.free(), report.limit - report.used);
+
+        Ok(())
+    }
+
+    /// `/context` must stay read-only. In SmartApprove the send path demotes
+    /// every write-annotated tool to `ask_before` and rewrites
+    /// `permission.yaml`, clobbering the user's own overrides — a report can't
+    /// afford that. The second half pins the send path's own behavior, so
+    /// splitting the annotation step out can't silently disable it there.
+    #[tokio::test]
+    async fn context_report_leaves_the_permission_store_untouched_in_smart_approve() -> Result<()> {
+        isolate_memory_root();
+        let data_dir = tempfile::tempdir()?;
+        let working_dir = tempfile::tempdir()?;
+        let session_manager = Arc::new(SessionManager::new(data_dir.path().to_path_buf()));
+        let permission_manager = Arc::new(PermissionManager::new(data_dir.path().to_path_buf()));
+        let agent = Agent::with_config(AgentConfig::new(
+            Arc::clone(&session_manager),
+            Arc::clone(&permission_manager),
+            None,
+            KajiMode::SmartApprove,
+            false,
+            KajiPlatform::KajiCli,
+        ));
+        let session = session_manager
+            .create_session(
+                working_dir.path().to_path_buf(),
+                "test-context-report-smart-approve".to_string(),
+                SessionType::Hidden,
+                KajiMode::SmartApprove,
+            )
+            .await?;
+        agent
+            .update_provider(
+                Arc::new(MockProvider),
+                ModelConfig::new("test-model"),
+                &session.id,
+            )
+            .await?;
+        agent
+            .add_extension(
+                crate::agents::extension::ExtensionConfig::Frontend {
+                    name: "frontend".to_string(),
+                    description: "desc".to_string(),
+                    tools: vec![rmcp::model::Tool::new(
+                        "frontend__write_tool",
+                        "Write tool",
+                        rmcp::object!({ "type": "object", "properties": { } }),
+                    )
+                    .annotate(rmcp::model::ToolAnnotations::new().read_only(false))],
+                    instructions: None,
+                    bundled: None,
+                    available_tools: vec![],
+                },
+                &session.id,
+            )
+            .await?;
+
+        agent
+            .context_report(&session.id, session.working_dir.as_path())
+            .await?;
+
+        assert_eq!(
+            permission_manager.get_smart_approve_permission("frontend__write_tool"),
+            None,
+            "/context must not demote a write-annotated tool"
+        );
+        assert!(
+            !permission_manager.get_config_path().exists(),
+            "/context must not write permission.yaml"
+        );
+
+        agent
+            .prepare_tools_and_prompt(&session.id, session.working_dir.as_path())
+            .await?;
+
+        assert_eq!(
+            permission_manager.get_smart_approve_permission("frontend__write_tool"),
+            Some(crate::config::permission::PermissionLevel::AskBefore),
+            "the send path still applies the SmartApprove annotations"
+        );
 
         Ok(())
     }

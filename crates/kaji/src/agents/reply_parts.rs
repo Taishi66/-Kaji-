@@ -183,7 +183,35 @@ fn is_mergeable_assistant_chunk(message: &Message) -> bool {
 }
 
 impl Agent {
+    /// Assembles what the next request would carry, then applies the
+    /// SmartApprove tool annotations — which demote write-annotated tools to
+    /// `ask_before` and rewrite `permission.yaml`. That write belongs to the
+    /// send path only: read-only callers must use
+    /// [`Agent::assemble_tools_and_prompt`] instead.
     pub async fn prepare_tools_and_prompt(
+        &self,
+        session_id: &str,
+        working_dir: &std::path::Path,
+    ) -> Result<(Vec<Tool>, Vec<Tool>, String, ModelConfig)> {
+        let (tools, toolshim_tools, system_prompt, model_config) = self
+            .assemble_tools_and_prompt(session_id, working_dir)
+            .await?;
+
+        if *self.current_kaji_mode.lock().await == KajiMode::SmartApprove {
+            // Toolshim routes the same tools through `toolshim_tools` instead,
+            // so exactly one of these two lists is ever non-empty.
+            self.tool_inspection_manager.apply_tool_annotations(&tools);
+            self.tool_inspection_manager
+                .apply_tool_annotations(&toolshim_tools);
+        }
+
+        Ok((tools, toolshim_tools, system_prompt, model_config))
+    }
+
+    /// The pure half of [`Agent::prepare_tools_and_prompt`]: resolves the
+    /// tools, the system prompt and the model config without touching any
+    /// persisted state.
+    pub(crate) async fn assemble_tools_and_prompt(
         &self,
         session_id: &str,
         working_dir: &std::path::Path,
@@ -210,10 +238,6 @@ impl Agent {
         let model_config = self.model_config_for_session(session_id).await?;
 
         let kaji_mode = *self.current_kaji_mode.lock().await;
-
-        if kaji_mode == KajiMode::SmartApprove {
-            self.tool_inspection_manager.apply_tool_annotations(&tools);
-        }
 
         let prompt_manager = self.prompt_manager.lock().await;
         let system_prompt = prompt_manager
