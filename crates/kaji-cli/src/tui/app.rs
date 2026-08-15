@@ -283,9 +283,20 @@ pub struct App {
     /// the running turn as live guidance, and they auto-submit when the turn
     /// ends. Kept in submit order, drained FIFO.
     pub steer_queue: Vec<String>,
-    /// @-mentions (item 4 ante): project file index backing the `@`
-    /// completion dropdown — rebuilt lazily, TTL-capped inside.
-    pub mention_index: crate::tui::mentions::MentionIndex,
+    /// @-mentions (item 4 ante): root of the project index, and the base
+    /// relative `./`, `../` fragments and pasted paths resolve against.
+    mention_root: std::path::PathBuf,
+    /// Last index snapshot delivered by the background build. `None` until
+    /// the first build lands — completion serves nothing rather than
+    /// blocking the event loop on a full walk.
+    mention_index: Option<crate::tui::mentions::MentionIndex>,
+    mention_index_built_at: Option<Instant>,
+    /// A build is in flight: no second one is requested, and the dropdown
+    /// shows `indexation…` while there is nothing to complete with.
+    mention_indexing: bool,
+    /// Picked up by `event_loop` (`take_mention_index_request`) which owns
+    /// the blocking task — `App` itself never walks the filesystem.
+    pending_index_request: bool,
     /// Current dropdown contents for the active `@` fragment, recomputed on
     /// every input mutation so `ui` reads them with a shared `&App`.
     pub mention_matches: Vec<String>,
@@ -339,9 +350,11 @@ impl App {
             pending_tools: HashMap::new(),
             spec_panel_forced: None,
             steer_queue: Vec::new(),
-            mention_index: crate::tui::mentions::MentionIndex::new(
-                std::env::current_dir().unwrap_or_default(),
-            ),
+            mention_root: std::env::current_dir().unwrap_or_default(),
+            mention_index: None,
+            mention_index_built_at: None,
+            mention_indexing: false,
+            pending_index_request: false,
             mention_matches: Vec::new(),
             mention_selected: 0,
             mention_suppressed: false,
@@ -483,17 +496,95 @@ impl App {
     /// Recomputes the mention dropdown contents from the live `@` fragment.
     /// Called on every input mutation; Esc suppression holds until the next
     /// edit — which is exactly when this runs.
+    ///
+    /// Never walks the project: `~/`, `/`, `./`, `../` fragments cost one
+    /// bounded `read_dir`, and everything else is served from whatever index
+    /// snapshot is on hand — a stale one keeps answering while the rebuild
+    /// runs on its own task.
     fn update_mention_matches(&mut self) {
+        self.reset_mention_state();
+        let Some(fragment) = crate::tui::mentions::active_fragment(&self.input).map(str::to_string)
+        else {
+            return;
+        };
+        if let Some(listing) =
+            crate::tui::mentions::complete_via_listing(&fragment, &self.mention_root)
+        {
+            self.mention_matches = listing;
+            return;
+        }
+        if self.mention_index_stale() {
+            self.request_mention_index();
+        }
+        if let Some(index) = &self.mention_index {
+            self.mention_matches = index.complete(&fragment);
+        }
+    }
+
+    /// Clears everything the dropdown derives from the live fragment. Single
+    /// reset point so a new dismissal path can't leave `mention_selected` or
+    /// the Esc suppression pointing at a fragment that no longer exists.
+    fn reset_mention_state(&mut self) {
+        self.mention_matches.clear();
         self.mention_selected = 0;
         self.mention_suppressed = false;
-        self.mention_matches = match crate::tui::mentions::active_fragment(&self.input) {
-            Some(fragment) => self.mention_index.complete(fragment),
-            None => Vec::new(),
-        };
+    }
+
+    fn mention_index_stale(&self) -> bool {
+        self.mention_index_built_at
+            .map(|t| t.elapsed() > crate::tui::mentions::INDEX_TTL)
+            .unwrap_or(true)
+    }
+
+    fn request_mention_index(&mut self) {
+        if self.mention_indexing {
+            return;
+        }
+        self.mention_indexing = true;
+        self.pending_index_request = true;
+    }
+
+    /// `event_loop` polls this after every event and runs the walk on a
+    /// blocking task, delivering the result to `on_mention_index_ready`.
+    pub fn take_mention_index_request(&mut self) -> Option<std::path::PathBuf> {
+        if !self.pending_index_request {
+            return None;
+        }
+        self.pending_index_request = false;
+        Some(self.mention_root.clone())
+    }
+
+    pub fn on_mention_index_ready(&mut self, index: crate::tui::mentions::MentionIndex) {
+        self.mention_index = Some(index);
+        self.mention_index_built_at = Some(Instant::now());
+        self.mention_indexing = false;
+        // An index landing mid-fragment must not re-open a dropdown Esc just
+        // dismissed — only an input edit re-arms completion.
+        let suppressed = self.mention_suppressed;
+        self.update_mention_matches();
+        self.mention_suppressed = suppressed;
+    }
+
+    pub fn mention_index_truncated(&self) -> bool {
+        self.mention_index
+            .as_ref()
+            .is_some_and(crate::tui::mentions::MentionIndex::truncated)
     }
 
     pub fn mention_dropdown_visible(&self) -> bool {
         !self.modal_active() && !self.mention_suppressed && !self.mention_matches.is_empty()
+    }
+
+    /// The `indexation…` placeholder stands in for the dropdown while the
+    /// first build is in flight. Deliberately not part of
+    /// `mention_dropdown_visible`: an empty dropdown must not capture
+    /// Tab/Enter/Esc.
+    pub fn mention_indexing_visible(&self) -> bool {
+        self.mention_indexing
+            && self.mention_matches.is_empty()
+            && !self.mention_suppressed
+            && !self.modal_active()
+            && crate::tui::mentions::active_fragment(&self.input).is_some()
     }
 
     /// Tab/Enter on the dropdown: replaces the active `@` fragment with the
@@ -517,6 +608,35 @@ impl App {
         self.input.truncate(keep);
         self.input.push_str(&completion);
         self.update_mention_matches();
+    }
+
+    /// Bracketed paste (item 4 ante): a pasted path is auto-prefixed with `@`
+    /// so it expands like a typed mention; anything else lands verbatim. The
+    /// composer is single-line, so newlines collapse into spaces.
+    fn insert_pasted(&mut self, text: &str) {
+        let flattened = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
+        if flattened.is_empty() {
+            return;
+        }
+        self.exit_history_navigation();
+        self.reset_palette_selection();
+        let trimmed = flattened.trim();
+        if self.pasted_path_exists(trimmed) {
+            self.input.push('@');
+            self.input.push_str(trimmed);
+        } else {
+            self.input.push_str(&flattened);
+        }
+        // A pasted path is already complete — opening the dropdown on it
+        // would only put a redundant match over the composer.
+        self.reset_mention_state();
+    }
+
+    fn pasted_path_exists(&self, text: &str) -> bool {
+        if text.is_empty() || text.starts_with('@') || text.chars().any(char::is_whitespace) {
+            return false;
+        }
+        crate::tui::mentions::resolve(text, &self.mention_root).exists()
     }
 
     /// Called from every turn-begin path (`begin_setup`, covering Submit,
@@ -855,6 +975,14 @@ impl App {
             }
             return Action::None;
         }
+        // A y/n modal owns the keyboard: a paste landing behind it would
+        // mutate the composer the user can't see.
+        if let Event::Paste(text) = ev {
+            if !self.modal_active() {
+                self.insert_pasted(text);
+            }
+            return Action::None;
+        }
         let Event::Key(key) = ev else {
             return Action::None;
         };
@@ -1043,8 +1171,8 @@ impl App {
             // Esc on the mention dropdown dismisses it without touching the
             // input — the fragment stays, any edit re-arms completion.
             KeyCode::Esc if self.mention_dropdown_visible() => {
+                self.reset_mention_state();
                 self.mention_suppressed = true;
-                self.mention_matches.clear();
                 Action::None
             }
             KeyCode::Esc if self.turn_active || self.turn_pending => Action::CancelTurn,
@@ -1069,7 +1197,7 @@ impl App {
             {
                 let text = self.input.trim().to_string();
                 self.input.clear();
-                self.mention_matches.clear();
+                self.reset_mention_state();
                 if text.is_empty() {
                     Action::None
                 } else {
@@ -1086,12 +1214,12 @@ impl App {
                     let cmd = matches[self.palette_selected.min(matches.len() - 1)];
                     self.input.clear();
                     self.reset_palette_selection();
-                    self.mention_matches.clear();
+                    self.reset_mention_state();
                     self.push_history(cmd.name);
                     return cmd.run(self);
                 }
                 let text = std::mem::take(&mut self.input);
-                self.mention_matches.clear();
+                self.reset_mention_state();
                 let text = text.trim().to_string();
                 if text.is_empty() {
                     Action::None
@@ -1625,15 +1753,25 @@ mod tests {
         assert_eq!(app.next_steer(), None);
     }
 
-    /// Fixture: an App whose mention index walks a tempdir instead of the
-    /// process cwd, so completion is hermetic.
-    fn app_with_mention_fixture() -> (App, tempfile::TempDir) {
+    /// Fixture: an App rooted on a tempdir instead of the process cwd, so
+    /// completion is hermetic. No index yet — the walk is `event_loop`'s job.
+    fn app_awaiting_mention_index() -> (App, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src/tui")).unwrap();
         std::fs::write(dir.path().join("src/tui/app.rs"), "x").unwrap();
         std::fs::write(dir.path().join("README.md"), "x").unwrap();
         let mut app = App::new(None);
-        app.mention_index = crate::tui::mentions::MentionIndex::new(dir.path().to_path_buf());
+        app.mention_root = dir.path().to_path_buf();
+        (app, dir)
+    }
+
+    /// Same fixture with the index already delivered — what the TUI looks
+    /// like once the background build has landed.
+    fn app_with_mention_fixture() -> (App, tempfile::TempDir) {
+        let (mut app, dir) = app_awaiting_mention_index();
+        app.on_mention_index_ready(crate::tui::mentions::MentionIndex::build(
+            dir.path().to_path_buf(),
+        ));
         (app, dir)
     }
 
@@ -1710,6 +1848,95 @@ mod tests {
     }
 
     #[test]
+    fn fragment_without_index_asks_for_a_build_instead_of_walking() {
+        let (mut app, dir) = app_awaiting_mention_index();
+        for c in "@src".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert!(
+            app.mention_matches.is_empty(),
+            "rien à compléter sans index"
+        );
+        assert!(app.mention_indexing);
+        assert!(app.mention_indexing_visible());
+        assert_eq!(
+            app.take_mention_index_request().as_deref(),
+            Some(dir.path()),
+            "event_loop doit recevoir la demande de build"
+        );
+        assert!(
+            app.take_mention_index_request().is_none(),
+            "une seule demande par build"
+        );
+    }
+
+    #[test]
+    fn index_delivery_fills_the_dropdown() {
+        let (mut app, dir) = app_awaiting_mention_index();
+        for c in "@rea".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.on_mention_index_ready(crate::tui::mentions::MentionIndex::build(
+            dir.path().to_path_buf(),
+        ));
+        assert!(!app.mention_indexing);
+        assert!(!app.mention_indexing_visible());
+        assert!(app.mention_matches.iter().any(|m| m == "README.md"));
+    }
+
+    #[test]
+    fn stale_index_still_answers_while_a_rebuild_is_requested() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.mention_index_built_at = Instant::now().checked_sub(Duration::from_secs(600));
+        for c in "@rea".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert!(
+            app.mention_matches.iter().any(|m| m == "README.md"),
+            "le périmé continue de servir"
+        );
+        assert!(app.mention_indexing);
+        assert!(app.take_mention_index_request().is_some());
+    }
+
+    #[test]
+    fn pasting_an_existing_path_prefixes_it_as_a_mention() {
+        let (mut app, dir) = app_with_mention_fixture();
+        app.on_event(&Event::Paste(
+            dir.path().join("README.md").to_string_lossy().into_owned(),
+        ));
+        assert_eq!(
+            app.input,
+            format!("@{}", dir.path().join("README.md").display())
+        );
+        assert!(!app.mention_dropdown_visible(), "chemin déjà complet");
+    }
+
+    #[test]
+    fn pasting_free_text_stays_verbatim() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.on_event(&Event::Paste("corrige le parseur stp".to_string()));
+        assert_eq!(app.input, "corrige le parseur stp");
+    }
+
+    #[test]
+    fn pasting_a_missing_path_stays_verbatim() {
+        let (mut app, dir) = app_with_mention_fixture();
+        let missing = dir.path().join("absent.md").to_string_lossy().into_owned();
+        app.on_event(&Event::Paste(missing.clone()));
+        assert_eq!(app.input, missing);
+    }
+
+    #[test]
+    fn pasting_multiple_lines_collapses_to_one() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.on_event(&Event::Paste(
+            "ligne un\r\nligne deux\nligne trois".to_string(),
+        ));
+        assert_eq!(app.input, "ligne un ligne deux ligne trois");
+    }
+
+    #[test]
     fn enter_mid_turn_with_dropdown_completes_instead_of_queueing() {
         let (mut app, _dir) = app_with_mention_fixture();
         app.turn_active = true;
@@ -1720,6 +1947,21 @@ mod tests {
         assert_eq!(action, Action::None);
         assert_eq!(app.input, "@README.md");
         assert_eq!(app.steer_len(), 0, "completion is not a steer message");
+    }
+
+    #[test]
+    fn esc_mid_turn_with_dropdown_dismisses_it_without_canceling_the_turn() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.turn_active = true;
+        for c in "@rea".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        let action = app.on_event(&key(KeyCode::Esc));
+        assert_eq!(action, Action::None, "Esc ferme la liste, pas le tour");
+        assert!(!app.mention_dropdown_visible());
+        assert_eq!(app.input, "@rea", "le fragment reste");
+        // Un second Esc, la liste fermée, annule bien le tour.
+        assert_eq!(app.on_event(&key(KeyCode::Esc)), Action::CancelTurn);
     }
 
     #[test]

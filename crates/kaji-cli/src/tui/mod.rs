@@ -19,7 +19,10 @@ use kaji::permission::{Permission, PermissionConfirmation};
 use kaji::session::SessionManager;
 use kaji::session::session_manager::{InterruptedTurn, SessionEvent};
 use kaji_core::sdd::SpecDoc;
-use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event,
+};
 use ratatui::crossterm::execute;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -43,10 +46,13 @@ pub async fn run(
     std::thread::spawn(move || input_thread(input_tx));
     let mut terminal = ratatui::init();
     let mouse = mouse_enabled();
+    // Bracketed paste (item 4 ante): without it a pasted path arrives as a
+    // burst of `Char` events and nothing can tell it apart from typing.
+    let _ = execute!(stdout(), EnableBracketedPaste);
     if mouse {
         let _ = execute!(stdout(), EnableMouseCapture);
-        install_mouse_panic_hook();
     }
+    install_terminal_panic_hook(mouse);
     let result = event_loop(
         &mut terminal,
         &agent,
@@ -61,21 +67,25 @@ pub async fn run(
     if mouse {
         let _ = execute!(stdout(), DisableMouseCapture);
     }
+    let _ = execute!(stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
 }
 
 /// `ratatui::init()` already installed a panic hook that restores raw
-/// mode/alt-screen, but not mouse capture — a panic while the mouse is
-/// captured would otherwise leave the user's shell eating raw mouse escape
-/// sequences after the crash. Chains onto the existing hook (installed
-/// before this runs, and while still in alt-screen) rather than replacing
-/// it, so both cleanups happen. The nominal `DisableMouseCapture` in `run`
-/// still runs on the non-panic path — calling it twice is a harmless no-op.
-fn install_mouse_panic_hook() {
+/// mode/alt-screen, but neither mouse capture nor bracketed paste — a panic
+/// while either is on would otherwise leave the user's shell eating raw
+/// escape sequences after the crash. Chains onto the existing hook
+/// (installed before this runs, and while still in alt-screen) rather than
+/// replacing it, so both cleanups happen. The nominal disables in `run`
+/// still run on the non-panic path — calling them twice is a harmless no-op.
+fn install_terminal_panic_hook(mouse: bool) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(stdout(), DisableMouseCapture);
+        if mouse {
+            let _ = execute!(stdout(), DisableMouseCapture);
+        }
+        let _ = execute!(stdout(), DisableBracketedPaste);
         previous(info);
     }));
 }
@@ -463,6 +473,7 @@ async fn event_loop(
     let mut pending: Option<Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'_>>> + '_>>> =
         None;
     let (suggestion_tx, mut suggestion_rx) = mpsc::channel::<String>(1);
+    let (index_tx, mut index_rx) = mpsc::channel::<mentions::MentionIndex>(1);
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -638,6 +649,16 @@ async fn event_loop(
                     Action::RestoreCancel => app.push_system("restore annulé"),
                     Action::None => {}
                 }
+                // @-mention index (item 4 ante): the walk runs on a blocking
+                // task, never here — this select! also owns `terminal.draw`
+                // and the running turn's stream, so a project-sized walk
+                // inline would freeze the screen mid-keystroke.
+                if let Some(root) = app.take_mention_index_request() {
+                    let tx = index_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _ = tx.blocking_send(mentions::MentionIndex::build(root));
+                    });
+                }
             }
             // The setup future (Agent::reply through its first yield: hooks,
             // add_message, tokenizer…) is polled by this arm of the same
@@ -697,6 +718,14 @@ async fn event_loop(
                     app.suggestion_loading = false;
                 } else {
                     app.suggestion_loading = false;
+                }
+            }
+            // Freshly built index snapshot: swaps in and re-runs the current
+            // fragment, so a completion typed before the walk finished lights
+            // up on arrival instead of waiting for the next keystroke.
+            maybe = index_rx.recv() => {
+                if let Some(index) = maybe {
+                    app.on_mention_index_ready(index);
                 }
             }
         }

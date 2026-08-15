@@ -413,19 +413,43 @@ fn draw_palette(frame: &mut Frame, app: &App, input_area: Rect) {
 /// overlay as the command palette, listing path completions for the live
 /// `@` fragment. Selection is cyclic ↑/↓, Tab/Enter confirms.
 fn draw_mentions(frame: &mut Frame, app: &App, input_area: Rect) {
-    if !app.mention_dropdown_visible() {
+    let indexing = app.mention_indexing_visible();
+    if !app.mention_dropdown_visible() && !indexing {
         return;
     }
-    let matches = &app.mention_matches;
-    let inner_w = matches.iter().map(|m| m.chars().count()).max().unwrap_or(0) as u16;
+    let empty: Vec<String> = Vec::new();
+    let matches = if indexing {
+        &empty
+    } else {
+        &app.mention_matches
+    };
+    let hint = if indexing {
+        Some("indexation…")
+    } else if app.mention_index_truncated() {
+        Some("… index tronqué (20 000 entrées)")
+    } else {
+        None
+    };
+    let inner_w = matches
+        .iter()
+        .map(|m| m.chars().count())
+        .chain(hint.map(|h| h.chars().count()))
+        .max()
+        .unwrap_or(0) as u16;
     let width = (inner_w + 4)
         .max(20)
         .min(input_area.width.saturating_sub(2));
-    let height = (matches.len() as u16 + 2).min(input_area.y);
+    let height = ((matches.len() + usize::from(hint.is_some())) as u16 + 2).min(input_area.y);
     if width < 4 || height < 3 {
         return;
     }
     let rows = (height - 2) as usize;
+    // The hint owns the last row; the matches scroll inside what's left.
+    let rows = if hint.is_some() {
+        rows.saturating_sub(1)
+    } else {
+        rows
+    };
     let first = app.mention_selected.saturating_sub(rows.saturating_sub(1));
     let area = Rect {
         x: input_area.x + 1,
@@ -439,7 +463,7 @@ fn draw_mentions(frame: &mut Frame, app: &App, input_area: Rect) {
         .border_type(BorderType::Rounded)
         .title(" fichiers ")
         .title_bottom(Line::from(" ↑↓ choisir · ⏎/Tab compléter · esc ").style(theme::dim()));
-    let lines: Vec<Line> = matches
+    let mut lines: Vec<Line> = matches
         .iter()
         .enumerate()
         .skip(first)
@@ -458,6 +482,9 @@ fn draw_mentions(frame: &mut Frame, app: &App, input_area: Rect) {
             ])
         })
         .collect();
+    if let Some(hint) = hint {
+        lines.push(Line::from(Span::styled(hint, theme::dim())));
+    }
     frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
 }
 

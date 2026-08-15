@@ -5,54 +5,51 @@
 //!
 //! Two halves:
 //! - completion: [`MentionIndex`] walks the project once (respecting
-//!   `.gitignore` via the `ignore` crate), cached for a TTL, plus direct
-//!   directory listings for `~/`, absolute, `./`, `../` fragments;
+//!   `.gitignore` via the `ignore` crate) on a blocking task owned by
+//!   `event_loop`, plus direct directory listings for `~/`, absolute, `./`,
+//!   `../` fragments — those hit a single `read_dir` and stay inline;
 //! - expansion: [`expand_mentions`] rewrites the submitted text, appending
 //!   `<attached-file>` / `<attached-directory>` blocks. The chat line keeps
 //!   the text as typed — only the model-bound message carries the payload.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-const INDEX_TTL: Duration = Duration::from_secs(60);
+pub(crate) const INDEX_TTL: Duration = Duration::from_secs(60);
 const MAX_INDEX_ENTRIES: usize = 20_000;
 const MAX_COMPLETIONS: usize = 8;
+const MAX_LISTING_SCAN: usize = 500;
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_BYTES: usize = 256 * 1024;
 const MAX_DIR_ENTRIES: usize = 200;
 
-/// Project file index backing `@` completion. Rebuilt lazily on first use and
-/// at most once per `INDEX_TTL`; the walk stops at `MAX_INDEX_ENTRIES` so a
-/// huge tree (vendor, target/) can't stall the composer.
+struct IndexedPath {
+    /// Project-relative, directories with a trailing `/`.
+    path: String,
+    lower: String,
+}
+
+/// Project file index backing `@` completion. Built off the event loop and
+/// swapped in as a whole snapshot; the walk stops at `MAX_INDEX_ENTRIES` so a
+/// huge tree (vendor, target/) can't grind the build thread forever.
 pub struct MentionIndex {
-    root: PathBuf,
-    /// Project-relative paths, directories with a trailing `/`.
-    paths: Vec<String>,
-    built_at: Option<Instant>,
+    entries: Vec<IndexedPath>,
+    truncated: bool,
 }
 
 impl MentionIndex {
-    pub fn new(root: PathBuf) -> Self {
-        Self {
-            root,
-            paths: Vec::new(),
-            built_at: None,
-        }
+    /// Blocking walk — never call this from the event loop task. `App` only
+    /// ever emits a build request (`App::take_mention_index_request`) that
+    /// `event_loop` runs on `spawn_blocking`.
+    pub fn build(root: PathBuf) -> Self {
+        Self::build_capped(&root, MAX_INDEX_ENTRIES)
     }
 
-    fn ensure_fresh(&mut self) {
-        let stale = self
-            .built_at
-            .map(|t| t.elapsed() > INDEX_TTL)
-            .unwrap_or(true);
-        if stale {
-            self.build();
-        }
-    }
-
-    fn build(&mut self) {
-        let mut paths = Vec::new();
-        let walker = ignore::WalkBuilder::new(&self.root)
+    fn build_capped(root: &Path, cap: usize) -> Self {
+        let mut entries = Vec::new();
+        let mut truncated = false;
+        let walker = ignore::WalkBuilder::new(root)
             .hidden(true)
             .git_ignore(true)
             .git_global(true)
@@ -60,42 +57,53 @@ impl MentionIndex {
             .sort_by_file_name(|a, b| a.cmp(b))
             .build();
         for entry in walker.flatten() {
-            if entry.path() == self.root {
+            if entry.path() == root {
                 continue;
             }
-            let Ok(rel) = entry.path().strip_prefix(&self.root) else {
+            let Ok(rel) = entry.path().strip_prefix(root) else {
                 continue;
             };
-            let mut s = rel.to_string_lossy().replace('\\', "/");
+            let mut path = rel.to_string_lossy().replace('\\', "/");
             if entry.file_type().is_some_and(|t| t.is_dir()) {
-                s.push('/');
+                path.push('/');
             }
-            paths.push(s);
-            if paths.len() >= MAX_INDEX_ENTRIES {
+            let lower = path.to_lowercase();
+            entries.push(IndexedPath { path, lower });
+            if entries.len() >= cap {
+                truncated = true;
                 break;
             }
         }
-        self.paths = paths;
-        self.built_at = Some(Instant::now());
+        Self { entries, truncated }
     }
 
-    /// Completions for the fragment after `@`. `~/`, absolute, `./` and `../`
-    /// fragments bypass the index with a direct directory listing of their
-    /// parent; anything else is a case-insensitive substring match over the
-    /// project index, shortest first.
-    pub fn complete(&mut self, fragment: &str) -> Vec<String> {
-        if let Some(listing) = complete_via_listing(fragment) {
-            return listing;
-        }
-        self.ensure_fresh();
+    /// The walk stopped at the cap — the dropdown says so rather than letting
+    /// whole subtrees look nonexistent.
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// Case-insensitive substring match over the project index, shortest
+    /// first. `~/`, absolute, `./` and `../` fragments never reach here —
+    /// [`complete_via_listing`] serves those from a single `read_dir`.
+    pub fn complete(&self, fragment: &str) -> Vec<String> {
         let needle = fragment.to_lowercase();
-        let mut scored: Vec<&String> = self
-            .paths
+        let mut matches: Vec<&IndexedPath> = self
+            .entries
             .iter()
-            .filter(|p| p.to_lowercase().contains(&needle))
+            .filter(|e| e.lower.contains(&needle))
             .collect();
-        scored.sort_by_key(|p| (p.len(), p.to_lowercase()));
-        scored.into_iter().take(MAX_COMPLETIONS).cloned().collect()
+        matches.sort_by(|a, b| {
+            a.path
+                .len()
+                .cmp(&b.path.len())
+                .then_with(|| a.lower.cmp(&b.lower))
+        });
+        matches
+            .into_iter()
+            .take(MAX_COMPLETIONS)
+            .map(|e| e.path.clone())
+            .collect()
     }
 }
 
@@ -111,35 +119,52 @@ pub fn active_fragment(input: &str) -> Option<&str> {
     token.strip_prefix('@').filter(|f| !f.is_empty())
 }
 
-/// Completes `~/…`, `/…`, `./…`, `../…` fragments by listing the parent
-/// directory directly — these address files outside (or relative around) the
-/// project root, which the index does not cover. Returns `None` for plain
-/// project-relative fragments.
-fn complete_via_listing(fragment: &str) -> Option<Vec<String>> {
-    let expanded = expand_home(fragment);
-    let path = Path::new(&expanded);
-    let is_special = fragment.starts_with("~/")
+/// Fragments the project index does not cover: they address files outside
+/// (or relative around) the project root.
+fn is_listing_fragment(fragment: &str) -> bool {
+    fragment.starts_with("~/")
         || fragment.starts_with('/')
         || fragment.starts_with("./")
-        || fragment.starts_with("../");
-    if !is_special {
+        || fragment.starts_with("../")
+}
+
+/// Completes `~/…`, `/…`, `./…`, `../…` fragments by listing the parent
+/// directory directly, resolving relative fragments against `base`. Returns
+/// `None` for plain project-relative fragments, which the index serves.
+/// Reads at most `MAX_LISTING_SCAN` entries so a directory with a huge fanout
+/// stays cheap enough to run inline on the keystroke path.
+pub(crate) fn complete_via_listing(fragment: &str, base: &Path) -> Option<Vec<String>> {
+    if !is_listing_fragment(fragment) {
         return None;
     }
-    let (parent, prefix) = if fragment.ends_with('/') {
-        (path.to_path_buf(), "")
+    let expanded = expand_home(fragment);
+    let path = Path::new(&expanded);
+    let (dir, prefix) = if fragment.ends_with('/') {
+        (path.to_path_buf(), String::new())
     } else {
         match path.parent() {
             Some(p) if !p.as_os_str().is_empty() => (
                 p.to_path_buf(),
-                path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string(),
             ),
-            _ => (path.to_path_buf(), ""),
+            _ => (path.to_path_buf(), String::new()),
         }
     };
+    let dir = if dir.is_absolute() {
+        dir
+    } else {
+        base.join(dir)
+    };
     let mut out: Vec<String> = Vec::new();
-    let entries = std::fs::read_dir(&parent).ok()?;
     let prefix_lc = prefix.to_lowercase();
-    for entry in entries.flatten() {
+    for entry in std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .take(MAX_LISTING_SCAN)
+    {
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with('.') {
             continue;
@@ -148,8 +173,7 @@ fn complete_via_listing(fragment: &str) -> Option<Vec<String>> {
             continue;
         }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let display = display_path(fragment, &name, is_dir);
-        out.push(display);
+        out.push(display_path(fragment, &name, is_dir));
         if out.len() >= MAX_COMPLETIONS {
             break;
         }
@@ -171,7 +195,7 @@ fn display_path(fragment: &str, name: &str, is_dir: bool) -> String {
     s
 }
 
-fn expand_home(fragment: &str) -> String {
+pub(crate) fn expand_home(fragment: &str) -> String {
     expand_home_with(fragment, std::env::var_os("HOME"))
 }
 
@@ -189,11 +213,24 @@ fn expand_home_with(fragment: &str, home: Option<std::ffi::OsString>) -> String 
     fragment.to_string()
 }
 
+/// Resolves a mention path the same way completion does: `~/` expanded,
+/// absolute kept, anything else relative to `base`.
+pub(crate) fn resolve(raw: &str, base: &Path) -> PathBuf {
+    let expanded = expand_home(raw);
+    let path = Path::new(&expanded);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
 /// Rewrites the submitted text: every `@path` that resolves to an existing
 /// file or directory (relative to `cwd`, with `~/` expansion) gets its
 /// payload appended as an attachment block. Unresolvable mentions are left
-/// as-is — the agent can still act on the raw path. Sizes are capped so a
-/// stray mention can't blow up the context window.
+/// as-is — the agent can still act on the raw path. Every block is rendered
+/// under the budget still left, so the total never exceeds
+/// `MAX_TOTAL_BYTES`.
 pub fn expand_mentions(text: &str, cwd: &Path) -> String {
     let mut attachments = String::new();
     let mut total = 0usize;
@@ -204,27 +241,19 @@ pub fn expand_mentions(text: &str, cwd: &Path) -> String {
         if raw.is_empty() {
             continue;
         }
-        let expanded = expand_home(raw);
-        let path = {
-            let p = Path::new(&expanded);
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                cwd.join(p)
-            }
-        };
         if total >= MAX_TOTAL_BYTES {
             break;
         }
-        if path.is_file() {
-            if let Some(block) =
-                render_file(raw, &path, MAX_FILE_BYTES.min(MAX_TOTAL_BYTES - total))
-            {
-                total += block.len();
-                attachments.push_str(&block);
-            }
+        let path = resolve(raw, cwd);
+        let remaining = MAX_TOTAL_BYTES - total;
+        let block = if path.is_file() {
+            render_file(raw, &path, MAX_FILE_BYTES.min(remaining))
         } else if path.is_dir() {
-            let block = render_dir(raw, &path);
+            render_dir(raw, &path, remaining)
+        } else {
+            None
+        };
+        if let Some(block) = block {
             total += block.len();
             attachments.push_str(&block);
         }
@@ -235,28 +264,54 @@ pub fn expand_mentions(text: &str, cwd: &Path) -> String {
     format!("{text}\n{attachments}")
 }
 
+/// Reads at most `budget` bytes — a multi-GB log mentioned by accident costs
+/// one bounded read, not its own size in RAM. `budget` caps the whole block,
+/// wrapper included, so the caller's running total stays exact.
 fn render_file(display: &str, path: &Path, budget: usize) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
+    let open = format!("\n<attached-file path=\"{display}\">\n");
+    let close = "\n</attached-file>\n";
+    let content_budget = budget.checked_sub(open.len() + close.len())?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(content_budget as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
     if bytes.contains(&0) {
-        return Some(format!(
+        let block = format!(
             "\n<attached-file path=\"{display}\">(binary file — content skipped)</attached-file>\n"
-        ));
+        );
+        return (block.len() <= budget).then_some(block);
     }
     let mut content = String::from_utf8_lossy(&bytes).into_owned();
-    if content.len() > budget {
-        content.truncate(budget);
-        while !content.is_char_boundary(content.len()) {
-            content.pop();
-        }
-        content.push_str("\n… (truncated)");
+    if content.len() > content_budget {
+        const MARKER: &str = "\n… (truncated)";
+        truncate_on_char_boundary(&mut content, content_budget.saturating_sub(MARKER.len()));
+        content.push_str(MARKER);
     }
-    Some(format!(
-        "\n<attached-file path=\"{display}\">\n{content}\n</attached-file>\n"
-    ))
+    Some(format!("{open}{content}{close}"))
 }
 
-fn render_dir(display: &str, path: &Path) -> String {
+/// `String::truncate` panics off a char boundary — a 64 KiB cut landing
+/// inside a multibyte char is not exotic in a UTF-8 source tree.
+fn truncate_on_char_boundary(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
+fn render_dir(display: &str, path: &Path, budget: usize) -> Option<String> {
+    const MARKER: &str = "… (listing truncated)\n";
+    let open = format!("\n<attached-directory path=\"{display}\">\n");
+    let close = "</attached-directory>\n";
+    let listing_budget = budget.checked_sub(open.len() + close.len())?;
     let mut listing = String::new();
+    let mut count = 0;
     let walker = ignore::WalkBuilder::new(path)
         .hidden(true)
         .git_ignore(true)
@@ -264,7 +319,6 @@ fn render_dir(display: &str, path: &Path) -> String {
         .git_exclude(true)
         .max_depth(Some(3))
         .build();
-    let mut count = 0;
     for entry in walker.flatten() {
         if entry.path() == path {
             continue;
@@ -280,16 +334,19 @@ fn render_dir(display: &str, path: &Path) -> String {
         } else {
             ""
         };
+        let line_len = rel.len() + suffix.len() + 1;
+        if count >= MAX_DIR_ENTRIES || listing.len() + line_len + MARKER.len() > listing_budget {
+            if listing.len() + MARKER.len() <= listing_budget {
+                listing.push_str(MARKER);
+            }
+            break;
+        }
         listing.push_str(&rel);
         listing.push_str(suffix);
         listing.push('\n');
         count += 1;
-        if count >= MAX_DIR_ENTRIES {
-            listing.push_str("… (listing truncated)\n");
-            break;
-        }
     }
-    format!("\n<attached-directory path=\"{display}\">\n{listing}</attached-directory>\n")
+    Some(format!("{open}{listing}{close}"))
 }
 
 #[cfg(test)]
@@ -343,6 +400,61 @@ mod tests {
     }
 
     #[test]
+    fn render_file_never_reads_past_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.log");
+        std::fs::write(&path, "x".repeat(1024 * 1024)).unwrap();
+        let block = render_file("huge.log", &path, MAX_FILE_BYTES).unwrap();
+        assert!(block.len() <= MAX_FILE_BYTES, "{}", block.len());
+        assert!(block.contains("… (truncated)"));
+    }
+
+    #[test]
+    fn render_file_truncates_on_a_char_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multibyte.txt");
+        std::fs::write(&path, "é".repeat(200)).unwrap();
+        let block = render_file("multibyte.txt", &path, 120).unwrap();
+        assert!(block.len() <= 120, "{}", block.len());
+        assert!(!block.contains('\u{fffd}'), "coupé au milieu d'un char");
+    }
+
+    #[test]
+    fn render_dir_respects_the_remaining_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..200 {
+            std::fs::write(dir.path().join(format!("file-{i:0>40}.txt")), "x").unwrap();
+        }
+        let block = render_dir("d/", dir.path(), 600).unwrap();
+        assert!(block.len() <= 600, "{}", block.len());
+        assert!(block.contains("… (listing truncated)"));
+    }
+
+    #[test]
+    fn expand_mentions_total_never_exceeds_the_global_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..3 {
+            std::fs::write(
+                dir.path().join(format!("big{i}.txt")),
+                "x".repeat(100 * 1024),
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.path().join("last.txt"), "y".repeat(60_000)).unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        for i in 0..200 {
+            std::fs::write(sub.join(format!("entry-{i:0>60}.txt")), "z").unwrap();
+        }
+        let text = "@big0.txt @big1.txt @big2.txt @last.txt @sub/";
+        let out = expand_mentions(text, dir.path());
+        let attachments = out.len() - text.len() - 1;
+        assert!(attachments <= MAX_TOTAL_BYTES, "{attachments}");
+        assert!(out.contains("<attached-directory path=\"sub/\">"));
+        assert!(out.contains("… (listing truncated)"));
+    }
+
+    #[test]
     fn expand_home_with_resolves_tilde_against_the_given_home() {
         let home = Some(std::ffi::OsString::from("/home/u"));
         assert_eq!(expand_home_with("~/x.txt", home.clone()), "/home/u/x.txt");
@@ -356,11 +468,12 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("src/tui")).unwrap();
         std::fs::write(dir.path().join("src/tui/app.rs"), "x").unwrap();
         std::fs::write(dir.path().join("README.md"), "x").unwrap();
-        let mut idx = MentionIndex::new(dir.path().to_path_buf());
+        let idx = MentionIndex::build(dir.path().to_path_buf());
         let matches = idx.complete("app");
         assert!(matches.iter().any(|m| m == "src/tui/app.rs"));
         let dirs = idx.complete("tu");
         assert!(dirs.iter().any(|m| m == "src/tui/"));
+        assert!(!idx.truncated());
     }
 
     #[test]
@@ -371,18 +484,37 @@ mod tests {
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         std::fs::write(dir.path().join("ignored.txt"), "x").unwrap();
         std::fs::write(dir.path().join("kept.txt"), "x").unwrap();
-        let mut idx = MentionIndex::new(dir.path().to_path_buf());
+        let idx = MentionIndex::build(dir.path().to_path_buf());
         let matches = idx.complete("txt");
         assert!(matches.iter().any(|m| m == "kept.txt"));
         assert!(!matches.iter().any(|m| m == "ignored.txt"));
     }
 
     #[test]
+    fn index_flags_a_walk_stopped_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let idx = MentionIndex::build_capped(dir.path(), 2);
+        assert!(idx.truncated());
+        assert_eq!(idx.entries.len(), 2);
+    }
+
+    #[test]
     fn listing_completes_dot_slash_fragments() {
-        let cwd = std::env::current_dir().unwrap();
-        let out = complete_via_listing("./Cargo").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("Cargotown")).unwrap();
+        let out = complete_via_listing("./Cargo", dir.path()).unwrap();
         assert!(out.iter().any(|m| m == "./Cargo.toml"), "{out:?}");
-        drop(cwd);
+        assert!(out.iter().any(|m| m == "./Cargotown/"), "{out:?}");
+    }
+
+    #[test]
+    fn listing_ignores_project_relative_fragments() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(complete_via_listing("src/tui", dir.path()).is_none());
     }
 
     #[test]
