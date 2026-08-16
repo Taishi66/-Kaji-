@@ -1,18 +1,186 @@
+use anyhow::{Result, bail};
 use ratatui::style::{Color, Modifier, Style};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Encre sumi 墨 — texte courant.
-pub const ENCRE: Color = Color::Rgb(200, 200, 195);
-/// Indigo ai 藍 — préfixe utilisateur, bordures inactives.
-pub const INDIGO: Color = Color::Rgb(84, 110, 140);
-/// Vermillon shu 朱 — accent actif : étage en cours, spinner, alerte.
-pub const VERMILLON: Color = Color::Rgb(203, 88, 65);
-/// Or patiné — titres, glyphe 鍛冶, coches de complétion.
-pub const OR_PATINE: Color = Color::Rgb(196, 164, 106);
-/// Sumi profond — fond discret des puces de code inline.
-pub const SUMI_PROFOND: Color = Color::Rgb(40, 40, 38);
-/// Wakakusa 若草 — vert tendre, 4ᵉ teinte des graphiques en camembert (distincte
-/// des trois accents déjà pris par vermillon/or/indigo).
-pub const WAKAKUSA: Color = Color::Rgb(139, 166, 108);
+/// Rôles sémantiques d'un thème — les fonctions de style ci-dessous ne
+/// connaissent que ces rôles, jamais une couleur littérale.
+#[derive(Debug)]
+pub struct Palette {
+    pub name: &'static str,
+    /// Texte courant.
+    pub text: Color,
+    /// Lignes système, raisonnement, ambiance de démarrage.
+    pub muted: Color,
+    /// Préfixe utilisateur.
+    pub user: Color,
+    /// Titres, agent, en-têtes de tableau.
+    pub gold: Color,
+    /// Accent actif : étage en cours, spinner, curseur, alerte.
+    pub accent: Color,
+    pub border_inactive: Color,
+    /// Fond des puces de code inline.
+    pub code_bg: Color,
+    /// 4ᵉ teinte des graphiques, distincte des trois accents ci-dessus.
+    pub chart_alt: Color,
+}
+
+/// Ordre du cycle `/theme` ; `zen` (index 0) est le thème par défaut et
+/// reprend à l'identique les couleurs historiques (encre sumi 墨, indigo ai
+/// 藍, vermillon shu 朱, or patiné, sumi profond, wakakusa 若草).
+pub static THEMES: [Palette; 6] = [
+    Palette {
+        name: "zen",
+        text: Color::Rgb(200, 200, 195),
+        muted: Color::DarkGray,
+        user: Color::Rgb(84, 110, 140),
+        gold: Color::Rgb(196, 164, 106),
+        accent: Color::Rgb(203, 88, 65),
+        border_inactive: Color::Rgb(84, 110, 140),
+        code_bg: Color::Rgb(40, 40, 38),
+        chart_alt: Color::Rgb(139, 166, 108),
+    },
+    Palette {
+        name: "light",
+        text: Color::Rgb(56, 56, 56),
+        muted: Color::Rgb(120, 118, 111),
+        user: Color::Rgb(59, 91, 130),
+        gold: Color::Rgb(138, 109, 42),
+        accent: Color::Rgb(180, 50, 31),
+        border_inactive: Color::Rgb(140, 158, 182),
+        code_bg: Color::Rgb(236, 234, 228),
+        chart_alt: Color::Rgb(94, 127, 58),
+    },
+    Palette {
+        name: "nord",
+        text: Color::Rgb(216, 222, 233),
+        muted: Color::Rgb(76, 86, 106),
+        user: Color::Rgb(136, 192, 208),
+        gold: Color::Rgb(235, 203, 139),
+        accent: Color::Rgb(191, 97, 106),
+        border_inactive: Color::Rgb(94, 129, 172),
+        code_bg: Color::Rgb(59, 66, 82),
+        chart_alt: Color::Rgb(163, 190, 140),
+    },
+    Palette {
+        name: "gruvbox",
+        text: Color::Rgb(235, 219, 178),
+        muted: Color::Rgb(146, 131, 116),
+        user: Color::Rgb(131, 165, 152),
+        gold: Color::Rgb(250, 189, 47),
+        accent: Color::Rgb(251, 73, 52),
+        border_inactive: Color::Rgb(102, 92, 84),
+        code_bg: Color::Rgb(60, 56, 52),
+        chart_alt: Color::Rgb(184, 187, 38),
+    },
+    Palette {
+        name: "solarized",
+        text: Color::Rgb(131, 148, 150),
+        muted: Color::Rgb(101, 123, 131),
+        user: Color::Rgb(38, 139, 210),
+        gold: Color::Rgb(181, 137, 0),
+        accent: Color::Rgb(220, 50, 47),
+        border_inactive: Color::Rgb(88, 110, 117),
+        code_bg: Color::Rgb(7, 54, 66),
+        chart_alt: Color::Rgb(133, 153, 0),
+    },
+    Palette {
+        name: "mono",
+        text: Color::Reset,
+        muted: Color::DarkGray,
+        user: Color::Gray,
+        gold: Color::White,
+        accent: Color::White,
+        border_inactive: Color::DarkGray,
+        code_bg: Color::DarkGray,
+        chart_alt: Color::Gray,
+    },
+];
+
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+pub fn active() -> &'static Palette {
+    &THEMES[ACTIVE.load(Ordering::Relaxed)]
+}
+
+fn index_of(name: &str) -> Option<usize> {
+    let name = name.trim();
+    THEMES
+        .iter()
+        .position(|p| p.name.eq_ignore_ascii_case(name))
+}
+
+pub fn set_active(name: &str) -> Result<()> {
+    let Some(idx) = index_of(name) else {
+        let available: Vec<&str> = THEMES.iter().map(|p| p.name).collect();
+        bail!(
+            "thème inconnu « {} » — disponibles : {}",
+            name.trim(),
+            available.join(", ")
+        );
+    };
+    ACTIVE.store(idx, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Thème suivant dans l'ordre de [`THEMES`], en boucle. Un nom inconnu
+/// repart du premier thème.
+pub fn next_name(current: &str) -> &'static str {
+    let idx = index_of(current).map_or(0, |i| (i + 1) % THEMES.len());
+    THEMES[idx].name
+}
+
+/// Résolution au démarrage : env `KAJI_THEME` > config `KAJI_THEME` > `zen`.
+/// Une valeur inconnue retombe sur `zen` plutôt que d'échouer.
+pub fn resolve_theme(env: Option<&str>, config: Option<&str>) -> &'static str {
+    env.or(config)
+        .and_then(index_of)
+        .map_or(THEMES[0].name, |idx| THEMES[idx].name)
+}
+
+pub fn text_color() -> Color {
+    active().text
+}
+
+pub fn user_color() -> Color {
+    active().user
+}
+
+pub fn gold_color() -> Color {
+    active().gold
+}
+
+pub fn accent_color() -> Color {
+    active().accent
+}
+
+pub fn chart_alt_color() -> Color {
+    active().chart_alt
+}
+
+/// La palette active est un état de processus : tout test qui la change (ou
+/// qui affirme une couleur exacte) prend ce verrou, restauré à la sortie.
+#[cfg(test)]
+pub struct ThemeGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: usize,
+}
+
+#[cfg(test)]
+impl Drop for ThemeGuard {
+    fn drop(&mut self) {
+        ACTIVE.store(self.previous, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+pub fn test_guard() -> ThemeGuard {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    ThemeGuard {
+        _lock: lock,
+        previous: ACTIVE.load(Ordering::Relaxed),
+    }
+}
 
 pub const KAJI_GLYPH: &str = "鍛冶";
 pub const USER_PREFIX: &str = "vous ▸ ";
@@ -28,7 +196,7 @@ pub const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴'
 pub const ENSO_FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
 
 /// Ninja cursor (T4) — pulses at the tail of the agent's in-flight text line
-/// while it streams. Vermillon, distinct from the dim ensō loader.
+/// while it streams. Accent-coloured, distinct from the dim ensō loader.
 pub const BLADE_FRAMES: [char; 4] = ['▊', '▋', '▌', '▍'];
 
 pub fn spinner_frame(elapsed: std::time::Duration) -> char {
@@ -54,20 +222,22 @@ pub fn blade_frame(elapsed: std::time::Duration) -> char {
 }
 
 pub fn text() -> Style {
-    Style::default().fg(ENCRE)
+    Style::default().fg(active().text)
 }
 
 pub fn user() -> Style {
-    Style::default().fg(INDIGO)
+    Style::default().fg(active().user)
 }
 
 pub fn agent() -> Style {
-    Style::default().fg(OR_PATINE).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(active().gold)
+        .add_modifier(Modifier::BOLD)
 }
 
 pub fn system() -> Style {
     Style::default()
-        .fg(Color::DarkGray)
+        .fg(active().muted)
         .add_modifier(Modifier::ITALIC)
 }
 
@@ -76,53 +246,149 @@ pub fn system() -> Style {
 /// though they currently share the same style.
 pub fn thinking() -> Style {
     Style::default()
-        .fg(Color::DarkGray)
+        .fg(active().muted)
         .add_modifier(Modifier::ITALIC)
 }
 
 pub fn accent() -> Style {
-    Style::default().fg(VERMILLON)
+    Style::default().fg(active().accent)
 }
 
 pub fn title() -> Style {
-    Style::default().fg(OR_PATINE).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(active().gold)
+        .add_modifier(Modifier::BOLD)
 }
 
 pub fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
+    Style::default().fg(active().muted)
 }
 
 pub fn border_inactive() -> Style {
-    Style::default().fg(INDIGO)
+    Style::default().fg(active().border_inactive)
 }
 
 pub fn border_active() -> Style {
-    Style::default().fg(VERMILLON)
+    Style::default().fg(active().accent)
 }
 
 pub fn code_inline() -> Style {
-    Style::default().fg(VERMILLON).bg(SUMI_PROFOND)
+    let palette = active();
+    Style::default().fg(palette.accent).bg(palette.code_bg)
 }
 
 pub fn code_block() -> Style {
-    Style::default().fg(VERMILLON)
+    Style::default().fg(active().accent)
 }
 
 pub fn heading() -> Style {
     Style::default()
-        .fg(OR_PATINE)
+        .fg(active().gold)
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
 }
 
-/// En-tête de tableau aligné (`/cost`, `/docker`) — or patiné estompé.
+/// En-tête de tableau aligné (`/cost`, `/docker`) — teinte or estompée.
 pub fn table_header() -> Style {
-    Style::default().fg(OR_PATINE).add_modifier(Modifier::DIM)
+    Style::default()
+        .fg(active().gold)
+        .add_modifier(Modifier::DIM)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn themes_are_six_uniquely_named_palettes_in_cycle_order() {
+        let names: Vec<&str> = THEMES.iter().map(|p| p.name).collect();
+        assert_eq!(
+            names,
+            ["zen", "light", "nord", "gruvbox", "solarized", "mono"]
+        );
+    }
+
+    #[test]
+    fn set_active_matches_names_case_insensitively() {
+        let _guard = test_guard();
+
+        set_active("NORD").expect("nord is a built-in theme");
+
+        assert_eq!(active().name, "nord");
+    }
+
+    #[test]
+    fn set_active_rejects_an_unknown_name_and_lists_the_available_ones() {
+        let _guard = test_guard();
+
+        let err = set_active("xyz").expect_err("xyz is not a theme");
+
+        let message = err.to_string();
+        assert!(message.contains("xyz"), "{message}");
+        for palette in &THEMES {
+            assert!(message.contains(palette.name), "{message}");
+        }
+        assert_eq!(active().name, "zen", "a rejected name changes nothing");
+    }
+
+    #[test]
+    fn next_name_walks_the_cycle_and_wraps_to_the_first_theme() {
+        assert_eq!(next_name("zen"), "light");
+        assert_eq!(next_name("solarized"), "mono");
+        assert_eq!(next_name("mono"), "zen");
+    }
+
+    #[test]
+    fn mono_palette_avoids_rgb_so_it_survives_a_16_color_terminal() {
+        let mono = THEMES
+            .iter()
+            .find(|p| p.name == "mono")
+            .expect("mono is a built-in theme");
+
+        for color in [
+            mono.text,
+            mono.muted,
+            mono.user,
+            mono.gold,
+            mono.accent,
+            mono.border_inactive,
+            mono.code_bg,
+            mono.chart_alt,
+        ] {
+            assert!(
+                !matches!(color, Color::Rgb(..)),
+                "mono must stay palette-free, got {color:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zen_palette_keeps_the_historical_colors() {
+        let zen = &THEMES[0];
+        assert_eq!(zen.name, "zen");
+        assert_eq!(zen.text, Color::Rgb(200, 200, 195));
+        assert_eq!(zen.user, Color::Rgb(84, 110, 140));
+        assert_eq!(zen.border_inactive, Color::Rgb(84, 110, 140));
+        assert_eq!(zen.accent, Color::Rgb(203, 88, 65));
+        assert_eq!(zen.gold, Color::Rgb(196, 164, 106));
+        assert_eq!(zen.code_bg, Color::Rgb(40, 40, 38));
+        assert_eq!(zen.chart_alt, Color::Rgb(139, 166, 108));
+        assert_eq!(zen.muted, Color::DarkGray);
+    }
+
+    #[test]
+    fn resolve_theme_prefers_env_over_config_over_the_default() {
+        assert_eq!(resolve_theme(Some("nord"), Some("gruvbox")), "nord");
+        assert_eq!(resolve_theme(None, Some("gruvbox")), "gruvbox");
+        assert_eq!(resolve_theme(None, None), "zen");
+        assert_eq!(resolve_theme(Some("MONO"), None), "mono");
+    }
+
+    #[test]
+    fn resolve_theme_falls_back_to_the_default_on_an_unknown_value() {
+        assert_eq!(resolve_theme(Some("xyz"), Some("nord")), "zen");
+        assert_eq!(resolve_theme(None, Some("")), "zen");
+    }
 
     #[test]
     fn enso_frame_cycles_through_four_frames_over_a_one_second_period() {

@@ -923,14 +923,15 @@ mod tests {
     }
 
     /// T4 — ninja cursor. `turn_active` plus a streaming agent text line
-    /// must render a `theme::BLADE_FRAMES` glyph, styled `theme::accent()`
-    /// (vermillon), appended right after the agent's own text on the last
-    /// rendered `Line` of that block.
+    /// must render a `theme::BLADE_FRAMES` glyph, styled `theme::accent()`,
+    /// appended right after the agent's own text on the last rendered
+    /// `Line` of that block.
     #[test]
     fn streaming_agent_line_carries_the_blade_cursor() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
+        let _theme = theme::test_guard();
         let mut app = App::new(None);
         app.begin_turn();
         app.apply_agent_event(&text_message("m1", "réponse"));
@@ -957,8 +958,8 @@ mod tests {
         let (bx, by) = blade_cells[0];
         assert_eq!(
             buffer[(bx, by)].fg,
-            theme::VERMILLON,
-            "the blade must be styled vermillon"
+            theme::accent_color(),
+            "the blade must be styled with the palette accent"
         );
 
         let row_text: String = (0..buffer.area.width)

@@ -101,6 +101,27 @@ fn mouse_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Thème de démarrage : env `KAJI_THEME` > config `KAJI_THEME` > `zen`. Une
+/// valeur inconnue est signalée dans le chat et laisse le thème par défaut,
+/// jamais un lancement qui échoue. Appelé après `maybe_push_welcome` : la
+/// ligne d'avertissement rendrait le chat non vide et masquerait la
+/// bannière d'accueil.
+fn apply_startup_theme(app: &mut App) -> Result<()> {
+    let from_env = std::env::var("KAJI_THEME").ok();
+    let from_config = Config::global().get_param::<String>("KAJI_THEME").ok();
+    let resolved = theme::resolve_theme(from_env.as_deref(), from_config.as_deref());
+    theme::set_active(resolved)?;
+    if let Some(requested) = from_env.as_deref().or(from_config.as_deref()) {
+        if !requested.trim().eq_ignore_ascii_case(resolved) {
+            app.push_system(&format!(
+                "thème « {} » inconnu — {resolved} appliqué",
+                requested.trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn build_header(session_id: &str) -> String {
     let config = Config::global();
     let provider = config
@@ -487,6 +508,7 @@ async fn event_loop(
     app.mouse_enabled = mouse_enabled();
     seed_chat(&mut app, &conversation);
     maybe_push_welcome(&mut app);
+    apply_startup_theme(&mut app)?;
     let session_manager = SessionManager::instance();
     if resume {
         apply_interrupted_turn_marker(
@@ -602,6 +624,11 @@ async fn event_loop(
                         }
                     }
                     Action::Help => push_welcome(&mut app, true),
+                    Action::Theme(name) => {
+                        if let Err(e) = Config::global().set_param("KAJI_THEME", &name) {
+                            app.push_system(&format!("thème appliqué mais non enregistré : {e}"));
+                        }
+                    }
                     Action::Cost => {
                         let report = cost_report(&session_manager, session_id).await;
                         app.push_system_lines(report);
@@ -1614,7 +1641,8 @@ mod tests {
             ("/cost", "/context"),
             ("/context", "/docker"),
             ("/docker", "/checkpoints"),
-            ("/checkpoints", "/help"),
+            ("/checkpoints", "/theme"),
+            ("/theme", "/help"),
             ("/help", "/quit"),
         ] {
             let row = rows
@@ -1658,19 +1686,21 @@ mod tests {
 
     #[test]
     fn help_command_renders_in_normal_text_style() {
+        let _theme = theme::test_guard();
         let mut app = App::new(None);
 
         push_welcome(&mut app, true);
 
         assert_eq!(
             welcome_line_fg(&app, "bienvenue"),
-            theme::ENCRE,
+            theme::text_color(),
             "/help must render like a normal answer, not the dim welcome ambiance"
         );
     }
 
     #[test]
     fn startup_welcome_stays_dim() {
+        let _theme = theme::test_guard();
         let mut app = App::new(None);
 
         push_welcome(&mut app, false);

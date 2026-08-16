@@ -244,9 +244,9 @@ fn budget_gauge_line(window_label: &str, budget: Budget, agg: &UsageAggregate) -
 
     let bar = gauge(ratio, GAUGE_WIDTH);
     let bar_style = if ratio >= GAUGE_DANGER_THRESHOLD {
-        Style::default().fg(theme::VERMILLON)
+        Style::default().fg(theme::accent_color())
     } else {
-        Style::default().fg(theme::OR_PATINE)
+        Style::default().fg(theme::gold_color())
     };
     let percent = (ratio * 100.0).round() as i64;
     let detail = if unit.is_empty() {
@@ -309,9 +309,9 @@ pub fn context_table_lines(
     });
     let bar_style = match &auto_compact {
         Some(_) if breakdown.used_pct() >= breakdown.compaction_threshold_pct => {
-            Style::default().fg(theme::VERMILLON)
+            Style::default().fg(theme::accent_color())
         }
-        _ => Style::default().fg(theme::OR_PATINE),
+        _ => Style::default().fg(theme::gold_color()),
     };
 
     let mut lines = vec![

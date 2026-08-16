@@ -1,3 +1,4 @@
+use crate::tui::theme;
 use kaji::agents::AgentEvent;
 use kaji::conversation::Conversation;
 use kaji::conversation::message::{ActionRequiredData, Message, MessageContentBlock};
@@ -80,6 +81,11 @@ pub enum Action {
     RestoreCancel,
     /// `Ctrl+S` — flush queued steer messages into the running turn.
     SteerNow,
+    /// Palette already switched by [`App::run_theme_command`] — carries the
+    /// applied name so the event loop can persist it to `KAJI_THEME`. The
+    /// switch itself must not wait on the config write: the redraw right
+    /// after this event is what the user is looking at.
+    Theme(String),
 }
 
 pub struct Command {
@@ -137,6 +143,11 @@ pub const COMMANDS: &[Command] = &[
         run: |_| Action::Checkpoints,
     },
     Command {
+        name: "/theme",
+        desc: "passe au thème suivant — /theme <nom> ou /theme list",
+        run: |app| app.run_theme_command(""),
+    },
+    Command {
         name: "/help",
         desc: "réaffiche l'aide",
         run: |_| Action::Help,
@@ -160,6 +171,18 @@ pub const COMMANDS: &[Command] = &[
 /// (or is empty) keeps `/restore` a whole word.
 fn restore_command_arg(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("/restore")?;
+    if rest.is_empty() || rest.starts_with(' ') {
+        Some(rest.trim())
+    } else {
+        None
+    }
+}
+
+/// Same whole-word parsing as [`restore_command_arg`], for `/theme <nom>`.
+/// `/theme` alone is in `COMMANDS` (arg-less = cycle), so it reaches
+/// [`App::run_theme_command`] through the palette too.
+fn theme_command_arg(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("/theme")?;
     if rest.is_empty() || rest.starts_with(' ') {
         Some(rest.trim())
     } else {
@@ -1245,6 +1268,9 @@ impl App {
                         }
                         return Action::Restore(arg.to_string());
                     }
+                    if let Some(arg) = theme_command_arg(&text) {
+                        return self.run_theme_command(arg);
+                    }
                     // Unreachable today: any trimmed input that names a command
                     // keeps the palette visible (see `palette_matches`), so this
                     // branch never runs for typed input — kept as a safety net
@@ -1290,6 +1316,44 @@ impl App {
             rendered: None,
         });
         self.reset_agent_merge_ids();
+    }
+
+    /// `/theme` : argument vide = thème suivant, `list` = inventaire,
+    /// sinon le nom donné. Un nom inconnu laisse la palette intacte et
+    /// renvoie la liste des noms disponibles.
+    fn run_theme_command(&mut self, arg: &str) -> Action {
+        if arg.eq_ignore_ascii_case("list") {
+            let active = theme::active().name;
+            let listing = theme::THEMES
+                .iter()
+                .map(|palette| {
+                    if palette.name == active {
+                        format!("▸ {}", palette.name)
+                    } else {
+                        palette.name.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            self.push_system(&format!("thèmes : {listing}"));
+            return Action::None;
+        }
+        let requested = if arg.is_empty() {
+            theme::next_name(theme::active().name)
+        } else {
+            arg
+        };
+        match theme::set_active(requested) {
+            Ok(()) => {
+                let applied = theme::active().name;
+                self.push_system(&format!("thème : {applied}"));
+                Action::Theme(applied.to_string())
+            }
+            Err(err) => {
+                self.push_system(&err.to_string());
+                Action::None
+            }
+        }
     }
 
     pub fn push_system(&mut self, text: &str) {
@@ -1647,6 +1711,79 @@ mod tests {
             app.on_event(&key(KeyCode::Enter)),
             Action::Restore("a1b2c3".to_string())
         );
+    }
+
+    fn submit(app: &mut App, text: &str) -> Action {
+        for c in text.chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.on_event(&key(KeyCode::Enter))
+    }
+
+    #[test]
+    fn bare_slash_theme_cycles_to_the_next_palette() {
+        let _theme = theme::test_guard();
+        let mut app = App::new(None);
+
+        let action = submit(&mut app, "/theme");
+
+        assert_eq!(action, Action::Theme("light".to_string()));
+        assert_eq!(theme::active().name, "light");
+        assert!(app.chat.iter().any(|l| l.text.contains("thème : light")));
+    }
+
+    #[test]
+    fn slash_theme_with_a_name_applies_that_palette() {
+        let _theme = theme::test_guard();
+        let mut app = App::new(None);
+
+        let action = submit(&mut app, "/theme nord");
+
+        assert_eq!(action, Action::Theme("nord".to_string()));
+        assert_eq!(theme::active().name, "nord");
+        assert!(app.chat.iter().any(|l| l.text.contains("thème : nord")));
+    }
+
+    #[test]
+    fn slash_theme_with_an_unknown_name_lists_the_available_themes() {
+        let _theme = theme::test_guard();
+        let mut app = App::new(None);
+
+        let action = submit(&mut app, "/theme xyz");
+
+        assert_eq!(action, Action::None);
+        assert_eq!(theme::active().name, "zen", "the palette must not change");
+        let error = app
+            .chat
+            .iter()
+            .find(|l| l.text.contains("xyz"))
+            .expect("an error line naming the rejected theme");
+        for palette in &theme::THEMES {
+            assert!(error.text.contains(palette.name), "{}", error.text);
+        }
+    }
+
+    #[test]
+    fn slash_theme_list_marks_the_active_palette() {
+        let _theme = theme::test_guard();
+        let mut app = App::new(None);
+
+        let action = submit(&mut app, "/theme list");
+
+        assert_eq!(action, Action::None);
+        let listing = app.chat.last().expect("a listing line");
+        for palette in &theme::THEMES {
+            assert!(listing.text.contains(palette.name), "{}", listing.text);
+        }
+        assert!(listing.text.contains("▸ zen"), "{}", listing.text);
+    }
+
+    #[test]
+    fn theme_command_arg_keeps_theme_a_whole_word() {
+        assert_eq!(theme_command_arg("/theme"), Some(""));
+        assert_eq!(theme_command_arg("/theme nord"), Some("nord"));
+        assert_eq!(theme_command_arg("/themex"), None);
+        assert_eq!(theme_command_arg("/restore a1"), None);
     }
 
     /// ⛔ BARRIÈRE premortem PM6 — /restore refusé pendant un tour actif
@@ -3544,6 +3681,7 @@ mod tests {
 
     #[test]
     fn every_command_in_the_table_dispatches_without_falling_through_to_submit() {
+        let _theme = theme::test_guard();
         for cmd in COMMANDS {
             let mut app = App::new(None);
             for c in cmd.name.chars() {

@@ -272,12 +272,14 @@ fn render_code_line(raw_line: &str) -> Line<'static> {
 
 const CHART_LABEL_CAP: usize = 24;
 const CHART_BAR_MAX_WIDTH: usize = 40;
-const PIE_COLORS: [Color; 4] = [
-    theme::VERMILLON,
-    theme::OR_PATINE,
-    theme::INDIGO,
-    theme::WAKAKUSA,
-];
+fn pie_colors() -> [Color; 4] {
+    [
+        theme::accent_color(),
+        theme::gold_color(),
+        theme::user_color(),
+        theme::chart_alt_color(),
+    ]
+}
 
 /// Reserved columns around the label+bar pair: pie's `"● "` bullet (2,
 /// reserved even for bar charts to keep one rule for both), the `"  "` gap
@@ -459,7 +461,8 @@ fn render_pie_line(
     bar_max: usize,
     idx: usize,
 ) -> Line<'static> {
-    let color = Style::default().fg(PIE_COLORS[idx % PIE_COLORS.len()]);
+    let colors = pie_colors();
+    let color = Style::default().fg(colors[idx % colors.len()]);
     let bar = "█".repeat(chart_bar_width(item.value, total, bar_max));
     let pct = (item.value / total * 100.0).round() as i64;
     Line::from(vec![
@@ -819,6 +822,7 @@ mod tests {
 
     #[test]
     fn renders_pie_chart_with_percentages() {
+        let _theme = theme::test_guard();
         let input = "```kaji-chart\n{\"type\":\"pie\",\"items\":[{\"label\":\"x\",\"value\":1},{\"label\":\"y\",\"value\":1},{\"label\":\"z\",\"value\":3}]}\n```";
         let lines = render_markdown(input, 200);
         assert_eq!(lines.len(), 3);
@@ -840,13 +844,13 @@ mod tests {
             .iter()
             .find(|s| s.content == "●")
             .expect("pastille span");
-        assert_eq!(dot0.style.fg, Some(theme::VERMILLON));
+        assert_eq!(dot0.style.fg, Some(theme::accent_color()));
         let dot1 = lines[1]
             .spans
             .iter()
             .find(|s| s.content == "●")
             .expect("pastille span");
-        assert_eq!(dot1.style.fg, Some(theme::OR_PATINE));
+        assert_eq!(dot1.style.fg, Some(theme::gold_color()));
     }
 
     #[test]
@@ -933,6 +937,7 @@ mod tests {
 
     #[test]
     fn pie_color_rotation_wraps_after_four_colors() {
+        let _theme = theme::test_guard();
         let input = "```kaji-chart\n{\"type\":\"pie\",\"items\":[{\"label\":\"a\",\"value\":1},{\"label\":\"b\",\"value\":1},{\"label\":\"c\",\"value\":1},{\"label\":\"d\",\"value\":1},{\"label\":\"e\",\"value\":1}]}\n```";
         let lines = render_markdown(input, 200);
         assert_eq!(lines.len(), 5);
@@ -941,7 +946,7 @@ mod tests {
             .iter()
             .find(|s| s.content == "●")
             .expect("pastille span");
-        assert_eq!(dot4.style.fg, Some(theme::VERMILLON));
+        assert_eq!(dot4.style.fg, Some(theme::accent_color()));
     }
 
     #[test]
