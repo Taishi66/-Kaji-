@@ -1,20 +1,35 @@
-use crate::tui::theme;
+use crate::tui::{diff, theme};
 use kaji::agents::AgentEvent;
+use kaji::config::KajiMode;
 use kaji::conversation::Conversation;
 use kaji::conversation::message::{
     ActionRequiredData, Message, MessageContentBlock, SystemNotificationType,
 };
+use kaji::permission::Permission;
+use kaji::permission::grants::{derive_grant_spec, is_shell_tool};
 use kaji::providers::base::ProviderUsage;
 use kaji_core::sdd::{SddPass, SpecDoc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::text::{Line, Span};
-use rmcp::model::Role;
+use rmcp::model::{JsonObject, Role};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::io::Read;
 use std::time::{Duration, Instant};
 
 const SCROLL_PAGE: u16 = 10;
 const SCROLL_WHEEL: u16 = 3;
+
+/// Hard ceiling on what the Tab detail panel reads back from disk to diff a
+/// `write` against the file it would replace. The panel is a preview, not a
+/// file viewer: past this the diff is cut rather than pulling a whole
+/// multi-megabyte file into the draw path.
+const DETAIL_READ_LIMIT: u64 = 256 * 1024;
+
+/// Ceiling on the detail text handed to the renderer. `ui::truncate_for_modal`
+/// clips it again to the modal's real geometry; this one keeps the string that
+/// reaches it (and the wrap measurement it runs every frame) bounded.
+const DETAIL_MAX_CHARS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassDriver {
@@ -56,7 +71,105 @@ pub struct ChatLine {
 pub struct ToolApprovalRequest {
     pub id: String,
     pub tool_name: String,
+    /// The call's own arguments — what the `s`/`a` answers derive their grant
+    /// from, and what the Tab detail panel renders.
+    pub arguments: JsonObject,
     pub prompt: Option<String>,
+}
+
+impl ToolApprovalRequest {
+    /// What `s`/`a` would actually persist, in the same serialized form the
+    /// permission lists store — derived by the core, never re-derived here.
+    pub fn grant_label(&self) -> String {
+        match derive_grant_spec(&self.tool_name, Some(&self.arguments)) {
+            Some(spec) => spec.to_string(),
+            None => format!("tout l'outil {}", self.tool_name),
+        }
+    }
+
+    /// The Tab panel's body: the full command for a shell call, a line diff for
+    /// an edit or an overwrite, the raw arguments for anything else.
+    pub fn detail_text(&self) -> String {
+        let base = self.tool_base_name();
+        let text = if is_shell_tool(&self.tool_name) {
+            self.string_arg("command").map(str::to_string)
+        } else if base == "edit" {
+            self.string_arg("before")
+                .zip(self.string_arg("after"))
+                .map(|(before, after)| diff::line_diff(before, after).join("\n"))
+        } else if base == "write" {
+            self.string_arg("path")
+                .zip(self.string_arg("content"))
+                .map(|(path, content)| write_preview(path, content))
+        } else {
+            None
+        };
+        cap_detail(text.unwrap_or_else(|| self.pretty_arguments()))
+    }
+
+    /// The developer extension is registered unprefixed in-process and prefixed
+    /// over MCP — both spellings name the same tool.
+    fn tool_base_name(&self) -> &str {
+        self.tool_name
+            .strip_prefix("developer__")
+            .unwrap_or(&self.tool_name)
+    }
+
+    fn string_arg(&self, key: &str) -> Option<&str> {
+        self.arguments.get(key)?.as_str()
+    }
+
+    fn pretty_arguments(&self) -> String {
+        serde_json::to_string_pretty(&self.arguments).unwrap_or_default()
+    }
+}
+
+fn write_preview(path: &str, content: &str) -> String {
+    match read_bounded(std::path::Path::new(path)) {
+        Some(existing) => diff::line_diff(&existing, content).join("\n"),
+        None => format!("nouveau fichier {path}\n{content}"),
+    }
+}
+
+/// `None` for anything that isn't a readable file — a `write` to a new path,
+/// which the caller renders as a creation rather than a diff.
+fn read_bounded(path: &std::path::Path) -> Option<String> {
+    let mut buffer = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(DETAIL_READ_LIMIT)
+        .read_to_end(&mut buffer)
+        .ok()?;
+    Some(String::from_utf8_lossy(&buffer).into_owned())
+}
+
+fn cap_detail(text: String) -> String {
+    let total = text.chars().count();
+    if total <= DETAIL_MAX_CHARS {
+        return text;
+    }
+    let head: String = text.chars().take(DETAIL_MAX_CHARS).collect();
+    format!("{head}… (+{} car.)", total - DETAIL_MAX_CHARS)
+}
+
+/// `Chat` is deliberately outside the cycle: Shift+Tab ramps how much the agent
+/// may do on its own, and a mode that refuses every tool call would read as a
+/// freeze. Landing on it from elsewhere still steps back to `Approve`.
+fn next_kaji_mode(mode: KajiMode) -> KajiMode {
+    match mode {
+        KajiMode::Approve => KajiMode::SmartApprove,
+        KajiMode::SmartApprove => KajiMode::Auto,
+        KajiMode::Auto | KajiMode::Chat => KajiMode::Approve,
+    }
+}
+
+pub fn kaji_mode_badge(mode: KajiMode) -> &'static str {
+    match mode {
+        KajiMode::Auto => "auto",
+        KajiMode::Approve => "approve",
+        KajiMode::SmartApprove => "smart",
+        KajiMode::Chat => "chat",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,8 +181,12 @@ pub enum Action {
     StartPass,
     GateApprove,
     GateReject,
-    ToolApprove,
-    ToolDeny,
+    /// The four approval answers, each carrying the permission the event loop
+    /// hands to `Agent::handle_confirmation` verbatim.
+    ToolAnswer(Permission),
+    /// Shift+Tab already moved `App::kaji_mode` — the event loop applies the
+    /// carried mode to the agent and persists it.
+    Mode(KajiMode),
     Help,
     Cost,
     Context,
@@ -230,6 +347,14 @@ pub struct App {
     pub pass: SddPass,
     pub gate_open: bool,
     pub tool_approval: Option<ToolApprovalRequest>,
+    /// `Some` while Tab has the detail panel open on the current approval —
+    /// built once per toggle rather than per frame, since a `write` preview
+    /// reads the file it would replace. Cleared with the approval itself.
+    pub approval_detail: Option<String>,
+    /// Mirrors the agent's mode for the header badge, and is what Shift+Tab
+    /// cycles: the badge must update on the redraw that follows the keypress,
+    /// not after the agent round-trip the event loop then performs.
+    pub kaji_mode: KajiMode,
     /// Checkpoint id awaiting y/n confirmation from `/restore <id>` — mirrors
     /// `tool_approval`'s shape (an `Option` carrying the payload the modal
     /// needs, taken by `event_loop` rather than cleared inline in
@@ -360,6 +485,8 @@ impl App {
             pass: SddPass::new(),
             gate_open: false,
             tool_approval: None,
+            approval_detail: None,
+            kaji_mode: KajiMode::default(),
             pending_restore: None,
             pending_restore_files_only: false,
             driver: PassDriver::Idle,
@@ -890,7 +1017,25 @@ impl App {
     }
 
     pub fn take_tool_approval(&mut self) -> Option<ToolApprovalRequest> {
+        self.approval_detail = None;
         self.tool_approval.take()
+    }
+
+    /// Tab on the approval modal. Building the text here (rather than in the
+    /// renderer) keeps the `write` file read off the per-frame draw path.
+    pub fn toggle_approval_detail(&mut self) {
+        self.approval_detail = match self.approval_detail {
+            Some(_) => None,
+            None => self.tool_approval.as_ref().map(|req| req.detail_text()),
+        };
+    }
+
+    /// Shift+Tab. Applies the new mode to `self` immediately and returns it —
+    /// the caller owns the agent update and the config write.
+    pub fn cycle_kaji_mode(&mut self) -> KajiMode {
+        self.kaji_mode = next_kaji_mode(self.kaji_mode);
+        self.push_system(&format!("mode : {}", kaji_mode_badge(self.kaji_mode)));
+        self.kaji_mode
     }
 
     /// Arms the `/restore <id>` y/n modal — mirrors `start_pass` pushing its
@@ -1099,9 +1244,32 @@ impl App {
             _ => {}
         }
         if self.tool_approval.is_some() {
+            // Chorded letters belong to the bindings below (Ctrl+S flushes the
+            // steer queue, Ctrl+W deletes a word): reading them as answers
+            // would let an unrelated reflex grant a session-wide permission.
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return Action::None;
+            }
             return match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => Action::ToolApprove,
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::ToolDeny,
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    Action::ToolAnswer(Permission::AllowOnce)
+                }
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    Action::ToolAnswer(Permission::AllowSession)
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    Action::ToolAnswer(Permission::AlwaysAllow)
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    Action::ToolAnswer(Permission::DenyOnce)
+                }
+                KeyCode::Tab => {
+                    self.toggle_approval_detail();
+                    Action::None
+                }
                 _ => Action::None,
             };
         }
@@ -1153,6 +1321,11 @@ impl App {
                     Action::SteerNow
                 }
             }
+            // Mode ramp (item 3 ante): the modal gates above already returned,
+            // and the palette owns Shift+Tab's sibling Tab while it is open —
+            // leave the chord alone there rather than switching modes under a
+            // list the user is navigating.
+            KeyCode::BackTab if !self.palette_visible() => Action::Mode(self.cycle_kaji_mode()),
             KeyCode::Char(c) => {
                 self.exit_history_navigation();
                 self.reset_palette_selection();
@@ -1483,13 +1656,15 @@ impl App {
                     if let ActionRequiredData::ToolConfirmation {
                         id,
                         tool_name,
+                        arguments,
                         prompt,
-                        ..
                     } = &action.data
                     {
+                        self.approval_detail = None;
                         self.tool_approval = Some(ToolApprovalRequest {
                             id: id.clone(),
                             tool_name: tool_name.clone(),
+                            arguments: arguments.clone(),
                             prompt: prompt.clone(),
                         });
                     }
@@ -1562,7 +1737,7 @@ impl App {
             line.text = format!("✗ {name} (interrompu)");
             line.tool = None;
         }
-        if let Some(req) = self.tool_approval.take() {
+        if let Some(req) = self.take_tool_approval() {
             self.push_system(&format!(
                 "✗ {} — approbation abandonnée (session interrompue)",
                 req.tool_name
@@ -1626,6 +1801,8 @@ mod tests {
     };
     use ratatui::text::Span;
     use rmcp::model::{CallToolRequestParams, CallToolResult};
+    use rmcp::object;
+    use test_case::test_case;
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent {
@@ -3393,7 +3570,10 @@ mod tests {
         app.apply_agent_event(&AgentEvent::Message(msg));
 
         assert!(app.tool_approval.is_some());
-        assert_eq!(app.on_event(&key(KeyCode::Char('y'))), Action::ToolApprove);
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('y'))),
+            Action::ToolAnswer(Permission::AllowOnce)
+        );
         let taken = app
             .take_tool_approval()
             .expect("approval consumed by test, not event");
@@ -3411,7 +3591,210 @@ mod tests {
             None,
         );
         app.apply_agent_event(&AgentEvent::Message(msg));
-        assert_eq!(app.on_event(&key(KeyCode::Char('n'))), Action::ToolDeny);
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('n'))),
+            Action::ToolAnswer(Permission::DenyOnce)
+        );
+    }
+
+    fn open_approval(app: &mut App, tool_name: &str, arguments: JsonObject) {
+        let msg = Message::assistant().with_action_required(
+            "req-args".to_string(),
+            tool_name.to_string(),
+            arguments,
+            None,
+        );
+        app.apply_agent_event(&AgentEvent::Message(msg));
+        assert!(
+            app.tool_approval.is_some(),
+            "test setup: modal must be open"
+        );
+    }
+
+    fn approval_detail(tool_name: &str, arguments: JsonObject) -> String {
+        let mut app = App::new(None);
+        open_approval(&mut app, tool_name, arguments);
+        app.on_event(&key(KeyCode::Tab));
+        app.approval_detail
+            .clone()
+            .expect("Tab must open the detail panel")
+    }
+
+    #[test_case(KeyCode::Char('y'), Permission::AllowOnce; "y_allows_once")]
+    #[test_case(KeyCode::Char('s'), Permission::AllowSession; "s_allows_for_the_session")]
+    #[test_case(KeyCode::Char('a'), Permission::AlwaysAllow; "a_allows_always")]
+    #[test_case(KeyCode::Char('n'), Permission::DenyOnce; "n_denies")]
+    #[test_case(KeyCode::Esc, Permission::DenyOnce; "esc_denies")]
+    fn every_approval_key_carries_its_permission(code: KeyCode, expected: Permission) {
+        let mut app = App::new(None);
+        open_approval(&mut app, "shell", object!({ "command": "cargo test" }));
+        assert_eq!(app.on_event(&key(code)), Action::ToolAnswer(expected));
+    }
+
+    /// `Ctrl+S` flushes the steer queue and `Ctrl+W` deletes a word — reading
+    /// the bare letter out of a chord would turn either reflex into a
+    /// session-wide grant on a modal the user hasn't answered yet.
+    #[test]
+    fn chorded_letters_are_not_approval_answers() {
+        let mut app = App::new(None);
+        open_approval(&mut app, "shell", object!({ "command": "cargo test" }));
+        assert_eq!(app.on_event(&ctrl_key(KeyCode::Char('s'))), Action::None);
+        assert_eq!(app.on_event(&ctrl_key(KeyCode::Char('a'))), Action::None);
+        assert!(app.tool_approval.is_some(), "the modal must stay open");
+    }
+
+    /// The label must be the core's own serialized grant, not a TUI
+    /// paraphrase: `s`/`a` persist exactly what this line promises.
+    #[test]
+    fn the_grant_label_is_the_derivation_the_core_would_persist() {
+        let mut app = App::new(None);
+        open_approval(
+            &mut app,
+            "shell",
+            object!({ "command": "cargo test -p kaji" }),
+        );
+        assert_eq!(
+            app.tool_approval.as_ref().expect("open").grant_label(),
+            "cargo test *"
+        );
+
+        let mut app = App::new(None);
+        open_approval(&mut app, "write", object!({ "path": "src/main.rs" }));
+        assert_eq!(
+            app.tool_approval.as_ref().expect("open").grant_label(),
+            "src/main.rs"
+        );
+
+        let mut app = App::new(None);
+        open_approval(&mut app, "other__tool", object!({ "x": 1 }));
+        assert_eq!(
+            app.tool_approval.as_ref().expect("open").grant_label(),
+            "tout l'outil other__tool"
+        );
+    }
+
+    #[test]
+    fn tab_toggles_the_detail_panel_and_the_approval_owns_its_lifetime() {
+        let mut app = App::new(None);
+        open_approval(&mut app, "shell", object!({ "command": "rm -rf /tmp/x" }));
+
+        assert_eq!(app.on_event(&key(KeyCode::Tab)), Action::None);
+        assert_eq!(app.approval_detail.as_deref(), Some("rm -rf /tmp/x"));
+        app.on_event(&key(KeyCode::Tab));
+        assert!(app.approval_detail.is_none(), "Tab must toggle back off");
+
+        app.on_event(&key(KeyCode::Tab));
+        app.take_tool_approval();
+        assert!(
+            app.approval_detail.is_none(),
+            "the panel must not outlive the approval it describes"
+        );
+    }
+
+    #[test]
+    fn the_detail_panel_diffs_an_edit_line_by_line() {
+        let detail = approval_detail(
+            "developer__edit",
+            object!({ "path": "a.rs", "before": "let a = 1;\nkeep", "after": "let a = 2;\nkeep" }),
+        );
+        assert_eq!(detail, "-let a = 1;\n+let a = 2;\n keep");
+    }
+
+    #[test]
+    fn the_detail_panel_diffs_a_write_against_the_file_it_replaces() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "old\nkeep\n").expect("seed file");
+        let detail = approval_detail(
+            "write",
+            object!({ "path": path.to_str().expect("utf-8 path"), "content": "new\nkeep\n" }),
+        );
+        assert_eq!(detail, "-old\n+new\n keep");
+    }
+
+    #[test]
+    fn the_detail_panel_announces_a_write_to_a_path_that_does_not_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fresh.txt");
+        let detail = approval_detail(
+            "write",
+            object!({ "path": path.to_str().expect("utf-8 path"), "content": "hello" }),
+        );
+        assert!(
+            detail.starts_with("nouveau fichier "),
+            "a creation must not be dressed up as a diff, got: {detail}"
+        );
+        assert!(detail.ends_with("hello"), "got: {detail}");
+    }
+
+    /// The panel is a preview: a huge file must be read up to the cap and no
+    /// further, and the text handed to the renderer stays bounded whatever the
+    /// file's size.
+    #[test]
+    fn the_detail_panel_reads_a_bounded_slice_of_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("big.txt");
+        let line = "x".repeat(63);
+        let contents = std::iter::repeat_n(line.as_str(), 8_000)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(contents.len() > DETAIL_READ_LIMIT as usize, "test setup");
+        std::fs::write(&path, &contents).expect("seed file");
+
+        assert_eq!(
+            read_bounded(&path).expect("readable").len(),
+            DETAIL_READ_LIMIT as usize
+        );
+        let detail = approval_detail(
+            "write",
+            object!({ "path": path.to_str().expect("utf-8 path"), "content": "small" }),
+        );
+        assert!(
+            detail.chars().count() <= DETAIL_MAX_CHARS + 32,
+            "got {} chars",
+            detail.chars().count()
+        );
+        assert!(
+            detail.contains("car.)"),
+            "the cut must be marked, got: {detail}"
+        );
+    }
+
+    #[test]
+    fn the_detail_panel_falls_back_to_the_raw_arguments() {
+        let detail = approval_detail("other__tool", object!({ "depth": 3 }));
+        assert!(detail.contains("\"depth\": 3"), "got: {detail}");
+    }
+
+    #[test_case(KajiMode::Approve, KajiMode::SmartApprove; "approve_ramps_to_smart")]
+    #[test_case(KajiMode::SmartApprove, KajiMode::Auto; "smart_ramps_to_auto")]
+    #[test_case(KajiMode::Auto, KajiMode::Approve; "auto_wraps_back_to_approve")]
+    #[test_case(KajiMode::Chat, KajiMode::Approve; "chat_is_outside_the_cycle")]
+    fn shift_tab_cycles_the_kaji_mode(from: KajiMode, expected: KajiMode) {
+        let mut app = App::new(None);
+        app.kaji_mode = from;
+        assert_eq!(app.on_event(&key(KeyCode::BackTab)), Action::Mode(expected));
+        assert_eq!(app.kaji_mode, expected, "the badge must switch immediately");
+        assert!(
+            app.chat
+                .last()
+                .expect("system line pushed")
+                .text
+                .contains(&format!("mode : {}", kaji_mode_badge(expected)))
+        );
+    }
+
+    /// Tab drives the palette selection while it is open — its sibling chord
+    /// must not switch modes under a list the user is navigating.
+    #[test]
+    fn shift_tab_is_inert_while_the_palette_is_open() {
+        let mut app = App::new(None);
+        for c in "/th".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert!(app.palette_visible(), "test setup");
+        assert_eq!(app.on_event(&key(KeyCode::BackTab)), Action::None);
+        assert_eq!(app.kaji_mode, KajiMode::default());
     }
 
     #[test]

@@ -1,4 +1,5 @@
 pub mod app;
+pub mod diff;
 pub mod markdown;
 pub mod mentions;
 pub mod report;
@@ -6,13 +7,13 @@ pub mod theme;
 pub mod ui;
 
 use anyhow::{Context, Result};
-use app::{Action, App, PassDriver};
+use app::{Action, App, PassDriver, ToolApprovalRequest};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use kaji::agents::{Agent, AgentEvent, SessionConfig};
 use kaji::checkpoint::{CheckpointId, CheckpointStore};
 use kaji::checkpoint_restore::{RestoreOutcome, restore_checkpoint};
-use kaji::config::Config;
+use kaji::config::{Config, KajiMode};
 use kaji::conversation::message::Message;
 use kaji::permission::permission_confirmation::PrincipalType;
 use kaji::permission::{Permission, PermissionConfirmation};
@@ -118,6 +119,26 @@ fn apply_startup_theme(app: &mut App) {
     }
 }
 
+/// A session-wide or permanent grant must say what it just covered, in the
+/// same form the permission list stores — "autorisé" alone would hide that the
+/// answer widened `cargo test -p x` into every `cargo test`.
+fn tool_answer_note(req: &ToolApprovalRequest, permission: &Permission) -> String {
+    match permission {
+        Permission::AllowSession => format!(
+            "✓ {} autorisé pour la session : {}",
+            req.tool_name,
+            req.grant_label()
+        ),
+        Permission::AlwaysAllow => format!(
+            "✓ {} toujours autorisé : {}",
+            req.tool_name,
+            req.grant_label()
+        ),
+        other if other.allows_execution() => format!("✓ {} autorisé", req.tool_name),
+        _ => format!("✗ {} refusé", req.tool_name),
+    }
+}
+
 fn build_header(session_id: &str) -> String {
     let config = Config::global();
     let provider = config
@@ -206,7 +227,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
 fn navigation_section(mouse_enabled: bool, content_style: Style) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled("navigation", theme::title()))];
     if mouse_enabled {
-        let rows: [(&str, &str); 7] = [
+        let rows: [(&str, &str); 8] = [
             ("molette", "défile le chat (3 lignes/cran)"),
             ("PageUp/PageDown", "défile par page · Home/End"),
             ("Ctrl+↑/↓", "saute au tour précédent/suivant"),
@@ -215,6 +236,7 @@ fn navigation_section(mouse_enabled: bool, content_style: Style) -> Vec<Line<'st
                 "Ctrl+S",
                 "steer : envoie les messages en file au tour en cours",
             ),
+            ("Shift+Tab", "change le mode (approve → smart → auto)"),
             ("Esc", "interrompt · Ctrl+C quitte"),
             ("Option+glisser", "sélectionner du texte"),
         ];
@@ -234,6 +256,7 @@ fn navigation_section(mouse_enabled: bool, content_style: Style) -> Vec<Line<'st
             "PageUp/PageDown/Home/End font défiler le chat",
             "Ctrl+↑/↓ saute au tour précédent/suivant",
             "Ctrl+S steer : envoie les messages en file au tour en cours",
+            "Shift+Tab change le mode (approve → smart → auto)",
             "Esc interrompt · Ctrl+C quitte",
         ] {
             lines.push(Line::from(Span::styled(text, content_style)));
@@ -502,6 +525,7 @@ async fn event_loop(
     app.header = header;
     app.git_status = refresh_git_status();
     app.mouse_enabled = mouse_enabled();
+    app.kaji_mode = agent.kaji_mode().await;
     seed_chat(&mut app, &conversation);
     maybe_push_welcome(&mut app);
     apply_startup_theme(&mut app);
@@ -601,22 +625,29 @@ async fn event_loop(
                         }
                     }
                     Action::GateReject => app.gate_reject(),
-                    Action::ToolApprove => {
+                    Action::ToolAnswer(permission) => {
                         if let Some(req) = app.take_tool_approval() {
+                            let note = tool_answer_note(&req, &permission);
                             agent.handle_confirmation(req.id, PermissionConfirmation {
                                 principal_type: PrincipalType::Tool,
-                                permission: Permission::AllowOnce,
+                                permission,
                             }).await;
-                            app.push_system(&format!("✓ {} autorisé", req.tool_name));
+                            app.push_system(&note);
                         }
                     }
-                    Action::ToolDeny => {
-                        if let Some(req) = app.take_tool_approval() {
-                            agent.handle_confirmation(req.id, PermissionConfirmation {
-                                principal_type: PrincipalType::Tool,
-                                permission: Permission::DenyOnce,
-                            }).await;
-                            app.push_system(&format!("✗ {} refusé", req.tool_name));
+                    // `App` already switched its own badge — this applies the
+                    // switch to the running session, and only then persists it
+                    // globally. `Auto` stays session-scoped (yolo mirror): a
+                    // ramp to full autonomy must not outlive the session that
+                    // asked for it.
+                    Action::Mode(mode) => {
+                        if let Err(e) = agent.update_kaji_mode(mode, session_id).await {
+                            app.kaji_mode = agent.kaji_mode().await;
+                            app.push_system(&format!("mode non appliqué : {e}"));
+                        } else if matches!(mode, KajiMode::Approve | KajiMode::SmartApprove) {
+                            if let Err(e) = Config::global().set_kaji_mode(mode) {
+                                app.push_system(&format!("mode appliqué mais non enregistré : {e}"));
+                            }
                         }
                     }
                     Action::Help => push_welcome(&mut app, true),

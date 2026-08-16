@@ -1,4 +1,4 @@
-use crate::tui::app::{App, ChatLine, Sender, ToolApprovalRequest};
+use crate::tui::app::{self, App, ChatLine, Sender, ToolApprovalRequest};
 use crate::tui::{markdown, theme};
 use kaji_core::sdd::StageStatus;
 use ratatui::Frame;
@@ -48,7 +48,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     } else if app.pending_restore.is_some() {
         draw_restore_confirm_modal(frame, app.pending_restore_files_only);
     } else if let Some(approval) = &app.tool_approval {
-        draw_tool_approval_modal(frame, approval);
+        draw_tool_approval_modal(frame, approval, app.approval_detail.as_deref());
     }
 }
 
@@ -65,6 +65,10 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(git) = &app.git_status {
         left_spans.push(Span::styled(format!(" · {git}"), theme::dim()));
     }
+    left_spans.push(Span::styled(
+        format!(" · {}", app::kaji_mode_badge(app.kaji_mode)),
+        theme::dim(),
+    ));
     frame.render_widget(Paragraph::new(Line::from(left_spans)), cols[0]);
 
     let right = Paragraph::new(header_status_text(app))
@@ -593,12 +597,14 @@ pub(crate) fn sanitize_for_display(text: &str) -> String {
     out
 }
 
-/// Measures wrapped rows against the modal's actual wrap mode (`Wrap {
-/// trim: true }`) — same idiom as `line_wrapped_rows`, targeted at this
-/// modal's own wrap setting rather than the chat's.
-fn modal_wrapped_rows(text: &str, width: u16) -> usize {
+/// Measures wrapped rows against the wrap mode the caller will actually
+/// render with — same idiom as `line_wrapped_rows`, targeted at this modal's
+/// own wrap settings rather than the chat's. The detail panel renders
+/// untrimmed (a diff's leading spaces are content), so measuring it as trimmed
+/// would under-count rows and let the tail clip silently.
+fn modal_wrapped_rows(text: &str, width: u16, trim: bool) -> usize {
     Paragraph::new(text)
-        .wrap(Wrap { trim: true })
+        .wrap(Wrap { trim })
         .line_count(width.max(1))
 }
 
@@ -612,10 +618,10 @@ fn modal_wrapped_rows(text: &str, width: u16) -> usize {
 /// to `width * height` chars up front — the maximum ever paintable
 /// regardless of wrapping — so a pathologically long hostile string can't
 /// turn this into quadratic work.
-fn truncate_for_modal(text: &str, width: u16, height: u16) -> String {
+fn truncate_for_modal(text: &str, width: u16, height: u16, trim: bool) -> String {
     let width = width.max(1);
     let height = height.max(1);
-    if modal_wrapped_rows(text, width) <= height as usize {
+    if modal_wrapped_rows(text, width, trim) <= height as usize {
         return text.to_string();
     }
     let total_chars = text.chars().count();
@@ -628,7 +634,7 @@ fn truncate_for_modal(text: &str, width: u16, height: u16) -> String {
             "{}… (+{hidden} car.)",
             chars[..cut].iter().collect::<String>()
         );
-        modal_wrapped_rows(&candidate, width) <= height as usize
+        modal_wrapped_rows(&candidate, width, trim) <= height as usize
     };
 
     let mut lo = 0usize;
@@ -648,26 +654,86 @@ fn truncate_for_modal(text: &str, width: u16, height: u16) -> String {
     )
 }
 
-fn draw_tool_approval_modal(frame: &mut Frame, approval: &ToolApprovalRequest) {
-    let area = centered_rect(60, 20, frame.area());
+/// The four answers plus the derived grant `s`/`a` would persist — an approver
+/// must be able to read what a session-wide or permanent grant would cover
+/// before pressing the key that writes it.
+fn approval_answers(approval: &ToolApprovalRequest, detail_open: bool) -> String {
+    let detail_key = if detail_open {
+        "Tab = masquer le détail"
+    } else {
+        "Tab = détail"
+    };
+    format!(
+        "y = une fois · n / Esc = refuser · {detail_key}\ns = pour la session · a = toujours : {}",
+        sanitize_for_display(&approval.grant_label())
+    )
+}
+
+fn draw_tool_approval_modal(
+    frame: &mut Frame,
+    approval: &ToolApprovalRequest,
+    detail: Option<&str>,
+) {
+    let area = match detail {
+        Some(_) => centered_rect(80, 60, frame.area()),
+        None => centered_rect(60, 20, frame.area()),
+    };
     let tool_name = sanitize_for_display(&approval.tool_name);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::border_active())
         .title(format!(
-            " {} confirmation d'outil — {} (y/n) ",
+            " {} confirmation d'outil — {} (y/s/a/n) ",
             theme::GATE_SYMBOL,
             tool_name
         ));
     let inner = block.inner(area);
-    let raw_body = approval
-        .prompt
-        .clone()
-        .unwrap_or_else(|| "y = autoriser une fois   n / Esc = refuser".to_string());
-    let body = truncate_for_modal(&sanitize_for_display(&raw_body), inner.width, inner.height);
-    let paragraph = Paragraph::new(body).block(block).wrap(Wrap { trim: true });
     frame.render_widget(Clear, area);
-    frame.render_widget(paragraph, area);
+    frame.render_widget(block, area);
+
+    let mut head = String::new();
+    if let Some(prompt) = &approval.prompt {
+        head.push_str(&sanitize_for_display(prompt));
+        head.push('\n');
+    }
+    head.push_str(&approval_answers(approval, detail.is_some()));
+
+    let Some(detail) = detail else {
+        let body = truncate_for_modal(&head, inner.width, inner.height, true);
+        frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: true }), inner);
+        return;
+    };
+
+    // The answers must never be the half that gets clipped: they get the rows
+    // they need up to half the modal, and the detail takes what is left.
+    let head_rows = modal_wrapped_rows(&head, inner.width, true)
+        .clamp(1, (inner.height / 2).max(1) as usize) as u16;
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(head_rows), Constraint::Min(0)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(truncate_for_modal(
+            &head,
+            rows[0].width,
+            rows[0].height,
+            true,
+        ))
+        .wrap(Wrap { trim: true }),
+        rows[0],
+    );
+    let body = truncate_for_modal(
+        &sanitize_for_display(detail),
+        rows[1].width,
+        rows[1].height,
+        false,
+    );
+    frame.render_widget(
+        Paragraph::new(body)
+            .style(theme::dim())
+            .wrap(Wrap { trim: false }),
+        rows[1],
+    );
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -1330,5 +1396,154 @@ mod tests {
             content.contains("car.)"),
             "an overflowing prompt must carry an explicit truncation marker, got:\n{content}"
         );
+    }
+
+    fn render_approval_at(
+        tool_name: &str,
+        arguments: rmcp::model::JsonObject,
+        detail: bool,
+        size: (u16, u16),
+    ) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new(None);
+        let msg = Message::assistant().with_action_required(
+            "req-render".to_string(),
+            tool_name.to_string(),
+            arguments,
+            None,
+        );
+        app.apply_agent_event(&AgentEvent::Message(msg));
+        assert!(
+            app.tool_approval.is_some(),
+            "test setup: modal must be open"
+        );
+        if detail {
+            app.toggle_approval_detail();
+        }
+
+        let backend = TestBackend::new(size.0, size.1);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must succeed against a TestBackend");
+        buffer_as_string(terminal.backend().buffer())
+    }
+
+    fn render_approval(
+        tool_name: &str,
+        arguments: rmcp::model::JsonObject,
+        detail: bool,
+    ) -> String {
+        render_approval_at(tool_name, arguments, detail, (100, 30))
+    }
+
+    /// An approver pressing `s` or `a` writes a permission list entry — the
+    /// modal has to show which one before the key is pressed, not after.
+    #[test]
+    fn approval_modal_offers_four_answers_and_names_the_grant_they_would_write() {
+        let content = render_approval(
+            "shell",
+            rmcp::object!({ "command": "cargo test -p kaji-cli" }),
+            false,
+        );
+        for expected in [
+            "(y/s/a/n)",
+            "y = une fois",
+            "n / Esc = refuser",
+            "Tab = détail",
+            "s = pour la session",
+            "a = toujours",
+            "cargo test *",
+        ] {
+            assert!(
+                content.contains(expected),
+                "modal must show {expected:?}, got:\n{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_detail_panel_shows_the_whole_shell_command() {
+        let content = render_approval(
+            "shell",
+            rmcp::object!({ "command": "rm -rf /tmp/kaji-scratch" }),
+            true,
+        );
+        assert!(
+            content.contains("rm -rf /tmp/kaji-scratch"),
+            "got:\n{content}"
+        );
+        assert!(
+            content.contains("Tab = masquer le détail"),
+            "an open panel must advertise how to close it, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn the_detail_panel_renders_an_edit_as_signed_lines() {
+        let content = render_approval(
+            "developer__edit",
+            rmcp::object!({ "path": "a.rs", "before": "let a = 1;", "after": "let a = 2;" }),
+            true,
+        );
+        assert!(content.contains("-let a = 1;"), "got:\n{content}");
+        assert!(content.contains("+let a = 2;"), "got:\n{content}");
+    }
+
+    /// The panel carries the same anti-masquage contract as the prompt above
+    /// it: a hostile command must not be able to hide half of itself behind a
+    /// control character, and an overlong one must say it was cut.
+    #[test]
+    fn the_detail_panel_sanitizes_and_marks_what_it_cannot_show() {
+        let content = render_approval(
+            "shell",
+            rmcp::object!({ "command": "echo ok\t\u{200B}rm -rf /\u{202E}" }),
+            true,
+        );
+        assert!(content.contains('␉'), "got:\n{content}");
+        assert!(content.contains("‹bidi›"), "got:\n{content}");
+        assert!(!content.contains('\t'), "got:\n{content}");
+
+        let content = render_approval(
+            "shell",
+            rmcp::object!({ "command": format!("rm -rf {}", "x".repeat(4000)) }),
+            true,
+        );
+        assert!(
+            content.contains("car.)"),
+            "a clipped detail must be marked, got:\n{content}"
+        );
+    }
+
+    /// Splitting the modal in two leaves the detail pane with zero rows on a
+    /// cramped terminal — it must degrade to showing nothing, never panic.
+    #[test]
+    fn the_detail_panel_survives_a_terminal_too_small_to_hold_it() {
+        for size in [(12u16, 4u16), (20, 6), (40, 10)] {
+            render_approval_at(
+                "developer__edit",
+                rmcp::object!({ "path": "a.rs", "before": "a", "after": "b" }),
+                true,
+                size,
+            );
+        }
+    }
+
+    #[test]
+    fn the_header_carries_the_current_mode() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new(None);
+        app.kaji_mode = kaji::config::KajiMode::SmartApprove;
+        let backend = TestBackend::new(100, 10);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must succeed against a TestBackend");
+        let content = buffer_as_string(terminal.backend().buffer());
+        assert!(content.contains("smart"), "got:\n{content}");
     }
 }
