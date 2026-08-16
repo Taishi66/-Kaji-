@@ -3,12 +3,13 @@ use crate::agents::types::SharedProvider;
 use crate::config::permission::PermissionLevel;
 use crate::config::{KajiMode, PermissionManager};
 use crate::conversation::message::{Message, ToolRequest};
+use crate::permission::grants::{call_allowed_by_any, GrantRule};
 use crate::permission::permission_judge::{detect_read_only_requests, PermissionCheckResult};
 use crate::tool_inspection::{InspectionAction, InspectionResult, ToolInspector};
 use anyhow::Result;
 use async_trait::async_trait;
-use rmcp::model::Tool;
-use std::collections::HashSet;
+use rmcp::model::{JsonObject, Tool};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 /// Permission Inspector that handles tool permission checking
@@ -17,6 +18,7 @@ pub struct PermissionInspector {
     provider: SharedProvider,
     session_manager: Arc<crate::session::SessionManager>,
     readonly_tools: RwLock<HashSet<String>>,
+    session_grants: RwLock<HashMap<String, HashSet<GrantRule>>>,
 }
 
 fn cache_non_readonly_decision(
@@ -44,7 +46,32 @@ impl PermissionInspector {
             provider,
             session_manager,
             readonly_tools: RwLock::new(HashSet::new()),
+            session_grants: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Grants a call for the lifetime of the process, scoped to one session. Never persisted.
+    pub fn grant_for_session(&self, session_id: &str, tool_name: &str, spec: Option<&str>) {
+        self.session_grants
+            .write()
+            .unwrap()
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(GrantRule::new(tool_name, spec));
+    }
+
+    fn session_allows(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        arguments: Option<&JsonObject>,
+    ) -> bool {
+        let session_grants = self.session_grants.read().unwrap();
+        let Some(rules) = session_grants.get(session_id) else {
+            return false;
+        };
+        let rules: Vec<GrantRule> = rules.iter().cloned().collect();
+        call_allowed_by_any(&rules, tool_name, arguments)
     }
 
     // readonly_tools is per-agent to avoid concurrent session clobbering; write-annotated
@@ -155,20 +182,23 @@ impl ToolInspector for PermissionInspector {
         for request in tool_requests {
             if let Ok(tool_call) = &request.tool_call {
                 let tool_name = &tool_call.name;
+                let arguments = tool_call.arguments.as_ref();
 
                 let action = match kaji_mode {
                     KajiMode::Chat => continue,
                     KajiMode::Auto => InspectionAction::Allow,
                     KajiMode::Approve | KajiMode::SmartApprove => {
-                        // 1. Check user-defined permission first
-                        if let Some(level) = permission_manager.get_user_permission(tool_name) {
-                            match level {
-                                PermissionLevel::AlwaysAllow => InspectionAction::Allow,
-                                PermissionLevel::NeverAllow => InspectionAction::Deny,
-                                PermissionLevel::AskBefore => {
-                                    InspectionAction::RequireApproval(None)
-                                }
-                            }
+                        // 1. Denials, then session grants, then persisted grants
+                        if permission_manager.is_call_denied(tool_name, arguments) {
+                            InspectionAction::Deny
+                        } else if self.session_allows(session_id, tool_name, arguments)
+                            || permission_manager.is_call_allowed(tool_name, arguments)
+                        {
+                            InspectionAction::Allow
+                        } else if permission_manager.get_user_permission(tool_name)
+                            == Some(PermissionLevel::AskBefore)
+                        {
+                            InspectionAction::RequireApproval(None)
                         // 2. Check for a read-only annotation in SmartApprove mode
                         } else if kaji_mode == KajiMode::SmartApprove
                             && self.is_readonly_annotated_tool(tool_name)
@@ -367,6 +397,105 @@ mod tests {
 
         assert_eq!(action, InspectionAction::RequireApproval(None));
         assert_eq!(cache, Some(PermissionLevel::AskBefore));
+    }
+
+    const SHELL: &str = "shell";
+    const SESSION: &str = "session-1";
+
+    fn shell_inspector() -> PermissionInspector {
+        let permission_manager =
+            Arc::new(PermissionManager::new(tempfile::tempdir().unwrap().keep()));
+        let session_manager = Arc::new(crate::session::SessionManager::new(
+            tempfile::tempdir().unwrap().keep(),
+        ));
+        PermissionInspector::new(
+            permission_manager,
+            Arc::new(Mutex::new(None)),
+            session_manager,
+        )
+    }
+
+    async fn inspect_shell(
+        inspector: &PermissionInspector,
+        session_id: &str,
+        command: &str,
+    ) -> InspectionAction {
+        let request = ToolRequest {
+            id: "req".into(),
+            tool_call: Ok(
+                CallToolRequestParams::new(SHELL).with_arguments(object!({ "command": command }))
+            ),
+            metadata: None,
+            tool_meta: None,
+        };
+        inspector
+            .inspect(session_id, &[request], &[], KajiMode::Approve)
+            .await
+            .unwrap()
+            .remove(0)
+            .action
+    }
+
+    #[tokio::test]
+    async fn a_denial_beats_a_session_grant() {
+        let inspector = shell_inspector();
+        inspector.grant_for_session(SESSION, SHELL, Some("cargo test *"));
+        inspector
+            .permission_manager
+            .update_user_permission(SHELL, PermissionLevel::NeverAllow);
+
+        assert_eq!(
+            inspect_shell(&inspector, SESSION, "cargo test --all").await,
+            InspectionAction::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_grant_beats_ask_before() {
+        let inspector = shell_inspector();
+        inspector
+            .permission_manager
+            .update_user_permission(SHELL, PermissionLevel::AskBefore);
+        inspector.grant_for_session(SESSION, SHELL, Some("cargo test *"));
+
+        assert_eq!(
+            inspect_shell(&inspector, SESSION, "cargo test --all").await,
+            InspectionAction::Allow
+        );
+        assert_eq!(
+            inspect_shell(&inspector, "other-session", "cargo test --all").await,
+            InspectionAction::RequireApproval(None)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_persisted_rule_covers_only_matching_stages() {
+        let inspector = shell_inspector();
+        inspector
+            .permission_manager
+            .add_grant(SHELL, Some("cargo test *"));
+
+        assert_eq!(
+            inspect_shell(&inspector, SESSION, "cargo test --all").await,
+            InspectionAction::Allow
+        );
+        assert_eq!(
+            inspect_shell(&inspector, SESSION, "cargo test && rm -rf /").await,
+            InspectionAction::RequireApproval(None)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_legacy_tool_name_grant_covers_every_call() {
+        let inspector = shell_inspector();
+        inspector
+            .permission_manager
+            .update_user_permission(SHELL, PermissionLevel::AlwaysAllow);
+
+        assert_eq!(
+            inspect_shell(&inspector, SESSION, "rm -rf /").await,
+            InspectionAction::Allow
+        );
     }
 
     #[test]

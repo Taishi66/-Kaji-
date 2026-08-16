@@ -1,3 +1,5 @@
+pub mod grant_decision;
+pub mod grants;
 pub mod permission_inspector;
 pub mod permission_judge;
 pub mod permission_store;

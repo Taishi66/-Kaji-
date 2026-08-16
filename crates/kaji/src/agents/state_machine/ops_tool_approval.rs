@@ -4,15 +4,16 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use rmcp::model::JsonObject;
 
 use crate::agents::state_machine::operation::{
     applied, messages_since_kickoff, not_applicable, Emitter, Operation, OperationResult,
     StateEffect,
 };
-use crate::config::permission::PermissionLevel;
 use crate::config::KajiMode;
 use crate::conversation::message::{ActionRequiredData, Message, MessageContent, ToolRequest};
 use crate::conversation::Conversation;
+use crate::permission::grant_decision::apply_grant_decision;
 use crate::permission::Permission;
 use crate::session::Session;
 use crate::tool_inspection::{
@@ -60,18 +61,19 @@ impl Operation for ToolApprovalOperation<'_> {
         let mut effects = Vec::new();
 
         for pending in state.responses() {
-            let executable = permission_allows(&pending.permission);
+            let executable = pending.permission.allows_execution();
 
-            if let Some(tool_name) = pending.tool_name {
-                if pending.permission == Permission::AlwaysAllow && pending.executable != Some(true)
-                {
-                    self.tool_inspection_manager
-                        .update_permission_manager(&tool_name, PermissionLevel::AlwaysAllow)
-                        .await;
-                } else if pending.permission == Permission::AlwaysDeny {
-                    self.tool_inspection_manager
-                        .update_permission_manager(&tool_name, PermissionLevel::NeverAllow)
-                        .await;
+            // An already-executable request has had its grant applied on a previous pass.
+            if let Some(tool_name) = &pending.tool_name {
+                if pending.executable != Some(true) {
+                    apply_grant_decision(
+                        self.tool_inspection_manager,
+                        tool_name,
+                        pending.arguments.as_ref(),
+                        &pending.permission,
+                        &session.id,
+                    )
+                    .await;
                 }
             }
 
@@ -157,6 +159,7 @@ impl Operation for ToolApprovalOperation<'_> {
 struct PendingResponse {
     tool_call_id: String,
     tool_name: Option<String>,
+    arguments: Option<JsonObject>,
     permission: Permission,
     executable: Option<bool>,
 }
@@ -214,14 +217,11 @@ impl ApprovalState {
                     return None;
                 }
                 let permission = self.approval_responses.get(&request.id)?.clone();
-                let tool_name = request
-                    .tool_call
-                    .as_ref()
-                    .ok()
-                    .map(|tool_call| tool_call.name.to_string());
+                let tool_call = request.tool_call.as_ref().ok();
                 Some(PendingResponse {
                     tool_call_id: request.id.clone(),
-                    tool_name,
+                    tool_name: tool_call.map(|tool_call| tool_call.name.to_string()),
+                    arguments: tool_call.and_then(|tool_call| tool_call.arguments.clone()),
                     permission,
                     executable: request_executable(request),
                 })
@@ -253,10 +253,6 @@ pub fn request_executable(request: &ToolRequest) -> Option<bool> {
         .as_ref()
         .and_then(|meta| meta.get(TOOL_EXECUTABLE_KEY))
         .and_then(|value| value.as_bool())
-}
-
-fn permission_allows(permission: &Permission) -> bool {
-    matches!(permission, Permission::AllowOnce | Permission::AlwaysAllow)
 }
 
 fn mark_executable(tool_call_id: &str, executable: bool) -> StateEffect {

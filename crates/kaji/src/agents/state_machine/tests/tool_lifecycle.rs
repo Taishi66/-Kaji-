@@ -230,6 +230,76 @@ async fn approvals_and_per_tool_permissions() -> Result<()> {
 }
 
 #[tokio::test]
+async fn shell_approvals_grant_a_command_prefix() -> Result<()> {
+    let (pipeline, api) = test_pipeline().await?;
+    let pipeline = pipeline.with_kaji_mode(KajiMode::Approve).await;
+    pipeline.add_extension("developer").await?;
+
+    api.on("run the first command").calls([(
+        "first",
+        "shell",
+        json!({ "command": "echo hello world" }),
+    )]);
+    api.on("hello world").reply("first command done");
+    pipeline.run(["run the first command"]).await?;
+    pipeline.confirm("first", Permission::AlwaysAllow).await?;
+    let result = pipeline.resume().await?;
+    result.assert_message(-1, Agent, "first command done");
+    assert_eq!(pipeline.user_grants(), ["shell(echo hello *)"]);
+
+    api.on("run a covered command").calls([(
+        "covered",
+        "shell",
+        json!({ "command": "echo hello again" }),
+    )]);
+    api.on("hello again").reply("covered command done");
+    let result = pipeline.run(["run a covered command"]).await?;
+    result.assert_message(-1, Agent, "covered command done");
+
+    api.on("run an uncovered command").calls([(
+        "uncovered",
+        "shell",
+        json!({ "command": "echo goodbye" }),
+    )]);
+    let result = pipeline.run(["run an uncovered command"]).await?;
+    result.assert_message(-1, Confirmation, "");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_approvals_are_granted_without_being_persisted() -> Result<()> {
+    let (pipeline, api) = test_pipeline().await?;
+    let pipeline = pipeline.with_kaji_mode(KajiMode::Approve).await;
+    pipeline.add_extension("developer").await?;
+
+    api.on("run the session command").calls([(
+        "session",
+        "shell",
+        json!({ "command": "echo session one" }),
+    )]);
+    api.on("session one").reply("session command done");
+    pipeline.run(["run the session command"]).await?;
+    pipeline
+        .confirm("session", Permission::AllowSession)
+        .await?;
+    let result = pipeline.resume().await?;
+    result.assert_message(-1, Agent, "session command done");
+    assert!(pipeline.user_grants().is_empty());
+
+    api.on("run the same command again").calls([(
+        "again",
+        "shell",
+        json!({ "command": "echo session two" }),
+    )]);
+    api.on("session two").reply("second command done");
+    let result = pipeline.run(["run the same command again"]).await?;
+    result.assert_message(-1, Agent, "second command done");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn execution_recovers_from_timeout_cancellation_and_filtered_output() -> Result<()> {
     let (pipeline, api) = test_pipeline().await?;
 

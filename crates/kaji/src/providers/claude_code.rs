@@ -954,7 +954,9 @@ impl Provider for ClaudeCodeProvider {
                                         pending_confirmations.lock().await.remove(&request_id);
 
                                         let perm_resp = match confirmation.permission {
-                                            Permission::AlwaysAllow | Permission::AllowOnce => {
+                                            Permission::AlwaysAllow
+                                            | Permission::AllowSession
+                                            | Permission::AllowOnce => {
                                                 PermissionResponse::Allow {
                                                     updated_input: input,
                                                     tool_use_id,

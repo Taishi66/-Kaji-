@@ -1,5 +1,6 @@
 use crate::config::paths::Paths;
-use rmcp::model::Tool;
+use crate::permission::grants::{call_allowed_by_any, GrantRule};
+use rmcp::model::{JsonObject, Tool};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -166,6 +167,72 @@ impl PermissionManager {
             }
         }
         None // Return None if no matching permission level is found
+    }
+
+    /// Whether the user's `always_allow` list covers this exact call.
+    pub fn is_call_allowed(&self, tool_name: &str, arguments: Option<&JsonObject>) -> bool {
+        self.call_matches(|config| &config.always_allow, tool_name, arguments)
+    }
+
+    /// Whether the user's `never_allow` list covers this exact call.
+    pub fn is_call_denied(&self, tool_name: &str, arguments: Option<&JsonObject>) -> bool {
+        self.call_matches(|config| &config.never_allow, tool_name, arguments)
+    }
+
+    fn call_matches(
+        &self,
+        list: impl Fn(&PermissionConfig) -> &Vec<String>,
+        tool_name: &str,
+        arguments: Option<&JsonObject>,
+    ) -> bool {
+        let map = self.permission_map.read().unwrap();
+        let Some(permission_config) = map.get(USER_PERMISSION) else {
+            return false;
+        };
+        let rules: Vec<GrantRule> = list(permission_config)
+            .iter()
+            .map(|entry| GrantRule::parse(entry))
+            .collect();
+        call_allowed_by_any(&rules, tool_name, arguments)
+    }
+
+    pub fn get_user_grants(&self) -> Vec<GrantRule> {
+        let map = self.permission_map.read().unwrap();
+        map.get(USER_PERMISSION)
+            .map(|config| {
+                config
+                    .always_allow
+                    .iter()
+                    .map(|entry| GrantRule::parse(entry))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Records an `always_allow` grant, dropping the rules the new one subsumes.
+    /// `spec` of `None` grants the tool as a whole.
+    pub fn add_grant(&self, tool_name: &str, spec: Option<&str>) {
+        let new_rule = GrantRule::new(tool_name, spec);
+        let mut map = self.permission_map.write().unwrap();
+        let permission_config = map.entry(USER_PERMISSION.to_string()).or_default();
+
+        permission_config.ask_before.retain(|p| p != tool_name);
+        permission_config.never_allow.retain(|p| p != tool_name);
+
+        let already_covered = permission_config
+            .always_allow
+            .iter()
+            .any(|entry| GrantRule::parse(entry).covers(&new_rule));
+        if !already_covered {
+            permission_config
+                .always_allow
+                .retain(|entry| !new_rule.covers(&GrantRule::parse(entry)));
+            permission_config.always_allow.push(new_rule.to_string());
+        }
+
+        let yaml_content =
+            serde_yaml::to_string(&*map).expect("Failed to serialize permission config");
+        fs::write(&self.config_path, yaml_content).expect("Failed to write to permission.yaml");
     }
 
     /// Updates the user permission level for a specific tool.
@@ -359,6 +426,97 @@ mod tests {
         let permission_path = temp_dir.path().join(PERMISSION_FILE);
         fs::write(&permission_path, "{{invalid yaml: [broken").unwrap();
         PermissionManager::new(temp_dir.path().to_path_buf());
+    }
+
+    const SHELL: &str = "shell";
+
+    fn shell_call(command: &str) -> rmcp::model::JsonObject {
+        object!({ "command": command })
+    }
+
+    fn grants(manager: &PermissionManager) -> Vec<String> {
+        manager
+            .get_user_grants()
+            .iter()
+            .map(GrantRule::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn grants_survive_a_reload() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = PermissionManager::new(temp_dir.path().to_path_buf());
+        manager.add_grant(SHELL, Some("cargo test *"));
+        manager.add_grant("other__tool", None);
+
+        let reloaded = PermissionManager::new(temp_dir.path().to_path_buf());
+        assert_eq!(
+            grants(&reloaded),
+            vec!["shell(cargo test *)", "other__tool"]
+        );
+        assert!(reloaded.is_call_allowed(SHELL, Some(&shell_call("cargo test --all"))));
+        assert!(!reloaded.is_call_allowed(SHELL, Some(&shell_call("cargo build"))));
+        assert!(reloaded.is_call_allowed("other__tool", None));
+    }
+
+    #[test]
+    fn a_new_grant_absorbs_the_rules_it_covers() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        manager.add_grant(SHELL, Some("cargo test -p kaji"));
+        manager.add_grant(SHELL, Some("cargo build *"));
+        manager.add_grant(SHELL, Some("cargo test *"));
+
+        assert_eq!(
+            grants(&manager),
+            vec!["shell(cargo build *)", "shell(cargo test *)"]
+        );
+    }
+
+    #[test]
+    fn a_covered_grant_is_not_added() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        manager.add_grant(SHELL, Some("cargo test *"));
+        manager.add_grant(SHELL, Some("cargo test -p kaji"));
+
+        assert_eq!(grants(&manager), vec!["shell(cargo test *)"]);
+    }
+
+    #[test]
+    fn a_tool_wide_grant_absorbs_every_rule_of_that_tool() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        manager.add_grant(SHELL, Some("cargo test *"));
+        manager.add_grant("other__tool", Some("kept"));
+        manager.add_grant(SHELL, None);
+
+        assert_eq!(grants(&manager), vec!["other__tool(kept)", "shell"]);
+    }
+
+    #[test]
+    fn a_legacy_tool_name_entry_allows_every_call() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        manager.update_user_permission(SHELL, PermissionLevel::AlwaysAllow);
+
+        assert!(manager.is_call_allowed(SHELL, Some(&shell_call("rm -rf /"))));
+        assert!(!manager.is_call_denied(SHELL, Some(&shell_call("rm -rf /"))));
+    }
+
+    #[test]
+    fn a_denied_tool_name_denies_every_call() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        manager.update_user_permission(SHELL, PermissionLevel::NeverAllow);
+
+        assert!(manager.is_call_denied(SHELL, Some(&shell_call("cargo test"))));
+        assert!(!manager.is_call_allowed(SHELL, Some(&shell_call("cargo test"))));
+    }
+
+    #[test]
+    fn a_grant_clears_the_other_levels_of_that_tool() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        manager.update_user_permission(SHELL, PermissionLevel::AskBefore);
+        manager.add_grant(SHELL, Some("cargo test *"));
+
+        assert_eq!(manager.get_user_permission(SHELL), None);
+        assert!(manager.is_call_allowed(SHELL, Some(&shell_call("cargo test --all"))));
     }
 
     use test_case::test_case;

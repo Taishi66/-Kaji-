@@ -32,7 +32,8 @@ impl From<Permission> for PermissionDecision {
     fn from(p: Permission) -> Self {
         match p {
             Permission::AlwaysAllow => Self::AllowAlways,
-            Permission::AllowOnce => Self::AllowOnce,
+            // ACP has no session-scoped option kind, so a session grant degrades to one call.
+            Permission::AllowSession | Permission::AllowOnce => Self::AllowOnce,
             Permission::DenyOnce => Self::RejectOnce,
             Permission::AlwaysDeny => Self::RejectAlways,
             Permission::Cancel => Self::Cancel,
@@ -202,6 +203,7 @@ mod tests {
 
     #[test_case(Permission::AlwaysAllow, PermissionDecision::AllowAlways; "always_allow")]
     #[test_case(Permission::AllowOnce, PermissionDecision::AllowOnce; "allow_once")]
+    #[test_case(Permission::AllowSession, PermissionDecision::AllowOnce; "allow_session_degrades_to_once")]
     #[test_case(Permission::DenyOnce, PermissionDecision::RejectOnce; "deny_once")]
     #[test_case(Permission::AlwaysDeny, PermissionDecision::RejectAlways; "always_deny")]
     #[test_case(Permission::Cancel, PermissionDecision::Cancel; "cancel")]

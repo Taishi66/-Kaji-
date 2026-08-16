@@ -10,10 +10,9 @@ use tokio_util::sync::CancellationToken;
 
 use std::path::PathBuf;
 
-use crate::config::permission::PermissionLevel;
 use crate::conversation::message::Message;
 use crate::mcp_utils::ToolResult;
-use crate::permission::Permission;
+use crate::permission::grant_decision::apply_grant_decision;
 use rmcp::model::{ContentBlock, ServerNotification};
 
 #[derive(Clone)]
@@ -184,10 +183,7 @@ impl Agent {
                     .map_err(|_| anyhow::anyhow!("Confirmation channel closed for request {}", request.id))?;
 
                 if let Some(finding_id) = get_security_finding_id_from_results(&request.id, inspection_results) {
-                    let action = match confirmation.permission {
-                        Permission::AllowOnce | Permission::AlwaysAllow => "ALLOW",
-                        _ => "BLOCK",
-                    };
+                    let action = if confirmation.permission.allows_execution() { "ALLOW" } else { "BLOCK" };
                     tracing::info!(
                         monotonic_counter.kaji.prompt_injection_user_decisions = 1,
                         security.event_type = "user_decision",
@@ -199,7 +195,15 @@ impl Agent {
                     );
                 }
 
-                if confirmation.permission == Permission::AllowOnce || confirmation.permission == Permission::AlwaysAllow {
+                apply_grant_decision(
+                    &self.tool_inspection_manager,
+                    &tool_call.name,
+                    tool_call.arguments.as_ref(),
+                    &confirmation.permission,
+                    &session.id,
+                ).await;
+
+                if confirmation.permission.allows_execution() {
                     let (req_id, tool_result) = self.dispatch_tool_call(tool_call.clone(), request.id.clone(), cancellation_token.clone(), session).await;
 
                     tool_futures.push((req_id, match tool_result {
@@ -214,12 +218,6 @@ impl Agent {
                             futures::future::ready(Err(e)),
                         ),
                     }));
-
-                    if confirmation.permission == Permission::AlwaysAllow {
-                        self.tool_inspection_manager
-                            .update_permission_manager(&tool_call.name, PermissionLevel::AlwaysAllow)
-                            .await;
-                    }
                 } else {
                     if let Some(response) = request_to_response_map.get_mut(&request.id) {
                         response.add_tool_response_with_metadata(
@@ -227,12 +225,6 @@ impl Agent {
                             Ok(CallToolResult::error(vec![ContentBlock::text(DECLINED_RESPONSE)])),
                             request.metadata.as_ref(),
                         );
-                    }
-
-                    if confirmation.permission == Permission::AlwaysDeny {
-                        self.tool_inspection_manager
-                            .update_permission_manager(&tool_call.name, PermissionLevel::NeverAllow)
-                            .await;
                     }
                 }
             }
@@ -264,5 +256,208 @@ impl Agent {
             }
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::{AgentConfig, AgentEvent, KajiPlatform, SessionConfig};
+    use crate::config::permission::PermissionManager;
+    use crate::config::KajiMode;
+    use crate::conversation::message::{ActionRequiredData, MessageContent};
+    use crate::permission::permission_confirmation::PrincipalType;
+    use crate::permission::{Permission, PermissionConfirmation};
+    use crate::session::session_manager::SessionType;
+    use crate::session::SessionManager;
+    use futures::StreamExt;
+    use kaji_providers::base::{stream_from_single_message, MessageStream, Provider};
+    use kaji_providers::conversation::token_usage::{ProviderUsage, Usage};
+    use kaji_providers::errors::ProviderError;
+    use kaji_providers::model::ModelConfig;
+    use rmcp::model::{CallToolRequestParams, Tool};
+    use rmcp::object;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    struct ScriptedProvider {
+        responses: StdMutex<VecDeque<Message>>,
+    }
+
+    impl ScriptedProvider {
+        fn new(responses: Vec<Message>) -> Self {
+            Self {
+                responses: StdMutex::new(responses.into()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ScriptedProvider {
+        fn get_name(&self) -> &str {
+            "scripted"
+        }
+
+        async fn stream(
+            &self,
+            _: &ModelConfig,
+            _: &str,
+            _: &[Message],
+            _: &[Tool],
+        ) -> std::result::Result<MessageStream, ProviderError> {
+            let message = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Message::assistant().with_text("nothing left to do"));
+            let usage = ProviderUsage::new("scripted".to_string(), Usage::default());
+            Ok(stream_from_single_message(message, usage))
+        }
+    }
+
+    struct Approval {
+        agent: Agent,
+        permission_manager: Arc<PermissionManager>,
+        session_id: String,
+    }
+
+    async fn approve_shell_call(command: &str, permission: Permission) -> Approval {
+        let permission_manager =
+            Arc::new(PermissionManager::new(tempfile::tempdir().unwrap().keep()));
+        let session_manager = Arc::new(SessionManager::new(tempfile::tempdir().unwrap().keep()));
+        let agent = Agent::with_config(AgentConfig::new(
+            Arc::clone(&session_manager),
+            Arc::clone(&permission_manager),
+            None,
+            KajiMode::Approve,
+            true,
+            KajiPlatform::KajiCli,
+        ));
+        let session = session_manager
+            .create_session(
+                PathBuf::default(),
+                "legacy-approval".to_string(),
+                SessionType::Hidden,
+                KajiMode::Approve,
+            )
+            .await
+            .unwrap();
+
+        let tool_call =
+            CallToolRequestParams::new("shell").with_arguments(object!({ "command": command }));
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            Message::assistant().with_tool_request("call-1", Ok(tool_call))
+        ]));
+        agent
+            .update_provider(provider, ModelConfig::new("scripted-model"), &session.id)
+            .await
+            .unwrap();
+
+        {
+            let stream = agent
+                .reply(
+                    Message::user().with_text("run it"),
+                    SessionConfig {
+                        id: session.id.clone(),
+                        schedule_id: None,
+                        max_turns: Some(2),
+                        retry_config: None,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            tokio::pin!(stream);
+
+            while let Some(event) = stream.next().await {
+                if let Ok(AgentEvent::Message(message)) = event {
+                    for content in &message.content {
+                        if let MessageContent::ActionRequired(action) = content {
+                            if let ActionRequiredData::ToolConfirmation { id, .. } = &action.data {
+                                agent
+                                    .handle_confirmation(
+                                        id.clone(),
+                                        PermissionConfirmation {
+                                            principal_type: PrincipalType::Tool,
+                                            permission: permission.clone(),
+                                        },
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Approval {
+            agent,
+            permission_manager,
+            session_id: session.id,
+        }
+    }
+
+    impl Approval {
+        fn grants(&self) -> Vec<String> {
+            self.permission_manager
+                .get_user_grants()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        }
+
+        async fn inspect(&self, command: &str) -> crate::tool_inspection::InspectionAction {
+            let request = ToolRequest {
+                id: "req".into(),
+                tool_call: Ok(CallToolRequestParams::new("shell")
+                    .with_arguments(object!({ "command": command }))),
+                metadata: None,
+                tool_meta: None,
+            };
+            self.agent
+                .tool_inspection_manager
+                .inspect_tools(&self.session_id, &[request], &[], KajiMode::Approve)
+                .await
+                .unwrap()
+                .remove(0)
+                .action
+        }
+    }
+
+    #[tokio::test]
+    async fn always_allow_persists_a_command_prefix_rule() {
+        let approval = approve_shell_call("cargo test -p kaji", Permission::AlwaysAllow).await;
+
+        assert_eq!(approval.grants(), ["shell(cargo test *)"]);
+        assert_eq!(
+            approval.permission_manager.get_user_permission("shell"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn always_deny_still_denies_the_whole_tool() {
+        let approval = approve_shell_call("cargo test -p kaji", Permission::AlwaysDeny).await;
+
+        assert_eq!(
+            approval.permission_manager.get_user_permission("shell"),
+            Some(crate::config::permission::PermissionLevel::NeverAllow)
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_session_grants_without_persisting() {
+        let approval = approve_shell_call("cargo test -p kaji", Permission::AllowSession).await;
+
+        assert!(approval.grants().is_empty());
+        assert_eq!(
+            approval.inspect("cargo test --all").await,
+            crate::tool_inspection::InspectionAction::Allow
+        );
+        assert_eq!(
+            approval.inspect("cargo build").await,
+            crate::tool_inspection::InspectionAction::RequireApproval(None)
+        );
     }
 }

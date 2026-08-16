@@ -2183,6 +2183,11 @@ fn prompt_tool_confirmation(security_prompt: &Option<String>) -> Result<Permissi
         cliclack::select(prompt)
             .item(Permission::AllowOnce, "Allow", "Allow the tool call once")
             .item(
+                Permission::AllowSession,
+                "Allow for this session",
+                "Allow similar tool calls until kaji exits",
+            )
+            .item(
                 Permission::AlwaysAllow,
                 "Always Allow",
                 "Always allow the tool call",

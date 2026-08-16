@@ -148,6 +148,18 @@ impl ToolInspectionManager {
         }
     }
 
+    pub async fn add_user_grant(&self, tool_name: &str, spec: Option<&str>) {
+        if let Some(inspector) = self.get_permission_inspector() {
+            inspector.permission_manager.add_grant(tool_name, spec);
+        }
+    }
+
+    pub fn grant_for_session(&self, session_id: &str, tool_name: &str, spec: Option<&str>) {
+        if let Some(inspector) = self.get_permission_inspector() {
+            inspector.grant_for_session(session_id, tool_name, spec);
+        }
+    }
+
     pub fn process_inspection_results_with_permission_inspector(
         &self,
         remaining_requests: &[ToolRequest],

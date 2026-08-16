@@ -468,6 +468,14 @@ impl TestPipeline {
         self.permission_manager.update_user_permission(tool, level);
     }
 
+    pub(super) fn user_grants(&self) -> Vec<String> {
+        self.permission_manager
+            .get_user_grants()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
     pub(super) async fn remove_extension(&self, name: &str) -> Result<()> {
         self.extension_manager
             .remove_extension(name)
