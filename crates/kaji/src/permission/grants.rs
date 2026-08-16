@@ -11,7 +11,7 @@ const PREFIX_GLOB: &str = " *";
 const ESCAPED_STAR: &str = "\\*";
 
 /// Operators that chain several commands into one shell invocation.
-const STAGE_SEPARATORS: [char; 4] = ['&', '|', ';', '\n'];
+const STAGE_SEPARATORS: [char; 5] = ['&', '|', ';', '\n', '\r'];
 
 /// Operators that make a stage non-widenable: a rule may only allow it verbatim.
 const SUBSTITUTION_OPERATORS: [&str; 4] = ["$(", "`", ">", "<"];
@@ -174,7 +174,7 @@ pub fn derive_grant_spec(tool_name: &str, arguments: Option<&JsonObject>) -> Opt
 /// Widens a shell command to its two-token prefix, unless the command carries an
 /// operator or a flag that would let the prefix cover unrelated work.
 pub fn derive_shell_grant(command: &str) -> Spec {
-    let command = normalize_whitespace(command);
+    let command = normalize_whitespace(command.trim());
     if command.contains(STAGE_SEPARATORS)
         || contains_substitution(&command)
         || split_shell_stages(&command).is_none()
@@ -191,8 +191,9 @@ pub fn derive_shell_grant(command: &str) -> Spec {
     Spec::Prefix(format!("{head} {second}"))
 }
 
-/// Collapses runs of unquoted whitespace so that a derived grant and the command it
-/// came from compare equal.
+/// Collapses runs of unquoted spaces and tabs so that a derived grant and the command
+/// it came from compare equal. Line breaks separate stages, so they are never
+/// collapsed: doing so would splice a chained command into a single one.
 fn normalize_whitespace(text: &str) -> String {
     let mut normalized = String::with_capacity(text.len());
     let mut in_single = false;
@@ -201,7 +202,7 @@ fn normalize_whitespace(text: &str) -> String {
     let mut chars = text.chars().peekable();
 
     while let Some(c) = chars.next() {
-        if c.is_whitespace() && !in_single && !in_double {
+        if matches!(c, ' ' | '\t') && !in_single && !in_double {
             pending_space = !normalized.is_empty();
             continue;
         }
@@ -262,7 +263,7 @@ pub fn split_shell_stages(command: &str) -> Option<Vec<String>> {
                 }
                 stages.push(std::mem::take(&mut current));
             }
-            ';' | '\n' if !in_single && !in_double => {
+            ';' | '\n' | '\r' if !in_single && !in_double => {
                 stages.push(std::mem::take(&mut current));
             }
             _ => current.push(c),
@@ -305,6 +306,9 @@ pub fn call_allowed_by_any(
 
     if specs.iter().any(|spec| spec.is_exactly(&call.argument)) {
         return true;
+    }
+    if call.stages.is_empty() {
+        return false;
     }
 
     call.stages.iter().all(|stage| {
@@ -367,6 +371,8 @@ struct CallArgument {
     unresolved_quoting: bool,
 }
 
+/// Stages are cut from the raw command, then normalized one by one: collapsing first
+/// would erase the line breaks the split relies on.
 fn call_argument(tool_name: &str, arguments: Option<&JsonObject>) -> Option<CallArgument> {
     let argument = primary_argument(tool_name, arguments?)?;
     if !is_shell_tool(tool_name) {
@@ -376,11 +382,15 @@ fn call_argument(tool_name: &str, arguments: Option<&JsonObject>) -> Option<Call
             unresolved_quoting: false,
         });
     }
+    let stages = split_shell_stages(&argument);
     let argument = normalize_whitespace(&argument);
-    match split_shell_stages(&argument) {
+    match stages {
         Some(stages) => Some(CallArgument {
             argument,
-            stages,
+            stages: stages
+                .iter()
+                .map(|stage| normalize_whitespace(stage))
+                .collect(),
             unresolved_quoting: false,
         }),
         None => Some(CallArgument {
@@ -425,6 +435,8 @@ mod tests {
     #[test_case("ls -la *", "ls -la \\*"; "literal_star_after_flag_is_escaped")]
     #[test_case("grep -r \"a  b\"", "grep -r \"a  b\""; "quoted_whitespace_is_preserved")]
     #[test_case("echo \"unbalanced", "echo \"unbalanced"; "unresolvable_quoting_stays_exact")]
+    #[test_case("cargo test\nrm -rf /", "cargo test\nrm -rf /"; "newline_chain_stays_exact")]
+    #[test_case("cargo test\r\nrm -rf /", "cargo test\r\nrm -rf /"; "carriage_return_chain_stays_exact")]
     fn derives_shell_grant(command: &str, serialized: &str) {
         assert_eq!(derive_shell_grant(command).to_string(), serialized);
     }
@@ -440,6 +452,8 @@ mod tests {
     #[test_case("rm -rf *"; "literal_star")]
     #[test_case("grep -r \"a  b\""; "quoted_whitespace")]
     #[test_case("echo \"unbalanced"; "unresolved_quoting")]
+    #[test_case("cargo test\nrm -rf /"; "newline_chain")]
+    #[test_case("cargo test\r\nrm -rf /"; "carriage_return_chain")]
     fn a_derived_grant_allows_the_command_it_came_from(command: &str) {
         let derived = rule(derive_shell_grant(command));
         assert!(call_allowed_by(&derived, SHELL, Some(&shell(command))));
@@ -559,6 +573,10 @@ mod tests {
     #[test_case("cargo test > /etc/passwd", false; "redirection_is_not_widened")]
     #[test_case("cargo test \"a && b", false; "unresolvable_quoting_is_not_widened")]
     #[test_case("echo 'cargo test'", false; "other_command_denied")]
+    #[test_case("cargo test\nrm -rf /", false; "newline_chained_call_needs_every_stage")]
+    #[test_case("cargo test\r\nrm -rf /", false; "carriage_return_chained_call_needs_every_stage")]
+    #[test_case("cargo test  \n  rm -rf /", false; "padded_newline_chain_needs_every_stage")]
+    #[test_case("cargo test\n", true; "trailing_newline_is_a_single_stage")]
     fn prefix_rule_allows_only_matching_calls(command: &str, expected: bool) {
         let granted = rule(Spec::prefix("cargo test"));
         assert_eq!(
@@ -601,6 +619,17 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_stage_set_allows_nothing() {
+        let granted = [rule(Spec::prefix("cargo test"))];
+        for command in [";;;", "&&", "|", " ", "\n\n"] {
+            assert!(
+                !call_allowed_by_any(&granted, SHELL, Some(&shell(command))),
+                "{command:?} should not be allowed"
+            );
+        }
+    }
+
+    #[test]
     fn a_denial_catches_any_stage_of_a_chained_command() {
         let denied = [rule(Spec::prefix("rm -rf"))];
         for command in [
@@ -608,6 +637,8 @@ mod tests {
             "true && rm -rf /",
             "rm -rf / && true",
             "echo hi | rm -rf /tmp",
+            "true\nrm -rf /",
+            "true\r\nrm -rf /",
         ] {
             assert!(
                 call_denied_by_any(&denied, SHELL, Some(&shell(command))),

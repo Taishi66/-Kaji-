@@ -96,6 +96,12 @@ impl PermissionManager {
         level
     }
 
+    /// Whether the tool carries a name-level `ask_before` entry, which per-call grants
+    /// narrow but never cancel.
+    pub fn asks_before(&self, principal_name: &str) -> bool {
+        self.get_permission(USER_PERMISSION, principal_name) == Some(PermissionLevel::AskBefore)
+    }
+
     /// Retrieves the smart approve permission level for a specific tool.
     pub fn get_smart_approve_permission(&self, principal_name: &str) -> Option<PermissionLevel> {
         self.get_permission(SMART_APPROVE_PERMISSION, principal_name)
@@ -555,7 +561,19 @@ mod tests {
         assert!(manager.is_call_denied(SHELL, Some(&shell_call("rm -rf /"))));
         assert!(manager.is_call_denied(SHELL, Some(&shell_call("rm -rf / && true"))));
         assert!(manager.is_call_denied(SHELL, Some(&shell_call("true && rm -rf /"))));
+        assert!(manager.is_call_denied(SHELL, Some(&shell_call("true\nrm -rf /"))));
+        assert!(manager.is_call_denied(SHELL, Some(&shell_call("true\r\nrm -rf /"))));
         assert!(!manager.is_call_denied(SHELL, Some(&shell_call("cargo test"))));
+    }
+
+    #[test]
+    fn a_prefix_grant_is_not_spliced_by_a_line_break() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        manager.add_grant(SHELL, Some(&derive_shell_grant("cargo test -p kaji")));
+
+        assert!(manager.is_call_allowed(SHELL, Some(&shell_call("cargo test --all"))));
+        assert!(!manager.is_call_allowed(SHELL, Some(&shell_call("cargo test\nrm -rf /"))));
+        assert!(!manager.is_call_allowed(SHELL, Some(&shell_call("cargo test\r\nrm -rf /"))));
     }
 
     #[test]

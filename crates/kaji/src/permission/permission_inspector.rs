@@ -195,9 +195,7 @@ impl ToolInspector for PermissionInspector {
                             || permission_manager.is_call_allowed(tool_name, arguments)
                         {
                             InspectionAction::Allow
-                        } else if permission_manager.get_user_permission(tool_name)
-                            == Some(PermissionLevel::AskBefore)
-                        {
+                        } else if permission_manager.asks_before(tool_name) {
                             InspectionAction::RequireApproval(None)
                         // 2. Check for a read-only annotation in SmartApprove mode
                         } else if kaji_mode == KajiMode::SmartApprove
@@ -420,6 +418,15 @@ mod tests {
         session_id: &str,
         command: &str,
     ) -> InspectionAction {
+        inspect_shell_in_mode(inspector, session_id, command, KajiMode::Approve).await
+    }
+
+    async fn inspect_shell_in_mode(
+        inspector: &PermissionInspector,
+        session_id: &str,
+        command: &str,
+        mode: KajiMode,
+    ) -> InspectionAction {
         let request = ToolRequest {
             id: "req".into(),
             tool_call: Ok(
@@ -429,11 +436,58 @@ mod tests {
             tool_meta: None,
         };
         inspector
-            .inspect(session_id, &[request], &[], KajiMode::Approve)
+            .inspect(session_id, &[request], &[], mode)
             .await
             .unwrap()
             .remove(0)
             .action
+    }
+
+    #[tokio::test]
+    async fn a_narrow_grant_does_not_cancel_a_name_level_ask_before() {
+        let config_dir = tempfile::tempdir().unwrap().keep();
+        std::fs::write(
+            config_dir.join("permission.yaml"),
+            "user:\n  always_allow:\n  - shell(cargo test *)\n  ask_before:\n  - shell\n  never_allow: []\n",
+        )
+        .unwrap();
+        let session_manager = Arc::new(crate::session::SessionManager::new(
+            tempfile::tempdir().unwrap().keep(),
+        ));
+        let inspector = PermissionInspector::new(
+            Arc::new(PermissionManager::new(config_dir)),
+            Arc::new(Mutex::new(None)),
+            session_manager,
+        );
+        *inspector.readonly_tools.write().unwrap() = [SHELL.to_string()].into_iter().collect();
+
+        assert_eq!(
+            inspect_shell_in_mode(&inspector, SESSION, "cargo build", KajiMode::SmartApprove).await,
+            InspectionAction::RequireApproval(None)
+        );
+        assert_eq!(
+            inspect_shell_in_mode(
+                &inspector,
+                SESSION,
+                "cargo test --all",
+                KajiMode::SmartApprove
+            )
+            .await,
+            InspectionAction::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prefix_grant_does_not_cover_a_line_broken_command() {
+        let inspector = shell_inspector();
+        inspector
+            .permission_manager
+            .add_grant(SHELL, Some(&Spec::prefix("cargo test")));
+
+        assert_eq!(
+            inspect_shell(&inspector, SESSION, "cargo test\nrm -rf /").await,
+            InspectionAction::RequireApproval(None)
+        );
     }
 
     #[tokio::test]
