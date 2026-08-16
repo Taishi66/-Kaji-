@@ -1,11 +1,13 @@
 use crate::tui::theme;
 use kaji::agents::AgentEvent;
 use kaji::conversation::Conversation;
-use kaji::conversation::message::{ActionRequiredData, Message, MessageContentBlock};
+use kaji::conversation::message::{
+    ActionRequiredData, Message, MessageContentBlock, SystemNotificationType,
+};
 use kaji::providers::base::ProviderUsage;
 use kaji_core::sdd::{SddPass, SpecDoc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use rmcp::model::Role;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -1388,6 +1390,26 @@ impl App {
         self.reset_agent_merge_ids();
     }
 
+    /// Provider/LLM failures: same placement as a system notice, in the
+    /// theme's alert colour so a failed turn doesn't read as chatter. The
+    /// message already opens with the taxonomy label (see
+    /// `Message::from_provider_error`).
+    pub fn push_error(&mut self, message: &str) {
+        let lines = message
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                let text = if index == 0 {
+                    format!("✗ {line}")
+                } else {
+                    line.to_string()
+                };
+                Line::from(Span::styled(text, theme::error()))
+            })
+            .collect();
+        self.push_system_lines(lines);
+    }
+
     pub fn apply_agent_event(&mut self, ev: &AgentEvent) {
         match ev {
             AgentEvent::Message(message) => self.apply_message(message),
@@ -1470,6 +1492,18 @@ impl App {
                             tool_name: tool_name.clone(),
                             prompt: prompt.clone(),
                         });
+                    }
+                }
+                MessageContentBlock::Error(error) => self.push_error(&error.message),
+                // Thinking/progress notifications drive the loader, not the
+                // transcript — only the two user-facing registers are shown.
+                MessageContentBlock::SystemNotification(notification) => {
+                    if matches!(
+                        notification.notification_type,
+                        SystemNotificationType::InlineMessage
+                            | SystemNotificationType::CreditsExhausted
+                    ) {
+                        self.push_system(&notification.msg);
                     }
                 }
                 _ => {}
@@ -2411,6 +2445,58 @@ mod tests {
             .collect();
         assert_eq!(agent_lines.len(), 1);
         assert_eq!(agent_lines[0].text, "Bonjour");
+    }
+
+    fn agent_message(app: &mut App, message: Message) {
+        app.apply_agent_event(&kaji::agents::AgentEvent::Message(message));
+    }
+
+    #[test]
+    fn a_provider_error_is_rendered_with_its_taxonomy_label() {
+        let mut app = App::new(None);
+        let error = kaji_providers::errors::ProviderError::RateLimitExceeded {
+            details: "slow down".to_string(),
+            retry_delay: None,
+        };
+
+        agent_message(&mut app, Message::from_provider_error(&error));
+
+        let line = app.chat.last().expect("error line");
+        assert_eq!(line.sender, Sender::System);
+        assert!(line.text.contains("limite de débit"), "{}", line.text);
+        assert!(line.text.starts_with('✗'), "{}", line.text);
+        assert!(line.rendered.is_some(), "error lines carry their own style");
+    }
+
+    #[test]
+    fn an_inline_notification_is_rendered_in_the_system_register() {
+        let mut app = App::new(None);
+
+        agent_message(
+            &mut app,
+            Message::assistant().with_system_notification(
+                SystemNotificationType::InlineMessage,
+                "Context limit reached",
+            ),
+        );
+
+        let line = app.chat.last().expect("system line");
+        assert_eq!(line.sender, Sender::System);
+        assert_eq!(line.text, "Context limit reached");
+        assert!(line.rendered.is_none(), "plain dim system register");
+    }
+
+    #[test]
+    fn a_thinking_notification_stays_out_of_the_transcript() {
+        let mut app = App::new(None);
+
+        agent_message(
+            &mut app,
+            Message::assistant()
+                .with_system_notification(SystemNotificationType::ThinkingMessage, "réflexion"),
+        );
+
+        assert!(app.chat.is_empty());
     }
 
     #[test]

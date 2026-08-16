@@ -312,7 +312,7 @@ async fn usage_and_provider_errors_survive_persistence() -> Result<()> {
         .conversation()
         .messages()
         .iter()
-        .find(|message| message.error_kind() == Some(MessageErrorKind::Other))
+        .find(|message| message.error_kind() == Some(MessageErrorKind::ServerError))
         .expect("persisted provider error");
     assert!(error.is_user_visible());
     assert!(!error.is_agent_visible());

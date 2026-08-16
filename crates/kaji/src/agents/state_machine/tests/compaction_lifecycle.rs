@@ -188,7 +188,7 @@ async fn a_context_error_compacts_and_the_session_survives_a_failed_retry() -> R
             .conversation()
             .last()
             .and_then(Message::error_kind),
-        Some(MessageErrorKind::Other)
+        Some(MessageErrorKind::ServerError)
     );
 
     api.on("try again").reply("recovered on the next turn");

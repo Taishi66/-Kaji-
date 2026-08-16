@@ -254,6 +254,13 @@ pub fn accent() -> Style {
     Style::default().fg(active().accent)
 }
 
+/// Erreurs provider/LLM — le rôle `accent` porte aussi l'alerte ; nom
+/// distinct de [`accent`] pour que le registre d'erreur puisse diverger
+/// sans toucher aux appelants « accent actif ».
+pub fn error() -> Style {
+    Style::default().fg(active().accent)
+}
+
 pub fn title() -> Style {
     Style::default()
         .fg(active().gold)

@@ -207,23 +207,76 @@ pub struct SystemNotificationContent {
     pub data: Option<serde_json::Value>,
 }
 
+/// Machine-readable taxonomy carried by every error block. The serialized
+/// name is the wire contract (event log, ACP `reason`); the camelCase
+/// aliases keep sessions written before the taxonomy readable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum MessageErrorKind {
+    #[serde(alias = "contextLengthExceeded")]
     ContextLengthExceeded,
+    #[serde(alias = "creditsExhausted")]
     CreditsExhausted,
+    Authentication,
+    RateLimited,
+    ServerError,
+    Network,
+    InvalidRequest,
+    Refusal,
+    NotConfigured,
+    Execution,
+    Usage,
+    NotImplemented,
+    EndpointNotFound,
     #[serde(other)]
     Other,
 }
 
+impl MessageErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageErrorKind::ContextLengthExceeded => "context_length_exceeded",
+            MessageErrorKind::CreditsExhausted => "credits_exhausted",
+            MessageErrorKind::Authentication => "authentication",
+            MessageErrorKind::RateLimited => "rate_limited",
+            MessageErrorKind::ServerError => "server_error",
+            MessageErrorKind::Network => "network",
+            MessageErrorKind::InvalidRequest => "invalid_request",
+            MessageErrorKind::Refusal => "refusal",
+            MessageErrorKind::NotConfigured => "not_configured",
+            MessageErrorKind::Execution => "execution",
+            MessageErrorKind::Usage => "usage",
+            MessageErrorKind::NotImplemented => "not_implemented",
+            MessageErrorKind::EndpointNotFound => "endpoint_not_found",
+            MessageErrorKind::Other => "other",
+        }
+    }
+
+    /// Short user-facing label, prefixed to the error text so every surface
+    /// (TUI, CLI, ACP) names the failure the same way.
+    pub fn label(self) -> &'static str {
+        match self {
+            MessageErrorKind::ContextLengthExceeded => "contexte dépassé",
+            MessageErrorKind::CreditsExhausted => "crédits épuisés",
+            MessageErrorKind::Authentication => "authentification",
+            MessageErrorKind::RateLimited => "limite de débit",
+            MessageErrorKind::ServerError => "erreur serveur",
+            MessageErrorKind::Network => "réseau",
+            MessageErrorKind::InvalidRequest => "requête invalide",
+            MessageErrorKind::Refusal => "refus",
+            MessageErrorKind::NotConfigured => "non configuré",
+            MessageErrorKind::Execution => "exécution",
+            MessageErrorKind::Usage => "usage",
+            MessageErrorKind::NotImplemented => "non implémenté",
+            MessageErrorKind::EndpointNotFound => "endpoint introuvable",
+            MessageErrorKind::Other => "erreur",
+        }
+    }
+}
+
 impl From<&crate::errors::ProviderError> for MessageErrorKind {
     fn from(err: &crate::errors::ProviderError) -> Self {
-        use crate::errors::ProviderError;
-        match err {
-            ProviderError::ContextLengthExceeded(_) => MessageErrorKind::ContextLengthExceeded,
-            ProviderError::CreditsExhausted { .. } => MessageErrorKind::CreditsExhausted,
-            _ => MessageErrorKind::Other,
-        }
+        err.kind()
     }
 }
 
@@ -1168,19 +1221,30 @@ impl Message {
 
     pub fn from_provider_error(err: &crate::errors::ProviderError) -> Self {
         use crate::errors::ProviderError;
-        let text = match err {
+        let detail = match err {
             ProviderError::NetworkError(_) => {
                 format!("{err}\n\nPlease resend your message to try again.")
             }
             ProviderError::ContextLengthExceeded(_) => {
                 format!("{err}\n\nThe conversation is too long for the model's context window.")
             }
+            ProviderError::Refusal { details, category } => {
+                let category = category
+                    .as_deref()
+                    .map(|category| format!("\n\nCategory: {category}"))
+                    .unwrap_or_default();
+                format!(
+                    "The provider refused this request.\n\n{details}{category}\n\n\
+                     Please start a new session to continue — resending this conversation \
+                     is likely to be refused again."
+                )
+            }
             _ => format!(
-                "Ran into this error: {err}.\n\n\
-                 Please retry if you think this is a transient or recoverable error."
+                "{err}\n\nPlease retry if you think this is a transient or recoverable error."
             ),
         };
-        Message::assistant().with_error(MessageErrorKind::from(err), text)
+        let kind = err.kind();
+        Message::assistant().with_error(kind, format!("{} — {detail}", kind.label()))
     }
 
     pub fn error_kind(&self) -> Option<MessageErrorKind> {
@@ -2017,5 +2081,122 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod error_kind_tests {
+    use crate::conversation::message::{Message, MessageContentBlock, MessageErrorKind};
+    use crate::errors::ProviderError;
+
+    const ALL_KINDS: [MessageErrorKind; 14] = [
+        MessageErrorKind::ContextLengthExceeded,
+        MessageErrorKind::CreditsExhausted,
+        MessageErrorKind::Authentication,
+        MessageErrorKind::RateLimited,
+        MessageErrorKind::ServerError,
+        MessageErrorKind::Network,
+        MessageErrorKind::InvalidRequest,
+        MessageErrorKind::Refusal,
+        MessageErrorKind::NotConfigured,
+        MessageErrorKind::Execution,
+        MessageErrorKind::Usage,
+        MessageErrorKind::NotImplemented,
+        MessageErrorKind::EndpointNotFound,
+        MessageErrorKind::Other,
+    ];
+
+    #[test]
+    fn all_kinds_covers_every_variant() {
+        for kind in ALL_KINDS {
+            match kind {
+                MessageErrorKind::ContextLengthExceeded
+                | MessageErrorKind::CreditsExhausted
+                | MessageErrorKind::Authentication
+                | MessageErrorKind::RateLimited
+                | MessageErrorKind::ServerError
+                | MessageErrorKind::Network
+                | MessageErrorKind::InvalidRequest
+                | MessageErrorKind::Refusal
+                | MessageErrorKind::NotConfigured
+                | MessageErrorKind::Execution
+                | MessageErrorKind::Usage
+                | MessageErrorKind::NotImplemented
+                | MessageErrorKind::EndpointNotFound
+                | MessageErrorKind::Other => {}
+            }
+        }
+    }
+
+    #[test]
+    fn every_kind_round_trips_through_its_wire_name() {
+        for kind in ALL_KINDS {
+            let serialized = serde_json::to_value(kind).expect("kind serializes");
+            assert_eq!(serialized, serde_json::json!(kind.as_str()));
+            let parsed: MessageErrorKind =
+                serde_json::from_value(serialized).expect("kind deserializes");
+            assert_eq!(parsed, kind);
+        }
+    }
+
+    #[test]
+    fn unknown_wire_names_deserialize_to_other() {
+        let parsed: MessageErrorKind =
+            serde_json::from_value(serde_json::json!("truc_inconnu")).expect("unknown kind");
+        assert_eq!(parsed, MessageErrorKind::Other);
+    }
+
+    #[test]
+    fn kinds_written_before_the_taxonomy_are_still_read() {
+        for (stored, expected) in [
+            (
+                "context_length_exceeded",
+                MessageErrorKind::ContextLengthExceeded,
+            ),
+            (
+                "contextLengthExceeded",
+                MessageErrorKind::ContextLengthExceeded,
+            ),
+            ("credits_exhausted", MessageErrorKind::CreditsExhausted),
+            ("creditsExhausted", MessageErrorKind::CreditsExhausted),
+            ("other", MessageErrorKind::Other),
+        ] {
+            let parsed: MessageErrorKind =
+                serde_json::from_value(serde_json::json!(stored)).expect("stored kind");
+            assert_eq!(parsed, expected, "{stored}");
+        }
+    }
+
+    #[test]
+    fn every_kind_has_a_distinct_label() {
+        let mut labels = Vec::new();
+        for kind in ALL_KINDS {
+            let label = kind.label();
+            assert!(!label.is_empty(), "{}", kind.as_str());
+            labels.push(label);
+        }
+        labels.sort_unstable();
+        let count = labels.len();
+        labels.dedup();
+        assert_eq!(labels.len(), count);
+    }
+
+    #[test]
+    fn a_provider_error_message_carries_its_kind_and_label() {
+        let error = ProviderError::RateLimitExceeded {
+            details: "slow down".to_string(),
+            retry_delay: None,
+        };
+        let message = Message::from_provider_error(&error);
+        assert_eq!(message.error_kind(), Some(MessageErrorKind::RateLimited));
+        let text = message
+            .content
+            .iter()
+            .find_map(MessageContentBlock::as_error)
+            .expect("error block")
+            .message
+            .clone();
+        assert!(text.starts_with("limite de débit — "), "{text}");
+        assert!(text.contains("slow down"), "{text}");
     }
 }

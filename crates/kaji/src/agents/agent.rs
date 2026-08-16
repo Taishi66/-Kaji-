@@ -354,6 +354,21 @@ fn agent_event_payload(event: &AgentEvent) -> String {
     }
 }
 
+/// `payload_json` column for the `turn_end` row of a turn that ended on a
+/// stream error. `kind` is the provider taxonomy when the failure came from
+/// a provider, `"internal"` for everything else (agent/session plumbing).
+fn turn_end_error_payload(error: &anyhow::Error) -> String {
+    let kind = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ProviderError>())
+        .map(|provider_error| provider_error.kind().as_str())
+        .unwrap_or("internal");
+    serialize_event_payload(&serde_json::json!({
+        "error": error.to_string(),
+        "kind": kind,
+    }))
+}
+
 /// Serializes an event log payload, falling back to a truncated `Debug`
 /// rendering under a `{"debug": ...}` wrapper if `Serialize` fails at
 /// runtime (e.g. a `NaN`/`Infinity` float, which JSON cannot represent).
@@ -2288,9 +2303,10 @@ impl Agent {
                         // polled again). Log turn_end before propagating so
                         // `last_turn_is_interrupted` doesn't mistake an errored turn for
                         // a crashed/killed one.
-                        if let Some(turn_seq) = turn_seq {
+                        if let (Some(turn_seq), Err(error)) = (turn_seq, &err) {
+                            let payload = turn_end_error_payload(error);
                             if let Err(append_error) = session_manager
-                                .append_event(&session_id, turn_seq, "turn_end", "{}")
+                                .append_event(&session_id, turn_seq, "turn_end", &payload)
                                 .await
                             {
                                 warn!(?append_error, "event log append failed for turn_end");
@@ -3490,32 +3506,17 @@ impl Agent {
                             );
                             break;
                         }
-                        Err(ref provider_err @ ProviderError::Refusal { ref details, ref category }) => {
+                        Err(ref provider_err @ ProviderError::Refusal { .. }) => {
                             provider_errored = true;
                             #[cfg(feature = "telemetry")]
                             crate::posthog::emit_error(provider_err.telemetry_type(), &provider_err.to_string());
                             error!("Error: {}", provider_err);
 
-                            let category = category.as_deref().map(|c| format!("\n\nCategory: {c}")).unwrap_or_default();
-                            yield AgentEvent::Message(Message::assistant().with_text(format!(
-                                "The provider refused this request.\n\n{details}{category}\n\nPlease start a new session to continue — resending this conversation is likely to be refused again."
-                            )));
+                            yield AgentEvent::Message(Message::from_provider_error(provider_err));
                             // A refusal is terminal: skip goal/grind nudges and
                             // recipe retry_config, which would resend the same
                             // refused conversation.
                             exit_chat = true;
-                            break;
-                        }
-                        Err(ref provider_err @ ProviderError::NetworkError(_)) => {
-                            provider_errored = true;
-                            #[cfg(feature = "telemetry")]
-                            crate::posthog::emit_error(provider_err.telemetry_type(), &provider_err.to_string());
-                            error!("Error: {}", provider_err);
-                            yield AgentEvent::Message(
-                                Message::assistant().with_text(
-                                    format!("{provider_err}\n\nPlease resend your message to try again.")
-                                )
-                            );
                             break;
                         }
                         Err(ref provider_err) => {
@@ -3523,11 +3524,7 @@ impl Agent {
                             #[cfg(feature = "telemetry")]
                             crate::posthog::emit_error(provider_err.telemetry_type(), &provider_err.to_string());
                             error!("Error: {}", provider_err);
-                            yield AgentEvent::Message(
-                                Message::assistant().with_text(
-                                    format!("Ran into this error: {provider_err}.\n\nPlease retry if you think this is a transient or recoverable error.")
-                                )
-                            );
+                            yield AgentEvent::Message(Message::from_provider_error(provider_err));
                             break;
                         }
                     }
@@ -4938,6 +4935,28 @@ echo start >> "$PLUGIN_ROOT/hook.log"
         }
     }
 
+    struct RateLimitedProvider;
+
+    #[async_trait::async_trait]
+    impl crate::providers::base::Provider for RateLimitedProvider {
+        async fn stream(
+            &self,
+            _model_config: &kaji_providers::model::ModelConfig,
+            _system_prompt: &str,
+            _messages: &[Message],
+            _tools: &[Tool],
+        ) -> Result<MessageStream, ProviderError> {
+            Err(ProviderError::RateLimitExceeded {
+                details: "slow down".to_string(),
+                retry_delay: None,
+            })
+        }
+
+        fn get_name(&self) -> &str {
+            "rate-limited"
+        }
+    }
+
     struct ChunkedTextProvider;
 
     #[async_trait::async_trait]
@@ -5072,7 +5091,9 @@ echo start >> "$PLUGIN_ROOT/hook.log"
         let mut emitted_refusal_id = None;
         while let Some(event) = reply_stream.next().await {
             if let AgentEvent::Message(message) = event? {
-                if message.as_concat_text().contains("provider refused") {
+                if message.error_kind()
+                    == Some(crate::conversation::message::MessageErrorKind::Refusal)
+                {
                     emitted_refusal_id = message.id;
                 }
             }
@@ -5866,6 +5887,18 @@ echo start >> "$PLUGIN_ROOT/hook.log"
             Some(&"turn_end"),
             "an errored turn must still close with turn_end: {kinds:?}"
         );
+        let payload: serde_json::Value =
+            serde_json::from_str(&events.last().expect("turn_end event").payload_json)?;
+        assert_eq!(
+            payload["kind"], "internal",
+            "a failure that is not a provider error is logged as internal: {payload}"
+        );
+        assert!(
+            payload["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()),
+            "the turn_end payload must carry the error text: {payload}"
+        );
         assert!(
             session_manager
                 .last_turn_is_interrupted(&session_id)
@@ -5926,6 +5959,35 @@ echo start >> "$PLUGIN_ROOT/hook.log"
              KAJI_STATE_MACHINE, since Agent::reply() is the single point where both loops \
              converge before the log wraps the stream"
         );
+        Ok(())
+    }
+
+    /// Taxonomy parity: the legacy loop hand-rolls the error message from
+    /// its own match arm, the state machine goes through
+    /// `Message::from_provider_error` — both must tag the same provider
+    /// failure with the same machine-readable kind.
+    #[tokio::test]
+    async fn a_provider_error_is_tagged_with_the_same_kind_on_both_loops() -> Result<()> {
+        async fn run_scenario(
+            state_machine: Option<&str>,
+        ) -> Result<Option<crate::conversation::message::MessageErrorKind>> {
+            let _guard = env_lock::lock_env([("KAJI_STATE_MACHINE", state_machine)]);
+            let temp_dir = tempfile::tempdir()?;
+            let hook_manager = crate::hooks::HookManager::from_plugins_for_test(vec![]);
+            let (agent, session_id) = create_test_agent(
+                temp_dir.path().join("data"),
+                hook_manager,
+                Arc::new(RateLimitedProvider),
+            )
+            .await?;
+
+            let messages = run_stop_hook_test_turn(&agent, &session_id, "hello").await?;
+            Ok(messages.last().and_then(Message::error_kind))
+        }
+
+        let expected = Some(crate::conversation::message::MessageErrorKind::RateLimited);
+        assert_eq!(run_scenario(None).await?, expected, "legacy loop");
+        assert_eq!(run_scenario(Some("1")).await?, expected, "state machine");
         Ok(())
     }
 

@@ -344,11 +344,11 @@ mod tests {
         let actual = err.telemetry_type();
         let expected_telemetry = match expected_variant {
             "CreditsExhausted" => "credits_exhausted",
-            "RateLimitExceeded" => "rate_limit",
-            "Authentication" => "auth",
-            "ContextLengthExceeded" => "context_length",
-            "ServerError" => "server",
-            "RequestFailed" => "request",
+            "RateLimitExceeded" => "rate_limited",
+            "Authentication" => "authentication",
+            "ContextLengthExceeded" => "context_length_exceeded",
+            "ServerError" => "server_error",
+            "RequestFailed" => "invalid_request",
             other => panic!("Unknown variant: {other}"),
         };
         assert_eq!(

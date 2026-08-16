@@ -2,6 +2,7 @@ use reqwest::StatusCode;
 use std::time::Duration;
 use thiserror::Error;
 
+use crate::conversation::message::MessageErrorKind;
 use crate::request_log::LogError;
 
 #[derive(Error, Debug, Clone, PartialEq)]
@@ -60,22 +61,26 @@ impl ProviderError {
         ProviderError::NetworkError(format!("Stream decode error: {error}"))
     }
 
-    pub fn telemetry_type(&self) -> &'static str {
+    pub fn kind(&self) -> MessageErrorKind {
         match self {
-            ProviderError::NotConfigured => "not_configured",
-            ProviderError::Authentication(_) => "auth",
-            ProviderError::ContextLengthExceeded(_) => "context_length",
-            ProviderError::RateLimitExceeded { .. } => "rate_limit",
-            ProviderError::ServerError(_) => "server",
-            ProviderError::NetworkError(_) => "network",
-            ProviderError::RequestFailed(_) => "request",
-            ProviderError::ExecutionError(_) => "execution",
-            ProviderError::UsageError(_) => "usage",
-            ProviderError::NotImplemented(_) => "not_implemented",
-            ProviderError::EndpointNotFound(_) => "endpoint_not_found",
-            ProviderError::CreditsExhausted { .. } => "credits_exhausted",
-            ProviderError::Refusal { .. } => "refusal",
+            ProviderError::NotConfigured => MessageErrorKind::NotConfigured,
+            ProviderError::Authentication(_) => MessageErrorKind::Authentication,
+            ProviderError::ContextLengthExceeded(_) => MessageErrorKind::ContextLengthExceeded,
+            ProviderError::RateLimitExceeded { .. } => MessageErrorKind::RateLimited,
+            ProviderError::ServerError(_) => MessageErrorKind::ServerError,
+            ProviderError::NetworkError(_) => MessageErrorKind::Network,
+            ProviderError::RequestFailed(_) => MessageErrorKind::InvalidRequest,
+            ProviderError::ExecutionError(_) => MessageErrorKind::Execution,
+            ProviderError::UsageError(_) => MessageErrorKind::Usage,
+            ProviderError::NotImplemented(_) => MessageErrorKind::NotImplemented,
+            ProviderError::EndpointNotFound(_) => MessageErrorKind::EndpointNotFound,
+            ProviderError::CreditsExhausted { .. } => MessageErrorKind::CreditsExhausted,
+            ProviderError::Refusal { .. } => MessageErrorKind::Refusal,
         }
+    }
+
+    pub fn telemetry_type(&self) -> &'static str {
+        self.kind().as_str()
     }
 
     pub fn is_endpoint_not_found(&self) -> bool {
@@ -206,6 +211,91 @@ impl GoogleErrorCode {
             500 => Some(Self::InternalServerError),
             503 => Some(Self::ServiceUnavailable),
             _ => Some(Self::InternalServerError),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn every_variant() -> Vec<(ProviderError, MessageErrorKind)> {
+        vec![
+            (
+                ProviderError::NotConfigured,
+                MessageErrorKind::NotConfigured,
+            ),
+            (
+                ProviderError::Authentication("bad key".to_string()),
+                MessageErrorKind::Authentication,
+            ),
+            (
+                ProviderError::ContextLengthExceeded("too long".to_string()),
+                MessageErrorKind::ContextLengthExceeded,
+            ),
+            (
+                ProviderError::RateLimitExceeded {
+                    details: "slow down".to_string(),
+                    retry_delay: Some(Duration::from_secs(1)),
+                },
+                MessageErrorKind::RateLimited,
+            ),
+            (
+                ProviderError::ServerError("boom".to_string()),
+                MessageErrorKind::ServerError,
+            ),
+            (
+                ProviderError::NetworkError("offline".to_string()),
+                MessageErrorKind::Network,
+            ),
+            (
+                ProviderError::RequestFailed("bad payload".to_string()),
+                MessageErrorKind::InvalidRequest,
+            ),
+            (
+                ProviderError::ExecutionError("panic".to_string()),
+                MessageErrorKind::Execution,
+            ),
+            (
+                ProviderError::UsageError("no usage".to_string()),
+                MessageErrorKind::Usage,
+            ),
+            (
+                ProviderError::NotImplemented("no tools".to_string()),
+                MessageErrorKind::NotImplemented,
+            ),
+            (
+                ProviderError::EndpointNotFound("/v1/chat".to_string()),
+                MessageErrorKind::EndpointNotFound,
+            ),
+            (
+                ProviderError::CreditsExhausted {
+                    details: "empty".to_string(),
+                    top_up_url: None,
+                },
+                MessageErrorKind::CreditsExhausted,
+            ),
+            (
+                ProviderError::Refusal {
+                    details: "nope".to_string(),
+                    category: Some("safety".to_string()),
+                },
+                MessageErrorKind::Refusal,
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_provider_error_maps_to_a_kind() {
+        for (error, expected) in every_variant() {
+            assert_eq!(error.kind(), expected, "{error}");
+        }
+    }
+
+    #[test]
+    fn telemetry_type_is_the_kind_wire_name() {
+        for (error, expected) in every_variant() {
+            assert_eq!(error.telemetry_type(), expected.as_str(), "{error}");
         }
     }
 }

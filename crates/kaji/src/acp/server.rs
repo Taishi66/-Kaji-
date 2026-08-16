@@ -1334,7 +1334,7 @@ fn prompt_error_from_message_content(
             let mut data = serde_json::Map::new();
             data.insert(
                 "reason".to_string(),
-                serde_json::Value::String("credits_exhausted".to_string()),
+                serde_json::Value::String(error.kind.as_str().to_string()),
             );
             Some(
                 agent_client_protocol::Error::new(-32603, error.message.clone())
@@ -2591,6 +2591,19 @@ print(\"hello, world\")
                 }
             })
         );
+    }
+
+    #[test]
+    fn test_credits_exhausted_error_block_reports_the_kind_as_reason() {
+        let content = MessageContent::Error(crate::conversation::message::ErrorContent {
+            kind: crate::conversation::message::MessageErrorKind::CreditsExhausted,
+            message: "crédits épuisés — out of credits".to_string(),
+        });
+
+        let error = prompt_error_from_message_content(&content).expect("expected prompt error");
+        let value = serde_json::to_value(error).unwrap();
+
+        assert_eq!(value["data"]["reason"], "credits_exhausted");
     }
 
     #[test]
