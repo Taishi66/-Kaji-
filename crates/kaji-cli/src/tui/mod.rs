@@ -101,25 +101,21 @@ fn mouse_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Thème de démarrage : env `KAJI_THEME` > config `KAJI_THEME` > `zen`. Une
-/// valeur inconnue est signalée dans le chat et laisse le thème par défaut,
-/// jamais un lancement qui échoue. Appelé après `maybe_push_welcome` : la
-/// ligne d'avertissement rendrait le chat non vide et masquerait la
-/// bannière d'accueil.
-fn apply_startup_theme(app: &mut App) -> Result<()> {
-    let from_env = std::env::var("KAJI_THEME").ok();
-    let from_config = Config::global().get_param::<String>("KAJI_THEME").ok();
-    let resolved = theme::resolve_theme(from_env.as_deref(), from_config.as_deref());
-    theme::set_active(resolved)?;
-    if let Some(requested) = from_env.as_deref().or(from_config.as_deref()) {
-        if !requested.trim().eq_ignore_ascii_case(resolved) {
-            app.push_system(&format!(
-                "thème « {} » inconnu — {resolved} appliqué",
-                requested.trim()
-            ));
-        }
+/// Thème de démarrage : `KAJI_THEME` — `Config::get_param` lit déjà la
+/// variable d'environnement avant le fichier de config, la précédence env >
+/// config n'a donc pas à être refaite ici. Une valeur inconnue est signalée
+/// dans le chat et laisse le thème par défaut (`zen`, déjà actif au
+/// lancement), jamais un lancement qui échoue. Appelé après
+/// `maybe_push_welcome` : la ligne d'avertissement rendrait le chat non vide
+/// et masquerait la bannière d'accueil.
+fn apply_startup_theme(app: &mut App) {
+    let Ok(requested) = Config::global().get_param::<String>("KAJI_THEME") else {
+        return;
+    };
+    if let Err(err) = theme::set_active(&requested) {
+        let fallback = theme::resolve_theme(Some(&requested), None);
+        app.push_system(&format!("{err} — {fallback} appliqué"));
     }
-    Ok(())
 }
 
 fn build_header(session_id: &str) -> String {
@@ -508,7 +504,7 @@ async fn event_loop(
     app.mouse_enabled = mouse_enabled();
     seed_chat(&mut app, &conversation);
     maybe_push_welcome(&mut app);
-    apply_startup_theme(&mut app)?;
+    apply_startup_theme(&mut app);
     let session_manager = SessionManager::instance();
     if resume {
         apply_interrupted_turn_marker(

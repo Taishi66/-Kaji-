@@ -871,6 +871,7 @@ mod tests {
 
     #[test]
     fn thinking_chat_line_renders_with_prefix_and_dim_italic_style() {
+        let _theme = theme::test_guard();
         let mut lines = Vec::new();
         let chat_line = ChatLine {
             sender: Sender::Thinking,

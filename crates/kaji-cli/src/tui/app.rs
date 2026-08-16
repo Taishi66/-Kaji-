@@ -159,18 +159,15 @@ pub const COMMANDS: &[Command] = &[
     },
 ];
 
-/// Parses a trimmed input line as a `/restore` invocation, returning the
-/// (possibly empty, untrimmed-of-inner-content) argument slice — `None` when
-/// the input isn't `/restore` at all. Deliberately NOT in `COMMANDS`: that
-/// table only holds arg-less commands the palette can autocomplete and run
-/// standalone (`Command::run` takes no argument), while `/restore` always
-/// needs an id.
+/// Parses a trimmed input line as an invocation of the slash command
+/// `command`, returning its (possibly empty) argument — `None` when the
+/// input names another command.
 ///
 /// `strip_prefix("/restore")` alone would also match a hypothetical future
 /// `/restorepoint` as `"point"` — checking the remainder starts with a space
-/// (or is empty) keeps `/restore` a whole word.
-fn restore_command_arg(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix("/restore")?;
+/// (or is empty) keeps the command a whole word.
+fn slash_command_arg<'a>(text: &'a str, command: &str) -> Option<&'a str> {
+    let rest = text.strip_prefix(command)?;
     if rest.is_empty() || rest.starts_with(' ') {
         Some(rest.trim())
     } else {
@@ -178,16 +175,17 @@ fn restore_command_arg(text: &str) -> Option<&str> {
     }
 }
 
-/// Same whole-word parsing as [`restore_command_arg`], for `/theme <nom>`.
-/// `/theme` alone is in `COMMANDS` (arg-less = cycle), so it reaches
-/// [`App::run_theme_command`] through the palette too.
+/// Deliberately NOT in `COMMANDS`: that table only holds arg-less commands
+/// the palette can autocomplete and run standalone (`Command::run` takes no
+/// argument), while `/restore` always needs an id.
+fn restore_command_arg(text: &str) -> Option<&str> {
+    slash_command_arg(text, "/restore")
+}
+
+/// `/theme` alone IS in `COMMANDS` (arg-less = cycle), so it also reaches
+/// [`App::run_theme_command`] through the palette.
 fn theme_command_arg(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix("/theme")?;
-    if rest.is_empty() || rest.starts_with(' ') {
-        Some(rest.trim())
-    } else {
-        None
-    }
+    slash_command_arg(text, "/theme")
 }
 
 pub struct App {

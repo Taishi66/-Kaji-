@@ -696,6 +696,7 @@ mod tests {
 
     #[test]
     fn renders_inline_code() {
+        let _theme = theme::test_guard();
         let lines = render_markdown("lance `cargo test` maintenant", 100);
         let code = lines[0]
             .spans
