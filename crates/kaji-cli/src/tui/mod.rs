@@ -210,6 +210,7 @@ fn commands_section(content_style: Style) -> Vec<Line<'static>> {
 fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
     match cmd.name {
         "/sdd" => "démarre une passe SDD (SPEC.md ou --spec)",
+        "/goal" => "boucle évaluée vers un but (<condition> | clear)",
         "/spec" => "(F2) panneau SPEC on/off",
         "/think" => "(F3) raisonnement du modèle (思考中)",
         "/cost" => "usage tokens/coût (session, 5 h, 7 j)",
@@ -535,6 +536,7 @@ async fn event_loop(
             &mut app,
             session_manager.last_turn_is_interrupted(session_id).await,
         );
+        apply_interrupted_goal_marker(&mut app, &session_manager, session_id).await;
     }
     let session_config = SessionConfig {
         id: session_id.to_string(),
@@ -579,6 +581,7 @@ async fn event_loop(
                         if app.driver != PassDriver::Idle {
                             app.pass_abort("tour annulé — passe interrompue");
                         }
+                        app.goal_abort("目標 tour annulé — but interrompu");
                     }
                     Action::SteerNow => {
                         // Live guidance (item 2 ante): interrupt the running
@@ -597,6 +600,7 @@ async fn event_loop(
                         if app.driver != PassDriver::Idle {
                             app.pass_abort("tour steeré — passe interrompue");
                         }
+                        app.goal_abort("目標 tour steeré — but interrompu");
                         if !app.turn_active {
                             // No stream is running to drain the queue on
                             // teardown (cancel of a pending setup falls here) —
@@ -618,6 +622,29 @@ async fn event_loop(
                         pending = Some(begin_setup(&mut app, agent, &session_config, &expanded, &mut cancel));
                     }
                     Action::StartPass => app.start_pass(),
+                    // Goal session (item 5 ante): the first work turn starts
+                    // here, every following one from `turn_end` — the same
+                    // chaining the SDD pass uses.
+                    Action::GoalSet(condition) => {
+                        if let Some(prompt) = app.goal_set(&condition, goal_max_iterations()) {
+                            pending = Some(begin_setup(&mut app, agent, &session_config, &prompt, &mut cancel));
+                        }
+                    }
+                    Action::GoalStatus => app.push_goal_status(),
+                    // The goal itself is already stopped (`App::goal_clear`);
+                    // what's left is the turn it was driving, cancelled here
+                    // exactly as Esc would.
+                    Action::GoalClear => {
+                        if let Some(token) = &cancel {
+                            token.cancel();
+                        }
+                        if app.turn_pending {
+                            pending = None;
+                            cancel = None;
+                            app.turn_pending = false;
+                            app.status.clear();
+                        }
+                    }
                     Action::GateApprove => {
                         if let Some(prompt) = app.gate_approve() {
                             app.push_system("Exec : envoi de la SPEC à l'agent");
@@ -758,8 +785,11 @@ async fn event_loop(
             res = async { pending.as_mut().unwrap().await }, if pending.is_some() => {
                 pending = None;
                 let started = install_turn(&mut app, &mut turn, &mut cancel, res);
-                if !started && app.driver != PassDriver::Idle {
-                    app.pass_abort("échec du démarrage du tour — passe interrompue");
+                if !started {
+                    if app.driver != PassDriver::Idle {
+                        app.pass_abort("échec du démarrage du tour — passe interrompue");
+                    }
+                    app.goal_abort("目標 échec du démarrage du tour — but interrompu");
                 }
             }
             item = next_turn_event(&mut turn), if turn.is_some() => {
@@ -773,6 +803,7 @@ async fn event_loop(
                         if app.driver != PassDriver::Idle {
                             app.pass_abort("erreur pendant la passe — passe interrompue");
                         }
+                        app.goal_abort("目標 erreur pendant le tour — but interrompu");
                     }
                     None => {
                         turn = None;
@@ -819,8 +850,42 @@ async fn event_loop(
                 }
             }
         }
+        // Single drain point for the goal event log: every arm above can end
+        // a goal (a verdict, Esc, a stream error), and journaling from here
+        // keeps the write off the keystroke path in all of them.
+        persist_goal_events(&session_manager, session_id, &mut app).await;
     }
     Ok(())
+}
+
+/// `KAJI_GOAL_MAX_ITERATIONS` — backstop of the unsupervised loop, distinct
+/// from the session's `max_turns`. Absent or unusable values fall back to the
+/// core default rather than disarming it.
+fn goal_max_iterations() -> usize {
+    kaji_core::goal::max_iterations(std::env::var("KAJI_GOAL_MAX_ITERATIONS").ok().as_deref())
+}
+
+/// Journals the goal events `App` queued, on the turn they belong to: the
+/// event log's last `turn_seq`, as `journal_pre_restore` does for a
+/// checkpoint. A failed append never interrupts the session.
+async fn persist_goal_events(session_manager: &SessionManager, session_id: &str, app: &mut App) {
+    let events = app.take_goal_events();
+    if events.is_empty() {
+        return;
+    }
+    let turn_seq = session_manager
+        .next_turn_seq(session_id)
+        .await
+        .map(|seq| seq - 1)
+        .unwrap_or(0);
+    for (kind, payload) in events {
+        if let Err(error) = session_manager
+            .append_event(session_id, turn_seq, kind, &payload)
+            .await
+        {
+            tracing::warn!(?error, "event log append failed for goal event");
+        }
+    }
 }
 
 /// Builds the `Agent::reply` future WITHOUT awaiting it, so `event_loop` can
@@ -1043,6 +1108,61 @@ fn apply_interrupted_turn_marker(app: &mut App, interrupted: Result<Option<Inter
         Ok(Some(it)) => app.push_system(&interrupted_turn_line(&it)),
         Ok(None) => {}
         Err(e) => tracing::warn!("échec de la détection de tour interrompu au resume: {e}"),
+    }
+}
+
+/// A goal session whose last journaled event isn't `goal_end` was cut short
+/// (crash, kill, closed terminal). The resume says so and stops there: a loop
+/// that relaunches itself on its own after a crash is exactly what the
+/// iteration cap exists to prevent.
+fn interrupted_goal_line(events: &[SessionEvent]) -> Option<String> {
+    let last = events
+        .iter()
+        .rfind(|event| event.kind.starts_with("goal_"))?;
+    if last.kind == "goal_end" {
+        return None;
+    }
+    let payload: serde_json::Value = serde_json::from_str(&last.payload_json).ok()?;
+    let condition = goal_condition(events)?;
+    let iteration = payload
+        .get("iteration")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
+    let max_iterations = goal_start_payload(events)?
+        .get("max_iterations")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(kaji_core::goal::DEFAULT_MAX_ITERATIONS as i64);
+    Some(format!(
+        "⚠ goal interrompu : {condition} (it {iteration}/{max_iterations}) — `/goal <condition>` pour relancer"
+    ))
+}
+
+fn goal_start_payload(events: &[SessionEvent]) -> Option<serde_json::Value> {
+    let last_start = events.iter().rfind(|event| event.kind == "goal_start")?;
+    serde_json::from_str(&last_start.payload_json).ok()
+}
+
+fn goal_condition(events: &[SessionEvent]) -> Option<String> {
+    goal_start_payload(events)?
+        .get("condition")
+        .and_then(|v| v.as_str())
+        .map(|c| crate::tui::ui::sanitize_for_display(&c.replace('\n', "␊")))
+}
+
+/// Same contract as `apply_interrupted_turn_marker`: a read error is logged,
+/// never turned into a blocked resume.
+async fn apply_interrupted_goal_marker(
+    app: &mut App,
+    session_manager: &SessionManager,
+    session_id: &str,
+) {
+    match session_manager.events_for_session(session_id).await {
+        Ok(events) => {
+            if let Some(line) = interrupted_goal_line(&events) {
+                app.push_system(&line);
+            }
+        }
+        Err(e) => tracing::warn!("échec de la détection de goal interrompu au resume: {e}"),
     }
 }
 
@@ -1503,6 +1623,136 @@ mod tests {
         assert!(line.contains("malicious"));
     }
 
+    /// ⛔ BARRIÈRE — un goal coupé net (crash, kill) est signalé au resume,
+    /// jamais relancé tout seul.
+    #[tokio::test]
+    async fn resume_warns_about_a_goal_left_without_its_end_event() {
+        use kaji::config::KajiMode;
+        use kaji::session::SessionType;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = sm
+            .create_session(
+                PathBuf::from("/tmp"),
+                "s".to_string(),
+                SessionType::User,
+                KajiMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.append_event(
+            &sid,
+            1,
+            "goal_start",
+            r#"{"condition":"les tests passent","max_iterations":10}"#,
+        )
+        .await
+        .unwrap();
+        sm.append_event(
+            &sid,
+            1,
+            "goal_iteration",
+            r#"{"iteration":2,"verdict":"continue","feedback":"il reste X"}"#,
+        )
+        .await
+        .unwrap();
+
+        let mut app = App::new(None);
+        apply_interrupted_goal_marker(&mut app, &sm, &sid).await;
+
+        let line = app
+            .chat
+            .iter()
+            .find(|l| l.text.contains("goal interrompu"))
+            .expect("une ligne d'avertissement");
+        assert!(line.text.contains("les tests passent"), "{}", line.text);
+        assert!(line.text.contains("2/10"), "{}", line.text);
+        assert!(line.text.contains("/goal <condition>"), "{}", line.text);
+    }
+
+    #[tokio::test]
+    async fn resume_stays_silent_when_the_goal_ended_cleanly() {
+        use kaji::config::KajiMode;
+        use kaji::session::SessionType;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = sm
+            .create_session(
+                PathBuf::from("/tmp"),
+                "s".to_string(),
+                SessionType::User,
+                KajiMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.append_event(
+            &sid,
+            1,
+            "goal_start",
+            r#"{"condition":"c","max_iterations":10}"#,
+        )
+        .await
+        .unwrap();
+        sm.append_event(&sid, 1, "goal_end", r#"{"outcome":"met","iteration":1}"#)
+            .await
+            .unwrap();
+
+        let mut app = App::new(None);
+        apply_interrupted_goal_marker(&mut app, &sm, &sid).await;
+
+        assert!(!app.chat.iter().any(|l| l.text.contains("goal interrompu")));
+    }
+
+    #[tokio::test]
+    async fn goal_events_are_journaled_on_the_current_turn() {
+        use kaji::config::KajiMode;
+        use kaji::session::SessionType;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = sm
+            .create_session(
+                PathBuf::from("/tmp"),
+                "s".to_string(),
+                SessionType::User,
+                KajiMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.append_event(&sid, 1, "turn_start", "{}").await.unwrap();
+
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 4);
+        persist_goal_events(&sm, &sid, &mut app).await;
+
+        let events = sm.events_for_session(&sid).await.unwrap();
+        let start = events
+            .iter()
+            .find(|e| e.kind == "goal_start")
+            .expect("un goal_start journalisé");
+        assert_eq!(start.turn_seq, 1, "le tour courant, pas le suivant");
+        assert!(start.payload_json.contains("les tests passent"));
+        assert!(app.take_goal_events().is_empty(), "la file est drainée");
+    }
+
+    #[test]
+    fn goal_max_iterations_reads_the_env_and_falls_back_on_the_default() {
+        {
+            let _guard = env_lock::lock_env([("KAJI_GOAL_MAX_ITERATIONS", Some("3"))]);
+            assert_eq!(goal_max_iterations(), 3);
+        }
+        let _guard = env_lock::lock_env([("KAJI_GOAL_MAX_ITERATIONS", None::<&str>)]);
+        assert_eq!(
+            goal_max_iterations(),
+            kaji_core::goal::DEFAULT_MAX_ITERATIONS
+        );
+    }
+
     #[test]
     fn apply_interrupted_turn_marker_stays_silent_on_read_error() {
         let mut app = App::new(None);
@@ -1662,7 +1912,8 @@ mod tests {
         );
 
         for (name, next_name) in [
-            ("/sdd", "/spec"),
+            ("/sdd", "/goal"),
+            ("/goal", "/spec"),
             ("/spec", "/think"),
             ("/think", "/cost"),
             ("/cost", "/context"),

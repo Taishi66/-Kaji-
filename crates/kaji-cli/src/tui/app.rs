@@ -8,6 +8,7 @@ use kaji::conversation::message::{
 use kaji::permission::Permission;
 use kaji::permission::grants::{derive_grant_spec, is_shell_tool};
 use kaji::providers::base::ProviderUsage;
+use kaji_core::goal::{self, GoalOutcome, GoalPhase, GoalState, GoalStep, Verdict};
 use kaji_core::sdd::{SddPass, SpecDoc};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::text::{Line, Span};
@@ -37,6 +38,18 @@ pub enum PassDriver {
     AwaitingGate,
     Executing,
     Validating,
+}
+
+/// Sibling of [`PassDriver`] for goal sessions (item 5 ante), derived from
+/// `App::goal` rather than stored: the phase lives in the core `GoalState`,
+/// and a second copy in the TUI would be one more thing to keep in sync.
+/// `Idle` covers both "no goal" and "goal finished" — the two states in which
+/// `turn_end` must not chain another turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalDriver {
+    Idle,
+    Working,
+    Evaluating,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +213,13 @@ pub enum Action {
     RestoreCancel,
     /// `Ctrl+S` — flush queued steer messages into the running turn.
     SteerNow,
+    /// Parsed `/goal <condition>` — the event loop asks [`App::goal_set`] for
+    /// the first work prompt and starts the turn with it.
+    GoalSet(String),
+    GoalStatus,
+    /// `/goal clear` — the goal is already stopped by [`App::goal_clear`];
+    /// the event loop only still has to cancel the turn it was driving.
+    GoalClear,
     /// Palette already switched by [`App::run_theme_command`] — carries the
     /// applied name so the event loop can persist it to `KAJI_THEME`. The
     /// switch itself must not wait on the config write: the redraw right
@@ -224,6 +244,11 @@ pub const COMMANDS: &[Command] = &[
         name: "/sdd",
         desc: "démarre une passe SDD (SPEC.md auto-détecté ou --spec <fichier>)",
         run: |_| Action::StartPass,
+    },
+    Command {
+        name: "/goal",
+        desc: "goal session — /goal <condition> lance la boucle évaluée, /goal seul le statut, /goal clear arrête",
+        run: |_| Action::GoalStatus,
     },
     Command {
         name: "/spec",
@@ -307,6 +332,25 @@ fn theme_command_arg(text: &str) -> Option<&str> {
     slash_command_arg(text, "/theme")
 }
 
+/// `/goal` alone IS in `COMMANDS` (arg-less = status). The agent core has its
+/// own `/goal` self-nudge command, so this match is also what keeps a goal
+/// session from being forwarded to it as a plain message.
+fn goal_command_arg(text: &str) -> Option<&str> {
+    slash_command_arg(text, "/goal")
+}
+
+/// Stable vocabulary for the `goal_end` event payload — the labels the UI
+/// shows are French and free to change, an event log's is not.
+fn outcome_token(outcome: GoalOutcome) -> &'static str {
+    match outcome {
+        GoalOutcome::Met => "met",
+        GoalOutcome::Unreachable => "unreachable",
+        GoalOutcome::Cleared => "cleared",
+        GoalOutcome::Interrupted => "interrupted",
+        GoalOutcome::IterationCap => "iteration_cap",
+    }
+}
+
 pub struct App {
     pub header: String,
     pub input: String,
@@ -367,6 +411,17 @@ pub struct App {
     /// say honestly.
     pub pending_restore_files_only: bool,
     pub driver: PassDriver,
+    /// Goal session (item 5 ante) — kept after it ends so `/goal` can still
+    /// report the last outcome. [`App::goal_driver`] is what says whether it
+    /// is still driving turns.
+    pub goal: Option<GoalState>,
+    /// The evaluator turn's assistant text, as `validate_buffer` is for the
+    /// SDD judge — the verdict is read from it at turn end.
+    goal_buffer: String,
+    /// `(kind, payload_json)` pairs awaiting `SessionManager::append_event`,
+    /// drained by the event loop: `App` has no session handle and must never
+    /// block a keystroke on a write.
+    goal_events: Vec<(&'static str, String)>,
     pub scroll_offset: u16,
     /// Real overflow (wrapped rows beyond the viewport) measured by
     /// `draw_chat` at render time — `max_scroll` reads this instead of
@@ -490,6 +545,9 @@ impl App {
             pending_restore: None,
             pending_restore_files_only: false,
             driver: PassDriver::Idle,
+            goal: None,
+            goal_buffer: String::new(),
+            goal_events: Vec::new(),
             scroll_offset: 0,
             chat_overflow: Cell::new(0),
             user_turn_rows: RefCell::new(Vec::new()),
@@ -518,6 +576,10 @@ impl App {
     }
 
     pub fn start_pass(&mut self) {
+        if self.goal_driver() != GoalDriver::Idle {
+            self.push_system("but en cours — /goal clear avant de lancer une passe SDD");
+            return;
+        }
         let Some(spec) = self.spec.as_ref() else {
             self.push_system("aucune SPEC chargée — /sdd nécessite un fichier SPEC.md");
             return;
@@ -569,6 +631,191 @@ impl App {
         self.push_system("gate refusée — passe interrompue");
     }
 
+    pub fn goal_driver(&self) -> GoalDriver {
+        match self.goal.as_ref().filter(|goal| goal.is_active()) {
+            None => GoalDriver::Idle,
+            Some(goal) => match goal.phase {
+                GoalPhase::Working => GoalDriver::Working,
+                GoalPhase::Evaluating => GoalDriver::Evaluating,
+            },
+        }
+    }
+
+    /// Sets (or replaces) the goal and returns the first work prompt — `None`
+    /// when an SDD pass owns the turn chain, since both drivers relaunch turns
+    /// from the same `turn_end`.
+    pub fn goal_set(&mut self, condition: &str, max_iterations: usize) -> Option<String> {
+        if self.driver != PassDriver::Idle {
+            self.push_system("passe SDD en cours — termine-la avant de fixer un but");
+            return None;
+        }
+        if self.goal_driver() != GoalDriver::Idle {
+            self.end_goal(GoalOutcome::Cleared, "目標 but remplacé");
+        }
+        self.goal = Some(GoalState::new(condition.to_string(), max_iterations));
+        self.goal_buffer.clear();
+        self.push_goal_event(
+            "goal_start",
+            serde_json::json!({ "condition": condition, "max_iterations": max_iterations }),
+        );
+        self.push_system(&format!(
+            "目標 but fixé : {condition} — évaluateur après chaque tour, cap {max_iterations} itérations"
+        ));
+        Some(goal::work_prompt(condition))
+    }
+
+    /// `true` when a live goal was actually stopped — the caller only cancels
+    /// the running turn in that case, so a stray `/goal clear` doesn't kill an
+    /// unrelated turn.
+    pub fn goal_clear(&mut self) -> bool {
+        if self.goal_driver() == GoalDriver::Idle {
+            self.push_system("aucun but en cours");
+            return false;
+        }
+        self.end_goal(GoalOutcome::Cleared, "目標 but effacé");
+        true
+    }
+
+    /// Same four sites as [`App::pass_abort`]: Esc, steering, a setup failure
+    /// and a stream error all leave the goal loop stopped rather than silently
+    /// waiting for a turn that will never end.
+    pub fn goal_abort(&mut self, reason: &str) {
+        if self.goal_driver() == GoalDriver::Idle {
+            return;
+        }
+        self.end_goal(GoalOutcome::Interrupted, reason);
+    }
+
+    pub fn push_goal_status(&mut self) {
+        let Some(goal) = self.goal.as_ref() else {
+            self.push_system("aucun but — /goal <condition> pour en fixer un");
+            return;
+        };
+        let line = match goal.outcome {
+            None => format!(
+                "目標 {} · it {}/{} · {}",
+                goal.condition,
+                goal.iteration,
+                goal.max_iterations,
+                goal.phase.label()
+            ),
+            Some(outcome) => format!(
+                "目標 {} · terminé : {} (it {}/{})",
+                goal.condition,
+                outcome.label(),
+                goal.iteration,
+                goal.max_iterations
+            ),
+        };
+        self.push_system(&line);
+    }
+
+    /// Drained by the event loop, which owns the session handle the
+    /// `append_event` writes need.
+    pub fn take_goal_events(&mut self) -> Vec<(&'static str, String)> {
+        std::mem::take(&mut self.goal_events)
+    }
+
+    fn push_goal_event(&mut self, kind: &'static str, payload: serde_json::Value) {
+        self.goal_events.push((kind, payload.to_string()));
+    }
+
+    fn push_goal_end(&mut self, outcome: GoalOutcome, iteration: usize) {
+        self.push_goal_event(
+            "goal_end",
+            serde_json::json!({ "outcome": outcome_token(outcome), "iteration": iteration }),
+        );
+    }
+
+    /// Stops the goal from outside the evaluator loop (cleared, replaced,
+    /// interrupted) — `message` is the caller's wording, as `pass_abort` takes
+    /// its reason.
+    fn end_goal(&mut self, outcome: GoalOutcome, message: &str) {
+        let Some(goal) = self.goal.as_mut() else {
+            return;
+        };
+        goal.finish(outcome);
+        let iteration = goal.iteration;
+        self.goal_buffer.clear();
+        self.push_goal_end(outcome, iteration);
+        self.push_system(message);
+    }
+
+    /// The goal half of [`App::turn_end`]: a finished work turn hands over to
+    /// the evaluator, a finished evaluator turn is judged.
+    fn goal_turn_end(&mut self) -> Option<String> {
+        match self.goal_driver() {
+            GoalDriver::Idle => None,
+            GoalDriver::Working => {
+                let goal = self.goal.as_mut()?;
+                goal.begin_evaluation();
+                let condition = goal.condition.clone();
+                let iteration = goal.iteration;
+                let max_iterations = goal.max_iterations;
+                self.goal_buffer.clear();
+                self.push_system(&format!(
+                    "目標 évaluation — itération {iteration}/{max_iterations}"
+                ));
+                Some(goal::evaluator_prompt(&condition))
+            }
+            GoalDriver::Evaluating => self.judge_goal(),
+        }
+    }
+
+    /// Fail-closed like the SDD judge: an evaluator that never wrote a verdict
+    /// line continues the loop, it never ends the goal.
+    fn judge_goal(&mut self) -> Option<String> {
+        let evaluation = std::mem::take(&mut self.goal_buffer);
+        let verdict = match goal::parse_verdict(&evaluation) {
+            Some(verdict) => verdict,
+            None => {
+                self.push_system("⚠ 目標 verdict absent — on continue par prudence");
+                Verdict::Continue(goal::bound_feedback(evaluation.trim()))
+            }
+        };
+        let (token, feedback) = match &verdict {
+            Verdict::Met => ("met", String::new()),
+            Verdict::Continue(feedback) => ("continue", feedback.clone()),
+            Verdict::Unreachable(reason) => ("unreachable", reason.clone()),
+        };
+        let goal = self.goal.as_mut()?;
+        let condition = goal.condition.clone();
+        let iteration = goal.iteration;
+        let max_iterations = goal.max_iterations;
+        let step = goal.apply_verdict(verdict);
+        self.push_goal_event(
+            "goal_iteration",
+            serde_json::json!({ "iteration": iteration, "verdict": token, "feedback": feedback }),
+        );
+        match step {
+            GoalStep::Continue(feedback) => {
+                let next = iteration + 1;
+                self.push_system(&format!(
+                    "目標 but non atteint — itération {next}/{max_iterations}"
+                ));
+                Some(goal::continuation_prompt(&condition, &feedback))
+            }
+            GoalStep::Finished(outcome) => {
+                let message = match outcome {
+                    GoalOutcome::Met => {
+                        format!("✓ 目標 but atteint en {iteration} itération(s) : {condition}")
+                    }
+                    GoalOutcome::Unreachable => {
+                        format!("⚠ 目標 but jugé inatteignable : {feedback}")
+                    }
+                    GoalOutcome::IterationCap => format!(
+                        "⚠ 目標 cap de {max_iterations} itérations atteint — but non atteint : {condition}"
+                    ),
+                    GoalOutcome::Cleared => "目標 but effacé".to_string(),
+                    GoalOutcome::Interrupted => "目標 but interrompu".to_string(),
+                };
+                self.push_goal_end(outcome, iteration);
+                self.push_system(&message);
+                None
+            }
+        }
+    }
+
     pub fn turn_end(&mut self) -> Option<String> {
         self.turn_active = false;
         match self.driver {
@@ -604,7 +851,10 @@ impl App {
                 self.driver = PassDriver::Idle;
                 None
             }
-            _ => None,
+            // Mutually exclusive by construction (`start_pass`/`goal_set` each
+            // refuse while the other drives), so the goal loop only ever gets
+            // the turn an idle SDD pass leaves it.
+            _ => self.goal_turn_end(),
         }
     }
 
@@ -1392,10 +1642,13 @@ impl App {
             // end. `/restore` carves itself out of the blanket queue below:
             // it needs to reach the general Enter arm even mid-turn so it can
             // push its OWN barrier message (premortem PM6) instead of the
-            // queue path. Every other command/message still gets the queue.
+            // queue path. `/goal` does the same, for `/goal clear`: stopping
+            // a goal loop mid-turn must not wait for the turn it is stopping.
+            // Every other command/message still gets the queue.
             KeyCode::Enter
                 if (self.turn_active || self.turn_pending)
-                    && restore_command_arg(self.input.trim()).is_none() =>
+                    && restore_command_arg(self.input.trim()).is_none()
+                    && goal_command_arg(self.input.trim()).is_none() =>
             {
                 let text = self.input.trim().to_string();
                 self.input.clear();
@@ -1440,6 +1693,10 @@ impl App {
                             return Action::None;
                         }
                         return Action::Restore(arg.to_string());
+                    }
+                    if let Some(arg) = goal_command_arg(&text) {
+                        let arg = arg.to_string();
+                        return self.run_goal_command(&arg);
                     }
                     if let Some(arg) = theme_command_arg(&text) {
                         return self.run_theme_command(arg);
@@ -1489,6 +1746,27 @@ impl App {
             rendered: None,
         });
         self.reset_agent_merge_ids();
+    }
+
+    /// `/goal` : argument vide = statut, `clear` = arrêt, sinon la condition
+    /// à poursuivre. Fixer un but demande un tour libre (le premier prompt de
+    /// travail en ouvre un) ; `clear` est justement ce qui libère le tour.
+    fn run_goal_command(&mut self, arg: &str) -> Action {
+        if arg.is_empty() {
+            return Action::GoalStatus;
+        }
+        if arg.eq_ignore_ascii_case("clear") {
+            return if self.goal_clear() {
+                Action::GoalClear
+            } else {
+                Action::None
+            };
+        }
+        if self.turn_active || self.turn_pending {
+            self.push_system("un tour est en cours — attends la fin, ou /goal clear");
+            return Action::None;
+        }
+        Action::GoalSet(arg.to_string())
     }
 
     /// `/theme` : argument vide = thème suivant, `list` = inventaire,
@@ -1625,6 +1903,9 @@ impl App {
                     self.merge_agent_text(&message.id, &text.text);
                     if self.driver == PassDriver::Validating {
                         self.validate_buffer.push_str(&text.text);
+                    }
+                    if self.goal_driver() == GoalDriver::Evaluating {
+                        self.goal_buffer.push_str(&text.text);
                     }
                 }
                 MessageContentBlock::Thinking(thinking) => {
@@ -4221,5 +4502,300 @@ mod tests {
         app.suggestion_loading = true;
         app.accept_suggestion();
         assert!(!app.suggestion_loading && app.input.is_empty());
+    }
+
+    fn goal_events(app: &mut App) -> Vec<(&'static str, String)> {
+        app.take_goal_events()
+    }
+
+    /// ⛔ BARRIÈRE — `/goal` a un homonyme côté core (self-nudge, sans
+    /// évaluateur) : la TUI doit l'intercepter, jamais l'envoyer à l'agent
+    /// comme message (`Action::Submit`).
+    #[test]
+    fn slash_goal_never_reaches_the_agent_as_a_message() {
+        let mut app = App::new(None);
+
+        let action = submit(&mut app, "/goal les tests passent");
+
+        assert_eq!(action, Action::GoalSet("les tests passent".to_string()));
+    }
+
+    #[test]
+    fn goal_command_arg_keeps_goal_a_whole_word() {
+        assert_eq!(goal_command_arg("/goal"), Some(""));
+        assert_eq!(goal_command_arg("/goal fais X"), Some("fais X"));
+        assert_eq!(goal_command_arg("/goalx"), None);
+        assert_eq!(goal_command_arg("/goals fais X"), None);
+        assert_eq!(goal_command_arg("/restore a1"), None);
+    }
+
+    #[test]
+    fn bare_slash_goal_asks_for_the_status() {
+        let mut app = App::new(None);
+
+        assert_eq!(submit(&mut app, "/goal"), Action::GoalStatus);
+
+        app.push_goal_status();
+        assert!(app.chat.iter().any(|l| l.text.contains("aucun but")));
+    }
+
+    #[test]
+    fn goal_set_starts_the_first_work_turn() {
+        let mut app = App::new(None);
+
+        let prompt = app
+            .goal_set("les tests passent", 10)
+            .expect("prompt de travail");
+
+        assert!(prompt.contains("Objectif : les tests passent"));
+        assert_eq!(app.goal_driver(), GoalDriver::Working);
+        let goal = app.goal.as_ref().expect("un but");
+        assert_eq!(goal.iteration, 1);
+        assert_eq!(goal.max_iterations, 10);
+        let events = goal_events(&mut app);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "goal_start");
+        assert!(events[0].1.contains("les tests passent"));
+    }
+
+    #[test]
+    fn a_finished_work_turn_hands_over_to_the_evaluator() {
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 10);
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "j'ai corrigé le test");
+
+        let prompt = app.turn_end().expect("prompt d'évaluation");
+
+        assert!(prompt.contains("VERDICT: MET"));
+        assert!(prompt.contains("les tests passent"));
+        assert_eq!(app.goal_driver(), GoalDriver::Evaluating);
+    }
+
+    #[test]
+    fn a_continue_verdict_relaunches_the_work_with_the_feedback() {
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 10);
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "j'ai corrigé le test");
+        app.turn_end();
+        goal_events(&mut app);
+
+        app.turn_active = true;
+        agent_says(&mut app, "m2", "il manque le cas nul\nVERDICT: CONTINUE");
+        let prompt = app.turn_end().expect("prompt de continuation");
+
+        assert!(prompt.contains("il manque le cas nul"));
+        assert!(prompt.contains("Continue le travail vers : les tests passent"));
+        let goal = app.goal.as_ref().expect("un but");
+        assert_eq!(goal.iteration, 2);
+        assert_eq!(app.goal_driver(), GoalDriver::Working);
+        let events = goal_events(&mut app);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "goal_iteration");
+        assert!(events[0].1.contains("continue"));
+        assert!(events[0].1.contains("il manque le cas nul"));
+    }
+
+    #[test]
+    fn a_met_verdict_ends_the_goal() {
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 10);
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "fait");
+        app.turn_end();
+
+        app.turn_active = true;
+        agent_says(&mut app, "m2", "tout vérifié\nVERDICT: MET");
+
+        assert!(app.turn_end().is_none());
+        assert_eq!(app.goal_driver(), GoalDriver::Idle);
+        assert_eq!(
+            app.goal.as_ref().and_then(|g| g.outcome),
+            Some(kaji_core::goal::GoalOutcome::Met)
+        );
+        assert!(app.chat.iter().any(|l| l.text.contains("but atteint")));
+        let events = goal_events(&mut app);
+        assert_eq!(events.last().expect("goal_end").0, "goal_end");
+    }
+
+    #[test]
+    fn an_unreachable_verdict_ends_the_goal() {
+        let mut app = App::new(None);
+        app.goal_set("réécrire le noyau Linux", 10);
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "j'ai essayé");
+        app.turn_end();
+
+        app.turn_active = true;
+        agent_says(&mut app, "m2", "hors périmètre\nVERDICT: UNREACHABLE");
+
+        assert!(app.turn_end().is_none());
+        assert_eq!(
+            app.goal.as_ref().and_then(|g| g.outcome),
+            Some(kaji_core::goal::GoalOutcome::Unreachable)
+        );
+        assert!(app.chat.iter().any(|l| l.text.contains("inatteignable")));
+    }
+
+    /// ⛔ BARRIÈRE — fail-closed : un évaluateur qui oublie la ligne de
+    /// verdict ne doit jamais clore le but ; la boucle continue.
+    #[test]
+    fn an_absent_verdict_continues_by_caution() {
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 10);
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "fait");
+        app.turn_end();
+
+        app.turn_active = true;
+        agent_says(&mut app, "m2", "ça a l'air bon");
+        let prompt = app.turn_end().expect("prompt de continuation");
+
+        assert!(prompt.contains("ça a l'air bon"));
+        assert!(app.chat.iter().any(|l| l.text.contains("verdict absent")));
+        assert_eq!(app.goal.as_ref().expect("un but").iteration, 2);
+    }
+
+    /// ⛔ BARRIÈRE — backstop de la boucle non supervisée : un évaluateur
+    /// qui répond CONTINUE sans fin s'arrête au cap.
+    #[test]
+    fn the_iteration_cap_ends_the_goal() {
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 1);
+
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "fait");
+        app.turn_end();
+        app.turn_active = true;
+        agent_says(&mut app, "m2", "il reste X\nVERDICT: CONTINUE");
+
+        assert!(app.turn_end().is_none());
+        assert_eq!(
+            app.goal.as_ref().and_then(|g| g.outcome),
+            Some(kaji_core::goal::GoalOutcome::IterationCap)
+        );
+        assert!(app.chat.iter().any(|l| l.text.contains("cap")));
+    }
+
+    #[test]
+    fn esc_during_a_goal_turn_interrupts_the_goal() {
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 10);
+        app.turn_active = true;
+
+        assert_eq!(app.on_event(&key(KeyCode::Esc)), Action::CancelTurn);
+        app.goal_abort("目標 tour annulé — but interrompu");
+
+        assert_eq!(app.goal_driver(), GoalDriver::Idle);
+        assert_eq!(
+            app.goal.as_ref().and_then(|g| g.outcome),
+            Some(kaji_core::goal::GoalOutcome::Interrupted)
+        );
+        let events = goal_events(&mut app);
+        assert_eq!(events.last().expect("goal_end").0, "goal_end");
+        assert!(events.last().expect("goal_end").1.contains("interrupted"));
+    }
+
+    /// ⛔ BARRIÈRE — exclusivité des deux drivers : deux boucles qui
+    /// enchaînent des tours sur le même `turn_end` se voleraient les prompts.
+    #[test]
+    fn a_goal_is_refused_while_an_sdd_pass_runs() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+
+        assert!(app.goal_set("les tests passent", 10).is_none());
+        assert!(app.goal.is_none());
+        assert!(app.chat.iter().any(|l| l.text.contains("passe SDD")));
+    }
+
+    #[test]
+    fn an_sdd_pass_is_refused_while_a_goal_runs() {
+        let mut app = App::new(Some(spec()));
+        app.goal_set("les tests passent", 10);
+
+        app.start_pass();
+
+        assert!(!app.pass.is_running());
+        assert!(!app.gate_open);
+        assert!(app.chat.iter().any(|l| l.text.contains("but en cours")));
+    }
+
+    #[test]
+    fn slash_goal_clear_stops_the_goal_and_cancels_the_turn() {
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 10);
+        app.turn_active = true;
+        goal_events(&mut app);
+
+        let action = submit(&mut app, "/goal clear");
+
+        assert_eq!(action, Action::GoalClear);
+        assert_eq!(app.goal_driver(), GoalDriver::Idle);
+        assert_eq!(
+            app.goal.as_ref().and_then(|g| g.outcome),
+            Some(kaji_core::goal::GoalOutcome::Cleared)
+        );
+        let events = goal_events(&mut app);
+        assert!(events.last().expect("goal_end").1.contains("cleared"));
+    }
+
+    #[test]
+    fn slash_goal_clear_without_a_goal_leaves_the_turn_alone() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+
+        assert_eq!(submit(&mut app, "/goal clear"), Action::None);
+        assert!(app.chat.iter().any(|l| l.text.contains("aucun but")));
+    }
+
+    /// Ruling 6 : un but ne se fixe pas au milieu d'un tour (il faut le
+    /// premier prompt de travail) — sauf `/goal clear`, testé ci-dessus.
+    #[test]
+    fn setting_a_goal_mid_turn_is_refused_rather_than_queued_as_steering() {
+        let mut app = App::new(None);
+        app.turn_active = true;
+
+        let action = submit(&mut app, "/goal les tests passent");
+
+        assert_eq!(action, Action::None);
+        assert!(app.steer_queue.is_empty(), "ni file de steering");
+        assert!(app.goal.is_none());
+        assert!(
+            app.chat
+                .iter()
+                .any(|l| l.text.contains("tour est en cours"))
+        );
+    }
+
+    #[test]
+    fn goal_status_reports_the_live_iteration_and_phase() {
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 10);
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "fait");
+        app.turn_end();
+
+        app.push_goal_status();
+
+        let status = app.chat.last().expect("une ligne de statut");
+        assert!(status.text.contains("les tests passent"));
+        assert!(status.text.contains("1/10"));
+        assert!(status.text.contains("évaluation"));
+    }
+
+    #[test]
+    fn setting_a_goal_replaces_the_previous_one() {
+        let mut app = App::new(None);
+        app.goal_set("premier but", 10);
+        goal_events(&mut app);
+
+        let prompt = app.goal_set("second but", 10).expect("prompt de travail");
+
+        assert!(prompt.contains("second but"));
+        assert_eq!(app.goal.as_ref().expect("un but").condition, "second but");
+        assert_eq!(app.goal.as_ref().expect("un but").iteration, 1);
+        let kinds: Vec<&str> = goal_events(&mut app).iter().map(|(k, _)| *k).collect();
+        assert_eq!(kinds, vec!["goal_end", "goal_start"]);
     }
 }

@@ -69,12 +69,41 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         format!(" · {}", app::kaji_mode_badge(app.kaji_mode)),
         theme::dim(),
     ));
+    if let Some(badge) = goal_badge(app) {
+        left_spans.push(Span::styled(badge, theme::accent()));
+    }
     frame.render_widget(Paragraph::new(Line::from(left_spans)), cols[0]);
 
     let right = Paragraph::new(header_status_text(app))
         .style(theme::dim())
         .alignment(Alignment::Right);
     frame.render_widget(right, cols[1]);
+}
+
+/// Condition width in the header badge — the full text stays available under
+/// `/goal`; the badge only has to say which goal is running.
+const GOAL_BADGE_CONDITION_CHARS: usize = 28;
+
+/// `None` once the loop is idle: a finished goal keeps its state for `/goal`,
+/// but must stop claiming the header.
+fn goal_badge(app: &App) -> Option<String> {
+    let goal = app.goal.as_ref().filter(|goal| goal.is_active())?;
+    let condition = sanitize_for_display(&goal.condition.replace('\n', "␊"));
+    let condition = if condition.chars().count() > GOAL_BADGE_CONDITION_CHARS {
+        let head: String = condition
+            .chars()
+            .take(GOAL_BADGE_CONDITION_CHARS - 1)
+            .collect();
+        format!("{head}…")
+    } else {
+        condition
+    };
+    Some(format!(
+        " · 目標 {condition} · it {}/{} · {}",
+        goal.iteration,
+        goal.max_iterations,
+        goal.phase.label()
+    ))
 }
 
 fn header_status_text(app: &App) -> String {
@@ -1545,5 +1574,46 @@ mod tests {
             .expect("draw must succeed against a TestBackend");
         let content = buffer_as_string(terminal.backend().buffer());
         assert!(content.contains("smart"), "got:\n{content}");
+    }
+
+    #[test]
+    fn the_header_carries_the_live_goal_but_drops_it_once_finished() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 10);
+
+        let badge = goal_badge(&app).expect("un but actif a un bandeau");
+        assert!(badge.contains("目標"), "{badge}");
+        assert!(badge.contains("les tests passent"), "{badge}");
+        assert!(badge.contains("it 1/10"), "{badge}");
+        assert!(badge.contains("travail"), "{badge}");
+
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must succeed against a TestBackend");
+        let content = buffer_as_string(terminal.backend().buffer());
+        assert!(content.contains("les tests passent"), "got:\n{content}");
+
+        app.goal_clear();
+        assert!(
+            goal_badge(&app).is_none(),
+            "un but terminé libère le header"
+        );
+    }
+
+    #[test]
+    fn the_goal_badge_bounds_and_sanitizes_the_condition() {
+        let mut app = App::new(None);
+        app.goal_set(&format!("{}\n\u{1b}malicious", "x".repeat(60)), 10);
+
+        let badge = goal_badge(&app).expect("un but actif a un bandeau");
+
+        assert!(!badge.contains('\n'), "{badge}");
+        assert!(!badge.contains('\u{1b}'), "{badge}");
+        assert!(badge.chars().count() < 60, "{badge}");
     }
 }
