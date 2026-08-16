@@ -17,12 +17,12 @@ pub async fn apply_grant_decision(
     match permission {
         Permission::AllowSession => {
             let spec = derive_grant_spec(tool_name, arguments);
-            tool_inspection_manager.grant_for_session(session_id, tool_name, spec.as_deref());
+            tool_inspection_manager.grant_for_session(session_id, tool_name, spec.as_ref());
         }
         Permission::AlwaysAllow => {
             let spec = derive_grant_spec(tool_name, arguments);
             tool_inspection_manager
-                .add_user_grant(tool_name, spec.as_deref())
+                .add_user_grant(tool_name, spec.as_ref())
                 .await;
         }
         Permission::AlwaysDeny => {
@@ -40,7 +40,7 @@ mod tests {
     use crate::config::KajiMode;
     use crate::config::PermissionManager;
     use crate::conversation::message::ToolRequest;
-    use crate::permission::grants::GrantRule;
+    use crate::permission::grants::{GrantRule, Spec};
     use crate::permission::PermissionInspector;
     use crate::tool_inspection::InspectionAction;
     use rmcp::model::CallToolRequestParams;
@@ -112,9 +112,8 @@ mod tests {
 
         assert_eq!(
             fixture.permission_manager.get_user_grants(),
-            vec![GrantRule::new(SHELL, Some("cargo test *"))]
+            vec![GrantRule::new(SHELL, Some(Spec::prefix("cargo test")))]
         );
-        assert_eq!(fixture.permission_manager.get_user_permission(SHELL), None);
         assert_eq!(
             fixture.inspect(SESSION, "cargo test --all").await,
             InspectionAction::Allow
@@ -123,6 +122,32 @@ mod tests {
             fixture.inspect(SESSION, "cargo build").await,
             InspectionAction::RequireApproval(None)
         );
+    }
+
+    #[tokio::test]
+    async fn always_allow_persists_the_edited_path_for_the_editor_tools() {
+        for tool_name in ["write", "edit"] {
+            let fixture = fixture();
+            apply_grant_decision(
+                &fixture.manager,
+                tool_name,
+                Some(&object!({ "path": "src/main.rs", "content": "fn main() {}" })),
+                &Permission::AlwaysAllow,
+                SESSION,
+            )
+            .await;
+
+            assert_eq!(
+                fixture.permission_manager.get_user_grants(),
+                vec![GrantRule::new(tool_name, Some(Spec::exact("src/main.rs")))]
+            );
+            assert!(fixture
+                .permission_manager
+                .is_call_allowed(tool_name, Some(&object!({ "path": "src/main.rs" }))));
+            assert!(!fixture
+                .permission_manager
+                .is_call_allowed(tool_name, Some(&object!({ "path": "src/other.rs" }))));
+        }
     }
 
     #[tokio::test]

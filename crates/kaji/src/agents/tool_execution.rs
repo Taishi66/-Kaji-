@@ -431,8 +431,12 @@ mod tests {
 
         assert_eq!(approval.grants(), ["shell(cargo test *)"]);
         assert_eq!(
-            approval.permission_manager.get_user_permission("shell"),
-            None
+            approval.inspect("cargo test --all").await,
+            crate::tool_inspection::InspectionAction::Allow
+        );
+        assert_eq!(
+            approval.inspect("cargo build").await,
+            crate::tool_inspection::InspectionAction::RequireApproval(None)
         );
     }
 

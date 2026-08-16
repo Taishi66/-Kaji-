@@ -1,5 +1,5 @@
 use crate::config::paths::Paths;
-use crate::permission::grants::{call_allowed_by_any, GrantRule};
+use crate::permission::grants::{call_allowed_by_any, call_denied_by_any, GrantRule, Spec};
 use rmcp::model::{JsonObject, Tool};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -83,9 +83,17 @@ impl PermissionManager {
             .collect()
     }
 
-    /// Retrieves the user permission level for a specific tool.
+    /// Retrieves the user permission level for a specific tool. Per-call grants report
+    /// as `AlwaysAllow` so that a configuration UI can see, and revoke, them.
     pub fn get_user_permission(&self, principal_name: &str) -> Option<PermissionLevel> {
-        self.get_permission(USER_PERMISSION, principal_name)
+        let level = self.get_permission(USER_PERMISSION, principal_name);
+        if level == Some(PermissionLevel::NeverAllow) {
+            return level;
+        }
+        if self.has_user_grant(principal_name) {
+            return Some(PermissionLevel::AlwaysAllow);
+        }
+        level
     }
 
     /// Retrieves the smart approve permission level for a specific tool.
@@ -171,53 +179,42 @@ impl PermissionManager {
 
     /// Whether the user's `always_allow` list covers this exact call.
     pub fn is_call_allowed(&self, tool_name: &str, arguments: Option<&JsonObject>) -> bool {
-        self.call_matches(|config| &config.always_allow, tool_name, arguments)
-    }
-
-    /// Whether the user's `never_allow` list covers this exact call.
-    pub fn is_call_denied(&self, tool_name: &str, arguments: Option<&JsonObject>) -> bool {
-        self.call_matches(|config| &config.never_allow, tool_name, arguments)
-    }
-
-    fn call_matches(
-        &self,
-        list: impl Fn(&PermissionConfig) -> &Vec<String>,
-        tool_name: &str,
-        arguments: Option<&JsonObject>,
-    ) -> bool {
-        let map = self.permission_map.read().unwrap();
-        let Some(permission_config) = map.get(USER_PERMISSION) else {
-            return false;
-        };
-        let rules: Vec<GrantRule> = list(permission_config)
-            .iter()
-            .map(|entry| GrantRule::parse(entry))
-            .collect();
+        let rules = self.rules_of(|config| &config.always_allow);
         call_allowed_by_any(&rules, tool_name, arguments)
     }
 
-    pub fn get_user_grants(&self) -> Vec<GrantRule> {
+    /// Whether any rule of the user's `never_allow` list catches this call.
+    pub fn is_call_denied(&self, tool_name: &str, arguments: Option<&JsonObject>) -> bool {
+        let rules = self.rules_of(|config| &config.never_allow);
+        call_denied_by_any(&rules, tool_name, arguments)
+    }
+
+    fn rules_of(&self, list: impl Fn(&PermissionConfig) -> &Vec<String>) -> Vec<GrantRule> {
         let map = self.permission_map.read().unwrap();
         map.get(USER_PERMISSION)
-            .map(|config| {
-                config
-                    .always_allow
-                    .iter()
-                    .map(|entry| GrantRule::parse(entry))
-                    .collect()
-            })
+            .map(|config| list(config).iter().map(|e| GrantRule::parse(e)).collect())
             .unwrap_or_default()
     }
 
+    pub fn get_user_grants(&self) -> Vec<GrantRule> {
+        self.rules_of(|config| &config.always_allow)
+    }
+
+    fn has_user_grant(&self, tool_name: &str) -> bool {
+        self.get_user_grants()
+            .iter()
+            .any(|grant| grant.tool_name == tool_name)
+    }
+
     /// Records an `always_allow` grant, dropping the rules the new one subsumes.
-    /// `spec` of `None` grants the tool as a whole.
-    pub fn add_grant(&self, tool_name: &str, spec: Option<&str>) {
-        let new_rule = GrantRule::new(tool_name, spec);
+    /// `spec` of `None` grants the tool as a whole. An explicit denial outranks any
+    /// grant, so `never_allow` is left untouched.
+    pub fn add_grant(&self, tool_name: &str, spec: Option<&Spec>) {
+        let new_rule = GrantRule::new(tool_name, spec.cloned());
         let mut map = self.permission_map.write().unwrap();
         let permission_config = map.entry(USER_PERMISSION.to_string()).or_default();
 
         permission_config.ask_before.retain(|p| p != tool_name);
-        permission_config.never_allow.retain(|p| p != tool_name);
 
         let already_covered = permission_config
             .always_allow
@@ -235,9 +232,30 @@ impl PermissionManager {
         fs::write(&self.config_path, yaml_content).expect("Failed to write to permission.yaml");
     }
 
-    /// Updates the user permission level for a specific tool.
+    /// Updates the user permission level for a specific tool. Setting any level revokes
+    /// the tool's per-call grants: they are what the level replaces.
     pub fn update_user_permission(&self, principal_name: &str, level: PermissionLevel) {
+        self.remove_grants(principal_name);
         self.update_permission(USER_PERMISSION, principal_name, level)
+    }
+
+    /// Drops every `always_allow` entry of a tool, tool-wide and per-call alike.
+    pub fn remove_grants(&self, tool_name: &str) {
+        let mut map = self.permission_map.write().unwrap();
+        let Some(permission_config) = map.get_mut(USER_PERMISSION) else {
+            return;
+        };
+        let before = permission_config.always_allow.len();
+        permission_config
+            .always_allow
+            .retain(|entry| GrantRule::parse(entry).tool_name != tool_name);
+        if permission_config.always_allow.len() == before {
+            return;
+        }
+
+        let yaml_content =
+            serde_yaml::to_string(&*map).expect("Failed to serialize permission config");
+        fs::write(&self.config_path, yaml_content).expect("Failed to write to permission.yaml");
     }
 
     /// Updates the smart approve permission level for a specific tool.
@@ -303,6 +321,7 @@ impl PermissionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permission::grants::derive_shell_grant;
     use rmcp::model::ToolAnnotations;
     use rmcp::object;
     use tempfile::TempDir;
@@ -446,13 +465,14 @@ mod tests {
     fn grants_survive_a_reload() {
         let temp_dir = TempDir::new().unwrap();
         let manager = PermissionManager::new(temp_dir.path().to_path_buf());
-        manager.add_grant(SHELL, Some("cargo test *"));
+        manager.add_grant(SHELL, Some(&Spec::prefix("cargo test")));
+        manager.add_grant(SHELL, Some(&Spec::exact("rm -rf *")));
         manager.add_grant("other__tool", None);
 
         let reloaded = PermissionManager::new(temp_dir.path().to_path_buf());
         assert_eq!(
             grants(&reloaded),
-            vec!["shell(cargo test *)", "other__tool"]
+            vec!["shell(cargo test *)", "shell(rm -rf \\*)", "other__tool"]
         );
         assert!(reloaded.is_call_allowed(SHELL, Some(&shell_call("cargo test --all"))));
         assert!(!reloaded.is_call_allowed(SHELL, Some(&shell_call("cargo build"))));
@@ -460,11 +480,23 @@ mod tests {
     }
 
     #[test]
+    fn a_literal_star_grant_never_reloads_as_a_prefix() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = PermissionManager::new(temp_dir.path().to_path_buf());
+        manager.add_grant(SHELL, Some(&derive_shell_grant("rm -rf *")));
+
+        let reloaded = PermissionManager::new(temp_dir.path().to_path_buf());
+        assert!(reloaded.is_call_allowed(SHELL, Some(&shell_call("rm -rf *"))));
+        assert!(!reloaded.is_call_allowed(SHELL, Some(&shell_call("rm -rf /"))));
+        assert!(!reloaded.is_call_allowed(SHELL, Some(&shell_call("rm -rf /home"))));
+    }
+
+    #[test]
     fn a_new_grant_absorbs_the_rules_it_covers() {
         let (manager, _temp_dir) = create_test_permission_manager();
-        manager.add_grant(SHELL, Some("cargo test -p kaji"));
-        manager.add_grant(SHELL, Some("cargo build *"));
-        manager.add_grant(SHELL, Some("cargo test *"));
+        manager.add_grant(SHELL, Some(&Spec::exact("cargo test -p kaji")));
+        manager.add_grant(SHELL, Some(&Spec::prefix("cargo build")));
+        manager.add_grant(SHELL, Some(&Spec::prefix("cargo test")));
 
         assert_eq!(
             grants(&manager),
@@ -475,8 +507,8 @@ mod tests {
     #[test]
     fn a_covered_grant_is_not_added() {
         let (manager, _temp_dir) = create_test_permission_manager();
-        manager.add_grant(SHELL, Some("cargo test *"));
-        manager.add_grant(SHELL, Some("cargo test -p kaji"));
+        manager.add_grant(SHELL, Some(&Spec::prefix("cargo test")));
+        manager.add_grant(SHELL, Some(&Spec::exact("cargo test -p kaji")));
 
         assert_eq!(grants(&manager), vec!["shell(cargo test *)"]);
     }
@@ -484,8 +516,8 @@ mod tests {
     #[test]
     fn a_tool_wide_grant_absorbs_every_rule_of_that_tool() {
         let (manager, _temp_dir) = create_test_permission_manager();
-        manager.add_grant(SHELL, Some("cargo test *"));
-        manager.add_grant("other__tool", Some("kept"));
+        manager.add_grant(SHELL, Some(&Spec::prefix("cargo test")));
+        manager.add_grant("other__tool", Some(&Spec::exact("kept")));
         manager.add_grant(SHELL, None);
 
         assert_eq!(grants(&manager), vec!["other__tool(kept)", "shell"]);
@@ -510,13 +542,74 @@ mod tests {
     }
 
     #[test]
-    fn a_grant_clears_the_other_levels_of_that_tool() {
+    fn a_denied_call_rule_catches_every_stage() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        {
+            let mut map = manager.permission_map.write().unwrap();
+            map.entry(USER_PERMISSION.to_string())
+                .or_default()
+                .never_allow
+                .push("shell(rm -rf *)".to_string());
+        }
+
+        assert!(manager.is_call_denied(SHELL, Some(&shell_call("rm -rf /"))));
+        assert!(manager.is_call_denied(SHELL, Some(&shell_call("rm -rf / && true"))));
+        assert!(manager.is_call_denied(SHELL, Some(&shell_call("true && rm -rf /"))));
+        assert!(!manager.is_call_denied(SHELL, Some(&shell_call("cargo test"))));
+    }
+
+    #[test]
+    fn a_grant_clears_ask_before_but_never_a_denial() {
         let (manager, _temp_dir) = create_test_permission_manager();
         manager.update_user_permission(SHELL, PermissionLevel::AskBefore);
-        manager.add_grant(SHELL, Some("cargo test *"));
+        manager.add_grant(SHELL, Some(&Spec::prefix("cargo test")));
 
-        assert_eq!(manager.get_user_permission(SHELL), None);
+        assert_eq!(
+            manager.get_user_permission(SHELL),
+            Some(PermissionLevel::AlwaysAllow)
+        );
         assert!(manager.is_call_allowed(SHELL, Some(&shell_call("cargo test --all"))));
+
+        manager.update_user_permission("other__tool", PermissionLevel::NeverAllow);
+        manager.add_grant("other__tool", Some(&Spec::exact("anything")));
+
+        assert_eq!(
+            manager.get_user_permission("other__tool"),
+            Some(PermissionLevel::NeverAllow)
+        );
+        assert!(manager.is_call_denied("other__tool", None));
+    }
+
+    #[test]
+    fn a_call_grant_is_visible_and_revocable_as_a_permission_level() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        manager.add_grant(SHELL, Some(&Spec::prefix("cargo test")));
+        manager.add_grant(SHELL, Some(&Spec::prefix("git status")));
+
+        assert_eq!(
+            manager.get_user_permission(SHELL),
+            Some(PermissionLevel::AlwaysAllow)
+        );
+
+        manager.update_user_permission(SHELL, PermissionLevel::AskBefore);
+
+        assert_eq!(
+            manager.get_user_permission(SHELL),
+            Some(PermissionLevel::AskBefore)
+        );
+        assert!(grants(&manager).is_empty());
+        assert!(!manager.is_call_allowed(SHELL, Some(&shell_call("cargo test --all"))));
+    }
+
+    #[test]
+    fn revoking_grants_leaves_other_tools_alone() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        manager.add_grant(SHELL, Some(&Spec::prefix("cargo test")));
+        manager.add_grant("other__tool", None);
+
+        manager.remove_grants(SHELL);
+
+        assert_eq!(grants(&manager), vec!["other__tool"]);
     }
 
     use test_case::test_case;

@@ -3,7 +3,7 @@ use crate::agents::types::SharedProvider;
 use crate::config::permission::PermissionLevel;
 use crate::config::{KajiMode, PermissionManager};
 use crate::conversation::message::{Message, ToolRequest};
-use crate::permission::grants::{call_allowed_by_any, GrantRule};
+use crate::permission::grants::{call_allowed_by_any, GrantRule, Spec};
 use crate::permission::permission_judge::{detect_read_only_requests, PermissionCheckResult};
 use crate::tool_inspection::{InspectionAction, InspectionResult, ToolInspector};
 use anyhow::Result;
@@ -51,13 +51,13 @@ impl PermissionInspector {
     }
 
     /// Grants a call for the lifetime of the process, scoped to one session. Never persisted.
-    pub fn grant_for_session(&self, session_id: &str, tool_name: &str, spec: Option<&str>) {
+    pub fn grant_for_session(&self, session_id: &str, tool_name: &str, spec: Option<&Spec>) {
         self.session_grants
             .write()
             .unwrap()
             .entry(session_id.to_string())
             .or_default()
-            .insert(GrantRule::new(tool_name, spec));
+            .insert(GrantRule::new(tool_name, spec.cloned()));
     }
 
     fn session_allows(
@@ -439,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn a_denial_beats_a_session_grant() {
         let inspector = shell_inspector();
-        inspector.grant_for_session(SESSION, SHELL, Some("cargo test *"));
+        inspector.grant_for_session(SESSION, SHELL, Some(&Spec::prefix("cargo test")));
         inspector
             .permission_manager
             .update_user_permission(SHELL, PermissionLevel::NeverAllow);
@@ -456,7 +456,7 @@ mod tests {
         inspector
             .permission_manager
             .update_user_permission(SHELL, PermissionLevel::AskBefore);
-        inspector.grant_for_session(SESSION, SHELL, Some("cargo test *"));
+        inspector.grant_for_session(SESSION, SHELL, Some(&Spec::prefix("cargo test")));
 
         assert_eq!(
             inspect_shell(&inspector, SESSION, "cargo test --all").await,
@@ -473,7 +473,7 @@ mod tests {
         let inspector = shell_inspector();
         inspector
             .permission_manager
-            .add_grant(SHELL, Some("cargo test *"));
+            .add_grant(SHELL, Some(&Spec::prefix("cargo test")));
 
         assert_eq!(
             inspect_shell(&inspector, SESSION, "cargo test --all").await,

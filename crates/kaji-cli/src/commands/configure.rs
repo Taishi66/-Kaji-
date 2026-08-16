@@ -1825,6 +1825,17 @@ pub async fn configure_tool_permissions_dialog() -> anyhow::Result<()> {
         Some(PermissionLevel::NeverAllow) => "Never Allow",
         None => "Not Set",
     };
+    let granted_calls = permission_manager
+        .get_user_grants()
+        .iter()
+        .filter(|grant| grant.tool_name == tool.name)
+        .filter_map(|grant| grant.spec.as_ref().map(|spec| spec.to_string()))
+        .collect::<Vec<_>>();
+    let current_permission = if granted_calls.is_empty() {
+        current_permission.to_string()
+    } else {
+        format!("{current_permission} for {}", granted_calls.join(", "))
+    };
 
     // Allow user to set the permission level
     let permission = cliclack::select(format!(
