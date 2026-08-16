@@ -104,19 +104,17 @@ fn mouse_enabled() -> bool {
 
 /// Thème de démarrage : `KAJI_THEME` — `Config::get_param` lit déjà la
 /// variable d'environnement avant le fichier de config, la précédence env >
-/// config n'a donc pas à être refaite ici. Une valeur inconnue est signalée
-/// dans le chat et laisse le thème par défaut (`zen`, déjà actif au
-/// lancement), jamais un lancement qui échoue. Appelé après
-/// `maybe_push_welcome` : la ligne d'avertissement rendrait le chat non vide
-/// et masquerait la bannière d'accueil.
-fn apply_startup_theme(app: &mut App) {
-    let Ok(requested) = Config::global().get_param::<String>("KAJI_THEME") else {
-        return;
-    };
-    if let Err(err) = theme::set_active(&requested) {
-        let fallback = theme::resolve_theme(Some(&requested), None);
-        app.push_system(&format!("{err} — {fallback} appliqué"));
-    }
+/// config n'a donc pas à être refaite ici. Une valeur inconnue laisse le thème
+/// par défaut (`zen`, déjà actif au lancement), jamais un lancement qui échoue.
+/// Appelé AVANT `seed_chat`, qui fige la palette des lignes qu'il rejoue
+/// (`push_error`) ; l'avertissement éventuel est rendu par l'appelant après
+/// `maybe_push_welcome`, sinon il rendrait le chat non vide et masquerait la
+/// bannière d'accueil.
+fn apply_startup_theme() -> Option<String> {
+    let requested = Config::global().get_param::<String>("KAJI_THEME").ok()?;
+    let err = theme::set_active(&requested).err()?;
+    let fallback = theme::resolve_theme(Some(&requested), None);
+    Some(format!("{err} — {fallback} appliqué"))
 }
 
 /// A session-wide or permanent grant must say what it just covered, in the
@@ -502,6 +500,19 @@ fn input_thread(tx: mpsc::Sender<Event>) {
     }
 }
 
+/// Every relative path the TUI resolves — @-mention index, pasted paths, the
+/// `write` preview of the approval modal — must share the base the tools
+/// themselves write against (`Agent::reply` → `session.working_dir`). A resumed
+/// session only *proposes* the chdir (`session/builder.rs`), so the process cwd
+/// is a different tree as soon as the user declines; it stays the fallback for
+/// a session that can't be read.
+async fn session_working_dir(session_manager: &SessionManager, session_id: &str) -> PathBuf {
+    match session_manager.get_session(session_id, false).await {
+        Ok(session) => session.working_dir,
+        Err(_) => std::env::current_dir().unwrap_or_default(),
+    }
+}
+
 type TurnStream<'a> = BoxStream<'a, anyhow::Result<AgentEvent>>;
 
 async fn next_turn_event(turn: &mut Option<TurnStream<'_>>) -> Option<anyhow::Result<AgentEvent>> {
@@ -527,10 +538,15 @@ async fn event_loop(
     app.git_status = refresh_git_status();
     app.mouse_enabled = mouse_enabled();
     app.kaji_mode = agent.kaji_mode().await;
+    let session_manager = SessionManager::instance();
+    let working_dir = session_working_dir(&session_manager, session_id).await;
+    app.set_working_dir(working_dir.clone());
+    let theme_warning = apply_startup_theme();
     seed_chat(&mut app, &conversation);
     maybe_push_welcome(&mut app);
-    apply_startup_theme(&mut app);
-    let session_manager = SessionManager::instance();
+    if let Some(warning) = theme_warning {
+        app.push_system(&warning);
+    }
     if resume {
         apply_interrupted_turn_marker(
             &mut app,
@@ -550,7 +566,6 @@ async fn event_loop(
         None;
     let (suggestion_tx, mut suggestion_rx) = mpsc::channel::<String>(1);
     let (index_tx, mut index_rx) = mpsc::channel::<mentions::MentionIndex>(1);
-    let cwd = std::env::current_dir().unwrap_or_default();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -611,14 +626,14 @@ async fn event_loop(
                                 &session_config,
                                 &mut pending,
                                 &mut cancel,
-                                &cwd,
+                                &working_dir,
                             );
                         }
                         app.push_system("🔀 steering — message injecté comme guidance");
                     }
                     Action::Submit(text) => {
                         app.push_user(&text);
-                        let expanded = mentions::expand_mentions(&text, &cwd);
+                        let expanded = mentions::expand_mentions(&text, &working_dir);
                         pending = Some(begin_setup(&mut app, agent, &session_config, &expanded, &mut cancel));
                     }
                     Action::StartPass => app.start_pass(),
@@ -626,7 +641,7 @@ async fn event_loop(
                     // here, every following one from `turn_end` — the same
                     // chaining the SDD pass uses.
                     Action::GoalSet(condition) => {
-                        if let Some(prompt) = app.goal_set(&condition, goal_max_iterations()) {
+                        if let Some(prompt) = goal_work_prompt(&mut app, &condition, &working_dir) {
                             pending = Some(begin_setup(&mut app, agent, &session_config, &prompt, &mut cancel));
                         }
                     }
@@ -796,7 +811,7 @@ async fn event_loop(
                 match item {
                     Some(Ok(ev)) => app.apply_agent_event(&ev),
                     Some(Err(e)) => {
-                        app.push_system(&format!("erreur: {e}"));
+                        app.push_error(&format!("{e}"));
                         turn = None;
                         cancel = None;
                         teardown_turn(&mut app);
@@ -817,7 +832,7 @@ async fn event_loop(
                             &session_config,
                             &mut pending,
                             &mut cancel,
-                            &cwd,
+                            &working_dir,
                         ) {
                             // Queued steering message auto-submitted as a new
                             // turn (item 2 ante "do nothing — queued messages
@@ -856,6 +871,17 @@ async fn event_loop(
         persist_goal_events(&session_manager, session_id, &mut app).await;
     }
     Ok(())
+}
+
+/// The first work prompt carries the condition verbatim, so an `@path` typed
+/// in `/goal` must expand exactly as it does in a submitted message. Only this
+/// first prompt: the turns that follow share the same session history, and
+/// re-expanding the condition every iteration would attach the same file over
+/// and over. The goal keeps the raw condition — it is what `/goal` reports and
+/// what the evaluator is asked about.
+fn goal_work_prompt(app: &mut App, condition: &str, working_dir: &Path) -> Option<String> {
+    let prompt = app.goal_set(condition, goal_max_iterations())?;
+    Some(mentions::expand_mentions(&prompt, working_dir))
 }
 
 /// `KAJI_GOAL_MAX_ITERATIONS` — backstop of the unsupervised loop, distinct
@@ -963,13 +989,13 @@ fn flush_steer_queue<'a>(
     session_config: &SessionConfig,
     pending: &mut Option<Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'a>>> + 'a>>>,
     cancel: &mut Option<CancellationToken>,
-    cwd: &std::path::Path,
+    working_dir: &Path,
 ) -> bool {
     let Some(text) = app.next_steer() else {
         return false;
     };
     app.push_user(&text);
-    let expanded = mentions::expand_mentions(&text, cwd);
+    let expanded = mentions::expand_mentions(&text, working_dir);
     *pending = Some(begin_setup(app, agent, session_config, &expanded, cancel));
     true
 }
@@ -1760,6 +1786,76 @@ mod tests {
         apply_interrupted_turn_marker(&mut app, Err(anyhow::anyhow!("boom")));
 
         assert!(app.chat.is_empty());
+    }
+
+    /// `seed_chat` bakes the palette into the lines it replays, so the startup
+    /// theme has to be active before it runs — hence the ordering in
+    /// `event_loop`.
+    #[test]
+    fn a_replayed_error_line_takes_the_theme_active_when_it_is_seeded() {
+        let _theme = theme::test_guard();
+
+        theme::set_active("zen").unwrap();
+        let zen = seeded_error_fg();
+        theme::set_active("nord").unwrap();
+        let nord = seeded_error_fg();
+
+        assert_ne!(zen, nord);
+    }
+
+    fn seeded_error_fg() -> Option<ratatui::style::Color> {
+        use kaji::conversation::message::MessageErrorKind;
+
+        let mut app = App::new(None);
+        let conversation = Conversation::new_unvalidated([
+            Message::assistant().with_error(MessageErrorKind::Other, "boom")
+        ]);
+        seed_chat(&mut app, &conversation);
+        app.chat
+            .iter()
+            .find_map(|line| line.rendered.as_ref()?.first()?.spans.first()?.style.fg)
+    }
+
+    #[tokio::test]
+    async fn the_working_dir_comes_from_the_session_not_the_process_cwd() {
+        use kaji::config::KajiMode;
+        use kaji::session::SessionType;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project = temp_dir.path().join("projet");
+        std::fs::create_dir_all(&project).unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = sm
+            .create_session(
+                project.clone(),
+                "s".to_string(),
+                SessionType::User,
+                KajiMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+
+        assert_eq!(session_working_dir(&sm, &sid).await, project);
+    }
+
+    /// `/goal corriger @notes.md` must reach the agent with the file attached,
+    /// exactly like the same text submitted as a message — while the goal
+    /// itself keeps the raw condition it reports and evaluates.
+    #[test]
+    fn goal_expands_the_mentions_of_its_condition_into_the_first_work_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.md"), "corps du fichier").unwrap();
+        let mut app = App::new(None);
+
+        let prompt = goal_work_prompt(&mut app, "corriger @notes.md", dir.path())
+            .expect("prompt de travail");
+
+        assert!(prompt.contains("corps du fichier"), "{prompt}");
+        assert_eq!(
+            app.goal.as_ref().expect("un but").condition,
+            "corriger @notes.md"
+        );
     }
 
     #[test]

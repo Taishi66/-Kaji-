@@ -102,7 +102,9 @@ impl ToolApprovalRequest {
 
     /// The Tab panel's body: the full command for a shell call, a line diff for
     /// an edit or an overwrite, the raw arguments for anything else.
-    pub fn detail_text(&self) -> String {
+    /// `working_dir` is the session's, the same base the tool itself writes
+    /// against — see [`App::set_working_dir`].
+    pub fn detail_text(&self, working_dir: &std::path::Path) -> String {
         let base = self.tool_base_name();
         let text = if is_shell_tool(&self.tool_name) {
             self.string_arg("command").map(str::to_string)
@@ -113,7 +115,7 @@ impl ToolApprovalRequest {
         } else if base == "write" {
             self.string_arg("path")
                 .zip(self.string_arg("content"))
-                .map(|(path, content)| write_preview(path, content))
+                .map(|(path, content)| write_preview(path, content, working_dir))
         } else {
             None
         };
@@ -137,8 +139,8 @@ impl ToolApprovalRequest {
     }
 }
 
-fn write_preview(path: &str, content: &str) -> String {
-    match read_bounded(std::path::Path::new(path)) {
+fn write_preview(path: &str, content: &str, working_dir: &std::path::Path) -> String {
+    match read_bounded(&crate::tui::mentions::resolve(path, working_dir)) {
         Some(existing) => diff::line_diff(&existing, content).join("\n"),
         None => format!("nouveau fichier {path}\n{content}"),
     }
@@ -492,9 +494,12 @@ pub struct App {
     /// the running turn as live guidance, and they auto-submit when the turn
     /// ends. Kept in submit order, drained FIFO.
     pub steer_queue: Vec<String>,
-    /// @-mentions (item 4 ante): root of the project index, and the base
-    /// relative `./`, `../` fragments and pasted paths resolve against.
-    mention_root: std::path::PathBuf,
+    /// The session's own root (`Agent::reply` → `session.working_dir`), set by
+    /// `event_loop` — every relative path the TUI resolves goes through it: the
+    /// @-mention index and its `./`, `../` fragments, pasted paths, and the
+    /// approval modal's `write` preview. Defaults to the process cwd, which a
+    /// resumed session may have left behind.
+    working_dir: std::path::PathBuf,
     /// Last index snapshot delivered by the background build. `None` until
     /// the first build lands — completion serves nothing rather than
     /// blocking the event loop on a full walk.
@@ -514,6 +519,12 @@ pub struct App {
     /// Set by Esc on the dropdown: keeps it closed for the current fragment
     /// without deleting it. Cleared by any input edit.
     mention_suppressed: bool,
+    /// A provider failure reached the transcript as an `Error` block during
+    /// this turn. The stream still ends normally afterwards, so this is what
+    /// tells `turn_end` the turn produced nothing to judge — see
+    /// [`App::abort_drivers_on_provider_error`]. Re-armed per turn by
+    /// `reset_turn_visibility`.
+    turn_had_error: bool,
 }
 
 impl App {
@@ -564,7 +575,7 @@ impl App {
             pending_tools: HashMap::new(),
             spec_panel_forced: None,
             steer_queue: Vec::new(),
-            mention_root: std::env::current_dir().unwrap_or_default(),
+            working_dir: std::env::current_dir().unwrap_or_default(),
             mention_index: None,
             mention_index_built_at: None,
             mention_indexing: false,
@@ -572,7 +583,15 @@ impl App {
             mention_matches: Vec::new(),
             mention_selected: 0,
             mention_suppressed: false,
+            turn_had_error: false,
         }
+    }
+
+    /// Called once by `event_loop` with the session's `working_dir`. Kept out
+    /// of `new` so the ~60 existing call sites (mostly tests) keep the process
+    /// cwd, as `mouse_enabled` does.
+    pub fn set_working_dir(&mut self, dir: std::path::PathBuf) {
+        self.working_dir = dir;
     }
 
     pub fn start_pass(&mut self) {
@@ -816,8 +835,24 @@ impl App {
         }
     }
 
+    /// A provider failure arrives as an `Error` block on a stream that then
+    /// ends normally, so neither driver's `Err` path fires: the work turn
+    /// produced nothing, and the evaluator buffer stays empty — which
+    /// `judge_goal` would read as "verdict absent" and answer by hammering the
+    /// provider that just failed, up to the iteration cap.
+    fn abort_drivers_on_provider_error(&mut self) {
+        if self.driver != PassDriver::Idle {
+            self.pass_abort("erreur provider — passe interrompue");
+        }
+        self.goal_abort("目標 erreur provider — but interrompu");
+    }
+
     pub fn turn_end(&mut self) -> Option<String> {
         self.turn_active = false;
+        if self.turn_had_error {
+            self.abort_drivers_on_provider_error();
+            return None;
+        }
         match self.driver {
             PassDriver::Executing => {
                 let body = self.spec.as_ref()?.body.clone();
@@ -914,7 +949,7 @@ impl App {
             return;
         };
         if let Some(listing) =
-            crate::tui::mentions::complete_via_listing(&fragment, &self.mention_root)
+            crate::tui::mentions::complete_via_listing(&fragment, &self.working_dir)
         {
             self.mention_matches = listing;
             return;
@@ -957,7 +992,7 @@ impl App {
             return None;
         }
         self.pending_index_request = false;
-        Some(self.mention_root.clone())
+        Some(self.working_dir.clone())
     }
 
     pub fn on_mention_index_ready(&mut self, index: crate::tui::mentions::MentionIndex) {
@@ -1042,7 +1077,7 @@ impl App {
         if text.is_empty() || text.starts_with('@') || text.chars().any(char::is_whitespace) {
             return false;
         }
-        crate::tui::mentions::resolve(text, &self.mention_root).exists()
+        crate::tui::mentions::resolve(text, &self.working_dir).exists()
     }
 
     /// Called from every turn-begin path (`begin_setup`, covering Submit,
@@ -1051,6 +1086,7 @@ impl App {
     pub fn reset_turn_visibility(&mut self) {
         self.turn_has_visible_output = false;
         self.turn_thinking_shown = false;
+        self.turn_had_error = false;
         self.last_thinking_msg_id = None;
         self.agent_stream_idx = None;
         self.clear_suggestion();
@@ -1276,7 +1312,10 @@ impl App {
     pub fn toggle_approval_detail(&mut self) {
         self.approval_detail = match self.approval_detail {
             Some(_) => None,
-            None => self.tool_approval.as_ref().map(|req| req.detail_text()),
+            None => self
+                .tool_approval
+                .as_ref()
+                .map(|req| req.detail_text(&self.working_dir)),
         };
     }
 
@@ -1572,10 +1611,12 @@ impl App {
                 }
             }
             // Mode ramp (item 3 ante): the modal gates above already returned,
-            // and the palette owns Shift+Tab's sibling Tab while it is open —
-            // leave the chord alone there rather than switching modes under a
-            // list the user is navigating.
-            KeyCode::BackTab if !self.palette_visible() => Action::Mode(self.cycle_kaji_mode()),
+            // and both open lists own Shift+Tab's sibling Tab — leave the chord
+            // alone there rather than switching modes under a list the user is
+            // navigating.
+            KeyCode::BackTab if !self.palette_visible() && !self.mention_dropdown_visible() => {
+                Action::Mode(self.cycle_kaji_mode())
+            }
             KeyCode::Char(c) => {
                 self.exit_history_navigation();
                 self.reset_palette_selection();
@@ -1657,8 +1698,18 @@ impl App {
                     Action::None
                 } else {
                     let depth = self.queue_steer(&text);
+                    // A driver relaunches a turn from `turn_end`, which is
+                    // exactly where the auto-flush would have run — under a
+                    // goal or a pass the queue waits for the whole loop.
+                    let when = if self.driver == PassDriver::Idle
+                        && self.goal_driver() == GoalDriver::Idle
+                    {
+                        "envoi auto en fin de tour"
+                    } else {
+                        "envoi à la fin de la boucle (but/passe en cours)"
+                    };
                     self.push_system(&format!(
-                        "🔀 mis en file ({depth}) — Ctrl+S pour steer, envoi auto en fin de tour"
+                        "🔀 mis en file ({depth}) — Ctrl+S pour steer, {when}"
                     ));
                     Action::None
                 }
@@ -1950,7 +2001,10 @@ impl App {
                         });
                     }
                 }
-                MessageContentBlock::Error(error) => self.push_error(&error.message),
+                MessageContentBlock::Error(error) => {
+                    self.turn_had_error = true;
+                    self.push_error(&error.message);
+                }
                 // Thinking/progress notifications drive the loader, not the
                 // transcript — only the two user-facing registers are shown.
                 MessageContentBlock::SystemNotification(notification) => {
@@ -2075,7 +2129,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kaji::conversation::message::Message;
+    use kaji::conversation::message::{Message, MessageErrorKind};
     use kaji::providers::base::Usage;
     use ratatui::crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
@@ -2319,11 +2373,24 @@ mod tests {
         assert_eq!(app.input, "");
         assert_eq!(app.steer_len(), 1);
         assert_eq!(app.next_steer().as_deref(), Some("hi"));
-        assert!(
-            app.chat
-                .iter()
-                .any(|l| l.text.contains("mis en file") && l.text.contains("Ctrl+S"))
-        );
+        assert!(app.chat.iter().any(|l| l.text.contains("mis en file")
+            && l.text.contains("Ctrl+S")
+            && l.text.contains("fin de tour")));
+    }
+
+    /// Sous un but (ou une passe), le tour qui se termine en relance un autre :
+    /// la file n'est drainée qu'à la fin de la boucle, pas à la fin du tour.
+    #[test]
+    fn a_steer_queued_under_a_goal_announces_the_end_of_the_loop() {
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 10);
+        app.turn_active = true;
+        app.on_event(&key(KeyCode::Char('x')));
+
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
+
+        let line = &app.chat.last().expect("ligne de mise en file").text;
+        assert!(line.contains("fin de la boucle"), "{line}");
     }
 
     #[test]
@@ -2394,7 +2461,7 @@ mod tests {
         std::fs::write(dir.path().join("src/tui/app.rs"), "x").unwrap();
         std::fs::write(dir.path().join("README.md"), "x").unwrap();
         let mut app = App::new(None);
-        app.mention_root = dir.path().to_path_buf();
+        app.set_working_dir(dir.path().to_path_buf());
         (app, dir)
     }
 
@@ -2972,6 +3039,12 @@ mod tests {
 
     fn agent_says(app: &mut App, id: &str, text: &str) {
         let mut m = Message::assistant().with_text(text);
+        m.id = Some(id.to_string());
+        app.apply_agent_event(&kaji::agents::AgentEvent::Message(m));
+    }
+
+    fn agent_errors(app: &mut App, id: &str, message: &str) {
+        let mut m = Message::assistant().with_error(MessageErrorKind::Other, message);
         m.id = Some(id.to_string());
         app.apply_agent_event(&kaji::agents::AgentEvent::Message(m));
     }
@@ -4008,6 +4081,27 @@ mod tests {
         assert!(detail.ends_with("hello"), "got: {detail}");
     }
 
+    /// The tool writes relative to the session's `working_dir` (`Agent::reply`),
+    /// which a resumed session no longer necessarily shares with the process
+    /// cwd — resolving the preview against the cwd would announce a creation
+    /// for a file the write is about to overwrite.
+    #[test]
+    fn the_detail_panel_diffs_a_relative_write_against_the_session_working_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("notes.md"), "old\n").expect("seed file");
+        let mut app = App::new(None);
+        app.set_working_dir(dir.path().to_path_buf());
+        open_approval(
+            &mut app,
+            "write",
+            object!({ "path": "notes.md", "content": "new\n" }),
+        );
+
+        app.on_event(&key(KeyCode::Tab));
+
+        assert_eq!(app.approval_detail.as_deref(), Some("-old\n+new"));
+    }
+
     /// The panel is a preview: a huge file must be read up to the cap and no
     /// further, and the text handed to the renderer stays bounded whatever the
     /// file's size.
@@ -4063,6 +4157,21 @@ mod tests {
                 .text
                 .contains(&format!("mode : {}", kaji_mode_badge(expected)))
         );
+    }
+
+    /// Shift+Tab is the reflex for "previous item" while a list is open, and
+    /// the mention dropdown owns its sibling Tab — ramping the permission
+    /// mode behind the overlay is a mode switch the user never asked for.
+    #[test]
+    fn shift_tab_is_inert_while_the_mention_dropdown_is_open() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        for c in "@rea".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert!(app.mention_dropdown_visible(), "test setup");
+
+        assert_eq!(app.on_event(&key(KeyCode::BackTab)), Action::None);
+        assert_eq!(app.kaji_mode, KajiMode::default());
     }
 
     /// Tab drives the palette selection while it is open — its sibling chord
@@ -4655,6 +4764,59 @@ mod tests {
         assert!(prompt.contains("ça a l'air bon"));
         assert!(app.chat.iter().any(|l| l.text.contains("verdict absent")));
         assert_eq!(app.goal.as_ref().expect("un but").iteration, 2);
+    }
+
+    /// ⛔ BARRIÈRE — un provider en échec livre un bloc `Error` sur un stream
+    /// qui se termine normalement : sans garde-fou, la boucle enchaîne un
+    /// tour d'évaluation contre le provider qui vient de rater.
+    #[test]
+    fn a_provider_error_during_a_work_turn_interrupts_the_goal() {
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 10);
+        app.turn_active = true;
+        agent_errors(&mut app, "m1", "rate limit atteint");
+
+        assert!(app.turn_end().is_none());
+        assert_eq!(app.goal_driver(), GoalDriver::Idle);
+        assert_eq!(
+            app.goal.as_ref().and_then(|g| g.outcome),
+            Some(GoalOutcome::Interrupted)
+        );
+    }
+
+    /// ⛔ BARRIÈRE — le buffer évaluateur reste vide quand le provider rate,
+    /// et « verdict absent » relancerait alors la boucle jusqu'au cap.
+    #[test]
+    fn a_provider_error_during_the_evaluator_turn_interrupts_the_goal() {
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 10);
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "j'ai corrigé le test");
+        app.turn_end();
+
+        app.reset_turn_visibility();
+        app.turn_active = true;
+        agent_errors(&mut app, "m2", "rate limit atteint");
+
+        assert!(app.turn_end().is_none());
+        assert_eq!(app.goal_driver(), GoalDriver::Idle);
+        assert!(
+            !app.chat.iter().any(|l| l.text.contains("verdict absent")),
+            "un échec provider n'est pas un évaluateur bavard"
+        );
+    }
+
+    #[test]
+    fn a_provider_error_during_an_sdd_turn_interrupts_the_pass() {
+        let mut app = App::new(Some(spec()));
+        app.start_pass();
+        app.gate_approve();
+        app.turn_active = true;
+        agent_errors(&mut app, "m1", "rate limit atteint");
+
+        assert!(app.turn_end().is_none());
+        assert_eq!(app.driver, PassDriver::Idle);
+        assert!(!app.pass.is_running());
     }
 
     /// ⛔ BARRIÈRE — backstop de la boucle non supervisée : un évaluateur

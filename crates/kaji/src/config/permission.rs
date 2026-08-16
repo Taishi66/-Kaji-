@@ -213,14 +213,15 @@ impl PermissionManager {
     }
 
     /// Records an `always_allow` grant, dropping the rules the new one subsumes.
-    /// `spec` of `None` grants the tool as a whole. An explicit denial outranks any
-    /// grant, so `never_allow` is left untouched.
+    /// `spec` of `None` grants the tool as a whole. A grant only ever widens what
+    /// a single call may do: `never_allow` outranks it, and the tool-wide
+    /// `ask_before` stays in place to catch everything the grant does not cover
+    /// (see [`Self::asks_before`]). Only [`Self::update_user_permission`] moves a
+    /// tool out of `ask_before`.
     pub fn add_grant(&self, tool_name: &str, spec: Option<&Spec>) {
         let new_rule = GrantRule::new(tool_name, spec.cloned());
         let mut map = self.permission_map.write().unwrap();
         let permission_config = map.entry(USER_PERMISSION.to_string()).or_default();
-
-        permission_config.ask_before.retain(|p| p != tool_name);
 
         let already_covered = permission_config
             .always_allow
@@ -577,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn a_grant_clears_ask_before_but_never_a_denial() {
+    fn a_grant_never_cancels_ask_before_nor_a_denial() {
         let (manager, _temp_dir) = create_test_permission_manager();
         manager.update_user_permission(SHELL, PermissionLevel::AskBefore);
         manager.add_grant(SHELL, Some(&Spec::prefix("cargo test")));
@@ -587,6 +588,11 @@ mod tests {
             Some(PermissionLevel::AlwaysAllow)
         );
         assert!(manager.is_call_allowed(SHELL, Some(&shell_call("cargo test --all"))));
+        // The narrow grant covers `cargo test`; everything else the tool-wide
+        // ask_before still catches (`PermissionInspector` reads the grants
+        // first, then `asks_before`).
+        assert!(manager.asks_before(SHELL));
+        assert!(!manager.is_call_allowed(SHELL, Some(&shell_call("cargo build"))));
 
         manager.update_user_permission("other__tool", PermissionLevel::NeverAllow);
         manager.add_grant("other__tool", Some(&Spec::exact("anything")));

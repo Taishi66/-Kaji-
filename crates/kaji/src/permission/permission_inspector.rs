@@ -443,6 +443,37 @@ mod tests {
             .action
     }
 
+    /// Same precedence as the file-level case below, but through the store's
+    /// own writer: approving one call must never widen into the tool-wide
+    /// `ask_before` the user set with `kaji configure`.
+    #[tokio::test]
+    async fn a_grant_recorded_over_an_ask_before_still_asks_for_the_rest() {
+        let inspector = shell_inspector();
+        inspector
+            .permission_manager
+            .update_user_permission(SHELL, PermissionLevel::AskBefore);
+        inspector
+            .permission_manager
+            .add_grant(SHELL, Some(&Spec::prefix("cargo test")));
+
+        *inspector.readonly_tools.write().unwrap() = [SHELL.to_string()].into_iter().collect();
+
+        assert_eq!(
+            inspect_shell_in_mode(
+                &inspector,
+                SESSION,
+                "cargo test --all",
+                KajiMode::SmartApprove
+            )
+            .await,
+            InspectionAction::Allow
+        );
+        assert_eq!(
+            inspect_shell_in_mode(&inspector, SESSION, "cargo build", KajiMode::SmartApprove).await,
+            InspectionAction::RequireApproval(None)
+        );
+    }
+
     #[tokio::test]
     async fn a_narrow_grant_does_not_cancel_a_name_level_ask_before() {
         let config_dir = tempfile::tempdir().unwrap().keep();
