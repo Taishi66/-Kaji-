@@ -10,7 +10,10 @@ use kaji::permission::grants::{derive_grant_spec, is_shell_tool};
 use kaji::providers::base::ProviderUsage;
 use kaji_core::goal::{self, GoalOutcome, GoalPhase, GoalState, GoalStep, Verdict};
 use kaji_core::sdd::{SddPass, SpecDoc};
-use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use rmcp::model::{JsonObject, Role};
 use std::cell::{Cell, RefCell};
@@ -20,6 +23,34 @@ use std::time::{Duration, Instant};
 
 const SCROLL_PAGE: u16 = 10;
 const SCROLL_WHEEL: u16 = 3;
+
+/// Rows the file finder ever paints, however many paths matched — the list is
+/// scanned with the eyes, not scrolled through by the thousand.
+const FINDER_MAX_RESULTS: usize = 200;
+
+/// Which pane owns the keyboard. The viewer and the explorer (task 9) are
+/// full-fledged focus targets rather than modal overlays: the chat keeps
+/// streaming underneath, and only the key routing changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    #[default]
+    Composer,
+    Viewer,
+    Explorer,
+}
+
+/// Fuzzy file finder (`Ctrl+P`, `/files`) — telescope's gesture: a query line,
+/// a ranked list, and three exits (open, attach, cancel).
+#[derive(Debug, Default)]
+pub struct FinderState {
+    pub query: String,
+    /// Insertion point in `query`, counted in chars — `draw_finder` puts the
+    /// terminal cursor there and ←/→ move it.
+    pub cursor: usize,
+    pub selected: usize,
+    /// Project-relative paths, best first, capped at [`FINDER_MAX_RESULTS`].
+    pub results: Vec<String>,
+}
 
 /// Hard ceiling on what the Tab detail panel reads back from disk to diff a
 /// `write` against the file it would replace. The panel is a preview, not a
@@ -253,6 +284,14 @@ pub const COMMANDS: &[Command] = &[
         run: |_| Action::GoalStatus,
     },
     Command {
+        name: "/files",
+        desc: "(ou Ctrl+P) recherche floue de fichiers — ⏎ ouvre le lecteur, Tab attache @",
+        run: |app| {
+            app.open_finder();
+            Action::None
+        },
+    },
+    Command {
         name: "/spec",
         desc: "(ou F2) affiche/masque le panneau SPEC",
         run: |app| {
@@ -339,6 +378,14 @@ fn theme_command_arg(text: &str) -> Option<&str> {
 /// session from being forwarded to it as a plain message.
 fn goal_command_arg(text: &str) -> Option<&str> {
     slash_command_arg(text, "/goal")
+}
+
+/// Byte offset of the `index`-th char — `String::insert_str` and
+/// `String::remove` take byte offsets and panic off a char boundary.
+fn char_boundary(text: &str, index: usize) -> usize {
+    text.char_indices()
+        .nth(index)
+        .map_or(text.len(), |(at, _)| at)
 }
 
 /// Stable vocabulary for the `goal_end` event payload — the labels the UI
@@ -519,6 +566,18 @@ pub struct App {
     /// Set by Esc on the dropdown: keeps it closed for the current fragment
     /// without deleting it. Cleared by any input edit.
     mention_suppressed: bool,
+    /// Fuzzy file finder overlay (task 8) — while `Some` it owns the
+    /// keyboard: nothing typed into it reaches the composer.
+    pub finder: Option<FinderState>,
+    /// Right-column file viewer. Takes the SPEC panel's slot for as long as
+    /// it is open; closing it hands the slot back with no state to restore
+    /// (`ui::draw` reads `spec_panel_visible` again).
+    pub viewer: Option<crate::tui::viewer::Viewer>,
+    pub focus: Focus,
+    /// Viewer geometry measured by `ui::draw_viewer` — same render-time
+    /// measurement as `chat_overflow`: the wheel hit-test and the half-page
+    /// jump need a height only the renderer knows.
+    pub viewer_area: Cell<Rect>,
     /// A provider failure reached the transcript as an `Error` block during
     /// this turn. The stream still ends normally afterwards, so this is what
     /// tells `turn_end` the turn produced nothing to judge — see
@@ -583,6 +642,10 @@ impl App {
             mention_matches: Vec::new(),
             mention_selected: 0,
             mention_suppressed: false,
+            finder: None,
+            viewer: None,
+            focus: Focus::default(),
+            viewer_area: Cell::new(Rect::default()),
             turn_had_error: false,
         }
     }
@@ -1004,6 +1067,7 @@ impl App {
         let suppressed = self.mention_suppressed;
         self.update_mention_matches();
         self.mention_suppressed = suppressed;
+        self.update_finder_results();
     }
 
     pub fn mention_index_truncated(&self) -> bool {
@@ -1049,6 +1113,238 @@ impl App {
         self.input.truncate(keep);
         self.input.push_str(&completion);
         self.update_mention_matches();
+    }
+
+    /// Opens the fuzzy file finder (`Ctrl+P`, `/files`). It reads the very
+    /// index the @-mention dropdown does, with the same contract: a stale
+    /// snapshot keeps answering while the rebuild runs on its own task, and a
+    /// missing one only emits the request `event_loop` picks up.
+    pub fn open_finder(&mut self) {
+        if self.modal_active() {
+            return;
+        }
+        if self.mention_index_stale() {
+            self.request_mention_index();
+        }
+        self.finder = Some(FinderState::default());
+        self.update_finder_results();
+    }
+
+    pub fn close_finder(&mut self) {
+        self.finder = None;
+    }
+
+    /// The finder has nothing to list because the first walk is still
+    /// running — distinct from "no match", which a served (even stale) index
+    /// produces.
+    pub fn finder_indexing(&self) -> bool {
+        self.finder.is_some() && self.mention_index.is_none()
+    }
+
+    fn update_finder_results(&mut self) {
+        let Some(query) = self.finder.as_ref().map(|finder| finder.query.clone()) else {
+            return;
+        };
+        let results = self
+            .mention_index
+            .as_ref()
+            .map(|index| index.search(&query, FINDER_MAX_RESULTS))
+            .unwrap_or_default();
+        if let Some(finder) = self.finder.as_mut() {
+            finder.results = results;
+            finder.selected = 0;
+        }
+    }
+
+    fn finder_insert(&mut self, text: &str) {
+        let Some(finder) = self.finder.as_mut() else {
+            return;
+        };
+        let at = char_boundary(&finder.query, finder.cursor);
+        finder.query.insert_str(at, text);
+        finder.cursor += text.chars().count();
+        self.update_finder_results();
+    }
+
+    fn finder_backspace(&mut self) {
+        let Some(finder) = self.finder.as_mut() else {
+            return;
+        };
+        let Some(previous) = finder.cursor.checked_sub(1) else {
+            return;
+        };
+        let at = char_boundary(&finder.query, previous);
+        finder.query.remove(at);
+        finder.cursor = previous;
+        self.update_finder_results();
+    }
+
+    fn finder_move(&mut self, delta: isize) {
+        let Some(finder) = self.finder.as_mut() else {
+            return;
+        };
+        let count = finder.results.len();
+        if count == 0 {
+            return;
+        }
+        let step = delta.rem_euclid(count as isize) as usize;
+        finder.selected = (finder.selected + step) % count;
+    }
+
+    fn finder_cursor_left(&mut self) {
+        if let Some(finder) = self.finder.as_mut() {
+            finder.cursor = finder.cursor.saturating_sub(1);
+        }
+    }
+
+    fn finder_cursor_right(&mut self) {
+        if let Some(finder) = self.finder.as_mut() {
+            finder.cursor = (finder.cursor + 1).min(finder.query.chars().count());
+        }
+    }
+
+    fn finder_selection(&self) -> Option<String> {
+        let finder = self.finder.as_ref()?;
+        finder.results.get(finder.selected).cloned()
+    }
+
+    /// Every key while the finder is open — nothing it swallows reaches the
+    /// composer, which is the whole point of an overlay you type into.
+    fn finder_key(&mut self, key: &KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('p') if ctrl => self.close_finder(),
+            // Telescope's chords, alongside the arrows.
+            KeyCode::Char('n' | 'j') if ctrl => self.finder_move(1),
+            KeyCode::Char('k') if ctrl => self.finder_move(-1),
+            KeyCode::Down => self.finder_move(1),
+            KeyCode::Up => self.finder_move(-1),
+            KeyCode::Left => self.finder_cursor_left(),
+            KeyCode::Right => self.finder_cursor_right(),
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.finder_insert(c.encode_utf8(&mut [0u8; 4]))
+            }
+            KeyCode::Backspace => self.finder_backspace(),
+            KeyCode::Enter => {
+                if let Some(path) = self.finder_selection() {
+                    self.close_finder();
+                    self.open_viewer(&path);
+                }
+            }
+            KeyCode::Tab => {
+                if let Some(path) = self.finder_selection() {
+                    self.close_finder();
+                    self.attach_mention(&path);
+                }
+            }
+            KeyCode::Esc => self.close_finder(),
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Loads a file into the right-column viewer and gives it the focus. A
+    /// directory, a missing file or an unreadable one is reported as a system
+    /// line instead of opening an empty pane.
+    pub fn open_viewer(&mut self, path: &str) {
+        let resolved = crate::tui::mentions::resolve(path, &self.working_dir);
+        match crate::tui::viewer::load(path, &resolved) {
+            Ok(viewer) => {
+                self.viewer = Some(viewer);
+                self.focus = Focus::Viewer;
+            }
+            Err(e) => {
+                self.focus = Focus::Composer;
+                self.push_system(&format!("lecture impossible : {e}"));
+            }
+        }
+    }
+
+    pub fn close_viewer(&mut self) {
+        self.viewer = None;
+        self.focus = Focus::Composer;
+    }
+
+    /// Rows of file content the pane paints, from the last measured geometry
+    /// minus its two borders (the header rides the top border as a title).
+    /// Floors at one so a viewer that has never been drawn still scrolls.
+    fn viewer_viewport(&self) -> usize {
+        usize::from(self.viewer_area.get().height.saturating_sub(2)).max(1)
+    }
+
+    fn point_in_viewer(&self, column: u16, row: u16) -> bool {
+        let area = self.viewer_area.get();
+        self.viewer.is_some()
+            && column >= area.x
+            && column < area.right()
+            && row >= area.y
+            && row < area.bottom()
+    }
+
+    /// Every key while the viewer holds the focus: it scrolls, attaches or
+    /// closes, and ignores the rest — a stray `j` must never end up in the
+    /// composer behind it.
+    fn viewer_key(&mut self, key: &KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            // The one key that isn't ignored: the finder opens from anywhere
+            // outside a modal, viewer included.
+            KeyCode::Char('p') if ctrl => {
+                self.open_finder();
+                return Action::None;
+            }
+            KeyCode::Char('q') | KeyCode::Esc if !ctrl => {
+                self.close_viewer();
+                return Action::None;
+            }
+            KeyCode::Char('a') if !ctrl => {
+                if let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path.clone()) {
+                    self.attach_mention(&path);
+                }
+                // The pane stays open — attaching is a step in writing a
+                // message, not a reason to lose what you were reading.
+                self.focus = Focus::Composer;
+                return Action::None;
+            }
+            _ => {}
+        }
+        let viewport = self.viewer_viewport();
+        let half = (viewport / 2).max(1);
+        let Some(viewer) = self.viewer.as_mut() else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down if !ctrl => viewer.scroll_down(1, viewport),
+            KeyCode::Char('k') | KeyCode::Up if !ctrl => viewer.scroll_up(1),
+            KeyCode::Char('d') if ctrl => viewer.scroll_down(half, viewport),
+            KeyCode::Char('u') if ctrl => viewer.scroll_up(half),
+            KeyCode::PageDown => viewer.scroll_down(half, viewport),
+            KeyCode::PageUp => viewer.scroll_up(half),
+            KeyCode::Char('g') if !ctrl => viewer.scroll_to_start(),
+            KeyCode::Char('G') => viewer.scroll_to_end(viewport),
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// `Tab` on the finder and `a` on the viewer both land here: the path
+    /// joins the draft as a real `@` mention — separated from what is already
+    /// typed, since `foo@bar` mid-word is not a mention, and followed by a
+    /// space so the next word doesn't glue onto it.
+    pub fn attach_mention(&mut self, path: &str) {
+        self.exit_history_navigation();
+        self.reset_palette_selection();
+        if !self.input.is_empty() && !self.input.ends_with(char::is_whitespace) {
+            self.input.push(' ');
+        }
+        self.input.push('@');
+        self.input.push_str(path);
+        self.input.push(' ');
+        self.reset_mention_state();
     }
 
     /// Bracketed paste (item 4 ante): a pasted path is auto-prefixed with `@`
@@ -1431,7 +1727,21 @@ impl App {
 
     pub fn on_event(&mut self, ev: &Event) -> Action {
         if let Event::Mouse(mouse) = ev {
+            // The wheel follows the pointer: over the file viewer it scrolls
+            // the file, anywhere else the chat.
+            let on_viewer = self.point_in_viewer(mouse.column, mouse.row);
+            let viewport = self.viewer_viewport();
             match mouse.kind {
+                MouseEventKind::ScrollUp if on_viewer => {
+                    if let Some(viewer) = self.viewer.as_mut() {
+                        viewer.scroll_up(SCROLL_WHEEL as usize);
+                    }
+                }
+                MouseEventKind::ScrollDown if on_viewer => {
+                    if let Some(viewer) = self.viewer.as_mut() {
+                        viewer.scroll_down(SCROLL_WHEEL as usize, viewport);
+                    }
+                }
                 MouseEventKind::ScrollUp => self.scroll_wheel_up(),
                 MouseEventKind::ScrollDown => self.scroll_wheel_down(),
                 _ => {}
@@ -1439,10 +1749,17 @@ impl App {
             return Action::None;
         }
         // A y/n modal owns the keyboard: a paste landing behind it would
-        // mutate the composer the user can't see.
+        // mutate the composer the user can't see. So would one landing behind
+        // the finder or the viewer — the finder takes it as query text, the
+        // viewer drops it.
         if let Event::Paste(text) = ev {
             if !self.modal_active() {
-                self.insert_pasted(text);
+                if self.finder.is_some() {
+                    let pasted: String = text.chars().filter(|c| !c.is_control()).collect();
+                    self.finder_insert(&pasted);
+                } else if self.focus == Focus::Composer {
+                    self.insert_pasted(text);
+                }
             }
             return Action::None;
         }
@@ -1454,6 +1771,18 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Action::Quit;
+        }
+        // File navigation (task 8) sits between Ctrl+C and everything else: an
+        // open finder or a focused viewer consumes the key before the global
+        // scroll bindings and the composer see it, but never before a y/n
+        // modal — an approval on screen still answers y/n.
+        if !self.modal_active() {
+            if self.finder.is_some() {
+                return self.finder_key(key);
+            }
+            if self.focus == Focus::Viewer {
+                return self.viewer_key(key);
+            }
         }
         // A y/n modal (tool approval or gate) swallows Enter/chars, but bare
         // ↑/↓ used to reach the history-recall branch below before the
@@ -1609,6 +1938,12 @@ impl App {
                 } else {
                     Action::SteerNow
                 }
+            }
+            // Fuzzy file finder (task 8) — before the plain `Char(c)` arm, or
+            // the chord would type a `p` into the composer.
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_finder();
+                Action::None
             }
             // Mode ramp (item 3 ante): the modal gates above already returned,
             // and both open lists own Shift+Tab's sibling Tab — leave the chord
@@ -2617,6 +2952,276 @@ mod tests {
         let (mut app, _dir) = app_with_mention_fixture();
         app.on_event(&Event::Paste("corrige le parseur stp".to_string()));
         assert_eq!(app.input, "corrige le parseur stp");
+    }
+
+    #[test]
+    fn ctrl_p_opens_the_finder_on_the_whole_index() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        assert_eq!(app.on_event(&ctrl_key(KeyCode::Char('p'))), Action::None);
+        let finder = app.finder.as_ref().expect("finder ouvert");
+        assert!(finder.query.is_empty());
+        assert!(
+            finder.results.iter().any(|p| p == "README.md"),
+            "{:?}",
+            finder.results
+        );
+        assert!(app.input.is_empty(), "Ctrl+P ne tape rien dans le composer");
+    }
+
+    #[test]
+    fn ctrl_p_is_ignored_under_a_modal() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.gate_open = true;
+        assert_eq!(app.on_event(&ctrl_key(KeyCode::Char('p'))), Action::None);
+        assert!(app.finder.is_none());
+    }
+
+    #[test]
+    fn slash_files_opens_the_finder() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        for c in "/files".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
+        assert!(app.finder.is_some());
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn typing_in_the_finder_filters_without_touching_the_composer() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.open_finder();
+        for c in "app".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        let finder = app.finder.as_ref().expect("finder ouvert");
+        assert_eq!(finder.query, "app");
+        assert_eq!(
+            finder.results.first().map(String::as_str),
+            Some("src/tui/app.rs")
+        );
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn finder_tab_attaches_the_selected_path_and_closes() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.open_finder();
+        for c in "readme".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Tab)), Action::None);
+        assert!(app.finder.is_none());
+        assert_eq!(app.input, "@README.md ");
+    }
+
+    #[test]
+    fn finder_tab_separates_the_mention_from_what_is_already_typed() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        for c in "relis".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.open_finder();
+        for c in "readme".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.on_event(&key(KeyCode::Tab));
+        assert_eq!(
+            app.input, "relis @README.md ",
+            "foo@bar n'est pas une mention"
+        );
+    }
+
+    #[test]
+    fn finder_enter_opens_the_viewer_and_hands_it_the_focus() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.open_finder();
+        for c in "readme".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
+        assert!(app.finder.is_none());
+        assert_eq!(app.focus, Focus::Viewer);
+        assert_eq!(
+            app.viewer.as_ref().expect("lecteur ouvert").path,
+            "README.md"
+        );
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn finder_esc_closes_without_touching_the_composer() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        for c in "salut".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        app.open_finder();
+        for c in "read".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Esc)), Action::None);
+        assert!(app.finder.is_none());
+        assert_eq!(app.input, "salut");
+    }
+
+    #[test]
+    fn finder_navigation_walks_the_result_list() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.open_finder();
+        let count = app.finder.as_ref().expect("finder ouvert").results.len();
+        assert!(count >= 3, "{count} résultats");
+
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.finder.as_ref().unwrap().selected, 1);
+        app.on_event(&ctrl_key(KeyCode::Char('n')));
+        assert_eq!(app.finder.as_ref().unwrap().selected, 2);
+        app.on_event(&ctrl_key(KeyCode::Char('k')));
+        assert_eq!(app.finder.as_ref().unwrap().selected, 1);
+        app.on_event(&key(KeyCode::Up));
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(
+            app.finder.as_ref().unwrap().selected,
+            count - 1,
+            "cyclique en haut"
+        );
+    }
+
+    #[test]
+    fn opening_the_finder_without_an_index_asks_for_a_build() {
+        let (mut app, dir) = app_awaiting_mention_index();
+        app.open_finder();
+        assert!(app.finder_indexing());
+        assert_eq!(
+            app.take_mention_index_request().as_deref(),
+            Some(dir.path()),
+            "event_loop doit recevoir la demande de build"
+        );
+    }
+
+    #[test]
+    fn a_delivered_index_fills_an_open_finder() {
+        let (mut app, dir) = app_awaiting_mention_index();
+        app.open_finder();
+        app.on_mention_index_ready(crate::tui::mentions::MentionIndex::build(
+            dir.path().to_path_buf(),
+        ));
+        assert!(!app.finder_indexing());
+        assert!(
+            app.finder
+                .as_ref()
+                .unwrap()
+                .results
+                .iter()
+                .any(|p| p == "README.md")
+        );
+    }
+
+    /// Viewer open on a 200-line file, with the geometry `draw_viewer` would
+    /// have measured: a 20-line viewport, so the half-page jumps are testable.
+    fn app_with_open_viewer() -> (App, tempfile::TempDir) {
+        let (mut app, dir) = app_with_mention_fixture();
+        std::fs::write(dir.path().join("long.txt"), "x\n".repeat(200)).unwrap();
+        app.open_viewer("long.txt");
+        app.viewer_area.set(Rect {
+            x: 60,
+            y: 1,
+            width: 40,
+            height: 22,
+        });
+        (app, dir)
+    }
+
+    #[test]
+    fn viewer_keys_scroll_the_file_and_never_reach_the_composer() {
+        let (mut app, _dir) = app_with_open_viewer();
+        assert_eq!(app.focus, Focus::Viewer);
+
+        for _ in 0..3 {
+            app.on_event(&key(KeyCode::Char('j')));
+        }
+        assert_eq!(app.viewer.as_ref().unwrap().scroll, 3);
+        app.on_event(&key(KeyCode::Char('k')));
+        assert_eq!(app.viewer.as_ref().unwrap().scroll, 2);
+        app.on_event(&ctrl_key(KeyCode::Char('d')));
+        assert_eq!(
+            app.viewer.as_ref().unwrap().scroll,
+            12,
+            "demi-page d'un viewport de 20 lignes"
+        );
+        app.on_event(&key(KeyCode::PageUp));
+        assert_eq!(app.viewer.as_ref().unwrap().scroll, 2);
+        app.on_event(&key(KeyCode::Char('G')));
+        assert_eq!(app.viewer.as_ref().unwrap().scroll, 180);
+        app.on_event(&key(KeyCode::Char('g')));
+        assert_eq!(app.viewer.as_ref().unwrap().scroll, 0);
+        assert!(app.input.is_empty(), "rien ne fuit dans le composer");
+    }
+
+    #[test]
+    fn q_closes_the_viewer_and_gives_the_composer_its_keys_back() {
+        let (mut app, _dir) = app_with_open_viewer();
+        assert_eq!(app.on_event(&key(KeyCode::Char('q'))), Action::None);
+        assert!(app.viewer.is_none());
+        assert_eq!(app.focus, Focus::Composer);
+        app.on_event(&key(KeyCode::Char('q')));
+        assert_eq!(app.input, "q");
+    }
+
+    #[test]
+    fn a_attaches_the_open_file_and_keeps_the_pane() {
+        let (mut app, _dir) = app_with_open_viewer();
+        app.on_event(&key(KeyCode::Char('a')));
+        assert_eq!(app.input, "@long.txt ");
+        assert!(app.viewer.is_some(), "le lecteur reste ouvert");
+        assert_eq!(app.focus, Focus::Composer);
+    }
+
+    #[test]
+    fn a_modal_still_owns_the_keyboard_over_the_viewer() {
+        let (mut app, _dir) = app_with_open_viewer();
+        app.gate_open = true;
+        assert_eq!(app.on_event(&key(KeyCode::Char('y'))), Action::GateApprove);
+    }
+
+    #[test]
+    fn the_wheel_over_the_viewer_scrolls_the_file_not_the_chat() {
+        let (mut app, _dir) = app_with_open_viewer();
+        app.chat_overflow.set(50);
+
+        app.on_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 70,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.viewer.as_ref().unwrap().scroll, SCROLL_WHEEL as usize);
+        assert_eq!(app.scroll_offset, 0, "le chat n'a pas bougé");
+
+        app.on_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(
+            app.scroll_offset, SCROLL_WHEEL,
+            "hors du lecteur la molette rend le chat"
+        );
+    }
+
+    #[test]
+    fn opening_a_directory_reports_it_instead_of_opening_a_pane() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.open_viewer("src/tui/");
+        assert!(app.viewer.is_none());
+        assert_eq!(app.focus, Focus::Composer);
+        assert!(
+            app.chat
+                .last()
+                .expect("ligne système")
+                .text
+                .contains("lecture impossible")
+        );
     }
 
     #[test]

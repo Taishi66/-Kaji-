@@ -105,6 +105,19 @@ impl MentionIndex {
             .map(|e| e.path.clone())
             .collect()
     }
+
+    /// Fuzzy-ranked paths for the file finder (task 8), best first. Kept apart
+    /// from [`MentionIndex::complete`] because they answer different
+    /// questions: the dropdown finishes the fragment being typed, the finder
+    /// looks for a file. Both read the same snapshot and the same
+    /// pre-lowercased entries.
+    pub fn search(&self, query: &str, cap: usize) -> Vec<String> {
+        crate::tui::fuzzy::rank(query, self.entries.iter().map(|e| e.lower.as_str()))
+            .into_iter()
+            .take(cap)
+            .map(|(idx, _)| self.entries[idx].path.clone())
+            .collect()
+    }
 }
 
 /// The live `@` fragment at the end of the composer input, if any. A mention

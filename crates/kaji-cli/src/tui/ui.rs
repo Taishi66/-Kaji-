@@ -1,4 +1,5 @@
-use crate::tui::app::{self, App, ChatLine, Sender, ToolApprovalRequest};
+use crate::tui::app::{self, App, ChatLine, Focus, Sender, ToolApprovalRequest};
+use crate::tui::viewer::{self, Viewer};
 use crate::tui::{markdown, theme};
 use kaji_core::sdd::StageStatus;
 use ratatui::Frame;
@@ -15,33 +16,46 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_header(frame, app, root[0]);
 
-    if app.spec_panel_visible() {
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
-            .split(root[1]);
-
-        let left = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
-            .split(cols[0]);
-
-        draw_chat(frame, app, left[0]);
-        draw_input(frame, app, left[1]);
-        draw_palette(frame, app, left[1]);
-        draw_mentions(frame, app, left[1]);
-        draw_spec(frame, app, cols[1]);
+    // One right column, two possible tenants: the file viewer takes the slot
+    // while it is open and hands it straight back to the SPEC panel on close —
+    // nothing to save and restore, the panel's own visibility answers again.
+    let right = if app.viewer.is_some() {
+        Some([
+            Constraint::Min(0),
+            Constraint::Length(viewer_width(root[1].width)),
+        ])
+    } else if app.spec_panel_visible() {
+        Some([Constraint::Percentage(72), Constraint::Percentage(28)])
     } else {
-        let left = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
-            .split(root[1]);
+        None
+    };
+    let (chat_area, right_area) = match right {
+        Some(constraints) => {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(constraints)
+                .split(root[1]);
+            (cols[0], Some(cols[1]))
+        }
+        None => (root[1], None),
+    };
 
-        draw_chat(frame, app, left[0]);
-        draw_input(frame, app, left[1]);
-        draw_palette(frame, app, left[1]);
-        draw_mentions(frame, app, left[1]);
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .split(chat_area);
+
+    draw_chat(frame, app, left[0]);
+    draw_input(frame, app, left[1]);
+    draw_palette(frame, app, left[1]);
+    draw_mentions(frame, app, left[1]);
+    if let Some(area) = right_area {
+        match &app.viewer {
+            Some(viewer) => draw_viewer(frame, app, viewer, area),
+            None => draw_spec(frame, app, area),
+        }
     }
+    draw_finder(frame, app);
 
     if app.gate_open {
         draw_gate_modal(frame);
@@ -518,6 +532,173 @@ fn draw_mentions(frame: &mut Frame, app: &App, input_area: Rect) {
     if let Some(hint) = hint {
         lines.push(Line::from(Span::styled(hint, theme::dim())));
     }
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+}
+
+const FINDER_MAX_WIDTH: u16 = 100;
+const FINDER_MAX_HEIGHT: u16 = 24;
+const FINDER_PROMPT: &str = "› ";
+
+/// Fuzzy file finder (`Ctrl+P`, `/files`) — centered, unlike the palette and
+/// the mention dropdown which hug the composer: this one is a place you go to,
+/// not a completion of what you are already typing. Drawn after the panes and
+/// before the y/n modals, which stay on top of everything.
+fn draw_finder(frame: &mut Frame, app: &App) {
+    let Some(finder) = &app.finder else {
+        return;
+    };
+    let full = frame.area();
+    let width = (u32::from(full.width) * 90 / 100).min(FINDER_MAX_WIDTH.into()) as u16;
+    let height = (u32::from(full.height) * 70 / 100).min(FINDER_MAX_HEIGHT.into()) as u16;
+    if width < 12 || height < 5 {
+        return;
+    }
+    let area = Rect {
+        x: full.x + (full.width - width) / 2,
+        y: full.y + (full.height - height) / 2,
+        width,
+        height,
+    };
+    let total = finder.results.len();
+    let position = if total == 0 { 0 } else { finder.selected + 1 };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_active())
+        .title(Span::styled(" ⌕ fichiers ", theme::title()))
+        .title_bottom(
+            Line::from(format!(
+                " Enter ouvrir · Tab attacher @ · Esc fermer · {position}/{total} "
+            ))
+            .style(theme::dim()),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(FINDER_PROMPT, theme::accent()),
+            Span::styled(sanitize_for_display(&finder.query), theme::text()),
+        ])),
+        rows[0],
+    );
+    let cursor_x = rows[0].x + (FINDER_PROMPT.chars().count() + finder.cursor) as u16;
+    frame.set_cursor_position((cursor_x.min(rows[0].right().saturating_sub(1)), rows[0].y));
+
+    let hint = if app.finder_indexing() {
+        Some("indexation…")
+    } else if app.mention_index_truncated() {
+        Some("… index tronqué (20 000 entrées)")
+    } else {
+        None
+    };
+    let list_rows = (rows[1].height as usize).saturating_sub(usize::from(hint.is_some()));
+    // Sliding window: the selection stays visible however far down the list it
+    // has walked.
+    let first = finder.selected.saturating_sub(list_rows.saturating_sub(1));
+    let mut lines: Vec<Line> = finder
+        .results
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(list_rows)
+        .map(|(i, path)| {
+            let selected = i == finder.selected;
+            let marker = if selected { "▸ " } else { "  " };
+            let style = if selected {
+                theme::accent()
+            } else {
+                theme::text()
+            };
+            Line::from(vec![
+                Span::styled(marker, theme::accent()),
+                Span::styled(sanitize_for_display(path), style),
+            ])
+        })
+        .collect();
+    if let Some(hint) = hint {
+        lines.push(Line::from(Span::styled(hint, theme::dim())));
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)), rows[1]);
+}
+
+const VIEWER_PERCENT: u16 = 45;
+const VIEWER_MIN_WIDTH: u16 = 40;
+/// Columns the chat keeps whatever the viewer asks for — a right column that
+/// eats the whole terminal would hide the conversation it is being read for.
+const VIEWER_MIN_CHAT: u16 = 20;
+
+fn viewer_width(total: u16) -> u16 {
+    let target = (u32::from(total) * u32::from(VIEWER_PERCENT) / 100) as u16;
+    target
+        .max(VIEWER_MIN_WIDTH)
+        .min(total.saturating_sub(VIEWER_MIN_CHAT))
+}
+
+/// Read-only file pane (task 8). Lines are already sanitized and tab-expanded
+/// by `viewer::load`; long ones are clipped rather than wrapped, so line
+/// numbers keep matching the file's.
+fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
+    app.viewer_area.set(area);
+    let visible = area.height.saturating_sub(2) as usize;
+    let total = viewer.lines.len();
+    let first = viewer.scroll.min(total.saturating_sub(1));
+    let title = if viewer.binary {
+        format!(" 📄 {} ", sanitize_for_display(&viewer.path))
+    } else {
+        let last = (first + visible).min(total);
+        let start = if total == 0 { 0 } else { first + 1 };
+        format!(
+            " 📄 {} · L{start}-{last}/{total} ",
+            sanitize_for_display(&viewer.path)
+        )
+    };
+    let footer = if viewer.truncated {
+        format!(
+            " … tronqué ({} lus) · j/k défiler · a attacher @ · q fermer ",
+            viewer::read_limit_label()
+        )
+    } else {
+        " j/k défiler · a attacher @ · q fermer ".to_string()
+    };
+    let border = if app.focus == Focus::Viewer {
+        theme::border_active()
+    } else {
+        theme::border_inactive()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border)
+        .title(Span::styled(title, theme::title()))
+        .title_bottom(Line::from(footer).style(theme::dim()));
+
+    let lines: Vec<Line> = if viewer.binary {
+        viewer
+            .lines
+            .iter()
+            .map(|text| Line::from(Span::styled(text.clone(), theme::dim())))
+            .collect()
+    } else {
+        let number_width = total.to_string().len();
+        viewer
+            .lines
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(visible)
+            .map(|(i, text)| {
+                Line::from(vec![
+                    Span::styled(format!("{:>number_width$} ", i + 1), theme::dim()),
+                    Span::styled(text.clone(), theme::text()),
+                ])
+            })
+            .collect()
+    };
     frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
 }
 
@@ -1615,5 +1796,90 @@ mod tests {
         assert!(!badge.contains('\n'), "{badge}");
         assert!(!badge.contains('\u{1b}'), "{badge}");
         assert!(badge.chars().count() < 60, "{badge}");
+    }
+
+    fn rendered(app: &App, width: u16, height: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| draw(frame, app))
+            .expect("draw must succeed against a TestBackend");
+        buffer_as_string(terminal.backend().buffer())
+    }
+
+    /// An App rooted on a tempdir holding one file, index already delivered.
+    fn app_on_a_project(file: &str, content: &str) -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(file), content).unwrap();
+        let mut app = App::new(None);
+        app.set_working_dir(dir.path().to_path_buf());
+        app.on_mention_index_ready(crate::tui::mentions::MentionIndex::build(
+            dir.path().to_path_buf(),
+        ));
+        (app, dir)
+    }
+
+    #[test]
+    fn the_finder_overlay_lists_matches_with_its_key_hints() {
+        let (mut app, _dir) = app_on_a_project("README.md", "x");
+        app.open_finder();
+
+        let content = rendered(&app, 80, 20);
+
+        assert!(content.contains("fichiers"), "got:\n{content}");
+        assert!(content.contains("README.md"), "got:\n{content}");
+        assert!(content.contains("Tab attacher @"), "got:\n{content}");
+        assert!(content.contains("▸"), "marqueur de sélection visible");
+    }
+
+    #[test]
+    fn the_viewer_takes_the_spec_slot_and_hands_it_back_on_close() {
+        let (mut app, _dir) = app_on_a_project("a.rs", "fn main() {}\n");
+        app.toggle_spec_panel();
+        assert!(app.spec_panel_visible());
+        assert!(rendered(&app, 100, 20).contains("SPEC"));
+
+        app.open_viewer("a.rs");
+        let content = rendered(&app, 100, 20);
+        assert!(content.contains("a.rs"), "got:\n{content}");
+        assert!(content.contains("fn main()"), "got:\n{content}");
+        assert!(content.contains("q fermer"), "got:\n{content}");
+        assert!(
+            !content.contains("SPEC"),
+            "le lecteur occupe la colonne du volet SPEC, got:\n{content}"
+        );
+
+        app.close_viewer();
+        assert!(
+            rendered(&app, 100, 20).contains("SPEC"),
+            "le volet SPEC revient à la fermeture"
+        );
+    }
+
+    #[test]
+    fn the_viewer_numbers_its_lines_and_scrolls_to_the_offset() {
+        let file: String = (1..=60).map(|i| format!("ligne{i}\n")).collect();
+        let (mut app, _dir) = app_on_a_project("n.txt", &file);
+        app.open_viewer("n.txt");
+        assert!(rendered(&app, 100, 20).contains(" 1 ligne1"));
+
+        app.viewer.as_mut().unwrap().scroll = 40;
+        let content = rendered(&app, 100, 20);
+        assert!(content.contains("41 ligne41"), "got:\n{content}");
+        assert!(
+            !content.contains(" 1 ligne1"),
+            "la première ligne est passée au-dessus, got:\n{content}"
+        );
+        assert!(content.contains("L41-"), "got:\n{content}");
+    }
+
+    #[test]
+    fn viewer_width_keeps_a_floor_for_both_columns() {
+        assert_eq!(viewer_width(120), 54);
+        assert_eq!(viewer_width(60), 40, "plancher de 40 colonnes");
+        assert_eq!(viewer_width(50), 30, "le chat garde ses 20 colonnes");
     }
 }

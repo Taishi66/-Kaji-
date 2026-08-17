@@ -1,10 +1,12 @@
 pub mod app;
 pub mod diff;
+pub mod fuzzy;
 pub mod markdown;
 pub mod mentions;
 pub mod report;
 pub mod theme;
 pub mod ui;
+pub mod viewer;
 
 use anyhow::{Context, Result};
 use app::{Action, App, PassDriver, ToolApprovalRequest};
@@ -209,6 +211,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
     match cmd.name {
         "/sdd" => "démarre une passe SDD (SPEC.md ou --spec)",
         "/goal" => "boucle évaluée vers un but (<condition> | clear)",
+        "/files" => "(Ctrl+P) recherche floue de fichiers",
         "/spec" => "(F2) panneau SPEC on/off",
         "/think" => "(F3) raisonnement du modèle (思考中)",
         "/cost" => "usage tokens/coût (session, 5 h, 7 j)",
@@ -226,11 +229,12 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
 fn navigation_section(mouse_enabled: bool, content_style: Style) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled("navigation", theme::title()))];
     if mouse_enabled {
-        let rows: [(&str, &str); 8] = [
+        let rows: [(&str, &str); 9] = [
             ("molette", "défile le chat (3 lignes/cran)"),
             ("PageUp/PageDown", "défile par page · Home/End"),
             ("Ctrl+↑/↓", "saute au tour précédent/suivant"),
             ("↑/↓", "historique de prompts"),
+            ("Ctrl+P", "recherche floue de fichiers (/files)"),
             (
                 "Ctrl+S",
                 "steer : envoie les messages en file au tour en cours",
@@ -254,6 +258,7 @@ fn navigation_section(mouse_enabled: bool, content_style: Style) -> Vec<Line<'st
         for text in [
             "PageUp/PageDown/Home/End font défiler le chat",
             "Ctrl+↑/↓ saute au tour précédent/suivant",
+            "Ctrl+P recherche floue de fichiers (/files)",
             "Ctrl+S steer : envoie les messages en file au tour en cours",
             "Shift+Tab change le mode (approve → smart → auto)",
             "Esc interrompt · Ctrl+C quitte",
@@ -2009,7 +2014,8 @@ mod tests {
 
         for (name, next_name) in [
             ("/sdd", "/goal"),
-            ("/goal", "/spec"),
+            ("/goal", "/files"),
+            ("/files", "/spec"),
             ("/spec", "/think"),
             ("/think", "/cost"),
             ("/cost", "/context"),
