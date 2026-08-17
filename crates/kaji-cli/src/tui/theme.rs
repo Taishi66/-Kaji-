@@ -301,6 +301,46 @@ pub fn table_header() -> Style {
         .add_modifier(Modifier::DIM)
 }
 
+/// Or nu, sans le gras de [`title`] ni l'atténuation de [`table_header`] —
+/// jauges budget et contexte sous leur seuil d'alerte.
+pub fn gold() -> Style {
+    Style::default().fg(active().gold)
+}
+
+/// Rôle sémantique d'un span de bloc pré-rendu (`/cost`, `/context`,
+/// `/docker`, `/checkpoints`, bannière, erreurs) : ce que la ligne de chat
+/// stocke à la place d'un `Style`, pour que la couleur soit résolue au draw et
+/// qu'un `/theme` en session re-colore les blocs déjà poussés.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpanRole {
+    /// Aucun style — espaces de marge et lignes vides.
+    Plain,
+    Text,
+    Dim,
+    System,
+    Accent,
+    Error,
+    Title,
+    TableHeader,
+    BorderInactive,
+    Gold,
+}
+
+pub fn style(role: SpanRole) -> Style {
+    match role {
+        SpanRole::Plain => Style::default(),
+        SpanRole::Text => text(),
+        SpanRole::Dim => dim(),
+        SpanRole::System => system(),
+        SpanRole::Accent => accent(),
+        SpanRole::Error => error(),
+        SpanRole::Title => title(),
+        SpanRole::TableHeader => table_header(),
+        SpanRole::BorderInactive => border_inactive(),
+        SpanRole::Gold => gold(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

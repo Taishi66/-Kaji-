@@ -1,3 +1,4 @@
+use crate::tui::theme::SpanRole;
 use crate::tui::{diff, theme};
 use kaji::agents::AgentEvent;
 use kaji::config::KajiMode;
@@ -14,7 +15,6 @@ use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Span};
 use rmcp::model::{JsonObject, Role};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -99,16 +99,82 @@ pub struct ToolLineState {
     pub started: Instant,
 }
 
+/// Un span de bloc pré-rendu : son texte et son rôle sémantique, jamais un
+/// `Style` — la couleur est résolue à chaque frame par
+/// `ui::push_rendered_lines`, donc un `/theme` en session re-colore les blocs
+/// déjà poussés.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoledSpan {
+    pub text: String,
+    pub role: SpanRole,
+}
+
+/// Une ligne pré-rendue : ses spans, dans l'ordre.
+pub type RoledLine = Vec<RoledSpan>;
+
+/// Un constructeur par rôle, nommé comme la fonction de style que
+/// `theme::style` lui associe : les producteurs de blocs écrivent le même
+/// vocabulaire qu'avec `Span::styled(.., theme::xxx())`, sans résoudre de
+/// couleur.
+impl RoledSpan {
+    pub fn new(text: impl Into<String>, role: SpanRole) -> Self {
+        Self {
+            text: text.into(),
+            role,
+        }
+    }
+
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self::new(text, SpanRole::Plain)
+    }
+
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::new(text, SpanRole::Text)
+    }
+
+    pub fn dim(text: impl Into<String>) -> Self {
+        Self::new(text, SpanRole::Dim)
+    }
+
+    pub fn system(text: impl Into<String>) -> Self {
+        Self::new(text, SpanRole::System)
+    }
+
+    pub fn accent(text: impl Into<String>) -> Self {
+        Self::new(text, SpanRole::Accent)
+    }
+
+    pub fn error(text: impl Into<String>) -> Self {
+        Self::new(text, SpanRole::Error)
+    }
+
+    pub fn title(text: impl Into<String>) -> Self {
+        Self::new(text, SpanRole::Title)
+    }
+
+    pub fn table_header(text: impl Into<String>) -> Self {
+        Self::new(text, SpanRole::TableHeader)
+    }
+
+    pub fn border_inactive(text: impl Into<String>) -> Self {
+        Self::new(text, SpanRole::BorderInactive)
+    }
+
+    pub fn gold(text: impl Into<String>) -> Self {
+        Self::new(text, SpanRole::Gold)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatLine {
     pub sender: Sender,
     pub text: String,
     pub tool: Option<ToolLineState>,
-    /// System lines only: pre-rendered, per-role-styled lines (aligned
-    /// tables) that bypass the plain dim-italic style entirely — used for
-    /// on-demand report blocks (`/cost`, `/docker`). `text` still carries
-    /// the flattened plain-text equivalent for scroll-height accounting.
-    pub rendered: Option<Vec<Line<'static>>>,
+    /// System lines only: pre-rendered blocks (aligned tables) whose spans
+    /// carry a semantic role instead of the plain dim-italic style — used for
+    /// on-demand report blocks (`/cost`, `/docker`). `text` still carries the
+    /// flattened plain-text equivalent for scroll-height accounting.
+    pub rendered: Option<Vec<RoledLine>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2398,17 +2464,17 @@ impl App {
         self.reset_agent_merge_ids();
     }
 
-    /// Same as [`Self::push_system`] but with pre-rendered, per-role-styled
-    /// lines (aligned tables) — used for on-demand report blocks (`/cost`,
-    /// `/docker`) that need theme styling the plain system register can't
-    /// express.
-    pub fn push_system_lines(&mut self, lines: Vec<Line<'static>>) {
+    /// Same as [`Self::push_system`] but with pre-rendered blocks (aligned
+    /// tables) whose spans carry a [`SpanRole`] — used for on-demand report
+    /// blocks (`/cost`, `/docker`) that need theme styling the plain system
+    /// register can't express.
+    pub fn push_system_lines(&mut self, lines: Vec<RoledLine>) {
         let text = lines
             .iter()
-            .map(|line| {
-                line.spans
+            .map(|spans| {
+                spans
                     .iter()
-                    .map(|s| s.content.as_ref())
+                    .map(|span| span.text.as_str())
                     .collect::<String>()
             })
             .collect::<Vec<_>>()
@@ -2436,7 +2502,7 @@ impl App {
                 } else {
                     line.to_string()
                 };
-                Line::from(Span::styled(text, theme::error()))
+                vec![RoledSpan::error(text)]
             })
             .collect();
         self.push_system_lines(lines);
@@ -2664,7 +2730,6 @@ mod tests {
     use ratatui::crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
     };
-    use ratatui::text::Span;
     use rmcp::model::{CallToolRequestParams, CallToolResult};
     use rmcp::object;
     use test_case::test_case;
@@ -4929,8 +4994,8 @@ mod tests {
     fn push_system_lines_marks_the_chat_line_as_rendered_and_flattens_text() {
         let mut app = App::new(None);
         app.push_system_lines(vec![
-            Line::from(Span::raw("/cost")),
-            Line::from(Span::raw("session : 10")),
+            vec![RoledSpan::title("/cost")],
+            vec![RoledSpan::text("session : 10")],
         ]);
         let line = app.chat.last().expect("chat line pushed");
         assert!(matches!(line.sender, Sender::System));

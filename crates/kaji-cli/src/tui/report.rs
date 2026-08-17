@@ -1,14 +1,12 @@
 //! Tableaux alignés à largeur fixe pour les blocs système `/cost` et
 //! `/docker` — construits par `format!` paddé plutôt que via un widget
-//! `Table` ratatui, pour rester une simple liste de `Line` insérable dans le
+//! `Table` ratatui, pour rester une simple liste de lignes insérable dans le
 //! flux du chat.
 
-use crate::tui::theme;
+use crate::tui::app::{RoledLine, RoledSpan};
 use kaji::agents::ContextBreakdown;
 use kaji::context_mgmt::condense::CondenseTotals;
 use kaji::session::{UsageAggregate, UsageWindows};
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
 
 const GAUGE_WIDTH: usize = 16;
 const GAUGE_DANGER_THRESHOLD: f64 = 0.9;
@@ -134,7 +132,7 @@ pub fn cost_table_lines(
     model: &str,
     budget_5h: Option<Budget>,
     budget_7j: Option<Budget>,
-) -> Vec<Line<'static>> {
+) -> Vec<RoledLine> {
     let session_total = tok(windows.session.total_tokens);
     let last_5h_total = tok(windows.last_5h.total_tokens);
     let last_7d_total = tok(windows.last_7d.total_tokens);
@@ -176,33 +174,30 @@ pub fn cost_table_lines(
     let rule_width = header_row.chars().count().saturating_sub(1);
 
     let mut lines = vec![
-        Line::from(Span::styled(
-            format!("/cost — {provider}/{model}"),
-            theme::title(),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(header_row, theme::table_header())),
-        Line::from(Span::styled(
-            format!(" {}", "─".repeat(rule_width)),
-            theme::border_inactive(),
-        )),
+        vec![RoledSpan::title(format!("/cost — {provider}/{model}"))],
+        vec![RoledSpan::plain("")],
+        vec![RoledSpan::table_header(header_row)],
+        vec![RoledSpan::border_inactive(format!(
+            " {}",
+            "─".repeat(rule_width)
+        ))],
     ];
 
     for row in &rows {
-        lines.push(Line::from(Span::styled(
-            format_row(row, &widths, &right_align),
-            theme::text(),
-        )));
+        lines.push(vec![RoledSpan::text(format_row(
+            row,
+            &widths,
+            &right_align,
+        ))]);
     }
 
     let cost_unknown_everywhere = windows.session.cost.is_none()
         && windows.last_5h.cost.is_none()
         && windows.last_7d.cost.is_none();
     if cost_unknown_everywhere {
-        lines.push(Line::from(Span::styled(
+        lines.push(vec![RoledSpan::dim(
             "coût indisponible : provider sans tarification",
-            theme::dim(),
-        )));
+        )]);
     }
 
     for (label, budget, agg) in [
@@ -217,7 +212,7 @@ pub fn cost_table_lines(
     lines
 }
 
-fn budget_gauge_line(window_label: &str, budget: Budget, agg: &UsageAggregate) -> Line<'static> {
+fn budget_gauge_line(window_label: &str, budget: Budget, agg: &UsageAggregate) -> RoledLine {
     let (used_display, total_display, unit, ratio) = match budget {
         Budget::Tokens(total) => {
             let used = tok(agg.total_tokens);
@@ -234,19 +229,18 @@ fn budget_gauge_line(window_label: &str, budget: Budget, agg: &UsageAggregate) -
                 (format!("${cost:.2}"), format!("${total:.2}"), "", ratio)
             }
             None => {
-                return Line::from(Span::styled(
-                    format!(" budget {window_label} — coût indisponible pour ce budget"),
-                    theme::dim(),
-                ));
+                return vec![RoledSpan::dim(format!(
+                    " budget {window_label} — coût indisponible pour ce budget"
+                ))];
             }
         },
     };
 
     let bar = gauge(ratio, GAUGE_WIDTH);
-    let bar_style = if ratio >= GAUGE_DANGER_THRESHOLD {
-        Style::default().fg(theme::accent_color())
+    let bar_span = if ratio >= GAUGE_DANGER_THRESHOLD {
+        RoledSpan::accent(bar)
     } else {
-        Style::default().fg(theme::gold_color())
+        RoledSpan::gold(bar)
     };
     let percent = (ratio * 100.0).round() as i64;
     let detail = if unit.is_empty() {
@@ -255,11 +249,11 @@ fn budget_gauge_line(window_label: &str, budget: Budget, agg: &UsageAggregate) -
         format!("  {percent} %  ({used_display} / {total_display} {unit})")
     };
 
-    Line::from(vec![
-        Span::styled(format!(" budget {window_label}  "), theme::dim()),
-        Span::styled(bar, bar_style),
-        Span::styled(detail, theme::text()),
-    ])
+    vec![
+        RoledSpan::dim(format!(" budget {window_label}  ")),
+        bar_span,
+        RoledSpan::text(detail),
+    ]
 }
 
 /// Ligne de synthèse condense — `None` si aucun résultat d'outil n'a jamais
@@ -268,19 +262,16 @@ fn budget_gauge_line(window_label: &str, budget: Budget, agg: &UsageAggregate) -
 /// qu'ils restent hors de la fenêtre de fraîcheur (voir
 /// `condense::totals`), donc ce nombre reflète l'économie réalisée sur
 /// l'ensemble de la session, pas un total de résultats uniques.
-pub fn condense_line(totals: &CondenseTotals) -> Option<Line<'static>> {
+pub fn condense_line(totals: &CondenseTotals) -> Option<RoledLine> {
     if totals.results_touched == 0 {
         return None;
     }
     let saved_tokens = totals.bytes_before.saturating_sub(totals.bytes_after) / 4;
-    Some(Line::from(Span::styled(
-        format!(
-            "condensé : {} résultats · ~{} tok d'historique non envoyés (cumul, est.)",
-            totals.results_touched,
-            fmt_tokens(saved_tokens)
-        ),
-        theme::dim(),
-    )))
+    Some(vec![RoledSpan::dim(format!(
+        "condensé : {} résultats · ~{} tok d'historique non envoyés (cumul, est.)",
+        totals.results_touched,
+        fmt_tokens(saved_tokens)
+    ))])
 }
 
 /// Construit le bloc `/context` : jauge d'occupation globale, une ligne par
@@ -290,7 +281,7 @@ pub fn context_table_lines(
     breakdown: &ContextBreakdown,
     provider: &str,
     model: &str,
-) -> Vec<Line<'static>> {
+) -> Vec<RoledLine> {
     let limit = breakdown.limit as u64;
     let used = breakdown.used as u64;
     let ratio = if limit == 0 {
@@ -307,36 +298,31 @@ pub fn context_table_lines(
             breakdown.compaction_threshold_pct
         )
     });
-    let bar_style = match &auto_compact {
+    let bar = gauge(ratio, CONTEXT_GAUGE_WIDTH);
+    let bar_span = match &auto_compact {
         Some(_) if breakdown.used_pct() >= breakdown.compaction_threshold_pct => {
-            Style::default().fg(theme::accent_color())
+            RoledSpan::accent(bar)
         }
-        _ => Style::default().fg(theme::gold_color()),
+        _ => RoledSpan::gold(bar),
     };
 
     let mut lines = vec![
-        Line::from(Span::styled(
-            format!("/context — {provider}/{model}"),
-            theme::title(),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(gauge(ratio, CONTEXT_GAUGE_WIDTH), bar_style),
-            Span::styled(
-                format!(
-                    " {} / {} ({} %){}",
-                    fmt_tokens(used),
-                    fmt_tokens(limit),
-                    breakdown.used_pct(),
-                    auto_compact
-                        .as_deref()
-                        .unwrap_or(" · auto-compact désactivé")
-                ),
-                theme::text(),
-            ),
-        ]),
-        Line::from(""),
+        vec![RoledSpan::title(format!("/context — {provider}/{model}"))],
+        vec![RoledSpan::plain("")],
+        vec![
+            RoledSpan::plain(" "),
+            bar_span,
+            RoledSpan::text(format!(
+                " {} / {} ({} %){}",
+                fmt_tokens(used),
+                fmt_tokens(limit),
+                breakdown.used_pct(),
+                auto_compact
+                    .as_deref()
+                    .unwrap_or(" · auto-compact désactivé")
+            )),
+        ],
+        vec![RoledSpan::plain("")],
     ];
 
     for (label, tokens) in [
@@ -351,62 +337,52 @@ pub fn context_table_lines(
         lines.push(context_category_line(label, tokens as u64, limit));
     }
 
-    lines.push(Line::from(Span::styled(
-        format!(
-            " {:<CONTEXT_LABEL_WIDTH$} {:>8}",
-            "libre",
-            fmt_tokens(breakdown.free() as u64)
-        ),
-        theme::text(),
-    )));
+    lines.push(vec![RoledSpan::text(format!(
+        " {:<CONTEXT_LABEL_WIDTH$} {:>8}",
+        "libre",
+        fmt_tokens(breakdown.free() as u64)
+    ))]);
 
     if let Some(last_reported) = breakdown.last_reported {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "dernier total rapporté par le provider : {}",
-                fmt_tokens(last_reported as u64)
-            ),
-            theme::dim(),
-        )));
+        lines.push(vec![RoledSpan::dim(format!(
+            "dernier total rapporté par le provider : {}",
+            fmt_tokens(last_reported as u64)
+        ))]);
     }
 
-    lines.push(Line::from(Span::styled(
+    lines.push(vec![RoledSpan::dim(
         "estimation tokenizer o200k — les chiffres exacts sont ceux du provider",
-        theme::dim(),
-    )));
+    )]);
 
     lines
 }
 
 /// Une catégorie vide n'a ni part ni jauge à montrer : `—` dit « rien ici »
 /// sans imposer une barre à zéro parmi celles qui portent du sens.
-fn context_category_line(label: &str, tokens: u64, limit: u64) -> Line<'static> {
+fn context_category_line(label: &str, tokens: u64, limit: u64) -> RoledLine {
     if tokens == 0 {
-        return Line::from(Span::styled(
-            format!(" {label:<CONTEXT_LABEL_WIDTH$} {:>8}", "—"),
-            theme::dim(),
-        ));
+        return vec![RoledSpan::dim(format!(
+            " {label:<CONTEXT_LABEL_WIDTH$} {:>8}",
+            "—"
+        ))];
     }
     let ratio = if limit == 0 {
         0.0
     } else {
         tokens as f64 / limit as f64
     };
-    Line::from(Span::styled(
-        format!(
-            " {label:<CONTEXT_LABEL_WIDTH$} {:>8} {:>3} %  {}",
-            fmt_tokens(tokens),
-            pct(tokens, limit),
-            gauge(ratio, CONTEXT_CATEGORY_GAUGE_WIDTH)
-        ),
-        theme::text(),
-    ))
+    vec![RoledSpan::text(format!(
+        " {label:<CONTEXT_LABEL_WIDTH$} {:>8} {:>3} %  {}",
+        fmt_tokens(tokens),
+        pct(tokens, limit),
+        gauge(ratio, CONTEXT_CATEGORY_GAUGE_WIDTH)
+    ))]
 }
 
 /// Parse `docker ps --format "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"`
 /// en tableau aligné NOM/IMAGE/STATUT/PORTS, colonnes tronquées avec `…` au
 /// besoin.
-pub fn docker_table_lines(raw_output: &str) -> Vec<Line<'static>> {
+pub fn docker_table_lines(raw_output: &str) -> Vec<RoledLine> {
     let raw_rows: Vec<[String; 4]> = raw_output
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -422,10 +398,7 @@ pub fn docker_table_lines(raw_output: &str) -> Vec<Line<'static>> {
         .collect();
 
     if raw_rows.is_empty() {
-        return vec![Line::from(Span::styled(
-            "docker : aucun conteneur en cours",
-            theme::dim(),
-        ))];
+        return vec![vec![RoledSpan::dim("docker : aucun conteneur en cours")]];
     }
 
     let headers = ["nom", "image", "statut", "ports"];
@@ -447,18 +420,19 @@ pub fn docker_table_lines(raw_output: &str) -> Vec<Line<'static>> {
     let rule_width = header_row.chars().count().saturating_sub(1);
 
     let mut lines = vec![
-        Line::from(Span::styled(header_row, theme::table_header())),
-        Line::from(Span::styled(
-            format!(" {}", "─".repeat(rule_width)),
-            theme::border_inactive(),
-        )),
+        vec![RoledSpan::table_header(header_row)],
+        vec![RoledSpan::border_inactive(format!(
+            " {}",
+            "─".repeat(rule_width)
+        ))],
     ];
 
     for row in &rows {
-        lines.push(Line::from(Span::styled(
-            format_row(row, &widths, &right_align),
-            theme::text(),
-        )));
+        lines.push(vec![RoledSpan::text(format_row(
+            row,
+            &widths,
+            &right_align,
+        ))]);
     }
 
     lines
@@ -468,11 +442,11 @@ pub fn docker_table_lines(raw_output: &str) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
 
-    fn plain_text(line: &Line) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    fn plain_text(line: &RoledLine) -> String {
+        line.iter().map(|span| span.text.as_str()).collect()
     }
 
-    fn plain_lines(lines: &[Line]) -> Vec<String> {
+    fn plain_lines(lines: &[RoledLine]) -> Vec<String> {
         lines.iter().map(plain_text).collect()
     }
 

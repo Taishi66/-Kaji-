@@ -10,7 +10,7 @@ pub mod ui;
 pub mod viewer;
 
 use anyhow::{Context, Result};
-use app::{Action, App, PassDriver, ToolApprovalRequest};
+use app::{Action, App, PassDriver, RoledLine, RoledSpan, ToolApprovalRequest};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use kaji::agents::{Agent, AgentEvent, SessionConfig};
@@ -28,13 +28,12 @@ use ratatui::crossterm::event::{
     Event,
 };
 use ratatui::crossterm::execute;
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
 use std::future::Future;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
+use theme::SpanRole;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -109,10 +108,12 @@ fn mouse_enabled() -> bool {
 /// variable d'environnement avant le fichier de config, la précédence env >
 /// config n'a donc pas à être refaite ici. Une valeur inconnue laisse le thème
 /// par défaut (`zen`, déjà actif au lancement), jamais un lancement qui échoue.
-/// Appelé AVANT `seed_chat`, qui fige la palette des lignes qu'il rejoue
-/// (`push_error`) ; l'avertissement éventuel est rendu par l'appelant après
+/// L'avertissement éventuel est rendu par l'appelant après
 /// `maybe_push_welcome`, sinon il rendrait le chat non vide et masquerait la
 /// bannière d'accueil.
+///
+/// Le thème actif au lancement ne fige plus rien : les blocs pré-rendus
+/// portent un rôle, résolu au draw (`ui::push_rendered_lines`).
 fn apply_startup_theme() -> Option<String> {
     let requested = Config::global().get_param::<String>("KAJI_THEME").ok()?;
     let err = theme::set_active(&requested).err()?;
@@ -159,44 +160,44 @@ fn build_header(session_id: &str) -> String {
 /// `emphasized` selects the content register: `false` is the startup banner
 /// (dim ambiance); `true` is `/help` invoked on-demand, which must read as a
 /// normal answer instead of background noise. Section titles (`commandes`,
-/// `navigation`) always use `theme::title()` (or patiné) in both registers —
-/// only the row content switches between `theme::dim()` and `theme::text()`.
+/// `navigation`) always take the `Title` role (or patiné) in both registers —
+/// only the row content switches between `Dim` and `Text`.
 ///
 /// `App::push_system_lines` splices the `· ` system marker onto the first
 /// line of each block only (`ui::push_rendered_lines`), landing it on the
 /// welcome banner line and on each section's title row — the same spot
 /// `/cost`/`/docker` already put it, not something new here.
 fn push_welcome(app: &mut App, emphasized: bool) {
-    let content_style = if emphasized {
-        theme::text()
+    let content_role = if emphasized {
+        SpanRole::Text
     } else {
-        theme::dim()
+        SpanRole::Dim
     };
 
-    app.push_system_lines(vec![Line::from(Span::styled(
+    app.push_system_lines(vec![vec![RoledSpan::new(
         "鍛冶 bienvenue dans kaji — tape ton message puis Entrée",
-        content_style,
-    ))]);
-    app.push_system_lines(commands_section(content_style));
-    app.push_system_lines(navigation_section(app.mouse_enabled, content_style));
+        content_role,
+    )]]);
+    app.push_system_lines(commands_section(content_role));
+    app.push_system_lines(navigation_section(app.mouse_enabled, content_role));
 }
 
-fn commands_section(content_style: Style) -> Vec<Line<'static>> {
+fn commands_section(content_role: SpanRole) -> Vec<RoledLine> {
     let name_width = crate::tui::app::COMMANDS
         .iter()
         .map(|cmd| cmd.name.chars().count())
         .max()
         .unwrap_or(0);
-    let mut lines = vec![Line::from(Span::styled("commandes", theme::title()))];
+    let mut lines = vec![vec![RoledSpan::title("commandes")]];
     for cmd in crate::tui::app::COMMANDS {
-        lines.push(Line::from(Span::styled(
+        lines.push(vec![RoledSpan::new(
             format!(
                 "  {:<name_width$}   {}",
                 cmd.name,
                 welcome_command_desc(cmd)
             ),
-            content_style,
-        )));
+            content_role,
+        )]);
     }
     lines
 }
@@ -228,8 +229,8 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
 /// don't work. Keeps the pre-mouse-support sentences verbatim (commit
 /// 26bd297c8) instead of the aligned key/description rows below, since they
 /// were never key/desc pairs to begin with.
-fn navigation_section(mouse_enabled: bool, content_style: Style) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled("navigation", theme::title()))];
+fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledLine> {
+    let mut lines = vec![vec![RoledSpan::title("navigation")]];
     if mouse_enabled {
         let rows: [(&str, &str); 11] = [
             ("molette", "défile le chat (3 lignes/cran)"),
@@ -256,10 +257,10 @@ fn navigation_section(mouse_enabled: bool, content_style: Style) -> Vec<Line<'st
             .max()
             .unwrap_or(0);
         for (key, desc) in rows {
-            lines.push(Line::from(Span::styled(
+            lines.push(vec![RoledSpan::new(
                 format!("  {key:<key_width$}   {desc}"),
-                content_style,
-            )));
+                content_role,
+            )]);
         }
     } else {
         for text in [
@@ -272,7 +273,7 @@ fn navigation_section(mouse_enabled: bool, content_style: Style) -> Vec<Line<'st
             "Shift+Tab change le mode (approve → smart → auto)",
             "Esc interrompt · Ctrl+C quitte",
         ] {
-            lines.push(Line::from(Span::styled(text, content_style)));
+            lines.push(vec![RoledSpan::new(text, content_role)]);
         }
     }
     lines
@@ -323,7 +324,7 @@ fn budget_from_env(var: &str) -> Option<report::Budget> {
         .and_then(|v| report::parse_budget(&v))
 }
 
-async fn cost_report(session_manager: &SessionManager, session_id: &str) -> Vec<Line<'static>> {
+async fn cost_report(session_manager: &SessionManager, session_id: &str) -> Vec<RoledLine> {
     let config = Config::global();
     let provider = config
         .get_kaji_provider()
@@ -343,10 +344,7 @@ async fn cost_report(session_manager: &SessionManager, session_id: &str) -> Vec<
             }
             lines
         }
-        Err(e) => vec![Line::from(Span::styled(
-            format!("erreur /cost : {e}"),
-            theme::dim(),
-        ))],
+        Err(e) => vec![vec![RoledSpan::dim(format!("erreur /cost : {e}"))]],
     }
 }
 
@@ -357,7 +355,7 @@ async fn context_report_lines(
     agent: &Agent,
     session_manager: &SessionManager,
     session_id: &str,
-) -> Vec<Line<'static>> {
+) -> Vec<RoledLine> {
     let config = Config::global();
     let provider = config
         .get_kaji_provider()
@@ -375,14 +373,11 @@ async fn context_report_lines(
 
     match report {
         Ok(breakdown) => report::context_table_lines(&breakdown, &provider, &model),
-        Err(e) => vec![Line::from(Span::styled(
-            format!("erreur /context : {e}"),
-            theme::dim(),
-        ))],
+        Err(e) => vec![vec![RoledSpan::dim(format!("erreur /context : {e}"))]],
     }
 }
 
-fn docker_report() -> Vec<Line<'static>> {
+fn docker_report() -> Vec<RoledLine> {
     let output = std::process::Command::new("docker")
         .args([
             "ps",
@@ -398,15 +393,11 @@ fn docker_report() -> Vec<Line<'static>> {
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let first_line = stderr.lines().next().unwrap_or("erreur inconnue");
-            vec![Line::from(Span::styled(
-                format!("docker indisponible — {first_line}"),
-                theme::dim(),
-            ))]
+            vec![vec![RoledSpan::dim(format!(
+                "docker indisponible — {first_line}"
+            ))]]
         }
-        Err(e) => vec![Line::from(Span::styled(
-            format!("docker indisponible — {e}"),
-            theme::dim(),
-        ))],
+        Err(e) => vec![vec![RoledSpan::dim(format!("docker indisponible — {e}"))]],
     }
 }
 
@@ -421,7 +412,7 @@ fn docker_report() -> Vec<Line<'static>> {
 /// `query_preview` (same `turn_seq`) — falling back to the checkpoint's own
 /// `boundary_message_id`, then a placeholder, if that event is missing
 /// (e.g. an old/replayed log).
-fn checkpoints_lines(events: &[SessionEvent]) -> Vec<Line<'static>> {
+fn checkpoints_lines(events: &[SessionEvent]) -> Vec<RoledLine> {
     events
         .iter()
         .filter(|event| event.kind == "checkpoint")
@@ -457,10 +448,10 @@ fn checkpoints_lines(events: &[SessionEvent]) -> Vec<Line<'static>> {
                 })
                 .unwrap_or_else(|| "(sans aperçu)".to_string());
             let preview = crate::tui::ui::sanitize_for_display(&preview);
-            Some(Line::from(Span::styled(
-                format!("tour {} · {id}{marker} · {preview}", checkpoint.turn_seq),
-                theme::system(),
-            )))
+            Some(vec![RoledSpan::system(format!(
+                "tour {} · {id}{marker} · {preview}",
+                checkpoint.turn_seq
+            ))])
         })
         .collect()
 }
@@ -1275,8 +1266,8 @@ mod tests {
         assert_eq!(spec.body, "# Demo\ncorps");
     }
 
-    fn line_text(line: &Line) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    fn line_text(line: &RoledLine) -> String {
+        line.iter().map(|span| span.text.as_str()).collect()
     }
 
     /// BARRIER — a restore must operate on the store the session's snapshots
@@ -1802,22 +1793,22 @@ mod tests {
         assert!(app.chat.is_empty());
     }
 
-    /// `seed_chat` bakes the palette into the lines it replays, so the startup
-    /// theme has to be active before it runs — hence the ordering in
-    /// `event_loop`.
+    /// `seed_chat` ne stocke plus qu'un rôle : le thème actif au replay ne
+    /// fige rien, la couleur est résolue au draw (`ui::push_rendered_lines`).
     #[test]
-    fn a_replayed_error_line_takes_the_theme_active_when_it_is_seeded() {
+    fn a_replayed_error_line_keeps_its_role_whatever_the_theme_at_seed_time() {
         let _theme = theme::test_guard();
 
         theme::set_active("zen").unwrap();
-        let zen = seeded_error_fg();
+        let zen = seeded_error_role();
         theme::set_active("nord").unwrap();
-        let nord = seeded_error_fg();
+        let nord = seeded_error_role();
 
-        assert_ne!(zen, nord);
+        assert_eq!(zen, Some(SpanRole::Error));
+        assert_eq!(zen, nord);
     }
 
-    fn seeded_error_fg() -> Option<ratatui::style::Color> {
+    fn seeded_error_role() -> Option<SpanRole> {
         use kaji::conversation::message::MessageErrorKind;
 
         let mut app = App::new(None);
@@ -1827,7 +1818,7 @@ mod tests {
         seed_chat(&mut app, &conversation);
         app.chat
             .iter()
-            .find_map(|line| line.rendered.as_ref()?.first()?.spans.first()?.style.fg)
+            .find_map(|line| Some(line.rendered.as_ref()?.first()?.first()?.role))
     }
 
     #[tokio::test]

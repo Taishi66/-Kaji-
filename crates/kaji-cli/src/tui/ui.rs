@@ -1,4 +1,4 @@
-use crate::tui::app::{self, App, ChatLine, Focus, Sender, ToolApprovalRequest};
+use crate::tui::app::{self, App, ChatLine, Focus, RoledLine, Sender, ToolApprovalRequest};
 use crate::tui::explorer::ExplorerState;
 use crate::tui::viewer::{self, Viewer};
 use crate::tui::{markdown, theme};
@@ -351,17 +351,24 @@ fn push_system_line(lines: &mut Vec<Line<'static>>, chat_line: &ChatLine) {
     );
 }
 
-/// On-demand report blocks (`/cost`, `/docker`) — already fully styled by
-/// `crate::tui::report`; only the leading `SYSTEM_PREFIX` marker is spliced
-/// onto the first line so it still reads as a system message.
-fn push_rendered_lines(lines: &mut Vec<Line<'static>>, rendered: &[Line<'static>]) {
-    let mut iter = rendered.iter();
-    if let Some(first) = iter.next() {
-        let mut spans = vec![Span::styled(theme::SYSTEM_PREFIX, theme::dim())];
-        spans.extend(first.spans.iter().cloned());
+/// On-demand report blocks (`/cost`, `/docker`) — each span carries a
+/// semantic role that becomes a `Style` HERE, at every frame, so a `/theme`
+/// in session re-colours blocks pushed before it. Only the leading
+/// `SYSTEM_PREFIX` marker is spliced onto the first line so the block still
+/// reads as a system message.
+fn push_rendered_lines(lines: &mut Vec<Line<'static>>, rendered: &[RoledLine]) {
+    for (index, roled) in rendered.iter().enumerate() {
+        let mut spans = Vec::with_capacity(roled.len() + 1);
+        if index == 0 {
+            spans.push(Span::styled(theme::SYSTEM_PREFIX, theme::dim()));
+        }
+        spans.extend(
+            roled
+                .iter()
+                .map(|span| Span::styled(span.text.clone(), theme::style(span.role))),
+        );
         lines.push(Line::from(spans));
     }
-    lines.extend(iter.cloned());
 }
 
 /// Row count for one already-built `Line`, measured with the SAME
@@ -1374,6 +1381,89 @@ mod tests {
             row_text.contains("réponse"),
             "the blade must trail the streaming agent line's own text, got: {row_text:?}"
         );
+    }
+
+    /// Couleur de la première cellule portant l'initiale de `needle`, dans la
+    /// première ligne du chat dessiné qui contient `needle` — lit le buffer
+    /// rendu, donc ce que le terminal affiche, pas les `Line` construites.
+    fn drawn_fg(app: &App, needle: &str) -> ratatui::style::Color {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| draw_chat(frame, app, frame.area()))
+            .expect("draw must succeed against a TestBackend");
+        let buffer = terminal.backend().buffer();
+        let head = needle.chars().next().expect("non-empty needle");
+
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect();
+            if !row.contains(needle) {
+                continue;
+            }
+            for x in 0..buffer.area.width {
+                if buffer[(x, y)].symbol().starts_with(head) {
+                    return buffer[(x, y)].fg;
+                }
+            }
+        }
+        panic!("aucune ligne du chat ne contient {needle:?}");
+    }
+
+    /// Un bloc `rendered` poussé sous un thème doit se re-colorer au draw
+    /// suivant : après `/theme`, la couleur figée au push serait celle de
+    /// l'ancienne palette.
+    #[test]
+    fn a_rendered_system_line_follows_a_theme_change_after_the_fact() {
+        let _theme = theme::test_guard();
+        theme::set_active("zen").expect("zen is a built-in theme");
+        let mut app = App::new(None);
+        app.push_error("boom");
+        let zen_alert = theme::accent_color();
+
+        theme::set_active("nord").expect("nord is a built-in theme");
+
+        let fg = drawn_fg(&app, "boom");
+        assert_eq!(fg, theme::accent_color(), "l'erreur suit la palette active");
+        assert_ne!(fg, zen_alert, "la palette du push ne doit rien figer");
+    }
+
+    /// Même contrat pour un bloc rapport aligné (`/cost`) — son titre est le
+    /// span le plus visiblement teinté du bloc.
+    #[test]
+    fn a_cost_block_is_drawn_with_the_theme_active_at_draw_time() {
+        use crate::tui::report;
+        use kaji::session::{UsageAggregate, UsageWindows};
+
+        let aggregate = |input: i64, output: i64| UsageAggregate {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + output,
+            cost: None,
+        };
+        let windows = UsageWindows {
+            session: aggregate(10, 2),
+            last_5h: aggregate(100, 20),
+            last_7d: aggregate(1_000, 200),
+        };
+
+        let _theme = theme::test_guard();
+        theme::set_active("zen").expect("zen is a built-in theme");
+        let mut app = App::new(None);
+        app.push_system_lines(report::cost_table_lines(
+            &windows, "ollama", "qwen", None, None,
+        ));
+        let zen_title = theme::gold_color();
+
+        theme::set_active("gruvbox").expect("gruvbox is a built-in theme");
+
+        let fg = drawn_fg(&app, "/cost");
+        assert_eq!(fg, theme::gold_color(), "le titre suit la palette active");
+        assert_ne!(fg, zen_title, "la palette du push ne doit rien figer");
     }
 
     #[test]
