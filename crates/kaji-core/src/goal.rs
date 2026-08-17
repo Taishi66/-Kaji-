@@ -147,13 +147,19 @@ pub fn continuation_prompt(condition: &str, feedback: &str) -> String {
 /// Verdict = dernière ligne non vide, retour = les lignes qui la précèdent.
 /// `None` pour une sortie sans ligne de verdict reconnaissable : l'appelant
 /// continue par prudence plutôt que de lire un silence comme un succès.
-pub fn parse_verdict(text: &str) -> Option<Verdict> {
-    let (last_index, last_line) = text
-        .lines()
+/// Le sous-scan partagé avec le juge SDD de la TUI, dont la taxonomie diffère
+/// (`VALIDE`/`DRIFT`) mais qui lit la même ligne : index de la dernière ligne
+/// non vide, et son contenu en majuscules.
+pub fn last_verdict_line(text: &str) -> Option<(usize, String)> {
+    text.lines()
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty())
-        .last()?;
-    let last_line = last_line.to_uppercase();
+        .last()
+        .map(|(index, line)| (index, line.to_uppercase()))
+}
+
+pub fn parse_verdict(text: &str) -> Option<Verdict> {
+    let (last_index, last_line) = last_verdict_line(text)?;
     let feedback = || {
         let above = text.lines().take(last_index).collect::<Vec<_>>().join("\n");
         bound_feedback(above.trim())

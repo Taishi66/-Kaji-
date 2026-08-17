@@ -1,4 +1,5 @@
 use crate::tui::theme::SpanRole;
+use crate::tui::ui::sanitize_for_display;
 use crate::tui::{diff, theme};
 use kaji::agents::AgentEvent;
 use kaji::config::KajiMode;
@@ -826,7 +827,8 @@ impl App {
             serde_json::json!({ "condition": condition, "max_iterations": max_iterations }),
         );
         self.push_system(&format!(
-            "目標 but fixé : {condition} — évaluateur après chaque tour, cap {max_iterations} itérations"
+            "目標 but fixé : {} — évaluateur après chaque tour, cap {max_iterations} itérations",
+            sanitize_for_display(condition)
         ));
         Some(goal::work_prompt(condition))
     }
@@ -858,17 +860,18 @@ impl App {
             self.push_system("aucun but — /goal <condition> pour en fixer un");
             return;
         };
+        let condition = sanitize_for_display(&goal.condition);
         let line = match goal.outcome {
             None => format!(
                 "目標 {} · it {}/{} · {}",
-                goal.condition,
+                condition,
                 goal.iteration,
                 goal.max_iterations,
                 goal.phase.label()
             ),
             Some(outcome) => format!(
                 "目標 {} · terminé : {} (it {}/{})",
-                goal.condition,
+                condition,
                 outcome.label(),
                 goal.iteration,
                 goal.max_iterations
@@ -964,14 +967,17 @@ impl App {
             }
             GoalStep::Finished(outcome) => {
                 let message = match outcome {
-                    GoalOutcome::Met => {
-                        format!("✓ 目標 but atteint en {iteration} itération(s) : {condition}")
-                    }
-                    GoalOutcome::Unreachable => {
-                        format!("⚠ 目標 but jugé inatteignable : {feedback}")
-                    }
+                    GoalOutcome::Met => format!(
+                        "✓ 目標 but atteint en {iteration} itération(s) : {}",
+                        sanitize_for_display(&condition)
+                    ),
+                    GoalOutcome::Unreachable => format!(
+                        "⚠ 目標 but jugé inatteignable : {}",
+                        sanitize_for_display(&feedback)
+                    ),
                     GoalOutcome::IterationCap => format!(
-                        "⚠ 目標 cap de {max_iterations} itérations atteint — but non atteint : {condition}"
+                        "⚠ 目標 cap de {max_iterations} itérations atteint — but non atteint : {}",
+                        sanitize_for_display(&condition)
                     ),
                     GoalOutcome::Cleared => "目標 but effacé".to_string(),
                     GoalOutcome::Interrupted => "目標 but interrompu".to_string(),
@@ -1013,13 +1019,9 @@ impl App {
             }
             PassDriver::Validating => {
                 self.pass.advance();
-                let last_line = self
-                    .validate_buffer
-                    .lines()
-                    .rev()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("")
-                    .to_uppercase();
+                let last_line = goal::last_verdict_line(&self.validate_buffer)
+                    .map(|(_, line)| line)
+                    .unwrap_or_default();
                 if last_line.contains("VERDICT: VALIDE") {
                     self.pass.advance();
                     self.push_system("✓ passe SDD complète — spec verrouillée");
@@ -5756,6 +5758,79 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, "goal_start");
         assert!(events[0].1.contains("les tests passent"));
+    }
+
+    fn has_no_control_char(line: &ChatLine) -> bool {
+        !line.text.contains('\x1b') && !line.text.contains('\r')
+    }
+
+    #[test]
+    fn goal_set_sanitizes_a_hostile_condition_in_the_chat_line() {
+        let mut app = App::new(None);
+
+        app.goal_set("safe\x1b[31m\rcondition", 10);
+
+        let last = app.chat.last().expect("ligne système poussée");
+        assert!(has_no_control_char(last), "{:?}", last.text);
+    }
+
+    #[test]
+    fn goal_status_sanitizes_a_hostile_condition_in_the_chat_line() {
+        let mut app = App::new(None);
+        app.goal_set("safe\x1b[31m\rcondition", 10);
+
+        app.push_goal_status();
+
+        let last = app.chat.last().expect("ligne de statut");
+        assert!(has_no_control_char(last), "{:?}", last.text);
+    }
+
+    #[test]
+    fn an_unreachable_verdict_sanitizes_the_evaluator_feedback_in_the_chat_line() {
+        let mut app = App::new(None);
+        app.goal_set("les tests passent", 10);
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "j'ai essayé");
+        app.turn_end();
+
+        app.turn_active = true;
+        agent_says(
+            &mut app,
+            "m2",
+            "hors\x1b[31m\rpérimètre\nVERDICT: UNREACHABLE",
+        );
+        app.turn_end();
+
+        let last = app.chat.last().expect("ligne de fin de but");
+        assert!(has_no_control_char(last), "{:?}", last.text);
+    }
+
+    /// La sanitisation vit au point d'interpolation : les prompts envoyés à
+    /// l'agent et à l'évaluateur gardent la condition et le retour bruts.
+    #[test]
+    fn goal_prompts_keep_the_raw_condition_and_feedback() {
+        let mut app = App::new(None);
+
+        let work = app
+            .goal_set("safe\x1b[31m\rcondition", 10)
+            .expect("prompt de travail");
+        assert!(work.contains("safe\x1b[31m\rcondition"), "{work:?}");
+
+        app.turn_active = true;
+        agent_says(&mut app, "m1", "j'ai travaillé");
+        app.turn_end();
+        app.turn_active = true;
+        agent_says(&mut app, "m2", "il manque\x1b[31m\rX\nVERDICT: CONTINUE");
+
+        let continuation = app.turn_end().expect("prompt de continuation");
+        assert!(
+            continuation.contains("il manque\x1b[31m\rX"),
+            "{continuation:?}"
+        );
+        assert!(
+            continuation.contains("safe\x1b[31m\rcondition"),
+            "{continuation:?}"
+        );
     }
 
     #[test]

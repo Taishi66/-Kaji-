@@ -64,6 +64,18 @@ fn only_the_last_non_empty_line_decides_the_verdict() {
     assert!(matches!(verdict, Some(Verdict::Continue(_))));
 }
 
+/// Le scan partagé avec le juge SDD de la TUI : même « dernière ligne non
+/// vide, en majuscules », plus l'index qui délimite le retour au-dessus.
+#[test]
+fn last_verdict_line_reads_the_last_non_empty_line_uppercased() {
+    assert_eq!(
+        goal::last_verdict_line("raisonnement\nverdict: met\n\n   \n"),
+        Some((1, "VERDICT: MET".to_string()))
+    );
+    assert_eq!(goal::last_verdict_line(""), None);
+    assert_eq!(goal::last_verdict_line("\n  \n\t\n"), None);
+}
+
 #[test]
 fn feedback_is_bounded_to_two_thousand_chars() {
     let long = "é".repeat(5_000);
