@@ -1,4 +1,5 @@
 use crate::tui::app::{self, App, ChatLine, Focus, Sender, ToolApprovalRequest};
+use crate::tui::explorer::ExplorerState;
 use crate::tui::viewer::{self, Viewer};
 use crate::tui::{markdown, theme};
 use kaji_core::sdd::StageStatus;
@@ -16,16 +17,48 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_header(frame, app, root[0]);
 
+    // Three columns at most: explorer | chat/composer | viewer-or-SPEC. Both
+    // side widths are decided against the full body width before anything is
+    // split, so the viewer keeps its share whatever the explorer takes.
+    let viewer_cols = if app.viewer.is_some() {
+        viewer_width(root[1].width)
+    } else {
+        0
+    };
+    // The SPEC panel is percentage-sized rather than fixed, but the explorer
+    // still owes it a reservation before claiming its own share.
+    let right_cols = if viewer_cols > 0 {
+        viewer_cols
+    } else if app.spec_panel_visible() {
+        (u32::from(root[1].width) * u32::from(SPEC_PERCENT) / 100) as u16
+    } else {
+        0
+    };
+    let explorer_cols = if app.explorer.is_some() {
+        explorer_width(root[1].width, right_cols)
+    } else {
+        0
+    };
+    let (explorer_area, body) = if explorer_cols > 0 {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(explorer_cols), Constraint::Min(0)])
+            .split(root[1]);
+        (Some(cols[0]), cols[1])
+    } else {
+        (None, root[1])
+    };
+
     // One right column, two possible tenants: the file viewer takes the slot
     // while it is open and hands it straight back to the SPEC panel on close —
     // nothing to save and restore, the panel's own visibility answers again.
     let right = if app.viewer.is_some() {
-        Some([
-            Constraint::Min(0),
-            Constraint::Length(viewer_width(root[1].width)),
-        ])
+        Some([Constraint::Min(0), Constraint::Length(viewer_cols)])
     } else if app.spec_panel_visible() {
-        Some([Constraint::Percentage(72), Constraint::Percentage(28)])
+        Some([
+            Constraint::Percentage(100 - SPEC_PERCENT),
+            Constraint::Percentage(SPEC_PERCENT),
+        ])
     } else {
         None
     };
@@ -34,10 +67,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints(constraints)
-                .split(root[1]);
+                .split(body);
             (cols[0], Some(cols[1]))
         }
-        None => (root[1], None),
+        None => (body, None),
     };
 
     let left = Layout::default()
@@ -54,6 +87,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
             Some(viewer) => draw_viewer(frame, app, viewer, area),
             None => draw_spec(frame, app, area),
         }
+    }
+    if let (Some(area), Some(explorer)) = (explorer_area, &app.explorer) {
+        draw_explorer(frame, app, explorer, area);
     }
     draw_finder(frame, app);
 
@@ -627,17 +663,109 @@ fn draw_finder(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(Text::from(lines)), rows[1]);
 }
 
+/// Share of the body the SPEC panel takes when it owns the right column.
+const SPEC_PERCENT: u16 = 28;
+
 const VIEWER_PERCENT: u16 = 45;
 const VIEWER_MIN_WIDTH: u16 = 40;
-/// Columns the chat keeps whatever the viewer asks for — a right column that
-/// eats the whole terminal would hide the conversation it is being read for.
-const VIEWER_MIN_CHAT: u16 = 20;
+/// Columns the chat keeps whatever the side panes ask for — a layout that eats
+/// the whole terminal would hide the conversation they are opened for.
+const MIN_CHAT_WIDTH: u16 = 20;
 
 fn viewer_width(total: u16) -> u16 {
     let target = (u32::from(total) * u32::from(VIEWER_PERCENT) / 100) as u16;
     target
         .max(VIEWER_MIN_WIDTH)
-        .min(total.saturating_sub(VIEWER_MIN_CHAT))
+        .min(total.saturating_sub(MIN_CHAT_WIDTH))
+}
+
+const EXPLORER_PERCENT: u16 = 30;
+const EXPLORER_MIN_WIDTH: u16 = 24;
+const EXPLORER_MAX_WIDTH: u16 = 48;
+
+/// Sacrifice order on a narrow terminal: the explorer gives way first, then the
+/// viewer, and the chat never drops under [`MIN_CHAT_WIDTH`]. `right` is what
+/// the viewer already reserved, so the tree only ever takes what is left; `0`
+/// means the pane stays open but unpainted rather than crushing the chat.
+fn explorer_width(total: u16, right: u16) -> u16 {
+    let room = total.saturating_sub(right).saturating_sub(MIN_CHAT_WIDTH);
+    if room < EXPLORER_MIN_WIDTH {
+        return 0;
+    }
+    let target = ((u32::from(total) * u32::from(EXPLORER_PERCENT) / 100) as u16)
+        .clamp(EXPLORER_MIN_WIDTH, EXPLORER_MAX_WIDTH);
+    target.min(room)
+}
+
+/// Left-column file tree (task 9). The pane keeps no scroll offset of its own:
+/// the window slides to keep the cursor row visible, the way the finder's list
+/// does.
+fn draw_explorer(frame: &mut Frame, app: &App, explorer: &ExplorerState, area: Rect) {
+    let root_label = explorer
+        .root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| explorer.root.to_string_lossy().into_owned());
+    let footer = if explorer.filter.is_empty() {
+        format!(
+            " {} éléments · . dotfiles · a attacher · q fermer ",
+            explorer.entry_count()
+        )
+    } else {
+        format!(
+            " ⌕ {} · {} éléments · Esc vide le filtre ",
+            sanitize_for_display(&explorer.filter),
+            explorer.entry_count()
+        )
+    };
+    let border = if app.focus == Focus::Explorer {
+        theme::border_active()
+    } else {
+        theme::border_inactive()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border)
+        .title(Span::styled(
+            format!(" 🗂 {} ", sanitize_for_display(&root_label)),
+            theme::title(),
+        ))
+        .title_bottom(Line::from(footer).style(theme::dim()));
+
+    let rows = usize::from(area.height.saturating_sub(2)).max(1);
+    let visible = explorer.visible();
+    let position = visible
+        .iter()
+        .position(|index| *index == explorer.cursor)
+        .unwrap_or(0);
+    let first = position.saturating_sub(rows.saturating_sub(1));
+    let lines: Vec<Line> = visible
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows)
+        .map(|(row, index)| {
+            let node = &explorer.nodes[*index];
+            let (glyph, label) = match node.overflow {
+                Some(dropped) => ("  ", format!("… +{dropped}")),
+                None if node.is_dir => (
+                    if node.expanded { "▾ " } else { "▸ " },
+                    sanitize_for_display(&node.name),
+                ),
+                None => ("  ", sanitize_for_display(&node.name)),
+            };
+            let style = if row == position {
+                theme::accent()
+            } else if node.overflow.is_some() {
+                theme::dim()
+            } else {
+                theme::text()
+            };
+            let indent = "  ".repeat(node.depth);
+            Line::from(Span::styled(format!("{indent}{glyph}{label}"), style))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
 }
 
 /// Read-only file pane (task 8). Lines are already sanitized and tab-expanded
@@ -1881,5 +2009,129 @@ mod tests {
         assert_eq!(viewer_width(120), 54);
         assert_eq!(viewer_width(60), 40, "plancher de 40 colonnes");
         assert_eq!(viewer_width(50), 30, "le chat garde ses 20 colonnes");
+    }
+
+    #[test]
+    fn an_empty_file_renders_without_a_line_range_and_without_panicking() {
+        let (mut app, _dir) = app_on_a_project("vide.txt", "");
+        app.open_viewer("vide.txt");
+        assert!(app.viewer.as_ref().unwrap().lines.is_empty());
+        let content = rendered(&app, 100, 20);
+        assert!(content.contains("L0-0/0"), "got:\n{content}");
+    }
+
+    #[test]
+    fn explorer_width_gives_way_before_the_viewer_and_the_chat() {
+        assert_eq!(explorer_width(120, 0), 36, "30 % sans lecteur");
+        assert_eq!(
+            explorer_width(120, viewer_width(120)),
+            36,
+            "30 % avec lecteur"
+        );
+        assert_eq!(explorer_width(200, 0), EXPLORER_MAX_WIDTH, "plafond de 48");
+        assert_eq!(explorer_width(50, 0), EXPLORER_MIN_WIDTH, "plancher de 24");
+        assert_eq!(
+            explorer_width(80, viewer_width(80)),
+            0,
+            "l'explorateur cède en premier plutôt que d'écraser le chat"
+        );
+        assert_eq!(explorer_width(40, 0), 0);
+    }
+
+    #[test]
+    fn the_explorer_takes_the_left_column_next_to_the_viewer() {
+        let (mut app, dir) = app_on_a_project("README.md", "hello\n");
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        app.toggle_explorer();
+        app.open_viewer("README.md");
+
+        let content = rendered(&app, 120, 20);
+        assert!(content.contains("▸ src"), "dossier replié, got:\n{content}");
+        assert!(
+            content.contains("2 éléments · . dotfiles"),
+            "got:\n{content}"
+        );
+
+        let row = content
+            .lines()
+            .find(|line| line.contains("▸ src"))
+            .expect("ligne de l'arbre");
+        let tree = row
+            .chars()
+            .position(|c| c == '▸')
+            .expect("glyphe de dossier");
+        let file = row
+            .split_once("hello")
+            .map(|(before, _)| before.chars().count())
+            .expect("le lecteur reste à droite");
+        assert!(
+            tree < 36 && tree < file,
+            "arbre à gauche ({tree}), lecteur à droite ({file}) : {row:?}"
+        );
+    }
+
+    #[test]
+    fn the_explorer_gives_way_rather_than_crush_the_chat_next_to_the_spec_panel() {
+        let (mut app, dir) = app_on_a_project("README.md", "x");
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        app.toggle_spec_panel();
+        app.toggle_explorer();
+
+        let wide = rendered(&app, 120, 12);
+        assert!(wide.contains("▸ src"), "got:\n{wide}");
+        assert!(wide.contains("SPEC"), "got:\n{wide}");
+
+        let narrow = rendered(&app, 50, 12);
+        assert!(
+            !narrow.contains("▸ src"),
+            "l'explorateur cède en premier, got:\n{narrow}"
+        );
+        assert!(narrow.contains("SPEC"), "got:\n{narrow}");
+    }
+
+    /// The pane's own 48-column ceiling clips the status line in situ, so the
+    /// text itself is asserted against an area wide enough to hold it.
+    #[test]
+    fn the_explorer_status_line_names_its_keys() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut app, dir) = app_on_a_project("README.md", "x");
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        app.toggle_explorer();
+
+        let backend = TestBackend::new(60, 8);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| {
+                draw_explorer(
+                    frame,
+                    &app,
+                    app.explorer.as_ref().expect("explorateur ouvert"),
+                    Rect::new(0, 0, 60, 8),
+                )
+            })
+            .expect("draw_explorer must succeed against a TestBackend");
+        let content = buffer_as_string(terminal.backend().buffer());
+        assert!(
+            content.contains("2 éléments · . dotfiles · a attacher · q fermer"),
+            "got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn an_expanded_directory_marks_its_children_by_indentation() {
+        let (mut app, dir) = app_on_a_project("README.md", "x");
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "x").unwrap();
+        app.toggle_explorer();
+        app.explorer.as_mut().unwrap().toggle_selected();
+
+        let content = rendered(&app, 120, 20);
+        assert!(content.contains("▾ src"), "got:\n{content}");
+        assert!(
+            content.contains("    main.rs"),
+            "indentation 2 col, got:\n{content}"
+        );
     }
 }

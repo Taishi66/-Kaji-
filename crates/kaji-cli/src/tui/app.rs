@@ -292,6 +292,14 @@ pub const COMMANDS: &[Command] = &[
         },
     },
     Command {
+        name: "/explorer",
+        desc: "(ou Ctrl+E) explorateur de fichiers — j/k naviguer, ⏎ ouvrir, a attacher @",
+        run: |app| {
+            app.toggle_explorer();
+            Action::None
+        },
+    },
+    Command {
         name: "/spec",
         desc: "(ou F2) affiche/masque le panneau SPEC",
         run: |app| {
@@ -378,6 +386,13 @@ fn theme_command_arg(text: &str) -> Option<&str> {
 /// session from being forwarded to it as a plain message.
 fn goal_command_arg(text: &str) -> Option<&str> {
     slash_command_arg(text, "/goal")
+}
+
+/// A pasted block lands on one line: the composer and the finder query are
+/// both single-line, and dropping the newlines outright would glue the last
+/// word of one line onto the first of the next.
+fn flatten_newlines(text: &str) -> String {
+    text.replace("\r\n", " ").replace(['\r', '\n'], " ")
 }
 
 /// Byte offset of the `index`-th char — `String::insert_str` and
@@ -573,6 +588,9 @@ pub struct App {
     /// it is open; closing it hands the slot back with no state to restore
     /// (`ui::draw` reads `spec_panel_visible` again).
     pub viewer: Option<crate::tui::viewer::Viewer>,
+    /// Left-column file tree (task 9). Open and focused are two different
+    /// things: `Ctrl+E` opens it focused, focuses it back, then closes it.
+    pub explorer: Option<crate::tui::explorer::ExplorerState>,
     pub focus: Focus,
     /// Viewer geometry measured by `ui::draw_viewer` — same render-time
     /// measurement as `chat_overflow`: the wheel hit-test and the half-page
@@ -644,6 +662,7 @@ impl App {
             mention_suppressed: false,
             finder: None,
             viewer: None,
+            explorer: None,
             focus: Focus::default(),
             viewer_area: Cell::new(Rect::default()),
             turn_had_error: false,
@@ -1331,6 +1350,155 @@ impl App {
         Action::None
     }
 
+    /// `Ctrl+E` / `/explorer`, three-state: closed it opens focused, open but
+    /// focused elsewhere it takes the keyboard back, focused it closes.
+    pub fn toggle_explorer(&mut self) {
+        if self.modal_active() {
+            return;
+        }
+        match (self.explorer.is_some(), self.focus) {
+            (true, Focus::Explorer) => self.close_explorer(),
+            (true, _) => self.focus = Focus::Explorer,
+            (false, _) => {
+                self.explorer = Some(crate::tui::explorer::ExplorerState::new(
+                    self.working_dir.clone(),
+                ));
+                self.focus = Focus::Explorer;
+            }
+        }
+    }
+
+    pub fn close_explorer(&mut self) {
+        self.explorer = None;
+        if self.focus == Focus::Explorer {
+            self.focus = Focus::Composer;
+        }
+    }
+
+    /// `Ctrl+O`: composer → explorer → viewer → composer, skipping whatever is
+    /// closed. Attaching from a pane hands the keyboard back to the composer,
+    /// and without this chord nothing ever gave it back.
+    pub fn cycle_focus(&mut self) {
+        const ORDER: [Focus; 3] = [Focus::Composer, Focus::Explorer, Focus::Viewer];
+        let start = ORDER.iter().position(|f| *f == self.focus).unwrap_or(0);
+        for step in 1..=ORDER.len() {
+            let next = ORDER[(start + step) % ORDER.len()];
+            let open = match next {
+                Focus::Composer => true,
+                Focus::Explorer => self.explorer.is_some(),
+                Focus::Viewer => self.viewer.is_some(),
+            };
+            if open {
+                self.focus = next;
+                return;
+            }
+        }
+    }
+
+    /// Every key while the explorer holds the focus. Like the viewer it is a
+    /// pane rather than an overlay: it answers or ignores, and a stray `j`
+    /// never lands in the composer behind it.
+    fn explorer_key(&mut self, key: &KeyEvent) -> Action {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            if key.code == KeyCode::Char('p') {
+                self.open_finder();
+            }
+            return Action::None;
+        }
+        if self.explorer.as_ref().is_some_and(|e| e.filtering) {
+            self.explorer_filter_key(key);
+            return Action::None;
+        }
+        match key.code {
+            KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => {
+                self.explorer_activate();
+                return Action::None;
+            }
+            KeyCode::Char('a') => {
+                if let Some(path) = self.explorer_mention_path() {
+                    self.attach_mention(&path);
+                    // Same bargain as the viewer's `a`: the pane stays open,
+                    // the keyboard goes where the message is being written.
+                    self.focus = Focus::Composer;
+                }
+                return Action::None;
+            }
+            KeyCode::Char('q') => {
+                self.close_explorer();
+                return Action::None;
+            }
+            KeyCode::Esc => {
+                if self.explorer.as_ref().is_some_and(|e| !e.filter.is_empty()) {
+                    if let Some(explorer) = self.explorer.as_mut() {
+                        explorer.clear_filter();
+                    }
+                } else {
+                    self.close_explorer();
+                }
+                return Action::None;
+            }
+            _ => {}
+        }
+        let Some(explorer) = self.explorer.as_mut() else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => explorer.move_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => explorer.move_cursor(-1),
+            KeyCode::Char('h') | KeyCode::Left => explorer.collapse_or_parent(),
+            KeyCode::Char('g') => explorer.cursor_to_start(),
+            KeyCode::Char('G') => explorer.cursor_to_end(),
+            KeyCode::Char('.') => explorer.toggle_hidden(),
+            KeyCode::Char('R') => explorer.refresh(),
+            KeyCode::Char('/') => explorer.start_filter(),
+            _ => {}
+        }
+        Action::None
+    }
+
+    fn explorer_filter_key(&mut self, key: &KeyEvent) {
+        let Some(explorer) = self.explorer.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Char(c) => explorer.push_filter(c),
+            KeyCode::Backspace => explorer.pop_filter(),
+            KeyCode::Down => explorer.move_cursor(1),
+            KeyCode::Up => explorer.move_cursor(-1),
+            KeyCode::Enter => explorer.end_filter(),
+            KeyCode::Esc => explorer.clear_filter(),
+            _ => {}
+        }
+    }
+
+    /// `l`/`→`/`Enter`: a directory folds or unfolds in place, a file opens in
+    /// the viewer and takes the focus with it.
+    fn explorer_activate(&mut self) {
+        let Some((is_dir, path)) = self.explorer.as_ref().and_then(|explorer| {
+            explorer
+                .selected()
+                .filter(|node| node.overflow.is_none())
+                .map(|node| (node.is_dir, node.path.clone()))
+        }) else {
+            return;
+        };
+        if is_dir {
+            if let Some(explorer) = self.explorer.as_mut() {
+                explorer.toggle_selected();
+            }
+        } else {
+            self.open_viewer(&path);
+        }
+    }
+
+    fn explorer_mention_path(&self) -> Option<String> {
+        self.explorer
+            .as_ref()?
+            .selected()
+            .filter(|node| node.overflow.is_none())
+            .map(crate::tui::explorer::Node::mention_path)
+    }
+
     /// `Tab` on the finder and `a` on the viewer both land here: the path
     /// joins the draft as a real `@` mention — separated from what is already
     /// typed, since `foo@bar` mid-word is not a mention, and followed by a
@@ -1351,7 +1519,7 @@ impl App {
     /// so it expands like a typed mention; anything else lands verbatim. The
     /// composer is single-line, so newlines collapse into spaces.
     fn insert_pasted(&mut self, text: &str) {
-        let flattened = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
+        let flattened = flatten_newlines(text);
         if flattened.is_empty() {
             return;
         }
@@ -1727,6 +1895,11 @@ impl App {
 
     pub fn on_event(&mut self, ev: &Event) -> Action {
         if let Event::Mouse(mouse) = ev {
+            // The finder is an overlay: the wheel under it would scroll a chat
+            // the overlay is covering.
+            if self.finder.is_some() {
+                return Action::None;
+            }
             // The wheel follows the pointer: over the file viewer it scrolls
             // the file, anywhere else the chat.
             let on_viewer = self.point_in_viewer(mouse.column, mouse.row);
@@ -1755,7 +1928,10 @@ impl App {
         if let Event::Paste(text) = ev {
             if !self.modal_active() {
                 if self.finder.is_some() {
-                    let pasted: String = text.chars().filter(|c| !c.is_control()).collect();
+                    let pasted: String = flatten_newlines(text)
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .collect();
                     self.finder_insert(&pasted);
                 } else if self.focus == Focus::Composer {
                     self.insert_pasted(text);
@@ -1780,8 +1956,27 @@ impl App {
             if self.finder.is_some() {
                 return self.finder_key(key);
             }
+            // The pane chords sit above the panes themselves: `Ctrl+E` has to
+            // reach the explorer from inside the viewer, and `Ctrl+O` has to
+            // rotate out of whichever pane currently owns the keyboard.
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                match key.code {
+                    KeyCode::Char('e') => {
+                        self.toggle_explorer();
+                        return Action::None;
+                    }
+                    KeyCode::Char('o') => {
+                        self.cycle_focus();
+                        return Action::None;
+                    }
+                    _ => {}
+                }
+            }
             if self.focus == Focus::Viewer {
                 return self.viewer_key(key);
+            }
+            if self.focus == Focus::Explorer {
+                return self.explorer_key(key);
             }
         }
         // A y/n modal (tool approval or gate) swallows Enter/chars, but bare
@@ -3222,6 +3417,232 @@ mod tests {
                 .text
                 .contains("lecture impossible")
         );
+    }
+
+    #[test]
+    fn the_wheel_is_swallowed_while_the_finder_is_open() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.chat_overflow.set(50);
+        app.open_finder();
+        app.on_event(&mouse_event(MouseEventKind::ScrollDown));
+        assert_eq!(
+            app.scroll_offset, 0,
+            "la molette ne défile pas le chat caché sous l'overlay"
+        );
+    }
+
+    #[test]
+    fn pasting_several_lines_into_the_finder_keeps_them_apart() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.open_finder();
+        app.on_event(&Event::Paste("src\r\ntui\napp".to_string()));
+        assert_eq!(
+            app.finder.as_ref().expect("finder ouvert").query,
+            "src tui app"
+        );
+    }
+
+    /// Explorer open on the mention fixture: `src/` first (directories lead),
+    /// then `README.md`.
+    fn app_with_open_explorer() -> (App, tempfile::TempDir) {
+        let (mut app, dir) = app_with_mention_fixture();
+        app.toggle_explorer();
+        (app, dir)
+    }
+
+    #[test]
+    fn ctrl_e_opens_the_explorer_and_hands_it_the_focus() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        assert_eq!(app.on_event(&ctrl_key(KeyCode::Char('e'))), Action::None);
+        let explorer = app.explorer.as_ref().expect("explorateur ouvert");
+        assert_eq!(explorer.selected().expect("racine listée").name, "src");
+        assert_eq!(app.focus, Focus::Explorer);
+        assert!(app.input.is_empty(), "Ctrl+E ne tape rien dans le composer");
+    }
+
+    #[test]
+    fn ctrl_e_takes_the_focus_back_before_it_closes() {
+        let (mut app, _dir) = app_with_open_explorer();
+        app.focus = Focus::Composer;
+
+        app.on_event(&ctrl_key(KeyCode::Char('e')));
+        assert_eq!(
+            app.focus,
+            Focus::Explorer,
+            "ouvert ailleurs : reprend le focus"
+        );
+        assert!(app.explorer.is_some());
+
+        app.on_event(&ctrl_key(KeyCode::Char('e')));
+        assert!(app.explorer.is_none(), "ouvert et focus dessus : ferme");
+        assert_eq!(app.focus, Focus::Composer);
+    }
+
+    #[test]
+    fn ctrl_e_is_ignored_under_a_modal() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.gate_open = true;
+        assert_eq!(app.on_event(&ctrl_key(KeyCode::Char('e'))), Action::None);
+        assert!(app.explorer.is_none());
+    }
+
+    #[test]
+    fn slash_explorer_opens_the_explorer() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        for c in "/explorer".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
+        assert!(app.explorer.is_some());
+        assert_eq!(app.focus, Focus::Explorer);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn explorer_keys_walk_the_tree_and_never_reach_the_composer() {
+        let (mut app, _dir) = app_with_open_explorer();
+        app.on_event(&key(KeyCode::Char('l')));
+        assert_eq!(
+            app.explorer
+                .as_ref()
+                .unwrap()
+                .nodes
+                .iter()
+                .map(|node| node.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src", "src/tui", "README.md"],
+            "l déplie src/"
+        );
+
+        app.on_event(&key(KeyCode::Char('j')));
+        assert_eq!(
+            app.explorer.as_ref().unwrap().selected().unwrap().path,
+            "src/tui"
+        );
+        app.on_event(&key(KeyCode::Char('h')));
+        assert_eq!(
+            app.explorer.as_ref().unwrap().selected().unwrap().path,
+            "src",
+            "h remonte au parent"
+        );
+        app.on_event(&key(KeyCode::Char('h')));
+        assert!(
+            !app.explorer.as_ref().unwrap().nodes[0].expanded,
+            "h replie"
+        );
+
+        app.on_event(&key(KeyCode::Char('G')));
+        assert_eq!(
+            app.explorer.as_ref().unwrap().selected().unwrap().path,
+            "README.md"
+        );
+        app.on_event(&key(KeyCode::Char('g')));
+        assert_eq!(
+            app.explorer.as_ref().unwrap().selected().unwrap().path,
+            "src"
+        );
+        app.on_event(&key(KeyCode::Char('R')));
+        app.on_event(&key(KeyCode::Char('.')));
+        assert!(app.explorer.as_ref().unwrap().show_hidden);
+
+        assert!(app.input.is_empty(), "rien ne fuit dans le composer");
+    }
+
+    #[test]
+    fn explorer_enter_on_a_file_opens_the_viewer() {
+        let (mut app, _dir) = app_with_open_explorer();
+        app.on_event(&key(KeyCode::Char('j')));
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
+        assert_eq!(
+            app.viewer.as_ref().expect("lecteur ouvert").path,
+            "README.md"
+        );
+        assert_eq!(app.focus, Focus::Viewer);
+        assert!(app.explorer.is_some(), "l'arbre reste ouvert à gauche");
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn explorer_a_attaches_the_selected_path_to_the_composer() {
+        let (mut app, _dir) = app_with_open_explorer();
+        app.on_event(&key(KeyCode::Char('a')));
+        assert_eq!(app.input, "@src/ ", "un dossier garde son slash");
+        assert!(app.explorer.is_some(), "le volet reste ouvert");
+        assert_eq!(app.focus, Focus::Composer);
+
+        app.focus = Focus::Explorer;
+        app.on_event(&key(KeyCode::Char('j')));
+        app.on_event(&key(KeyCode::Char('a')));
+        assert_eq!(app.input, "@src/ @README.md ");
+    }
+
+    #[test]
+    fn explorer_esc_closes_and_gives_the_composer_its_keys_back() {
+        let (mut app, _dir) = app_with_open_explorer();
+        assert_eq!(app.on_event(&key(KeyCode::Esc)), Action::None);
+        assert!(app.explorer.is_none());
+        assert_eq!(app.focus, Focus::Composer);
+        app.on_event(&key(KeyCode::Char('j')));
+        assert_eq!(app.input, "j");
+    }
+
+    #[test]
+    fn explorer_slash_filters_the_visible_names() {
+        let (mut app, _dir) = app_with_open_explorer();
+        app.on_event(&key(KeyCode::Char('/')));
+        for c in "read".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        let explorer = app.explorer.as_ref().unwrap();
+        assert_eq!(explorer.filter, "read");
+        assert_eq!(explorer.visible().len(), 1);
+        assert_eq!(explorer.selected().unwrap().path, "README.md");
+        assert!(app.input.is_empty());
+
+        app.on_event(&key(KeyCode::Esc));
+        assert!(app.explorer.as_ref().unwrap().filter.is_empty());
+        assert!(app.explorer.is_some(), "Esc vide le filtre avant de fermer");
+    }
+
+    #[test]
+    fn a_modal_still_owns_the_keyboard_over_the_explorer() {
+        let (mut app, _dir) = app_with_open_explorer();
+        app.gate_open = true;
+        assert_eq!(app.on_event(&key(KeyCode::Char('y'))), Action::GateApprove);
+    }
+
+    #[test]
+    fn ctrl_o_cycles_the_focus_over_the_open_panes_only() {
+        let (mut app, _dir) = app_with_open_explorer();
+        app.focus = Focus::Composer;
+
+        app.on_event(&ctrl_key(KeyCode::Char('o')));
+        assert_eq!(app.focus, Focus::Explorer);
+        app.on_event(&ctrl_key(KeyCode::Char('o')));
+        assert_eq!(
+            app.focus,
+            Focus::Composer,
+            "le lecteur est fermé, on l'enjambe"
+        );
+
+        app.open_viewer("README.md");
+        assert_eq!(app.focus, Focus::Viewer);
+        app.on_event(&ctrl_key(KeyCode::Char('o')));
+        assert_eq!(app.focus, Focus::Composer);
+        app.on_event(&ctrl_key(KeyCode::Char('o')));
+        assert_eq!(app.focus, Focus::Explorer);
+        app.on_event(&ctrl_key(KeyCode::Char('o')));
+        assert_eq!(app.focus, Focus::Viewer);
+    }
+
+    #[test]
+    fn ctrl_e_reaches_the_explorer_from_inside_the_viewer() {
+        let (mut app, _dir) = app_with_open_viewer();
+        assert_eq!(app.focus, Focus::Viewer);
+        app.on_event(&ctrl_key(KeyCode::Char('e')));
+        assert!(app.explorer.is_some());
+        assert_eq!(app.focus, Focus::Explorer);
+        assert!(app.viewer.is_some(), "le lecteur reste ouvert à droite");
     }
 
     #[test]
