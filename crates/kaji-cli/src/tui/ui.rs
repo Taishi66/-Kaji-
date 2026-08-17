@@ -1,7 +1,7 @@
 use crate::tui::app::{self, App, ChatLine, Focus, RoledLine, Sender, ToolApprovalRequest};
 use crate::tui::explorer::ExplorerState;
 use crate::tui::viewer::{self, Viewer};
-use crate::tui::{markdown, theme};
+use crate::tui::{gitstatus, markdown, theme};
 use kaji_core::sdd::StageStatus;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -12,10 +12,15 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 pub fn draw(frame: &mut Frame, app: &App) {
     let root = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(frame.area());
 
     draw_header(frame, app, root[0]);
+    draw_status_bar(frame, app, root[2]);
 
     // Three columns at most: explorer | chat/composer | viewer-or-SPEC. Both
     // side widths are decided against the full body width before anything is
@@ -113,13 +118,6 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(theme::KAJI_GLYPH, theme::title()),
         Span::styled(format!(" kaji · {}", app.header), theme::dim()),
     ];
-    if let Some(git) = &app.git_status {
-        left_spans.push(Span::styled(format!(" · {git}"), theme::dim()));
-    }
-    left_spans.push(Span::styled(
-        format!(" · {}", app::kaji_mode_badge(app.kaji_mode)),
-        theme::dim(),
-    ));
     if let Some(badge) = goal_badge(app) {
         left_spans.push(Span::styled(badge, theme::accent()));
     }
@@ -129,6 +127,34 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         .style(theme::dim())
         .alignment(Alignment::Right);
     frame.render_widget(right, cols[1]);
+}
+
+/// Lualine-style bottom bar (task 15): the working directory and the state of
+/// its repository on the left, the kaji mode pinned to the right. Everything
+/// left of the badge is fitted into the width it is given
+/// ([`gitstatus::render`]) rather than clipped by the renderer.
+fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let badge = app::kaji_mode_badge(app.kaji_mode);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(badge.chars().count() as u16 + 1),
+        ])
+        .split(area);
+
+    let line = Line::from(gitstatus::render(
+        app.git_status.as_ref(),
+        app.working_dir(),
+        cols[0].width as usize,
+    ));
+    frame.render_widget(Paragraph::new(line), cols[0]);
+    frame.render_widget(
+        Paragraph::new(badge)
+            .style(theme::dim())
+            .alignment(Alignment::Right),
+        cols[1],
+    );
 }
 
 /// Condition width in the header badge — the full text stays available under
@@ -2018,20 +2044,47 @@ mod tests {
         }
     }
 
+    /// The mode badge moved to the status bar with task 15 — the header must
+    /// not carry it twice.
     #[test]
-    fn the_header_carries_the_current_mode() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
+    fn the_status_bar_carries_the_current_mode_and_the_header_no_longer_does() {
         let mut app = App::new(None);
         app.kaji_mode = kaji::config::KajiMode::SmartApprove;
-        let backend = TestBackend::new(100, 10);
-        let mut terminal = Terminal::new(backend).expect("test backend terminal");
-        terminal
-            .draw(|f| draw(f, &app))
-            .expect("draw must succeed against a TestBackend");
-        let content = buffer_as_string(terminal.backend().buffer());
-        assert!(content.contains("smart"), "got:\n{content}");
+
+        let content = rendered(&app, 100, 10);
+        let mut rows = content.lines();
+        let header = rows.next().expect("ligne de header");
+        let bar = rows.next_back().expect("barre d'état");
+
+        assert!(bar.contains("smart"), "got:\n{content}");
+        assert!(!header.contains("smart"), "got:\n{content}");
+    }
+
+    #[test]
+    fn the_status_bar_shows_the_working_directory_and_the_repository_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(None);
+        app.set_working_dir(dir.path().to_path_buf());
+        app.git_status = Some(crate::tui::gitstatus::GitStatus {
+            branch: "feat/kaji-init".to_string(),
+            modified: 2,
+            ..crate::tui::gitstatus::GitStatus::default()
+        });
+
+        let content = rendered(&app, 120, 10);
+        let bar = content.lines().next_back().expect("barre d'état");
+
+        assert!(bar.contains("📁"), "got:\n{content}");
+        assert!(bar.contains("feat/kaji-init"), "got:\n{content}");
+        assert!(bar.contains("✚2"), "got:\n{content}");
+        assert!(
+            bar.contains(app::kaji_mode_badge(app.kaji_mode)),
+            "got:\n{content}"
+        );
+        assert!(
+            !content.lines().next().expect("header").contains('±'),
+            "le header a rendu l'état git à la barre, got:\n{content}"
+        );
     }
 
     #[test]

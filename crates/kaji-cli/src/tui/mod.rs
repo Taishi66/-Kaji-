@@ -2,6 +2,7 @@ pub mod app;
 pub mod diff;
 pub mod explorer;
 pub mod fuzzy;
+pub mod gitstatus;
 pub mod markdown;
 pub mod mentions;
 pub mod report;
@@ -36,6 +37,11 @@ use std::time::Duration;
 use theme::SpanRole;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+/// How often the status bar re-reads the repository. Slow enough that a
+/// terminal left open costs two short `git` calls every 5 s, fast enough that
+/// a commit made in another window shows up on its own.
+const GIT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 pub async fn run(
     agent: Agent,
@@ -279,45 +285,6 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
     lines
 }
 
-/// Résumé git dim pour le header — `None` si `dir` n'est pas un dépôt ou si
-/// git est absent. N compte les fichiers modifiés + untracked
-/// (`git status --porcelain`).
-fn git_summary(dir: &Path) -> Option<String> {
-    let branch_output = kaji::subprocess::git_command()
-        .current_dir(dir)
-        .args(["branch", "--show-current"])
-        .output()
-        .ok()?;
-    if !branch_output.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&branch_output.stdout)
-        .trim()
-        .to_string();
-    if branch.is_empty() {
-        return None;
-    }
-
-    let status_output = kaji::subprocess::git_command()
-        .current_dir(dir)
-        .args(["status", "--porcelain"])
-        .output()
-        .ok()?;
-    if !status_output.status.success() {
-        return None;
-    }
-    let dirty = String::from_utf8_lossy(&status_output.stdout)
-        .lines()
-        .filter(|line| !line.is_empty())
-        .count();
-
-    Some(format!("{branch} ±{dirty}"))
-}
-
-fn refresh_git_status() -> Option<String> {
-    git_summary(&std::env::current_dir().ok()?)
-}
-
 fn budget_from_env(var: &str) -> Option<report::Budget> {
     std::env::var(var)
         .ok()
@@ -540,12 +507,12 @@ async fn event_loop(
 ) -> Result<()> {
     let mut app = App::new(spec);
     app.header = header;
-    app.git_status = refresh_git_status();
     app.mouse_enabled = mouse_enabled();
     app.kaji_mode = agent.kaji_mode().await;
     let session_manager = SessionManager::instance();
     let working_dir = session_working_dir(&session_manager, session_id).await;
     app.set_working_dir(working_dir.clone());
+    app.request_git_refresh();
     let theme_warning = apply_startup_theme();
     seed_chat(&mut app, &conversation);
     maybe_push_welcome(&mut app);
@@ -571,13 +538,20 @@ async fn event_loop(
         None;
     let (suggestion_tx, mut suggestion_rx) = mpsc::channel::<String>(1);
     let (index_tx, mut index_rx) = mpsc::channel::<mentions::MentionIndex>(1);
+    let (git_tx, mut git_rx) = mpsc::channel::<Option<gitstatus::GitStatus>>(1);
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The status bar's own beat, armed even when nothing is running: the
+    // working tree changes under a `git` run in another terminal too, and a
+    // read that is already in flight is never doubled (`request_git_refresh`).
+    let mut git_tick = tokio::time::interval(GIT_REFRESH_INTERVAL);
+    git_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         terminal.draw(|frame| ui::draw(frame, &app))?;
         tokio::select! {
             _ = tick.tick(), if app.turn_active || app.turn_pending => {}
+            _ = git_tick.tick() => app.request_git_refresh(),
             ev = input_rx.recv() => {
                 let Some(ev) = ev else { break };
                 match app.on_event(&ev) {
@@ -869,6 +843,20 @@ async fn event_loop(
                     app.on_mention_index_ready(index);
                 }
             }
+            maybe = git_rx.recv() => {
+                if let Some(status) = maybe {
+                    app.on_git_status(status);
+                }
+            }
+        }
+        // Status bar (task 15): same hand-off as the @-mention index, drained
+        // here rather than in the input arm because the tick and the end of a
+        // turn arm it too.
+        if let Some(dir) = app.take_git_refresh_request() {
+            let tx = git_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = tx.blocking_send(gitstatus::read(&dir));
+            });
         }
         // Single drain point for the goal event log: every arm above can end
         // a goal (a verdict, Esc, a stream error), and journaling from here
@@ -972,16 +960,15 @@ fn install_turn<'a>(
 
 /// Shared cleanup once a turn's event stream ends — cleanly, by error, or
 /// by Esc cancellation reaching this arm as the stream's trailing `None`.
-/// Clears the turn clock/token bookkeeping, refreshes the git summary, and
-/// closes any tool line still awaiting its response (Esc mid-tool-call, or
-/// the stream ending with a tool pending) so the ⚙ spinner doesn't stay
-/// frozen forever. `close_orphaned_tool_requests` only touches still-pending
-/// entries, so calling it here is safe even when every tool already
-/// completed normally.
+/// Clears the turn clock/token bookkeeping (which also arms a git read for the
+/// status bar) and closes any tool line still awaiting its response (Esc
+/// mid-tool-call, or the stream ending with a tool pending) so the ⚙ spinner
+/// doesn't stay frozen forever. `close_orphaned_tool_requests` only touches
+/// still-pending entries, so calling it here is safe even when every tool
+/// already completed normally.
 fn teardown_turn(app: &mut App) {
     app.finish_turn();
     app.close_orphaned_tool_requests();
-    app.git_status = refresh_git_status();
 }
 
 /// Submits the next queued steering message as a fresh turn (item 2 ante).
@@ -1202,45 +1189,6 @@ mod tests {
     use super::*;
     use app::Sender;
     use kaji::conversation::Conversation;
-
-    fn run_git(dir: &std::path::Path, args: &[&str]) {
-        let output = kaji::subprocess::git_command()
-            .current_dir(dir)
-            .args(args)
-            .output()
-            .expect("git available for tests");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[test]
-    fn git_summary_reports_branch_and_dirty_count_in_a_temp_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        run_git(dir.path(), &["init", "-q"]);
-        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
-        run_git(dir.path(), &["config", "user.name", "test"]);
-        std::fs::write(dir.path().join("a.txt"), "one").unwrap();
-        run_git(dir.path(), &["add", "a.txt"]);
-        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
-
-        std::fs::write(dir.path().join("a.txt"), "two").unwrap();
-
-        let summary = git_summary(dir.path()).expect("should detect the git repo");
-        assert!(
-            summary.ends_with(" ±1"),
-            "expected one dirty file, got {summary:?}"
-        );
-    }
-
-    #[test]
-    fn git_summary_returns_none_outside_a_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(git_summary(dir.path()), None);
-    }
 
     #[test]
     fn resolve_spec_errors_when_explicit_flag_path_is_missing() {

@@ -1,3 +1,4 @@
+use crate::tui::gitstatus::GitStatus;
 use crate::tui::theme::SpanRole;
 use crate::tui::ui::sanitize_for_display;
 use crate::tui::{diff, theme};
@@ -528,7 +529,17 @@ pub struct App {
     pub tokens_total_out: i64,
     pub cost_turn: Option<f64>,
     pub cost_total: Option<f64>,
-    pub git_status: Option<String>,
+    /// Last snapshot delivered by the background read (task 15) — `None` until
+    /// the first one lands, and again whenever `working_dir` is not a
+    /// repository. Never computed here: `App` must not shell out to git on the
+    /// draw path.
+    pub git_status: Option<GitStatus>,
+    /// A read is in flight: no second one is requested until it answers, so a
+    /// slow repository can't pile up blocking tasks behind the 5 s tick.
+    git_refresh_inflight: bool,
+    /// Picked up by `event_loop` (`take_git_refresh_request`), same hand-off as
+    /// `pending_index_request`.
+    pending_git_request: bool,
     pub spec: Option<SpecDoc>,
     pub pass: SddPass,
     pub gate_open: bool,
@@ -705,6 +716,8 @@ impl App {
             cost_turn: None,
             cost_total: None,
             git_status: None,
+            git_refresh_inflight: false,
+            pending_git_request: false,
             spec,
             pass: SddPass::new(),
             gate_open: false,
@@ -756,6 +769,36 @@ impl App {
     /// cwd, as `mouse_enabled` does.
     pub fn set_working_dir(&mut self, dir: std::path::PathBuf) {
         self.working_dir = dir;
+    }
+
+    pub fn working_dir(&self) -> &std::path::Path {
+        &self.working_dir
+    }
+
+    /// Arms a git read for the status bar. Idempotent while one is in flight —
+    /// the 5 s tick calls this on every beat and only the first one after an
+    /// answer arms anything.
+    pub fn request_git_refresh(&mut self) {
+        if self.git_refresh_inflight {
+            return;
+        }
+        self.git_refresh_inflight = true;
+        self.pending_git_request = true;
+    }
+
+    /// `event_loop` polls this and runs [`crate::tui::gitstatus::read`] on a
+    /// blocking task, delivering the result to [`App::on_git_status`].
+    pub fn take_git_refresh_request(&mut self) -> Option<std::path::PathBuf> {
+        if !self.pending_git_request {
+            return None;
+        }
+        self.pending_git_request = false;
+        Some(self.working_dir.clone())
+    }
+
+    pub fn on_git_status(&mut self, status: Option<GitStatus>) {
+        self.git_status = status;
+        self.git_refresh_inflight = false;
     }
 
     pub fn start_pass(&mut self) {
@@ -1072,9 +1115,13 @@ impl App {
 
     /// Effacé à la fin du tour (stream terminé ou erreur) — laisse le
     /// cumul de session (tokens_total_*) intact.
+    /// The turn is the one moment the working tree is guaranteed to have
+    /// changed under the user's feet, so the status bar asks for a fresh read
+    /// here rather than waiting for the next tick.
     pub fn finish_turn(&mut self) {
         self.turn_active = false;
         self.turn_started = None;
+        self.request_git_refresh();
     }
 
     /// Queues a steering message typed while a turn is running (item 2 ante).
@@ -3374,6 +3421,62 @@ mod tests {
         );
         assert!(app.mention_indexing);
         assert!(app.take_mention_index_request().is_some());
+    }
+
+    #[test]
+    fn a_git_refresh_request_carries_the_session_working_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(None);
+        app.set_working_dir(dir.path().to_path_buf());
+
+        app.request_git_refresh();
+
+        assert_eq!(
+            app.take_git_refresh_request().as_deref(),
+            Some(dir.path()),
+            "event_loop doit recevoir le dossier de la session"
+        );
+        assert!(
+            app.take_git_refresh_request().is_none(),
+            "une seule demande par lecture"
+        );
+    }
+
+    #[test]
+    fn a_second_git_refresh_waits_for_the_first_to_answer() {
+        let mut app = App::new(None);
+        app.request_git_refresh();
+        app.take_git_refresh_request().expect("première demande");
+
+        app.request_git_refresh();
+        assert!(
+            app.take_git_refresh_request().is_none(),
+            "une seule lecture en vol"
+        );
+
+        app.on_git_status(Some(GitStatus {
+            branch: "main".to_string(),
+            ..GitStatus::default()
+        }));
+        assert_eq!(
+            app.git_status.as_ref().map(|g| g.branch.as_str()),
+            Some("main")
+        );
+
+        app.request_git_refresh();
+        assert!(
+            app.take_git_refresh_request().is_some(),
+            "la réponse réarme la lecture suivante"
+        );
+    }
+
+    #[test]
+    fn finishing_a_turn_asks_for_a_fresh_git_status() {
+        let mut app = App::new(None);
+        app.begin_turn();
+        app.finish_turn();
+
+        assert!(app.take_git_refresh_request().is_some());
     }
 
     #[test]
