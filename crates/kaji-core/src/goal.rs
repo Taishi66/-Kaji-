@@ -144,9 +144,6 @@ pub fn continuation_prompt(condition: &str, feedback: &str) -> String {
     )
 }
 
-/// Verdict = dernière ligne non vide, retour = les lignes qui la précèdent.
-/// `None` pour une sortie sans ligne de verdict reconnaissable : l'appelant
-/// continue par prudence plutôt que de lire un silence comme un succès.
 /// Le sous-scan partagé avec le juge SDD de la TUI, dont la taxonomie diffère
 /// (`VALIDE`/`DRIFT`) mais qui lit la même ligne : index de la dernière ligne
 /// non vide, et son contenu en majuscules.
@@ -158,6 +155,9 @@ pub fn last_verdict_line(text: &str) -> Option<(usize, String)> {
         .map(|(index, line)| (index, line.to_uppercase()))
 }
 
+/// Verdict = dernière ligne non vide, retour = les lignes qui la précèdent.
+/// `None` pour une sortie sans ligne de verdict reconnaissable : l'appelant
+/// continue par prudence plutôt que de lire un silence comme un succès.
 pub fn parse_verdict(text: &str) -> Option<Verdict> {
     let (last_index, last_line) = last_verdict_line(text)?;
     let feedback = || {

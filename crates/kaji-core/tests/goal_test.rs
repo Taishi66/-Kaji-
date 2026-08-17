@@ -74,6 +74,10 @@ fn last_verdict_line_reads_the_last_non_empty_line_uppercased() {
     );
     assert_eq!(goal::last_verdict_line(""), None);
     assert_eq!(goal::last_verdict_line("\n  \n\t\n"), None);
+    assert_eq!(
+        goal::last_verdict_line("verdict: met\n\r"),
+        Some((0, "VERDICT: MET".to_string()))
+    );
 }
 
 #[test]
