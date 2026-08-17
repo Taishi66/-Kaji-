@@ -99,7 +99,18 @@ pub static THEMES: [Palette; 6] = [
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 pub fn active() -> &'static Palette {
-    &THEMES[ACTIVE.load(Ordering::Relaxed)]
+    &THEMES[active_index()]
+}
+
+pub fn active_index() -> usize {
+    ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Pendant infaillible de [`set_active`] pour les appelants qui tiennent déjà
+/// un rang dans [`THEMES`] — le sélecteur `/theme`, dont l'aperçu ne peut pas
+/// échouer. L'index boucle, comme [`next_name`].
+pub fn set_active_index(index: usize) {
+    ACTIVE.store(index % THEMES.len(), Ordering::Relaxed);
 }
 
 fn index_of(name: &str) -> Option<usize> {

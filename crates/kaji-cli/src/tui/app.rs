@@ -53,6 +53,17 @@ pub struct FinderState {
     pub results: Vec<String>,
 }
 
+/// Sélecteur de thème (`/theme`) — chaque déplacement applique la palette
+/// pour de bon : l'écran entier est l'aperçu, il n'y a rien à prévisualiser à
+/// côté. Les deux champs sont des rangs dans [`theme::THEMES`].
+#[derive(Debug)]
+pub struct ThemePicker {
+    pub selected: usize,
+    /// Palette active à l'ouverture : Esc la remet, et la liste la marque
+    /// `(actuel)`.
+    pub initial: usize,
+}
+
 /// Hard ceiling on what the Tab detail panel reads back from disk to diff a
 /// `write` against the file it would replace. The panel is a preview, not a
 /// file viewer: past this the diff is cut rather than pulling a whole
@@ -404,7 +415,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/theme",
-        desc: "passe au thème suivant — /theme <nom> ou /theme list",
+        desc: "choisir un thème (aperçu en direct) — /theme <nom> · next",
         run: |app| app.run_theme_command(""),
     },
     Command {
@@ -442,7 +453,7 @@ fn restore_command_arg(text: &str) -> Option<&str> {
     slash_command_arg(text, "/restore")
 }
 
-/// `/theme` alone IS in `COMMANDS` (arg-less = cycle), so it also reaches
+/// `/theme` alone IS in `COMMANDS` (arg-less = sélecteur), so it also reaches
 /// [`App::run_theme_command`] through the palette.
 fn theme_command_arg(text: &str) -> Option<&str> {
     slash_command_arg(text, "/theme")
@@ -651,6 +662,9 @@ pub struct App {
     /// Fuzzy file finder overlay (task 8) — while `Some` it owns the
     /// keyboard: nothing typed into it reaches the composer.
     pub finder: Option<FinderState>,
+    /// Sélecteur de thème (`/theme`) — même contrat d'overlay que le finder :
+    /// tant qu'il est `Some`, il capture le clavier.
+    pub theme_picker: Option<ThemePicker>,
     /// Right-column file viewer. Takes the SPEC panel's slot for as long as
     /// it is open; closing it hands the slot back with no state to restore
     /// (`ui::draw` reads `spec_panel_visible` again).
@@ -728,6 +742,7 @@ impl App {
             mention_selected: 0,
             mention_suppressed: false,
             finder: None,
+            theme_picker: None,
             viewer: None,
             explorer: None,
             focus: Focus::default(),
@@ -1329,6 +1344,64 @@ impl App {
                 }
             }
             KeyCode::Esc => self.close_finder(),
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Ouvre le sélecteur de thème (`/theme`, `/theme list`) sur la palette
+    /// active — même garde que le finder : une modale y/n garde le clavier.
+    pub fn open_theme_picker(&mut self) {
+        if self.modal_active() {
+            return;
+        }
+        let active = theme::active_index();
+        self.theme_picker = Some(ThemePicker {
+            selected: active,
+            initial: active,
+        });
+    }
+
+    fn theme_picker_select(&mut self, index: usize) {
+        let Some(picker) = self.theme_picker.as_mut() else {
+            return;
+        };
+        picker.selected = index;
+        theme::set_active_index(index);
+    }
+
+    fn theme_picker_move(&mut self, delta: isize) {
+        let Some(picker) = self.theme_picker.as_ref() else {
+            return;
+        };
+        let count = theme::THEMES.len();
+        let step = delta.rem_euclid(count as isize) as usize;
+        self.theme_picker_select((picker.selected + step) % count);
+    }
+
+    /// Every key while the theme picker is open. Moving the selection applies
+    /// the palette for real — the whole screen is the preview — so Enter has
+    /// nothing left to apply and Esc has one thing to undo.
+    fn theme_picker_key(&mut self, key: &KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('n' | 'j') if ctrl => self.theme_picker_move(1),
+            KeyCode::Char('k') if ctrl => self.theme_picker_move(-1),
+            KeyCode::Down | KeyCode::Char('j') if !ctrl => self.theme_picker_move(1),
+            KeyCode::Up | KeyCode::Char('k') if !ctrl => self.theme_picker_move(-1),
+            KeyCode::Home => self.theme_picker_select(0),
+            KeyCode::End => self.theme_picker_select(theme::THEMES.len() - 1),
+            KeyCode::Enter => {
+                self.theme_picker = None;
+                let applied = theme::active().name;
+                self.push_system(&format!("thème : {applied}"));
+                return Action::Theme(applied.to_string());
+            }
+            KeyCode::Esc | KeyCode::Char('q') if !ctrl => {
+                if let Some(picker) = self.theme_picker.take() {
+                    theme::set_active_index(picker.initial);
+                }
+            }
             _ => {}
         }
         Action::None
@@ -1963,9 +2036,9 @@ impl App {
 
     pub fn on_event(&mut self, ev: &Event) -> Action {
         if let Event::Mouse(mouse) = ev {
-            // The finder is an overlay: the wheel under it would scroll a chat
-            // the overlay is covering.
-            if self.finder.is_some() {
+            // The finder and the theme picker are overlays: the wheel under
+            // them would scroll a chat the overlay is covering.
+            if self.finder.is_some() || self.theme_picker.is_some() {
                 return Action::None;
             }
             // The wheel follows the pointer: over the file viewer it scrolls
@@ -1991,8 +2064,8 @@ impl App {
         }
         // A y/n modal owns the keyboard: a paste landing behind it would
         // mutate the composer the user can't see. So would one landing behind
-        // the finder or the viewer — the finder takes it as query text, the
-        // viewer drops it.
+        // the finder, the theme picker or the viewer — the finder takes it as
+        // query text, the other two drop it.
         if let Event::Paste(text) = ev {
             if !self.modal_active() {
                 if self.finder.is_some() {
@@ -2001,7 +2074,7 @@ impl App {
                         .filter(|c| !c.is_control())
                         .collect();
                     self.finder_insert(&pasted);
-                } else if self.focus == Focus::Composer {
+                } else if self.theme_picker.is_none() && self.focus == Focus::Composer {
                     self.insert_pasted(text);
                 }
             }
@@ -2023,6 +2096,12 @@ impl App {
         if !self.modal_active() {
             if self.finder.is_some() {
                 return self.finder_key(key);
+            }
+            // Same contract for the theme picker; the two can't be open at
+            // once since whichever is open swallows the key that would open
+            // the other.
+            if self.theme_picker.is_some() {
+                return self.theme_picker_key(key);
             }
             // The pane chords sit above the panes themselves: `Ctrl+E` has to
             // reach the explorer from inside the viewer, and `Ctrl+O` has to
@@ -2418,27 +2497,15 @@ impl App {
         Action::GoalSet(arg.to_string())
     }
 
-    /// `/theme` : argument vide = thème suivant, `list` = inventaire,
-    /// sinon le nom donné. Un nom inconnu laisse la palette intacte et
-    /// renvoie la liste des noms disponibles.
+    /// `/theme` : argument vide ou `list` = sélecteur avec aperçu en direct,
+    /// `next` = palette suivante du cycle, sinon le nom donné. Un nom inconnu
+    /// laisse la palette intacte et renvoie la liste des noms disponibles.
     fn run_theme_command(&mut self, arg: &str) -> Action {
-        if arg.eq_ignore_ascii_case("list") {
-            let active = theme::active().name;
-            let listing = theme::THEMES
-                .iter()
-                .map(|palette| {
-                    if palette.name == active {
-                        format!("▸ {}", palette.name)
-                    } else {
-                        palette.name.to_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
-            self.push_system(&format!("thèmes : {listing}"));
+        if arg.is_empty() || arg.eq_ignore_ascii_case("list") {
+            self.open_theme_picker();
             return Action::None;
         }
-        let requested = if arg.is_empty() {
+        let requested = if arg.eq_ignore_ascii_case("next") {
             theme::next_name(theme::active().name)
         } else {
             arg
@@ -2862,15 +2929,143 @@ mod tests {
     }
 
     #[test]
-    fn bare_slash_theme_cycles_to_the_next_palette() {
+    fn slash_theme_next_cycles_to_the_next_palette() {
         let _theme = theme::test_guard();
         let mut app = App::new(None);
 
-        let action = submit(&mut app, "/theme");
+        let action = submit(&mut app, "/theme next");
 
         assert_eq!(action, Action::Theme("light".to_string()));
         assert_eq!(theme::active().name, "light");
         assert!(app.chat.iter().any(|l| l.text.contains("thème : light")));
+    }
+
+    #[test]
+    fn slash_theme_opens_the_picker_on_the_active_palette() {
+        let _theme = theme::test_guard();
+        theme::set_active("nord").expect("nord is a built-in theme");
+        let mut app = App::new(None);
+
+        let action = submit(&mut app, "/theme");
+
+        assert_eq!(action, Action::None);
+        let picker = app.theme_picker.as_ref().expect("le sélecteur est ouvert");
+        assert_eq!(theme::THEMES[picker.selected].name, "nord");
+        assert_eq!(picker.initial, picker.selected);
+        assert_eq!(theme::active().name, "nord", "ouvrir ne change rien");
+        assert!(app.chat.is_empty(), "ouvrir n'écrit aucune ligne système");
+    }
+
+    #[test]
+    fn theme_picker_navigation_previews_the_palette_without_committing() {
+        let _theme = theme::test_guard();
+        theme::set_active("zen").expect("zen is a built-in theme");
+        let mut app = App::new(None);
+        submit(&mut app, "/theme");
+
+        let action = app.on_event(&key(KeyCode::Down));
+
+        assert_eq!(action, Action::None, "l'aperçu ne persiste rien");
+        assert_eq!(theme::active().name, "light", "aperçu appliqué en direct");
+        assert!(app.theme_picker.is_some(), "le sélecteur reste ouvert");
+        assert!(app.chat.is_empty(), "aucune ligne système pendant l'aperçu");
+    }
+
+    #[test]
+    fn theme_picker_enter_keeps_the_previewed_palette() {
+        let _theme = theme::test_guard();
+        theme::set_active("zen").expect("zen is a built-in theme");
+        let mut app = App::new(None);
+        submit(&mut app, "/theme");
+        app.on_event(&key(KeyCode::Down));
+
+        let action = app.on_event(&key(KeyCode::Enter));
+
+        assert_eq!(action, Action::Theme("light".to_string()));
+        assert_eq!(theme::active().name, "light");
+        assert!(app.theme_picker.is_none(), "le sélecteur se ferme");
+        assert!(app.chat.iter().any(|l| l.text.contains("thème : light")));
+    }
+
+    #[test]
+    fn theme_picker_enter_without_moving_validates_the_active_palette() {
+        let _theme = theme::test_guard();
+        theme::set_active("nord").expect("nord is a built-in theme");
+        let mut app = App::new(None);
+        submit(&mut app, "/theme");
+
+        let action = app.on_event(&key(KeyCode::Enter));
+
+        assert_eq!(action, Action::Theme("nord".to_string()));
+        assert!(app.chat.iter().any(|l| l.text.contains("thème : nord")));
+    }
+
+    #[test]
+    fn theme_picker_esc_restores_the_palette_it_opened_on() {
+        let _theme = theme::test_guard();
+        theme::set_active("zen").expect("zen is a built-in theme");
+        let mut app = App::new(None);
+        submit(&mut app, "/theme");
+        app.on_event(&key(KeyCode::Down));
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(theme::active().name, "nord", "l'aperçu a bien bougé");
+
+        let action = app.on_event(&key(KeyCode::Esc));
+
+        assert_eq!(action, Action::None);
+        assert_eq!(theme::active().name, "zen", "Esc rend la palette d'origine");
+        assert!(app.theme_picker.is_none(), "le sélecteur se ferme");
+        assert!(app.chat.is_empty(), "annuler n'écrit aucune ligne système");
+    }
+
+    #[test]
+    fn theme_picker_navigation_wraps_at_both_ends() {
+        let _theme = theme::test_guard();
+        theme::set_active("zen").expect("zen is a built-in theme");
+        let mut app = App::new(None);
+        submit(&mut app, "/theme");
+
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(theme::active().name, "mono", "↑ depuis le premier boucle");
+
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(theme::active().name, "zen", "↓ depuis le dernier boucle");
+
+        app.on_event(&key(KeyCode::End));
+        assert_eq!(theme::active().name, "mono");
+
+        app.on_event(&key(KeyCode::Home));
+        assert_eq!(theme::active().name, "zen");
+    }
+
+    #[test]
+    fn the_theme_picker_swallows_every_key_it_does_not_use() {
+        let _theme = theme::test_guard();
+        let mut app = App::new(None);
+        submit(&mut app, "/theme");
+
+        app.on_event(&key(KeyCode::Char('x')));
+        app.on_event(&ctrl_key(KeyCode::Char('p')));
+        app.on_event(&ctrl_key(KeyCode::Char('e')));
+
+        assert!(app.input.is_empty(), "rien ne fuit dans le composer");
+        assert!(app.finder.is_none(), "Ctrl+P est inerte sous le sélecteur");
+        assert!(
+            app.explorer.is_none(),
+            "Ctrl+E est inerte sous le sélecteur"
+        );
+        assert!(app.theme_picker.is_some());
+    }
+
+    #[test]
+    fn slash_theme_list_opens_the_picker() {
+        let _theme = theme::test_guard();
+        let mut app = App::new(None);
+
+        let action = submit(&mut app, "/theme list");
+
+        assert_eq!(action, Action::None);
+        assert!(app.theme_picker.is_some(), "list ouvre le même sélecteur");
     }
 
     #[test]
@@ -2902,21 +3097,6 @@ mod tests {
         for palette in &theme::THEMES {
             assert!(error.text.contains(palette.name), "{}", error.text);
         }
-    }
-
-    #[test]
-    fn slash_theme_list_marks_the_active_palette() {
-        let _theme = theme::test_guard();
-        let mut app = App::new(None);
-
-        let action = submit(&mut app, "/theme list");
-
-        assert_eq!(action, Action::None);
-        let listing = app.chat.last().expect("a listing line");
-        for palette in &theme::THEMES {
-            assert!(listing.text.contains(palette.name), "{}", listing.text);
-        }
-        assert!(listing.text.contains("▸ zen"), "{}", listing.text);
     }
 
     #[test]

@@ -92,6 +92,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_explorer(frame, app, explorer, area);
     }
     draw_finder(frame, app);
+    draw_theme_picker(frame, app);
 
     if app.gate_open {
         draw_gate_modal(frame);
@@ -668,6 +669,64 @@ fn draw_finder(frame: &mut Frame, app: &App) {
         lines.push(Line::from(Span::styled(hint, theme::dim())));
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), rows[1]);
+}
+
+/// Assez large pour que le pied tienne d'un tenant dans le cadre, et jamais
+/// plus de 90 % du terminal.
+const THEME_PICKER_WIDTH: u16 = 41;
+const THEME_PICKER_FOOTER: &str = "↑↓ aperçu · Enter valider · Esc annuler";
+
+/// Sélecteur de thème (`/theme`) — une liste nue, sans pastilles de couleur :
+/// la palette sélectionnée est déjà appliquée, donc tout ce qui entoure la
+/// boîte est l'aperçu. Même z-order que le finder.
+fn draw_theme_picker(frame: &mut Frame, app: &App) {
+    let Some(picker) = &app.theme_picker else {
+        return;
+    };
+    let full = frame.area();
+    let width = (u32::from(full.width) * 90 / 100).min(THEME_PICKER_WIDTH.into()) as u16;
+    let height = theme::THEMES.len() as u16 + 3;
+    if width < 12 || full.height < height {
+        return;
+    }
+    let area = Rect {
+        x: full.x + (full.width - width) / 2,
+        y: full.y + (full.height - height) / 2,
+        width,
+        height,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_active())
+        .title(Span::styled(" thème ", theme::title()));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = theme::THEMES
+        .iter()
+        .enumerate()
+        .map(|(i, palette)| {
+            let selected = i == picker.selected;
+            let marker = if selected { "▸ " } else { "  " };
+            let style = if selected {
+                theme::accent()
+            } else {
+                theme::text()
+            };
+            let mut spans = vec![
+                Span::styled(marker, theme::accent()),
+                Span::styled(palette.name, style),
+            ];
+            if i == picker.initial {
+                spans.push(Span::styled(" (actuel)", theme::dim()));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    lines.push(Line::from(Span::styled(THEME_PICKER_FOOTER, theme::dim())));
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 /// Share of the body the SPEC panel takes when it owns the right column.
@@ -2051,6 +2110,28 @@ mod tests {
         assert!(content.contains("README.md"), "got:\n{content}");
         assert!(content.contains("Tab attacher @"), "got:\n{content}");
         assert!(content.contains("▸"), "marqueur de sélection visible");
+    }
+
+    #[test]
+    fn the_theme_picker_lists_every_palette_and_marks_the_active_one() {
+        let _theme = theme::test_guard();
+        theme::set_active("nord").expect("nord is a built-in theme");
+        let mut app = App::new(None);
+        app.open_theme_picker();
+
+        let content = rendered(&app, 80, 20);
+
+        assert!(content.contains("thème"), "got:\n{content}");
+        for palette in &theme::THEMES {
+            assert!(
+                content.contains(palette.name),
+                "{} manquant, got:\n{content}",
+                palette.name
+            );
+        }
+        assert!(content.contains("nord (actuel)"), "got:\n{content}");
+        assert!(content.contains("▸ nord"), "sélection sur l'actif");
+        assert!(content.contains("Enter valider"), "got:\n{content}");
     }
 
     #[test]
