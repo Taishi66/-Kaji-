@@ -12,6 +12,7 @@ mod compaction_lifecycle;
 mod condense_lifecycle;
 mod dummy_api;
 mod hooks_lifecycle;
+mod memory_lifecycle;
 mod pipeline;
 mod prompt_skill_lifecycle;
 mod provider_lifecycle;

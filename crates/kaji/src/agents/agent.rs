@@ -5909,6 +5909,28 @@ echo start >> "$PLUGIN_ROOT/hook.log"
         Ok(())
     }
 
+    #[test]
+    fn turn_end_error_payload_carries_the_provider_error_kind() {
+        let error = anyhow::Error::new(ProviderError::RateLimitExceeded {
+            details: "slow down".to_string(),
+            retry_delay: None,
+        });
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&turn_end_error_payload(&error)).expect("payload json");
+
+        assert_eq!(
+            payload["kind"], "rate_limited",
+            "a provider failure is logged with its taxonomy kind: {payload}"
+        );
+        assert!(
+            payload["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("slow down")),
+            "the turn_end payload must carry the error text: {payload}"
+        );
+    }
+
     #[tokio::test]
     async fn event_sequence_is_identical_across_legacy_and_state_machine() -> Result<()> {
         async fn run_scenario(state_machine: Option<&str>) -> Result<Vec<String>> {

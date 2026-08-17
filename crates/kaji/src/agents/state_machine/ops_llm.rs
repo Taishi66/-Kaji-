@@ -395,10 +395,13 @@ impl Inference for InferenceRunner<'_> {
                 kaji_mode,
             );
             // KAJI : splice recalled inter-session facts (parity with the legacy
-            // `prepare_reply_context` path).
+            // `prepare_reply_context` path, which reads memory off the repaired
+            // conversation — merged user messages change the recall query).
             let mut system_prompt = system_prompt;
-            crate::kaji::ingest_turn(&session.id, conversation.messages());
-            let query = crate::kaji::latest_user_instruction(conversation.messages());
+            let (fixed_conversation, _) =
+                crate::conversation::fix_conversation(conversation.clone());
+            crate::kaji::ingest_turn(&session.id, fixed_conversation.messages());
+            let query = crate::kaji::latest_user_instruction(fixed_conversation.messages());
             if let Some(query) = query {
                 system_prompt =
                     crate::kaji::splice_memory_block(&system_prompt, &session.id, &query);
