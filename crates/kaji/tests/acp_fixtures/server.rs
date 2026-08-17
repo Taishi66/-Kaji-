@@ -101,6 +101,11 @@ impl AcpServerConnection {
     pub fn cx(&self) -> &ConnectionTo<Agent> {
         &self.cx
     }
+
+    #[allow(dead_code)]
+    pub fn permission_manager(&self) -> Arc<PermissionManager> {
+        Arc::clone(&self.permission_manager)
+    }
 }
 
 #[async_trait]

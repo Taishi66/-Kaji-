@@ -21,7 +21,7 @@ impl KajiAcpAgent {
             .into_iter()
             .map(|tool| {
                 let permission = permission_manager
-                    .get_user_permission(&tool.name)
+                    .get_tool_wide_permission(&tool.name)
                     .or_else(|| {
                         if kaji_mode == KajiMode::SmartApprove {
                             permission_manager.get_smart_approve_permission(&tool.name)

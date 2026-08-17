@@ -12,6 +12,7 @@ use common_tests::fixtures::{
     TestConnectionConfig,
 };
 use kaji::acp::server::AcpProviderFactory;
+use kaji::permission::grants::Spec;
 use kaji::providers::base::{MessageStream, Provider};
 use kaji_providers::errors::ProviderError;
 use kaji_providers::model::ModelConfig;
@@ -184,6 +185,62 @@ fn test_custom_get_tools() {
         let response = result.unwrap();
         let tools = response.get("tools").expect("missing 'tools' field");
         assert!(tools.is_array(), "tools should be array");
+    });
+}
+
+#[test]
+#[serial]
+fn test_custom_get_tools_reports_a_narrow_grant_as_not_auto_approved() {
+    write_acp_global_config(DEFAULT_ACP_TEST_CONFIG);
+    run_test(async move {
+        let openai = OpenAiFixture::new(vec![], Arc::new(EnforceSessionId::default())).await;
+        let mut conn = AcpServerConnection::new(
+            TestConnectionConfig {
+                builtins: vec!["developer".to_string()],
+                ..Default::default()
+            },
+            openai,
+        )
+        .await;
+
+        let SessionData { session, .. } = conn.new_session().await.unwrap();
+        let session_id = session.session_id().0.clone();
+
+        async fn permission_of(
+            conn: &AcpServerConnection,
+            session_id: &str,
+            tool_name: &str,
+        ) -> serde_json::Value {
+            let response = send_custom(
+                conn.cx(),
+                "_kaji/unstable/tools/list",
+                serde_json::json!({ "sessionId": session_id }),
+            )
+            .await
+            .unwrap();
+            let tools = response["tools"].as_array().unwrap().clone();
+            tools
+                .iter()
+                .find(|tool| tool["name"] == tool_name)
+                .unwrap_or_else(|| panic!("tool {tool_name} missing from {tools:?}"))["permission"]
+                .clone()
+        }
+
+        let shell = "shell";
+        let permission_manager = conn.permission_manager();
+
+        permission_manager.add_grant(shell, Some(&Spec::prefix("cargo test")));
+        assert_ne!(
+            permission_of(&conn, &session_id, shell).await,
+            serde_json::json!("always_allow"),
+            "a per-call grant must not be reported as a tool-wide auto-approval"
+        );
+
+        permission_manager.add_grant(shell, None);
+        assert_eq!(
+            permission_of(&conn, &session_id, shell).await,
+            serde_json::json!("always_allow")
+        );
     });
 }
 

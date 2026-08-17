@@ -4,8 +4,10 @@ use rmcp::model::{JsonObject, Tool};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, RwLock};
+use tempfile::NamedTempFile;
 use tracing;
 
 const PERMISSION_FILE: &str = "permission.yaml";
@@ -28,6 +30,29 @@ pub struct PermissionConfig {
     pub always_allow: Vec<String>, // List of tools that are always allowed
     pub ask_before: Vec<String>,   // List of tools that require user consent
     pub never_allow: Vec<String>,  // List of tools that are never allowed
+}
+
+impl PermissionConfig {
+    /// Drops every `always_allow` entry of a tool, tool-wide and per-call alike,
+    /// reporting whether anything was dropped.
+    fn drop_grants(&mut self, tool_name: &str) -> bool {
+        let before = self.always_allow.len();
+        self.always_allow
+            .retain(|entry| GrantRule::parse(entry).tool_name != tool_name);
+        self.always_allow.len() != before
+    }
+
+    fn set_level(&mut self, principal_name: &str, level: &PermissionLevel) {
+        self.always_allow.retain(|p| p != principal_name);
+        self.ask_before.retain(|p| p != principal_name);
+        self.never_allow.retain(|p| p != principal_name);
+
+        match level {
+            PermissionLevel::AlwaysAllow => self.always_allow.push(principal_name.to_string()),
+            PermissionLevel::AskBefore => self.ask_before.push(principal_name.to_string()),
+            PermissionLevel::NeverAllow => self.never_allow.push(principal_name.to_string()),
+        }
+    }
 }
 
 /// PermissionManager manages permission configurations for various tools.
@@ -96,6 +121,25 @@ impl PermissionManager {
         level
     }
 
+    /// The permission level that holds for the tool as a whole, for callers that report a
+    /// tool's permission to a client. Unlike [`Self::get_user_permission`], a per-call grant
+    /// stays invisible: reporting it as `AlwaysAllow` would announce an auto-approval the
+    /// inspector only gives to the calls the grant covers.
+    pub fn get_tool_wide_permission(&self, principal_name: &str) -> Option<PermissionLevel> {
+        let covers_the_tool = |list: fn(&PermissionConfig) -> &Vec<String>| {
+            self.rules_of(list)
+                .iter()
+                .any(|rule| rule.tool_name == principal_name && rule.spec.is_none())
+        };
+        if covers_the_tool(|config| &config.never_allow) {
+            return Some(PermissionLevel::NeverAllow);
+        }
+        if covers_the_tool(|config| &config.always_allow) {
+            return Some(PermissionLevel::AlwaysAllow);
+        }
+        self.get_permission(USER_PERMISSION, principal_name)
+    }
+
     /// Whether the tool carries a name-level `ask_before` entry, which per-call grants
     /// narrow but never cancel.
     pub fn asks_before(&self, principal_name: &str) -> bool {
@@ -135,26 +179,26 @@ impl PermissionManager {
         let permission_config = map.entry(SMART_APPROVE_PERMISSION.to_string()).or_default();
 
         for tool_name in tool_names {
-            // Remove from all lists to avoid duplicates
-            permission_config.always_allow.retain(|p| p != tool_name);
-            permission_config.ask_before.retain(|p| p != tool_name);
-            permission_config.never_allow.retain(|p| p != tool_name);
-
-            // Add to the appropriate list
-            match &level {
-                PermissionLevel::AlwaysAllow => {
-                    permission_config.always_allow.push(tool_name.clone())
-                }
-                PermissionLevel::AskBefore => permission_config.ask_before.push(tool_name.clone()),
-                PermissionLevel::NeverAllow => {
-                    permission_config.never_allow.push(tool_name.clone())
-                }
-            }
+            permission_config.set_level(tool_name, &level);
         }
 
+        self.persist(&map);
+    }
+
+    /// Commits the whole map through a temporary file of the config directory renamed
+    /// onto the config path, so a reader never sees a half-written file and an
+    /// interrupted write never truncates the previous one. Callers hold the write lock
+    /// across this, which keeps the file's contents ordered like the map's mutations.
+    fn persist(&self, map: &HashMap<String, PermissionConfig>) {
         let yaml_content =
-            serde_yaml::to_string(&*map).expect("Failed to serialize permission config");
-        fs::write(&self.config_path, yaml_content).expect("Failed to write to permission.yaml");
+            serde_yaml::to_string(map).expect("Failed to serialize permission config");
+        let directory = self.config_path.parent().unwrap_or(Path::new("."));
+        let mut file =
+            NamedTempFile::new_in(directory).expect("Failed to write to permission.yaml");
+        file.write_all(yaml_content.as_bytes())
+            .expect("Failed to write to permission.yaml");
+        file.persist(&self.config_path)
+            .expect("Failed to write to permission.yaml");
     }
 
     /// Helper function to retrieve the permission level for a specific permission category and tool.
@@ -234,16 +278,20 @@ impl PermissionManager {
             permission_config.always_allow.push(new_rule.to_string());
         }
 
-        let yaml_content =
-            serde_yaml::to_string(&*map).expect("Failed to serialize permission config");
-        fs::write(&self.config_path, yaml_content).expect("Failed to write to permission.yaml");
+        self.persist(&map);
     }
 
     /// Updates the user permission level for a specific tool. Setting any level revokes
-    /// the tool's per-call grants: they are what the level replaces.
+    /// the tool's per-call grants: they are what the level replaces. Revocation and level
+    /// are committed together, so no reader ever sees the tool stripped of its grants
+    /// without its new level.
     pub fn update_user_permission(&self, principal_name: &str, level: PermissionLevel) {
-        self.remove_grants(principal_name);
-        self.update_permission(USER_PERMISSION, principal_name, level)
+        let mut map = self.permission_map.write().unwrap();
+        let permission_config = map.entry(USER_PERMISSION.to_string()).or_default();
+        permission_config.drop_grants(principal_name);
+        permission_config.set_level(principal_name, &level);
+
+        self.persist(&map);
     }
 
     /// Drops every `always_allow` entry of a tool, tool-wide and per-call alike.
@@ -252,17 +300,11 @@ impl PermissionManager {
         let Some(permission_config) = map.get_mut(USER_PERMISSION) else {
             return;
         };
-        let before = permission_config.always_allow.len();
-        permission_config
-            .always_allow
-            .retain(|entry| GrantRule::parse(entry).tool_name != tool_name);
-        if permission_config.always_allow.len() == before {
+        if !permission_config.drop_grants(tool_name) {
             return;
         }
 
-        let yaml_content =
-            serde_yaml::to_string(&*map).expect("Failed to serialize permission config");
-        fs::write(&self.config_path, yaml_content).expect("Failed to write to permission.yaml");
+        self.persist(&map);
     }
 
     /// Updates the smart approve permission level for a specific tool.
@@ -273,35 +315,11 @@ impl PermissionManager {
     /// Helper function to update a permission level for a specific tool in a given permission category.
     fn update_permission(&self, name: &str, principal_name: &str, level: PermissionLevel) {
         let mut map = self.permission_map.write().unwrap();
-        // Get or create a new PermissionConfig for the specified category
-        let permission_config = map.entry(name.to_string()).or_default();
+        map.entry(name.to_string())
+            .or_default()
+            .set_level(principal_name, &level);
 
-        // Remove the principal from all existing lists to avoid duplicates
-        permission_config
-            .always_allow
-            .retain(|p| p != principal_name);
-        permission_config.ask_before.retain(|p| p != principal_name);
-        permission_config
-            .never_allow
-            .retain(|p| p != principal_name);
-
-        // Add the principal to the appropriate list
-        match level {
-            PermissionLevel::AlwaysAllow => permission_config
-                .always_allow
-                .push(principal_name.to_string()),
-            PermissionLevel::AskBefore => permission_config
-                .ask_before
-                .push(principal_name.to_string()),
-            PermissionLevel::NeverAllow => permission_config
-                .never_allow
-                .push(principal_name.to_string()),
-        }
-
-        // Serialize the updated permission map and write it back to the config file
-        let yaml_content =
-            serde_yaml::to_string(&*map).expect("Failed to serialize permission config");
-        fs::write(&self.config_path, yaml_content).expect("Failed to write to permission.yaml");
+        self.persist(&map);
     }
 
     /// Removes all entries where the principal name starts with the given extension name.
@@ -319,9 +337,7 @@ impl PermissionManager {
                 .retain(|p| !p.starts_with(extension_name));
         }
 
-        let yaml_content =
-            serde_yaml::to_string(&*map).expect("Failed to serialize permission config");
-        fs::write(&self.config_path, yaml_content).expect("Failed to write to permission.yaml");
+        self.persist(&map);
     }
 }
 
@@ -623,6 +639,135 @@ mod tests {
         );
         assert!(grants(&manager).is_empty());
         assert!(!manager.is_call_allowed(SHELL, Some(&shell_call("cargo test --all"))));
+    }
+
+    #[test]
+    fn a_narrow_grant_is_never_reported_tool_wide() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        manager.add_grant(SHELL, Some(&Spec::prefix("cargo test")));
+
+        assert_eq!(manager.get_tool_wide_permission(SHELL), None);
+        assert_eq!(
+            manager.get_user_permission(SHELL),
+            Some(PermissionLevel::AlwaysAllow)
+        );
+
+        manager.update_user_permission(SHELL, PermissionLevel::AskBefore);
+        manager.add_grant(SHELL, Some(&Spec::prefix("cargo test")));
+
+        assert_eq!(
+            manager.get_tool_wide_permission(SHELL),
+            Some(PermissionLevel::AskBefore)
+        );
+        assert_eq!(
+            manager.get_user_permission(SHELL),
+            Some(PermissionLevel::AlwaysAllow)
+        );
+    }
+
+    #[test]
+    fn a_tool_wide_grant_is_reported_tool_wide() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        manager.update_user_permission(SHELL, PermissionLevel::AskBefore);
+        manager.add_grant(SHELL, None);
+
+        assert_eq!(
+            manager.get_tool_wide_permission(SHELL),
+            Some(PermissionLevel::AlwaysAllow)
+        );
+        assert_eq!(
+            manager.get_user_permission(SHELL),
+            Some(PermissionLevel::AlwaysAllow)
+        );
+    }
+
+    #[test]
+    fn a_denial_outranks_a_grant_in_the_tool_wide_view() {
+        let (manager, _temp_dir) = create_test_permission_manager();
+        manager.update_user_permission(SHELL, PermissionLevel::NeverAllow);
+        manager.add_grant(SHELL, Some(&Spec::exact("cargo test")));
+        manager.add_grant(SHELL, None);
+
+        assert_eq!(
+            manager.get_tool_wide_permission(SHELL),
+            Some(PermissionLevel::NeverAllow)
+        );
+    }
+
+    fn written_config(dir: &Path) -> HashMap<String, PermissionConfig> {
+        let contents = fs::read_to_string(dir.join(PERMISSION_FILE)).unwrap();
+        serde_yaml::from_str(&contents).unwrap()
+    }
+
+    #[test]
+    fn revoking_a_grant_leaves_one_consistent_file_and_no_leftovers() {
+        let (manager, temp_dir) = create_test_permission_manager();
+        manager.add_grant(SHELL, Some(&Spec::prefix("cargo test")));
+        manager.update_user_permission(SHELL, PermissionLevel::AskBefore);
+
+        let entries: Vec<String> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec![PERMISSION_FILE.to_string()]);
+
+        let config = written_config(temp_dir.path())
+            .remove(USER_PERMISSION)
+            .unwrap();
+        assert!(config.always_allow.is_empty());
+        assert_eq!(config.ask_before, vec![SHELL.to_string()]);
+    }
+
+    #[test]
+    fn concurrent_writes_never_expose_a_partial_file() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        const WRITERS: usize = 8;
+        const WRITES_PER_WRITER: usize = 20;
+
+        let (manager, temp_dir) = create_test_permission_manager();
+        let manager = Arc::new(manager);
+        manager.update_user_permission("seed", PermissionLevel::AskBefore);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let path = temp_dir.path().join(PERMISSION_FILE);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let contents = fs::read_to_string(&path).unwrap();
+                    serde_yaml::from_str::<HashMap<String, PermissionConfig>>(&contents)
+                        .expect("permission.yaml must always parse");
+                }
+            })
+        };
+
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|index| {
+                let manager = Arc::clone(&manager);
+                std::thread::spawn(move || {
+                    for _ in 0..WRITES_PER_WRITER {
+                        manager.update_user_permission(
+                            &format!("tool{index}"),
+                            PermissionLevel::AlwaysAllow,
+                        );
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
+
+        let config = written_config(temp_dir.path())
+            .remove(USER_PERMISSION)
+            .unwrap();
+        for index in 0..WRITERS {
+            assert!(config.always_allow.contains(&format!("tool{index}")));
+        }
+        assert_eq!(fs::read_dir(temp_dir.path()).unwrap().count(), 1);
     }
 
     #[test]
