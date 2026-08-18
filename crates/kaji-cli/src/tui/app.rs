@@ -2433,7 +2433,8 @@ impl App {
                         "envoi à la fin de la boucle (but/passe en cours)"
                     };
                     self.push_system(&format!(
-                        "🔀 mis en file ({depth}) — Ctrl+S pour steer, {when}"
+                        "{} mis en file ({depth}) — Ctrl+S pour steer, {when}",
+                        theme::STEER_GLYPH
                     ));
                     Action::None
                 }
@@ -2685,7 +2686,7 @@ impl App {
                         .to_string();
                     self.chat.push(ChatLine {
                         sender: Sender::System,
-                        text: format!("⚙ {name}"),
+                        text: format!("{} {name}", theme::TOOL_GLYPH),
                         tool: Some(ToolLineState {
                             name,
                             started: Instant::now(),
@@ -4676,7 +4677,7 @@ mod tests {
     fn push_system_between_same_id_chunks_keeps_them_separate() {
         let mut app = App::new(None);
         agent_says(&mut app, "m1", "Bon");
-        app.push_system("⚙ outil");
+        app.push_system(&format!("{} outil", theme::TOOL_GLYPH));
         agent_says(&mut app, "m1", "jour");
 
         let agent_lines: Vec<_> = app
@@ -5065,14 +5066,15 @@ mod tests {
             Message::assistant().with_tool_request("t1", Ok(CallToolRequestParams::new("shell")));
         app.apply_agent_event(&AgentEvent::Message(req_msg));
 
-        assert!(app.chat.iter().any(|l| l.text.contains("⚙ shell")));
+        let running = format!("{} shell", theme::TOOL_GLYPH);
+        assert!(app.chat.iter().any(|l| l.text.contains(&running)));
         assert!(app.chat.iter().any(|l| l.tool.is_some()));
 
         let resp_msg =
             Message::user().with_tool_response("t1", Ok(CallToolResult::success(vec![])));
         app.apply_agent_event(&AgentEvent::Message(resp_msg));
 
-        assert!(!app.chat.iter().any(|l| l.text.contains("⚙ shell")));
+        assert!(!app.chat.iter().any(|l| l.text.contains(&running)));
         assert!(
             app.chat
                 .iter()

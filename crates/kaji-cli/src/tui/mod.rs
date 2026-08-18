@@ -608,7 +608,10 @@ async fn event_loop(
                                 &working_dir,
                             );
                         }
-                        app.push_system("🔀 steering — message injecté comme guidance");
+                        app.push_system(&format!(
+                            "{} steering — message injecté comme guidance",
+                            theme::STEER_GLYPH
+                        ));
                     }
                     Action::Submit(text) => {
                         app.push_user(&text);
@@ -962,7 +965,7 @@ fn install_turn<'a>(
 /// by Esc cancellation reaching this arm as the stream's trailing `None`.
 /// Clears the turn clock/token bookkeeping (which also arms a git read for the
 /// status bar) and closes any tool line still awaiting its response (Esc
-/// mid-tool-call, or the stream ending with a tool pending) so the ⚙ spinner
+/// mid-tool-call, or the stream ending with a tool pending) so the 工 spinner
 /// doesn't stay frozen forever. `close_orphaned_tool_requests` only touches
 /// still-pending entries, so calling it here is safe even when every tool
 /// already completed normally.
@@ -1478,7 +1481,7 @@ mod tests {
     }
 
     /// Finding 2: after Esc cancels a running turn mid-tool-call (or the
-    /// stream ends with a tool pending), the ⚙ spinner must not stay frozen
+    /// stream ends with a tool pending), the 工 spinner must not stay frozen
     /// forever — `teardown_turn` is the shared cleanup every stream-end site
     /// in `event_loop` calls, and it must close orphaned tool lines the same
     /// way `close_orphaned_tool_requests` already does for `--resume`.

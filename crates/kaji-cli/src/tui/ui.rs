@@ -362,7 +362,12 @@ fn push_plain_lines(lines: &mut Vec<Line<'static>>, text: &str, prefix: &str, st
 fn push_system_line(lines: &mut Vec<Line<'static>>, chat_line: &ChatLine) {
     if let Some(tool) = &chat_line.tool {
         let spinner = theme::spinner_frame(tool.started.elapsed());
-        let content = format!("{}⚙ {} {spinner}", theme::SYSTEM_PREFIX, tool.name);
+        let content = format!(
+            "{}{} {} {spinner}",
+            theme::SYSTEM_PREFIX,
+            theme::TOOL_GLYPH,
+            tool.name
+        );
         lines.push(Line::from(Span::styled(content, theme::system())));
         return;
     }
@@ -417,13 +422,20 @@ fn line_wrapped_rows(line: &Line, width: u16) -> usize {
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let (title, title_style) = if app.turn_active {
         let elapsed = app.turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-        (format!(" ⏳ {elapsed}s — Esc annule "), theme::accent())
+        (
+            format!(" {} {elapsed}s — Esc annule ", theme::ELAPSED_GLYPH),
+            theme::accent(),
+        )
     } else {
         (" message ".to_string(), theme::title())
     };
     let (title, title_style) = if app.steer_len() > 0 {
         (
-            format!("{title} 🔀 {} en file — Ctrl+S ", app.steer_len()),
+            format!(
+                "{title} {} {} en file — Ctrl+S ",
+                theme::STEER_GLYPH,
+                app.steer_len()
+            ),
             theme::accent(),
         )
     } else {
@@ -799,10 +811,7 @@ fn draw_explorer(frame: &mut Frame, app: &App, explorer: &ExplorerState, area: R
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| explorer.root.to_string_lossy().into_owned());
     let footer = if explorer.filter.is_empty() {
-        format!(
-            " {} éléments · . dotfiles · a attacher · q fermer ",
-            explorer.entry_count()
-        )
+        " . dotfiles · a attacher · q fermer ".to_string()
     } else {
         format!(
             " ⌕ {} · {} éléments · Esc vide le filtre ",
@@ -819,7 +828,12 @@ fn draw_explorer(frame: &mut Frame, app: &App, explorer: &ExplorerState, area: R
         .borders(Borders::ALL)
         .border_style(border)
         .title(Span::styled(
-            format!(" 🗂 {} ", sanitize_for_display(&root_label)),
+            format!(
+                " {} {} · {} ",
+                theme::EXPLORER_GLYPH,
+                sanitize_for_display(&root_label),
+                explorer.entry_count()
+            ),
             theme::title(),
         ))
         .title_bottom(Line::from(footer).style(theme::dim()));
@@ -869,12 +883,17 @@ fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
     let total = viewer.lines.len();
     let first = viewer.scroll.min(total.saturating_sub(1));
     let title = if viewer.binary {
-        format!(" 📄 {} ", sanitize_for_display(&viewer.path))
+        format!(
+            " {} {} ",
+            theme::VIEWER_GLYPH,
+            sanitize_for_display(&viewer.path)
+        )
     } else {
         let last = (first + visible).min(total);
         let start = if total == 0 { 0 } else { first + 1 };
         format!(
-            " 📄 {} · L{start}-{last}/{total} ",
+            " {} {} · L{start}-{last}/{total} ",
+            theme::VIEWER_GLYPH,
             sanitize_for_display(&viewer.path)
         )
     };
@@ -965,9 +984,9 @@ fn draw_spec(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_restore_confirm_modal(frame: &mut Frame, files_only: bool) {
     let area = centered_rect(60, 20, frame.area());
     let title = if files_only {
-        format!(" {} restaurer le filet ? (y/n) ", theme::GATE_SYMBOL)
+        format!(" {} restaurer le filet ? (y/n) ", theme::GATE_GLYPH)
     } else {
-        format!(" {} restaurer le checkpoint ? (y/n) ", theme::GATE_SYMBOL)
+        format!(" {} restaurer le checkpoint ? (y/n) ", theme::GATE_GLYPH)
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -991,7 +1010,7 @@ fn draw_gate_modal(frame: &mut Frame) {
         .border_style(theme::title())
         .title(format!(
             " {} Gate — approuver la SPEC ? (y/n) ",
-            theme::GATE_SYMBOL
+            theme::GATE_GLYPH
         ));
     let paragraph = Paragraph::new("y = approuver   n / Esc = refuser")
         .block(block)
@@ -1114,7 +1133,7 @@ fn draw_tool_approval_modal(
         .border_style(theme::border_active())
         .title(format!(
             " {} confirmation d'outil — {} (y/s/a/n) ",
-            theme::GATE_SYMBOL,
+            theme::GATE_GLYPH,
             tool_name
         ));
     let inner = block.inner(area);
@@ -2074,7 +2093,7 @@ mod tests {
         let content = rendered(&app, 120, 10);
         let bar = content.lines().next_back().expect("barre d'état");
 
-        assert!(bar.contains("📁"), "got:\n{content}");
+        assert!(bar.contains(theme::DIR_GLYPH), "got:\n{content}");
         assert!(bar.contains("feat/kaji-init"), "got:\n{content}");
         assert!(bar.contains("✚2"), "got:\n{content}");
         assert!(
@@ -2272,7 +2291,7 @@ mod tests {
         let content = rendered(&app, 120, 20);
         assert!(content.contains("▸ src"), "dossier replié, got:\n{content}");
         assert!(
-            content.contains("2 éléments · . dotfiles"),
+            content.contains(". dotfiles · a attacher"),
             "got:\n{content}"
         );
 
@@ -2313,8 +2332,8 @@ mod tests {
         assert!(narrow.contains("SPEC"), "got:\n{narrow}");
     }
 
-    /// The pane's own 48-column ceiling clips the status line in situ, so the
-    /// text itself is asserted against an area wide enough to hold it.
+    /// The entry count belongs to the title so the status line stays short
+    /// enough to survive the pane's own 48-column ceiling uncut.
     #[test]
     fn the_explorer_status_line_names_its_keys() {
         use ratatui::Terminal;
@@ -2324,7 +2343,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         app.toggle_explorer();
 
-        let backend = TestBackend::new(60, 8);
+        let backend = TestBackend::new(EXPLORER_MAX_WIDTH, 8);
         let mut terminal = Terminal::new(backend).expect("test backend terminal");
         terminal
             .draw(|frame| {
@@ -2332,13 +2351,20 @@ mod tests {
                     frame,
                     &app,
                     app.explorer.as_ref().expect("explorateur ouvert"),
-                    Rect::new(0, 0, 60, 8),
+                    Rect::new(0, 0, EXPLORER_MAX_WIDTH, 8),
                 )
             })
             .expect("draw_explorer must succeed against a TestBackend");
         let content = buffer_as_string(terminal.backend().buffer());
-        assert!(
-            content.contains("2 éléments · . dotfiles · a attacher · q fermer"),
+
+        let title = content.lines().next().expect("bordure haute");
+        assert!(title.contains(theme::EXPLORER_GLYPH), "got:\n{content}");
+        assert!(title.contains(" · 2 "), "compte au titre, got:\n{content}");
+
+        let status = content.lines().next_back().expect("bordure basse");
+        assert_eq!(
+            status.trim_matches(|c: char| c == '└' || c == '┘' || c == '─' || c == ' '),
+            ". dotfiles · a attacher · q fermer",
             "got:\n{content}"
         );
     }

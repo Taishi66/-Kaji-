@@ -12,7 +12,6 @@ use ratatui::style::Style;
 use ratatui::text::Span;
 use std::path::Path;
 
-const DIR_GLYPH: &str = "📁 ";
 const SEPARATOR: &str = " · ";
 const ELLIPSIS: &str = "…";
 const CLEAN: &str = "✓";
@@ -155,16 +154,17 @@ fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// The bar's left side, fitted into `width` cells: `📁 {dir}` then one group of
+/// The bar's left side, fitted into `width` cells: `在 {dir}` then one group of
 /// segments per repository fact, joined by `SEPARATOR`. `status` is `None`
 /// outside a repository, which leaves the directory alone on the bar.
 pub fn render(status: Option<&GitStatus>, dir: &Path, width: usize) -> Vec<Span<'static>> {
     let tail = join_groups(status.map(repo_groups).unwrap_or_default());
     let tail_width: usize = tail.iter().map(Span::width).sum();
-    let budget = width.saturating_sub(tail_width + display_width(DIR_GLYPH));
+    let glyph = format!("{} ", theme::DIR_GLYPH);
+    let budget = width.saturating_sub(tail_width + display_width(&glyph));
 
     let mut spans = vec![
-        Span::styled(DIR_GLYPH, theme::dim()),
+        Span::styled(glyph, theme::dim()),
         Span::styled(truncate_left(&dir_label(dir), budget), theme::dim()),
     ];
     spans.extend(tail);
@@ -284,7 +284,7 @@ fn truncate_left(label: &str, budget: usize) -> String {
 }
 
 /// Cells, not chars: ratatui measures every span with unicode-width, so a
-/// `chars().count()` budget would let `📁` or a CJK path overflow the bar.
+/// `chars().count()` budget would let a kanji or a CJK path overflow the bar.
 fn display_width(text: &str) -> usize {
     Span::raw(text).width()
 }
@@ -394,8 +394,9 @@ mod tests {
 
         let line = rendered(Some(&dirty()), "/tmp/project", 120);
 
+        let dir = format!("{} /tmp/project", theme::DIR_GLYPH);
         for expected in [
-            "📁 /tmp/project",
+            dir.as_str(),
             "main",
             "↑1",
             "↓2",
@@ -420,7 +421,10 @@ mod tests {
 
         let line = rendered(Some(&status), "/tmp/project", 120);
 
-        assert_eq!(line, "📁 /tmp/project · main · ✓");
+        assert_eq!(
+            line,
+            format!("{} /tmp/project · main · ✓", theme::DIR_GLYPH)
+        );
     }
 
     #[test]
@@ -457,7 +461,7 @@ mod tests {
 
         let line = rendered(None, "/tmp/project", 120);
 
-        assert_eq!(line, "📁 /tmp/project");
+        assert_eq!(line, format!("{} /tmp/project", theme::DIR_GLYPH));
     }
 
     #[test]
@@ -506,7 +510,7 @@ mod tests {
         );
         assert!(line.contains("main"), "l'état du dépôt reste: {line:?}");
         assert!(
-            line.contains(&format!("{DIR_GLYPH}{ELLIPSIS}")),
+            line.contains(&format!("{} {ELLIPSIS}", theme::DIR_GLYPH)),
             "troncature marquée: {line:?}"
         );
     }

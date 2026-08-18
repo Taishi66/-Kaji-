@@ -199,8 +199,18 @@ pub const AGENT_PREFIX: &str = "鍛冶 ▸ ";
 pub const SYSTEM_PREFIX: &str = "· ";
 pub const THINKING_PREFIX: &str = "思 ";
 pub const STEP_SYMBOL: &str = "◦";
-pub const GATE_SYMBOL: &str = "⚔";
 pub const SCROLL_INDICATOR: &str = "▼";
+
+/// Glyphes de volet et d'état, en kanji plutôt qu'en emoji. Chacun occupe
+/// deux cellules comme l'emoji qu'il remplace, donc les budgets de largeur
+/// des titres et de la barre d'état restent justes.
+pub const EXPLORER_GLYPH: &str = "樹";
+pub const VIEWER_GLYPH: &str = "巻";
+pub const DIR_GLYPH: &str = "在";
+pub const STEER_GLYPH: &str = "列";
+pub const TOOL_GLYPH: &str = "工";
+pub const ELAPSED_GLYPH: &str = "刻";
+pub const GATE_GLYPH: &str = "門";
 
 pub const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 /// Loader zen (`思考中`) while a turn is in flight with nothing visible yet.
@@ -356,6 +366,24 @@ pub fn style(role: SpanRole) -> Style {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// Les volets et la barre d'état mesurent leur budget en cellules : un
+    /// glyphe d'une autre largeur que les deux colonnes de l'emoji remplacé
+    /// décalerait chaque troncature calculée autour de lui.
+    #[test]
+    fn every_pane_glyph_takes_two_cells() {
+        for glyph in [
+            EXPLORER_GLYPH,
+            VIEWER_GLYPH,
+            DIR_GLYPH,
+            STEER_GLYPH,
+            TOOL_GLYPH,
+            ELAPSED_GLYPH,
+            GATE_GLYPH,
+        ] {
+            assert_eq!(ratatui::text::Span::raw(glyph).width(), 2, "{glyph}");
+        }
+    }
 
     #[test]
     fn themes_are_six_uniquely_named_palettes_in_cycle_order() {
