@@ -384,8 +384,17 @@ pub enum Launch {
     /// Éditeur graphique lancé sans suspension — le chemin 19a
     /// (`open_detached`).
     Detached(Vec<String>),
-    /// `nvim --server $NVIM --remote-tab` — ouvre dans le nvim hôte.
-    Remote(Vec<String>),
+    /// `nvim --server $NVIM --remote-tab` — ouvre dans le nvim hôte. Nvim ne
+    /// supporte pas `+{cmd}` sur `--remote-tab` (`runtime/doc/remote.txt` :
+    /// « It's not yet supported by Nvim » — vérifié empiriquement : le tab
+    /// s'ouvre sur un fichier littéralement nommé `+3`), donc la ligne est un
+    /// second aller séparé, seulement si demandée : `--remote-send` avec les
+    /// touches `<C-\><C-N>:{line}<CR>` (mode normal puis `:{line}` Entrée),
+    /// une fois le tab en place.
+    Remote {
+        open: Vec<String>,
+        goto: Option<Vec<String>>,
+    },
     /// Un pane du multiplexeur (Zellij ou tmux) — le premier mot de l'argv
     /// dit lequel.
     Pane(Vec<String>),
@@ -408,20 +417,26 @@ fn plan_remote(
     line: Option<usize>,
 ) -> Option<Launch> {
     let addr = ctx.nvim.as_ref()?;
-    if !editor.program.ends_with("nvim") {
+    if editor.program_name() != "nvim" {
         return None;
     }
-    let mut argv = vec![
+    let open = vec![
         editor.program.clone(),
         "--server".to_string(),
         addr.clone(),
         "--remote-tab".to_string(),
+        file.to_string_lossy().into_owned(),
     ];
-    if let Some(line) = line {
-        argv.push(format!("+{line}"));
-    }
-    argv.push(file.to_string_lossy().into_owned());
-    Some(Launch::Remote(argv))
+    let goto = line.map(|line| {
+        vec![
+            editor.program.clone(),
+            "--server".to_string(),
+            addr.clone(),
+            "--remote-send".to_string(),
+            format!("<C-\\><C-N>:{line}<CR>"),
+        ]
+    });
+    Some(Launch::Remote { open, goto })
 }
 
 /// Branches (c)/(d) : Zellij d'abord — les deux variables peuvent coexister
@@ -513,7 +528,7 @@ pub fn launch_label(launch: &Launch, editor: &Editor) -> String {
     match launch {
         Launch::Suspend(_) => "suspend".to_string(),
         Launch::Detached(_) => editor.program_name().to_string(),
-        Launch::Remote(_) => "nvim hôte".to_string(),
+        Launch::Remote { .. } => "nvim hôte".to_string(),
         Launch::Pane(argv) => match argv.first().map(String::as_str) {
             Some("zellij") => "pane zellij".to_string(),
             _ => "pane tmux".to_string(),
@@ -742,14 +757,22 @@ mod tests {
         );
         assert_eq!(
             launch,
-            Launch::Remote(vec![
-                "nvim".into(),
-                "--server".into(),
-                "/tmp/nvim.sock".into(),
-                "--remote-tab".into(),
-                "+3".into(),
-                "a.rs".into(),
-            ]),
+            Launch::Remote {
+                open: vec![
+                    "nvim".into(),
+                    "--server".into(),
+                    "/tmp/nvim.sock".into(),
+                    "--remote-tab".into(),
+                    "a.rs".into(),
+                ],
+                goto: Some(vec![
+                    "nvim".into(),
+                    "--server".into(),
+                    "/tmp/nvim.sock".into(),
+                    "--remote-send".into(),
+                    r"<C-\><C-N>:3<CR>".into(),
+                ]),
+            },
             "nvim hôte gagne même avec Zellij et tmux tous les deux présents"
         );
     }
@@ -834,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_mode_appends_the_line_flag_only_when_a_line_is_given() {
+    fn remote_mode_opens_via_remote_tab_then_gotos_via_remote_send_when_a_line_is_given() {
         let editor = Editor::from(spec("nvim"));
         let with_line = plan(
             EditMode::Remote,
@@ -845,14 +868,23 @@ mod tests {
         );
         assert_eq!(
             with_line,
-            Launch::Remote(vec![
-                "nvim".into(),
-                "--server".into(),
-                "/tmp/s".into(),
-                "--remote-tab".into(),
-                "+7".into(),
-                "a.rs".into(),
-            ])
+            Launch::Remote {
+                open: vec![
+                    "nvim".into(),
+                    "--server".into(),
+                    "/tmp/s".into(),
+                    "--remote-tab".into(),
+                    "a.rs".into(),
+                ],
+                goto: Some(vec![
+                    "nvim".into(),
+                    "--server".into(),
+                    "/tmp/s".into(),
+                    "--remote-send".into(),
+                    r"<C-\><C-N>:7<CR>".into(),
+                ]),
+            },
+            "--remote-tab n'accepte pas +N (non supporté par Nvim) — la ligne passe par --remote-send"
         );
         let without_line = plan(
             EditMode::Remote,
@@ -863,14 +895,17 @@ mod tests {
         );
         assert_eq!(
             without_line,
-            Launch::Remote(vec![
-                "nvim".into(),
-                "--server".into(),
-                "/tmp/s".into(),
-                "--remote-tab".into(),
-                "a.rs".into(),
-            ]),
-            "pas de +N nu sans ligne"
+            Launch::Remote {
+                open: vec![
+                    "nvim".into(),
+                    "--server".into(),
+                    "/tmp/s".into(),
+                    "--remote-tab".into(),
+                    "a.rs".into(),
+                ],
+                goto: None,
+            },
+            "pas de --remote-send sans ligne"
         );
     }
 
@@ -987,7 +1022,16 @@ mod tests {
         let vim = Editor::from(spec("vim"));
         let code = Editor::from(spec("code"));
         assert_eq!(launch_label(&Launch::Suspend(vec![]), &vim), "suspend");
-        assert_eq!(launch_label(&Launch::Remote(vec![]), &vim), "nvim hôte");
+        assert_eq!(
+            launch_label(
+                &Launch::Remote {
+                    open: vec![],
+                    goto: None
+                },
+                &vim
+            ),
+            "nvim hôte"
+        );
         assert_eq!(launch_label(&Launch::Detached(vec![]), &code), "code");
         assert_eq!(
             launch_label(&Launch::Pane(vec!["zellij".into()]), &vim),

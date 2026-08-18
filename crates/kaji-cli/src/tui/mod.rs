@@ -655,25 +655,66 @@ fn edit_file(
     }
 }
 
-/// Un lancement `Detached`/`Remote`/`Pane` n'a pas besoin du terminal : on le
-/// lance et on le laisse vivre — ni suspension, ni attente. Ses flux vont au
-/// vide, sinon le premier avertissement qu'il écrit passe par-dessus le TUI.
-/// Un fil à part attend le lanceur, qui rend la main aussitôt : sans ce
-/// `wait`, chaque édition laisserait un zombie jusqu'à la fin de la session.
-fn spawn_launch(argv: &[String], working_dir: &Path) -> std::result::Result<(), String> {
+/// Flux au vide, `spawn()` seul : ni la sortie ni le code de retour d'un
+/// lancement non bloquant n'intéressent kaji. Un `NotFound` garde l'indice
+/// actionnable de `editor_not_found` (le programme en tête d'argv est bien
+/// celui qui manque) ; les autres erreurs remontent telles quelles.
+fn spawn_child(
+    argv: &[String],
+    working_dir: &Path,
+) -> std::result::Result<std::process::Child, String> {
     let [program, args @ ..] = argv else {
         return Err("commande vide".to_string());
     };
-    let mut child = std::process::Command::new(program)
+    std::process::Command::new(program)
         .args(args)
         .current_dir(working_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => editor_not_found(program),
+            _ => e.to_string(),
+        })
+}
+
+/// Un lancement `Detached`/`Pane` n'a pas besoin du terminal : on le lance et
+/// on le laisse vivre — ni suspension, ni attente. Un fil à part attend le
+/// lanceur, qui rend la main aussitôt : sans ce `wait`, chaque édition
+/// laisserait un zombie jusqu'à la fin de la session.
+fn spawn_launch(argv: &[String], working_dir: &Path) -> std::result::Result<(), String> {
+    let mut child = spawn_child(argv, working_dir)?;
     std::thread::spawn(move || {
         let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// `Remote` fait deux allers au serveur nvim hôte à la suite : `--remote-tab`
+/// (ouvre le fichier), puis — seulement si une ligne est demandée —
+/// `--remote-send` (saute dessus une fois le tab en place, `remote.txt` ne
+/// supportant pas `+{cmd}` sur `--remote-tab`). `open` doit avoir fini avant
+/// que `goto` ait un sens, mais rien de tout ça ne doit geler la boucle
+/// d'événements : les deux tournent dans le même fil moissonneur, comme
+/// `spawn_launch`. Seul l'échec du premier `spawn()` (celui d'`open`, encore
+/// sur ce fil) remonte à l'appelant — celui de `goto`, plus tard sur le fil
+/// à part, n'a pas de canal de retour vers le chat.
+fn spawn_remote(
+    open: &[String],
+    goto: Option<&[String]>,
+    working_dir: &Path,
+) -> std::result::Result<(), String> {
+    let mut open_child = spawn_child(open, working_dir)?;
+    let goto = goto.map(<[String]>::to_vec);
+    let working_dir = working_dir.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = open_child.wait();
+        if let Some(goto) = goto {
+            if let Ok(mut goto_child) = spawn_child(&goto, &working_dir) {
+                let _ = goto_child.wait();
+            }
+        }
     });
     Ok(())
 }
@@ -1178,7 +1219,9 @@ async fn event_loop(
         // on a runtime worker, so `block_in_place` hands the worker's other
         // tasks to a sibling thread (multi-thread runtime, see `main.rs`)
         // instead of stalling them. `Detached`/`Remote`/`Pane` take nothing
-        // and are simply spawned (`spawn_launch`).
+        // and are simply spawned (`spawn_launch`/`spawn_remote`) — `None`
+        // below stands for `Suspend`, which never goes through a spawn at
+        // all.
         if let Some((path, line)) = edit_request {
             let shown = path.strip_prefix(&working_dir).unwrap_or(&path).to_owned();
             match app.editors.resolve() {
@@ -1190,8 +1233,17 @@ async fn event_loop(
                         app.push_system(&note);
                     }
                     let busy = app.turn_active || app.turn_pending;
-                    match &launch {
-                        editors::Launch::Suspend(_) => {
+                    let spawned = match &launch {
+                        editors::Launch::Suspend(_) => None,
+                        editors::Launch::Detached(argv) | editors::Launch::Pane(argv) => {
+                            Some(spawn_launch(argv, &working_dir))
+                        }
+                        editors::Launch::Remote { open, goto } => {
+                            Some(spawn_remote(open, goto.as_deref(), &working_dir))
+                        }
+                    };
+                    match spawned {
+                        None => {
                             run_suspend_edit(
                                 terminal,
                                 gate,
@@ -1202,30 +1254,26 @@ async fn event_loop(
                                 &working_dir,
                             );
                         }
-                        editors::Launch::Detached(argv)
-                        | editors::Launch::Remote(argv)
-                        | editors::Launch::Pane(argv) => match spawn_launch(argv, &working_dir) {
-                            Ok(()) => app.push_system(&format!(
-                                "{} {} ouvert ({})",
-                                theme::VIEWER_GLYPH,
-                                shown.display(),
-                                editors::launch_label(&launch, &editor)
-                            )),
-                            Err(err) => {
-                                app.push_system(&launch_spawn_failure(&launch, &editor, &err));
-                                if !busy {
-                                    run_suspend_edit(
-                                        terminal,
-                                        gate,
-                                        &mut app,
-                                        &editor,
-                                        &path,
-                                        line,
-                                        &working_dir,
-                                    );
-                                }
+                        Some(Ok(())) => app.push_system(&format!(
+                            "{} {} ouvert ({})",
+                            theme::VIEWER_GLYPH,
+                            shown.display(),
+                            editors::launch_label(&launch, &editor)
+                        )),
+                        Some(Err(err)) => {
+                            app.push_system(&launch_spawn_failure(&launch, &editor, &err));
+                            if !busy {
+                                run_suspend_edit(
+                                    terminal,
+                                    gate,
+                                    &mut app,
+                                    &editor,
+                                    &path,
+                                    line,
+                                    &working_dir,
+                                );
                             }
-                        },
+                        }
                     }
                 }
             }

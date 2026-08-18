@@ -553,13 +553,10 @@ fn editor_command_arg(text: &str) -> Option<&str> {
 /// `/editor mode` est un sous-mot de `/editor <cmd>`, pas une commande à
 /// part : même garde de mot entier que [`slash_command_arg`], pour qu'un
 /// binaire réellement nommé `modeline` ne soit pas lu comme `mode line`.
+/// Insensible à la casse comme `list`/`reset` (`/editor Mode pane` marche).
 fn editor_mode_arg(arg: &str) -> Option<&str> {
-    let rest = arg.strip_prefix("mode")?;
-    if rest.is_empty() || rest.starts_with(' ') {
-        Some(rest.trim())
-    } else {
-        None
-    }
+    let (head, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+    head.eq_ignore_ascii_case("mode").then(|| rest.trim())
 }
 
 /// A pasted block lands on one line: the composer and the finder query are
@@ -1814,19 +1811,31 @@ impl App {
         (path.to_string(), Some(line))
     }
 
+    /// Le mécanisme partagé par `on_file_edited` et `reload_viewer` : relit
+    /// `path` sous le nom d'affichage `display`, clampe le scroll dans le
+    /// nouveau contenu. Seul ce que chaque appelant en dit au chat diffère.
+    fn reload_viewer_content(
+        &mut self,
+        display: &str,
+        path: &std::path::Path,
+        scroll: usize,
+    ) -> std::result::Result<(), String> {
+        let viewport = self.viewer_viewport();
+        let mut reloaded = crate::tui::viewer::load(display, path).map_err(|e| e.to_string())?;
+        reloaded.scroll = scroll.min(reloaded.max_scroll(viewport));
+        self.viewer = Some(reloaded);
+        Ok(())
+    }
+
     /// The editor had the terminal and the file may have changed under the
     /// panes: the viewer holds a snapshot taken at open time, the explorer a
     /// listing that a brand new file is missing from.
     pub fn on_file_edited(&mut self, path: &std::path::Path) {
-        let viewport = self.viewer_viewport();
         let stale = self.viewer.as_ref().filter(|viewer| {
             crate::tui::mentions::resolve(&viewer.path, &self.working_dir) == path
         });
         if let Some((display, scroll)) = stale.map(|v| (v.path.clone(), v.scroll)) {
-            if let Ok(mut reloaded) = crate::tui::viewer::load(&display, path) {
-                reloaded.scroll = scroll.min(reloaded.max_scroll(viewport));
-                self.viewer = Some(reloaded);
-            }
+            let _ = self.reload_viewer_content(&display, path, scroll);
         }
         if let Some(explorer) = self.explorer.as_mut() {
             explorer.refresh();
@@ -1838,6 +1847,9 @@ impl App {
     /// bloquante (task 19b — nvim hôte, pane Zellij/tmux) ne prévient jamais
     /// kaji quand elle termine, contrairement à `edit_file` qui rend la main
     /// à la sortie de l'éditeur ; le lecteur doit donc pouvoir le redemander.
+    /// Même rafraîchissement que `on_file_edited` (explorateur, statut git) —
+    /// un lancement non bloquant a pu toucher plus que le seul fichier
+    /// affiché.
     fn reload_viewer(&mut self) {
         let Some((display, scroll)) = self
             .viewer
@@ -1847,15 +1859,14 @@ impl App {
             return;
         };
         let resolved = crate::tui::mentions::resolve(&display, &self.working_dir);
-        let viewport = self.viewer_viewport();
-        match crate::tui::viewer::load(&display, &resolved) {
-            Ok(mut reloaded) => {
-                reloaded.scroll = scroll.min(reloaded.max_scroll(viewport));
-                self.viewer = Some(reloaded);
-                self.push_system(&format!("{} {display} rechargé", theme::VIEWER_GLYPH));
-            }
+        match self.reload_viewer_content(&display, &resolved, scroll) {
+            Ok(()) => self.push_system(&format!("{} {display} rechargé", theme::VIEWER_GLYPH)),
             Err(e) => self.push_system(&format!("lecture impossible : {e}")),
         }
+        if let Some(explorer) = self.explorer.as_mut() {
+            explorer.refresh();
+        }
+        self.request_git_refresh();
     }
 
     /// The reader while it holds the focus, which is when it takes the chat's
@@ -4640,6 +4651,18 @@ mod tests {
         assert!(last_line(&app).contains("mode : pane"));
     }
 
+    /// Comme `list`/`reset`, `mode` est insensible à la casse.
+    #[test]
+    fn slash_editor_mode_is_case_insensitive() {
+        let mut app = App::new(None);
+
+        assert_eq!(
+            submit(&mut app, "/editor Mode PANE"),
+            Action::EditMode("pane".to_string())
+        );
+        assert_eq!(app.edit_mode, EditMode::Pane);
+    }
+
     #[test]
     fn slash_editor_mode_alone_shows_the_configured_and_effective_mode() {
         let mut app = App::new(None);
@@ -4684,6 +4707,42 @@ mod tests {
         assert_eq!(viewer.lines, vec!["court"]);
         assert_eq!(viewer.scroll, 0, "scroll ramené dans le nouveau fichier");
         assert!(last_line(&app).contains("rechargé"), "{}", last_line(&app));
+    }
+
+    /// Un lancement non bloquant a pu toucher plus que le seul fichier
+    /// affiché : `r` rafraîchit l'explorateur ouvert et arme un
+    /// rafraîchissement du statut git, comme `on_file_edited`.
+    #[test]
+    fn r_also_refreshes_the_open_explorer_and_arms_a_git_refresh() {
+        let (mut app, dir) = app_with_open_viewer();
+        app.explorer = Some(crate::tui::explorer::ExplorerState::new(
+            dir.path().to_path_buf(),
+        ));
+        assert!(
+            !app.explorer
+                .as_ref()
+                .unwrap()
+                .nodes
+                .iter()
+                .any(|n| n.name == "new.txt")
+        );
+
+        std::fs::write(dir.path().join("new.txt"), "x").unwrap();
+        app.on_event(&key(KeyCode::Char('r')));
+
+        assert!(
+            app.explorer
+                .as_ref()
+                .unwrap()
+                .nodes
+                .iter()
+                .any(|n| n.name == "new.txt"),
+            "l'explorateur doit refléter le nouveau fichier après r"
+        );
+        assert!(
+            app.take_git_refresh_request().is_some(),
+            "r doit aussi armer un rafraîchissement du statut git"
+        );
     }
 
     #[test]
