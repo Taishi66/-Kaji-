@@ -11,6 +11,7 @@ use crate::tui::ui::sanitize_for_display;
 use ratatui::style::Style;
 use ratatui::text::Span;
 use std::path::Path;
+use std::process::Command;
 
 const SEPARATOR: &str = " · ";
 const ELLIPSIS: &str = "…";
@@ -142,12 +143,25 @@ pub fn read(dir: &Path) -> Option<GitStatus> {
     Some(status)
 }
 
-fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = kaji::subprocess::git_command()
+/// Both reads happen behind the user's back, every five seconds, which is what
+/// the two environment variables answer for. `LC_ALL=C` keeps `--shortstat` in
+/// English, the wording [`parse_shortstat`] matches on — a French git prints
+/// « suppressions(-) » and the deletions would read 0 forever.
+/// `GIT_OPTIONAL_LOCKS=0` keeps `status` from taking `.git/index.lock` to
+/// refresh the index, which would break a `git commit` the user runs at the
+/// same moment.
+fn git_command_for(dir: &Path, args: &[&str]) -> Command {
+    let mut command = kaji::subprocess::git_command();
+    command
         .current_dir(dir)
         .args(args)
-        .output()
-        .ok()?;
+        .env("LC_ALL", "C")
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    command
+}
+
+fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = git_command_for(dir, args).output().ok()?;
     output
         .status
         .success()
@@ -242,7 +256,7 @@ fn branch_label(status: &GitStatus) -> String {
 }
 
 fn dir_label(dir: &Path) -> String {
-    dir_label_with(dir, std::env::var_os("HOME"))
+    sanitize_for_display(&dir_label_with(dir, std::env::var_os("HOME")))
 }
 
 /// Env-free core so tests never touch the process-global `HOME` — the same
@@ -453,6 +467,39 @@ mod tests {
         let line = rendered(Some(&status), "/tmp/project", 120);
 
         assert!(!line.contains('\u{1b}'), "{line:?}");
+    }
+
+    #[test]
+    fn the_directory_is_sanitized_before_it_reaches_the_bar() {
+        let _theme = theme::test_guard();
+
+        let line = rendered(None, "/tmp/pro\u{1b}[31mject", 120);
+
+        assert!(!line.contains('\u{1b}'), "{line:?}");
+    }
+
+    #[test]
+    fn the_git_reads_force_the_c_locale_and_drop_optional_locks() {
+        let command = git_command_for(Path::new("/tmp/project"), &["status"]);
+
+        let envs: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+
+        assert!(
+            envs.contains(&("LC_ALL".to_string(), Some("C".to_string()))),
+            "{envs:?}"
+        );
+        assert!(
+            envs.contains(&("GIT_OPTIONAL_LOCKS".to_string(), Some("0".to_string()))),
+            "{envs:?}"
+        );
     }
 
     #[test]
