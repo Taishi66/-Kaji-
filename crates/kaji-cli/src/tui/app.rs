@@ -340,6 +340,17 @@ pub fn kaji_mode_badge(mode: KajiMode) -> &'static str {
     }
 }
 
+/// The kanji the status bar's seal carries. The seal is vermilion whatever the
+/// mode, so this glyph is the only thing that says which one is running.
+pub fn kaji_mode_seal(mode: KajiMode) -> &'static str {
+    match mode {
+        KajiMode::Auto => "自",
+        KajiMode::Approve => "承",
+        KajiMode::SmartApprove => "智",
+        KajiMode::Chat => "話",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     None,
@@ -588,6 +599,9 @@ fn outcome_token(outcome: GoalOutcome) -> &'static str {
 
 pub struct App {
     pub header: String,
+    /// Model name shown by the status bar's telemetry — set once at startup by
+    /// the event loop, empty everywhere else (tests, `App::new`).
+    pub model: String,
     pub input: String,
     pub chat: Vec<ChatLine>,
     pub status: String,
@@ -808,6 +822,7 @@ impl App {
     pub fn new(spec: Option<SpecDoc>) -> Self {
         Self {
             header: String::new(),
+            model: String::new(),
             input: String::new(),
             chat: Vec::new(),
             status: String::new(),

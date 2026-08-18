@@ -1,5 +1,5 @@
-//! Lualine-style status bar contents (task 15) — the bottom line's working
-//! directory, branch and repository state.
+//! The status bar's place (task 15, restyled « hanko & forge ») — the bottom
+//! line's working directory, branch and repository state.
 //!
 //! Two `git` calls, both off the event loop: `status --porcelain=v2 --branch`
 //! for the branch, the upstream gap and the file counts, `diff HEAD
@@ -13,7 +13,7 @@ use ratatui::text::Span;
 use std::path::Path;
 use std::process::Command;
 
-const SEPARATOR: &str = " · ";
+const SEPARATOR: &str = "  ";
 const ELLIPSIS: &str = "…";
 const CLEAN: &str = "✓";
 
@@ -168,9 +168,10 @@ fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// The bar's left side, fitted into `width` cells: `在 {dir}` then one group of
-/// segments per repository fact, joined by `SEPARATOR`. `status` is `None`
-/// outside a repository, which leaves the directory alone on the bar.
+/// The bar's place, fitted into `width` cells: `在 {dir}`, the branch behind
+/// [`theme::PLACE_SEPARATOR`], then one group of segments per repository fact,
+/// joined by `SEPARATOR`. `status` is `None` outside a repository, which leaves
+/// the directory alone on the bar.
 pub fn render(status: Option<&GitStatus>, dir: &Path, width: usize) -> Vec<Span<'static>> {
     let tail = join_groups(status.map(repo_groups).unwrap_or_default());
     let tail_width: usize = tail.iter().map(Span::width).sum();
@@ -185,17 +186,24 @@ pub fn render(status: Option<&GitStatus>, dir: &Path, width: usize) -> Vec<Span<
     spans
 }
 
+/// The branch is the only group the place separator introduces: it still
+/// answers "where", where the groups behind it answer "in what state".
 fn join_groups(groups: Vec<Vec<Span<'static>>>) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    for group in groups {
-        spans.push(Span::styled(SEPARATOR, theme::dim()));
+    for (index, group) in groups.into_iter().enumerate() {
+        let separator = if index == 0 {
+            format!(" {} ", theme::PLACE_SEPARATOR)
+        } else {
+            SEPARATOR.to_string()
+        };
+        spans.push(Span::styled(separator, theme::dim()));
         spans.extend(group);
     }
     spans
 }
 
 fn repo_groups(status: &GitStatus) -> Vec<Vec<Span<'static>>> {
-    let mut groups = vec![vec![Span::styled(branch_label(status), theme::title())]];
+    let mut groups = vec![vec![Span::styled(branch_label(status), theme::text())]];
 
     let upstream = counters(&[
         (status.ahead, "↑", theme::text()),
@@ -206,7 +214,7 @@ fn repo_groups(status: &GitStatus) -> Vec<Vec<Span<'static>>> {
     }
 
     let files = counters(&[
-        (status.staged, "●", theme::accent()),
+        (status.staged, "●", theme::text()),
         (status.modified, "✚", theme::text()),
         (status.untracked, "…", theme::dim()),
     ]);
@@ -218,7 +226,7 @@ fn repo_groups(status: &GitStatus) -> Vec<Vec<Span<'static>>> {
 
     let diff = counters(&[
         (status.insertions, "+", theme::text()),
-        (status.deletions, "−", theme::accent()),
+        (status.deletions, "−", theme::text()),
     ]);
     if !diff.is_empty() {
         groups.push(diff);
@@ -409,9 +417,10 @@ mod tests {
         let line = rendered(Some(&dirty()), "/tmp/project", 120);
 
         let dir = format!("{} /tmp/project", theme::DIR_GLYPH);
+        let branch = format!("{} main", theme::PLACE_SEPARATOR);
         for expected in [
             dir.as_str(),
-            "main",
+            branch.as_str(),
             "↑1",
             "↓2",
             "●3",
@@ -421,6 +430,23 @@ mod tests {
             "−6",
         ] {
             assert!(line.contains(expected), "{expected} manquant dans {line:?}");
+        }
+    }
+
+    /// The gold is the cost's alone (task « hanko & forge ») and the accent is
+    /// the seal's: the repository state reads in plain ink.
+    #[test]
+    fn the_branch_and_the_counters_read_in_plain_ink() {
+        let _theme = theme::test_guard();
+
+        let spans = render(Some(&dirty()), Path::new("/tmp/project"), 120);
+
+        for content in ["main", "●3", "−6"] {
+            let span = spans
+                .iter()
+                .find(|span| span.content.contains(content))
+                .unwrap_or_else(|| panic!("{content} rendu"));
+            assert_eq!(span.style, theme::text(), "{content}");
         }
     }
 
@@ -437,7 +463,11 @@ mod tests {
 
         assert_eq!(
             line,
-            format!("{} /tmp/project · main · ✓", theme::DIR_GLYPH)
+            format!(
+                "{} /tmp/project {} main  ✓",
+                theme::DIR_GLYPH,
+                theme::PLACE_SEPARATOR
+            )
         );
     }
 

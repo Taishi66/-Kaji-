@@ -220,6 +220,13 @@ pub const STEER_GLYPH: &str = "列";
 pub const TOOL_GLYPH: &str = "工";
 pub const ELAPSED_GLYPH: &str = "刻";
 pub const GATE_GLYPH: &str = "門";
+/// Forge de la barre d'état : le charbon compte les tokens, le feu ne brûle
+/// que pendant un tour.
+pub const TOKENS_GLYPH: &str = "炭";
+pub const FIRE_GLYPH: &str = "火";
+/// Sépare le lieu de la branche sur la barre d'état — une seule cellule, à la
+/// différence des glyphes ci-dessus.
+pub const PLACE_SEPARATOR: &str = "⟩";
 
 pub const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 /// Loader zen (`思考中`) while a turn is in flight with nothing visible yet.
@@ -283,6 +290,16 @@ pub fn thinking() -> Style {
 
 pub fn accent() -> Style {
     Style::default().fg(active().accent)
+}
+
+/// Sceau (hanko) du mode, à gauche de la barre d'état : toujours vermillon,
+/// c'est le kanji qui porte le mode. `REVERSED` passe l'accent en fond, donc
+/// le kanji reprend la couleur de fond du terminal et reste lisible en thème
+/// clair comme en sombre, sans couleur de texte codée en dur.
+pub fn seal() -> Style {
+    Style::default()
+        .fg(active().accent)
+        .add_modifier(Modifier::REVERSED | Modifier::BOLD)
 }
 
 /// Erreurs provider/LLM — le rôle `accent` porte aussi l'alerte ; nom
@@ -390,6 +407,8 @@ mod tests {
             TOOL_GLYPH,
             ELAPSED_GLYPH,
             GATE_GLYPH,
+            TOKENS_GLYPH,
+            FIRE_GLYPH,
         ] {
             assert_eq!(ratatui::text::Span::raw(glyph).width(), 2, "{glyph}");
         }

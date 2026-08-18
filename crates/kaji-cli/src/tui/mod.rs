@@ -7,6 +7,7 @@ pub mod gitstatus;
 pub mod markdown;
 pub mod mentions;
 pub mod report;
+pub mod statusbar;
 pub mod theme;
 pub mod ui;
 pub mod viewer;
@@ -157,13 +158,17 @@ fn tool_answer_note(req: &ToolApprovalRequest, permission: &Permission) -> Strin
     }
 }
 
+/// The header carries the session alone since the « hanko & forge » bar: the
+/// model reads once, on the bar's telemetry ([`model_label`]), and the provider
+/// is implied by it.
 fn build_header(session_id: &str) -> String {
-    let config = Config::global();
-    let provider = config
-        .get_kaji_provider()
-        .unwrap_or_else(|_| "?".to_string());
-    let model = config.get_kaji_model().unwrap_or_else(|_| "?".to_string());
-    format!("{session_id} · {provider}/{model}")
+    session_id.to_string()
+}
+
+fn model_label() -> String {
+    Config::global()
+        .get_kaji_model()
+        .unwrap_or_else(|_| "?".to_string())
 }
 
 /// Each welcome/help section renders as ONE `ChatLine` (via
@@ -270,7 +275,10 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
                 "Ctrl+S",
                 "steer : envoie les messages en file au tour en cours",
             ),
-            ("Shift+Tab", "change le mode (approve → smart → auto)"),
+            (
+                "Shift+Tab",
+                "change le mode (承 approve → 智 smart → 自 auto) — sceau à gauche de la barre d'état",
+            ),
             ("Esc", "interrompt · Ctrl+C quitte"),
             ("Option+glisser", "sélectionner du texte"),
         ];
@@ -295,7 +303,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             "  le chat se replie quand le lecteur a le focus",
             "e éditer ($EDITOR, nvim hôte ou pane Zellij/tmux selon KAJI_EDIT_MODE) · /edit <chemin>",
             "Ctrl+S steer : envoie les messages en file au tour en cours",
-            "Shift+Tab change le mode (approve → smart → auto)",
+            "Shift+Tab change le mode (承 approve → 智 smart → 自 auto) — sceau à gauche de la barre d'état",
             "Esc interrompt · Ctrl+C quitte",
         ] {
             lines.push(vec![RoledSpan::new(text, content_role)]);
@@ -818,6 +826,7 @@ async fn event_loop(
 ) -> Result<()> {
     let mut app = App::new(spec);
     app.header = header;
+    app.model = model_label();
     app.mouse_enabled = mouse_enabled();
     app.kaji_mode = agent.kaji_mode().await;
     let session_manager = SessionManager::instance();
