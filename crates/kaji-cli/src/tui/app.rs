@@ -332,6 +332,11 @@ pub enum Action {
     /// `/goal clear` — the goal is already stopped by [`App::goal_clear`];
     /// the event loop only still has to cancel the turn it was driving.
     GoalClear,
+    /// `e` on the viewer/explorer or `/edit <chemin>` — carries the absolute
+    /// path to open. Only the event loop can honor it: suspending the TUI for
+    /// the editor needs the terminal and the input thread, neither of which
+    /// `App` owns.
+    EditFile(std::path::PathBuf),
     /// Palette already switched by [`App::run_theme_command`] — carries the
     /// applied name so the event loop can persist it to `KAJI_THEME`. The
     /// switch itself must not wait on the config write: the redraw right
@@ -377,6 +382,11 @@ pub const COMMANDS: &[Command] = &[
             app.toggle_explorer();
             Action::None
         },
+    },
+    Command {
+        name: "/edit",
+        desc: "éditer un fichier dans $EDITOR — /edit <chemin>, ou e depuis le lecteur/explorateur",
+        run: |app| app.run_edit_command(""),
     },
     Command {
         name: "/spec",
@@ -465,6 +475,12 @@ fn theme_command_arg(text: &str) -> Option<&str> {
 /// session from being forwarded to it as a plain message.
 fn goal_command_arg(text: &str) -> Option<&str> {
     slash_command_arg(text, "/goal")
+}
+
+/// `/edit` alone IS in `COMMANDS` (arg-less = son usage), so the palette can
+/// autocomplete it; with a path it lands here.
+fn edit_command_arg(text: &str) -> Option<&str> {
+    slash_command_arg(text, "/edit")
 }
 
 /// A pasted block lands on one line: the composer and the finder query are
@@ -1476,6 +1492,55 @@ impl App {
         self.focus = Focus::Composer;
     }
 
+    /// Every path that ends up in `$EDITOR` goes through here: `~` expanded,
+    /// relative resolved against the session's root, `@path` accepted as the
+    /// same thing the composer would attach. A missing file is deliberately
+    /// let through — the editor creates it.
+    ///
+    /// Refused mid-turn: the agent is writing to that same tree, and two
+    /// writers on one file is a conflict neither side can see.
+    fn request_edit(&mut self, path: &str) -> Action {
+        if self.turn_active || self.turn_pending {
+            self.push_system("un tour est en cours — attends la fin");
+            return Action::None;
+        }
+        let raw = path.trim_start_matches('@');
+        let resolved = crate::tui::mentions::resolve(raw, &self.working_dir);
+        if resolved.is_dir() {
+            self.push_system(&format!("{raw} : dossier, pas un fichier"));
+            return Action::None;
+        }
+        Action::EditFile(resolved)
+    }
+
+    fn run_edit_command(&mut self, arg: &str) -> Action {
+        if arg.is_empty() {
+            self.push_system("usage : /edit <chemin>");
+            return Action::None;
+        }
+        self.request_edit(arg)
+    }
+
+    /// The editor had the terminal and the file may have changed under the
+    /// panes: the viewer holds a snapshot taken at open time, the explorer a
+    /// listing that a brand new file is missing from.
+    pub fn on_file_edited(&mut self, path: &std::path::Path) {
+        let viewport = self.viewer_viewport();
+        let stale = self.viewer.as_ref().filter(|viewer| {
+            crate::tui::mentions::resolve(&viewer.path, &self.working_dir) == path
+        });
+        if let Some((display, scroll)) = stale.map(|v| (v.path.clone(), v.scroll)) {
+            if let Ok(mut reloaded) = crate::tui::viewer::load(&display, path) {
+                reloaded.scroll = scroll.min(reloaded.max_scroll(viewport));
+                self.viewer = Some(reloaded);
+            }
+        }
+        if let Some(explorer) = self.explorer.as_mut() {
+            explorer.refresh();
+        }
+        self.request_git_refresh();
+    }
+
     /// Rows of file content the pane paints, from the last measured geometry
     /// minus its two borders (the header rides the top border as a title).
     /// Floors at one so a viewer that has never been drawn still scrolls.
@@ -1507,6 +1572,14 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc if !ctrl => {
                 self.close_viewer();
                 return Action::None;
+            }
+            // The pane is read-only by design (task 8) — `e` is how a file
+            // read here reaches an editor, without kaji growing one.
+            KeyCode::Char('e') if !ctrl => {
+                let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path.clone()) else {
+                    return Action::None;
+                };
+                return self.request_edit(&path);
             }
             KeyCode::Char('a') if !ctrl => {
                 if let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path.clone()) {
@@ -1602,6 +1675,12 @@ impl App {
                 self.explorer_activate();
                 return Action::None;
             }
+            KeyCode::Char('e') => {
+                let Some(path) = self.explorer_file_path() else {
+                    return Action::None;
+                };
+                return self.request_edit(&path);
+            }
             KeyCode::Char('a') => {
                 if let Some(path) = self.explorer_mention_path() {
                     self.attach_mention(&path);
@@ -1677,6 +1756,16 @@ impl App {
         } else {
             self.open_viewer(&path);
         }
+    }
+
+    /// The selected row when it is a file — a directory has nothing to open
+    /// in an editor, and the overflow row isn't a path at all.
+    fn explorer_file_path(&self) -> Option<String> {
+        self.explorer
+            .as_ref()?
+            .selected()
+            .filter(|node| node.overflow.is_none() && !node.is_dir)
+            .map(|node| node.path.clone())
     }
 
     fn explorer_mention_path(&self) -> Option<String> {
@@ -2409,11 +2498,14 @@ impl App {
             // push its OWN barrier message (premortem PM6) instead of the
             // queue path. `/goal` does the same, for `/goal clear`: stopping
             // a goal loop mid-turn must not wait for the turn it is stopping.
-            // Every other command/message still gets the queue.
+            // `/edit` too: queued, it would reach the model as a message
+            // instead of being refused the way `e` is. Every other
+            // command/message still gets the queue.
             KeyCode::Enter
                 if (self.turn_active || self.turn_pending)
                     && restore_command_arg(self.input.trim()).is_none()
-                    && goal_command_arg(self.input.trim()).is_none() =>
+                    && goal_command_arg(self.input.trim()).is_none()
+                    && edit_command_arg(self.input.trim()).is_none() =>
             {
                 let text = self.input.trim().to_string();
                 self.input.clear();
@@ -2476,6 +2568,9 @@ impl App {
                     }
                     if let Some(arg) = theme_command_arg(&text) {
                         return self.run_theme_command(arg);
+                    }
+                    if let Some(arg) = edit_command_arg(&text) {
+                        return self.run_edit_command(arg);
                     }
                     // Unreachable today: any trimmed input that names a command
                     // keeps the palette visible (see `palette_matches`), so this
@@ -3723,6 +3818,40 @@ mod tests {
     }
 
     #[test]
+    fn e_asks_to_edit_the_file_the_viewer_shows() {
+        let (mut app, dir) = app_with_open_viewer();
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('e'))),
+            Action::EditFile(dir.path().join("long.txt"))
+        );
+        assert!(app.viewer.is_some(), "le lecteur reste ouvert");
+    }
+
+    #[test]
+    fn a_file_edited_outside_is_reloaded_with_its_scroll_clamped() {
+        let (mut app, dir) = app_with_open_viewer();
+        app.on_event(&key(KeyCode::Char('G')));
+        assert_eq!(app.viewer.as_ref().unwrap().scroll, 180);
+
+        std::fs::write(dir.path().join("long.txt"), "court\n").unwrap();
+        app.on_file_edited(&dir.path().join("long.txt"));
+
+        let viewer = app.viewer.as_ref().expect("le lecteur reste ouvert");
+        assert_eq!(viewer.lines, vec!["court"]);
+        assert_eq!(viewer.scroll, 0, "scroll ramené dans le nouveau fichier");
+    }
+
+    #[test]
+    fn editing_another_file_leaves_the_open_one_alone() {
+        let (mut app, dir) = app_with_open_viewer();
+        std::fs::write(dir.path().join("long.txt"), "court\n").unwrap();
+
+        app.on_file_edited(&dir.path().join("README.md"));
+
+        assert_eq!(app.viewer.as_ref().unwrap().lines.len(), 200);
+    }
+
+    #[test]
     fn a_modal_still_owns_the_keyboard_over_the_viewer() {
         let (mut app, _dir) = app_with_open_viewer();
         app.gate_open = true;
@@ -3799,6 +3928,102 @@ mod tests {
         let (mut app, dir) = app_with_mention_fixture();
         app.toggle_explorer();
         (app, dir)
+    }
+
+    #[test]
+    fn e_edits_the_selected_file_and_ignores_a_directory() {
+        let (mut app, dir) = app_with_open_explorer();
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('e'))),
+            Action::None,
+            "src/ est un dossier"
+        );
+        assert!(app.chat.is_empty(), "un dossier ne dit rien");
+
+        app.on_event(&key(KeyCode::Char('j')));
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('e'))),
+            Action::EditFile(dir.path().join("README.md"))
+        );
+    }
+
+    #[test]
+    fn slash_edit_resolves_its_path_against_the_working_dir() {
+        let (mut app, dir) = app_with_mention_fixture();
+        assert_eq!(
+            submit(&mut app, "/edit src/tui/app.rs"),
+            Action::EditFile(dir.path().join("src/tui/app.rs"))
+        );
+    }
+
+    #[test]
+    fn slash_edit_takes_a_mention_form_and_a_file_that_does_not_exist_yet() {
+        let (mut app, dir) = app_with_mention_fixture();
+        assert_eq!(
+            submit(&mut app, "/edit @nouveau.rs"),
+            Action::EditFile(dir.path().join("nouveau.rs")),
+            "l'éditeur crée le fichier"
+        );
+    }
+
+    #[test]
+    fn slash_edit_on_a_directory_refuses_instead_of_launching_an_editor() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        assert_eq!(submit(&mut app, "/edit src"), Action::None);
+        assert!(
+            app.chat
+                .last()
+                .expect("ligne système")
+                .text
+                .contains("dossier, pas un fichier")
+        );
+    }
+
+    #[test]
+    fn slash_edit_alone_shows_its_usage() {
+        let mut app = App::new(None);
+        assert_eq!(submit(&mut app, "/edit"), Action::None);
+        assert!(
+            app.chat
+                .last()
+                .expect("ligne système")
+                .text
+                .contains("usage : /edit")
+        );
+    }
+
+    #[test]
+    fn e_is_refused_while_a_turn_is_running() {
+        let (mut app, _dir) = app_with_open_viewer();
+        app.turn_active = true;
+
+        assert_eq!(app.on_event(&key(KeyCode::Char('e'))), Action::None);
+        assert!(
+            app.chat
+                .last()
+                .expect("ligne système")
+                .text
+                .contains("un tour est en cours")
+        );
+    }
+
+    /// Mid-turn, the blanket Enter guard queues everything as steering — a
+    /// `/edit` swallowed that way would be sent to the model as a message
+    /// instead of being refused.
+    #[test]
+    fn slash_edit_mid_turn_is_refused_rather_than_queued_as_steering() {
+        let (mut app, _dir) = app_with_mention_fixture();
+        app.turn_active = true;
+
+        assert_eq!(submit(&mut app, "/edit README.md"), Action::None);
+        assert_eq!(app.steer_len(), 0);
+        assert!(
+            app.chat
+                .last()
+                .expect("ligne système")
+                .text
+                .contains("un tour est en cours")
+        );
     }
 
     #[test]

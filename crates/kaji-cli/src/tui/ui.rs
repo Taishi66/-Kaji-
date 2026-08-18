@@ -899,11 +899,11 @@ fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
     };
     let footer = if viewer.truncated {
         format!(
-            " … tronqué ({} lus) · j/k défiler · a attacher @ · q fermer ",
+            " … tronqué ({} lus) · j/k défiler · e éditer · a attacher @ · q fermer ",
             viewer::read_limit_label()
         )
     } else {
-        " j/k défiler · a attacher @ · q fermer ".to_string()
+        " j/k défiler · e éditer · a attacher @ · q fermer ".to_string()
     };
     let border = if app.focus == Focus::Viewer {
         theme::border_active()
@@ -2217,7 +2217,10 @@ mod tests {
         let content = rendered(&app, 100, 20);
         assert!(content.contains("a.rs"), "got:\n{content}");
         assert!(content.contains("fn main()"), "got:\n{content}");
-        assert!(content.contains("q fermer"), "got:\n{content}");
+        assert!(
+            content.contains("j/k défiler · e éditer"),
+            "got:\n{content}"
+        );
         assert!(
             !content.contains("SPEC"),
             "le lecteur occupe la colonne du volet SPEC, got:\n{content}"

@@ -24,15 +24,21 @@ use kaji::permission::{Permission, PermissionConfirmation};
 use kaji::session::SessionManager;
 use kaji::session::session_manager::{InterruptedTurn, SessionEvent};
 use kaji_core::sdd::SpecDoc;
+use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event,
 };
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use std::future::Future;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use theme::SpanRole;
 use tokio::sync::mpsc;
@@ -52,7 +58,9 @@ pub async fn run(
 ) -> Result<()> {
     let header = build_header(&session_id);
     let (input_tx, input_rx) = mpsc::channel::<Event>(64);
-    std::thread::spawn(move || input_thread(input_tx));
+    let gate = Arc::new(InputGate::default());
+    let reader_gate = Arc::clone(&gate);
+    std::thread::spawn(move || input_thread(input_tx, &reader_gate));
     let mut terminal = ratatui::init();
     let mouse = mouse_enabled();
     // Bracketed paste (item 4 ante): without it a pasted path arrives as a
@@ -70,6 +78,7 @@ pub async fn run(
         spec,
         header,
         input_rx,
+        &gate,
         resume,
     )
     .await;
@@ -221,6 +230,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
         "/goal" => "boucle évaluée vers un but (<condition> | clear)",
         "/files" => "(Ctrl+P) recherche floue de fichiers",
         "/explorer" => "(Ctrl+E) explorateur de fichiers",
+        "/edit" => "(ou e) éditer un fichier dans $EDITOR",
         "/spec" => "(F2) panneau SPEC on/off",
         "/think" => "(F3) raisonnement du modèle (思考中)",
         "/cost" => "usage tokens/coût (session, 5 h, 7 j)",
@@ -238,7 +248,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
 fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledLine> {
     let mut lines = vec![vec![RoledSpan::title("navigation")]];
     if mouse_enabled {
-        let rows: [(&str, &str); 11] = [
+        let rows: [(&str, &str); 12] = [
             ("molette", "défile le chat (3 lignes/cran)"),
             ("PageUp/PageDown", "défile par page · Home/End"),
             ("Ctrl+↑/↓", "saute au tour précédent/suivant"),
@@ -248,6 +258,10 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             (
                 "Ctrl+O",
                 "change de volet (composer → explorateur → lecteur)",
+            ),
+            (
+                "e",
+                "éditer dans $EDITOR (lecteur/explorateur) · /edit <chemin>",
             ),
             (
                 "Ctrl+S",
@@ -275,6 +289,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             "Ctrl+P recherche floue de fichiers (/files)",
             "Ctrl+E explorateur de fichiers (/explorer)",
             "Ctrl+O change de volet (composer → explorateur → lecteur)",
+            "e éditer dans $EDITOR (lecteur/explorateur) · /edit <chemin>",
             "Ctrl+S steer : envoie les messages en file au tour en cours",
             "Shift+Tab change le mode (approve → smart → auto)",
             "Esc interrompt · Ctrl+C quitte",
@@ -453,8 +468,69 @@ async fn perform_restore(
     .await
 }
 
-fn input_thread(tx: mpsc::Sender<Event>) {
+/// Hand-off of stdin between the input thread and an external editor, which
+/// needs the terminal whole: both would otherwise read the same keystrokes,
+/// and crossterm's reader would consume the ones meant for vim.
+///
+/// The reader is the only writer of `parked`, the loop the only writer of
+/// `suspended` — the confirmation is what tells the loop the reader is out of
+/// the way, rather than assuming it after a sleep.
+#[derive(Debug, Default)]
+struct InputGate {
+    suspended: AtomicBool,
+    parked: AtomicBool,
+}
+
+/// How long a parked reader sleeps before looking at the gate again.
+const GATE_PARK_SLEEP: Duration = Duration::from_millis(20);
+/// The loop's own beat while it waits for that confirmation, and how long it
+/// waits at all before starting the editor anyway.
+const GATE_POLL: Duration = Duration::from_millis(5);
+const GATE_PARK_TIMEOUT: Duration = Duration::from_millis(500);
+
+impl InputGate {
+    /// Called by the reader before every poll: `true` means stdin is off
+    /// limits until further notice.
+    fn park_if_suspended(&self) -> bool {
+        if self.suspended.load(Ordering::Acquire) {
+            self.parked.store(true, Ordering::Release);
+            std::thread::sleep(GATE_PARK_SLEEP);
+            true
+        } else {
+            self.parked.store(false, Ordering::Release);
+            false
+        }
+    }
+
+    /// Asks the reader for stdin and waits for it to confirm. `false` when it
+    /// never did within [`GATE_PARK_TIMEOUT`]: the editor still runs — a
+    /// reader that can't be reached is not a reason to refuse an edit, and it
+    /// polls with a 50 ms timeout, so it is about to see the flag anyway.
+    fn suspend(&self) -> bool {
+        self.suspended.store(true, Ordering::Release);
+        let deadline = std::time::Instant::now() + GATE_PARK_TIMEOUT;
+        while std::time::Instant::now() < deadline {
+            if self.parked.load(Ordering::Acquire) {
+                return true;
+            }
+            std::thread::sleep(GATE_POLL);
+        }
+        false
+    }
+
+    fn resume(&self) {
+        self.suspended.store(false, Ordering::Release);
+    }
+}
+
+fn input_thread(tx: mpsc::Sender<Event>, gate: &InputGate) {
     loop {
+        if gate.park_if_suspended() {
+            if tx.is_closed() {
+                return;
+            }
+            continue;
+        }
         match event::poll(Duration::from_millis(50)) {
             Ok(true) => {
                 let Ok(ev) = event::read() else { return };
@@ -469,6 +545,79 @@ fn input_thread(tx: mpsc::Sender<Event>) {
             }
             Err(_) => return,
         }
+    }
+}
+
+/// `$VISUAL`, then `$EDITOR`, then `vi` — the POSIX order every other TUI
+/// follows. The value is a command line, not a program name (`code --wait`),
+/// split on whitespace: no shell runs it, so quoting and redirections are out
+/// of scope.
+pub fn resolve_editor(visual: Option<&str>, editor: Option<&str>) -> (String, Vec<String>) {
+    let mut words = [visual, editor]
+        .into_iter()
+        .flatten()
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or("vi")
+        .split_whitespace();
+    let program = words.next().unwrap_or("vi").to_string();
+    (program, words.map(str::to_string).collect())
+}
+
+/// Suspends the TUI, hands the terminal to the user's editor, takes it back:
+/// the lazygit/yazi bargain, kaji doesn't grow an editor of its own.
+///
+/// `Ok(None)` = the editor ran and exited cleanly, `Ok(Some(note))` = it ran
+/// and said something (non-zero code), `Err(note)` = it never started. Every
+/// step of the return path runs whatever the child did, so a missing `$EDITOR`
+/// can't leave the shell in raw mode outside the alternate screen with a
+/// parked reader.
+fn edit_file(
+    terminal: &mut ratatui::DefaultTerminal,
+    gate: &InputGate,
+    mouse: bool,
+    path: &Path,
+    working_dir: &Path,
+) -> std::result::Result<Option<String>, String> {
+    let (program, args) = resolve_editor(
+        std::env::var("VISUAL").ok().as_deref(),
+        std::env::var("EDITOR").ok().as_deref(),
+    );
+    gate.suspend();
+    leave_terminal(mouse);
+    let status = std::process::Command::new(&program)
+        .args(&args)
+        .arg(path)
+        .current_dir(working_dir)
+        .status();
+    enter_terminal(mouse);
+    let _ = terminal.clear();
+    gate.resume();
+    match status {
+        Ok(status) if status.success() => Ok(None),
+        Ok(status) => Ok(Some(match status.code() {
+            Some(code) => format!("éditeur : code {code}"),
+            None => "éditeur : interrompu".to_string(),
+        })),
+        Err(_) => Err(format!("éditeur introuvable : {program} — définis $EDITOR")),
+    }
+}
+
+/// Mirrors exactly what `run` turned on, in reverse — anything left on here
+/// is an escape sequence the editor would have to make sense of.
+fn leave_terminal(mouse: bool) {
+    if mouse {
+        let _ = execute!(stdout(), DisableMouseCapture);
+    }
+    let _ = execute!(stdout(), DisableBracketedPaste);
+    let _ = disable_raw_mode();
+    let _ = execute!(stdout(), LeaveAlternateScreen, Show);
+}
+
+fn enter_terminal(mouse: bool) {
+    let _ = enable_raw_mode();
+    let _ = execute!(stdout(), EnterAlternateScreen, EnableBracketedPaste);
+    if mouse {
+        let _ = execute!(stdout(), EnableMouseCapture);
     }
 }
 
@@ -515,6 +664,7 @@ async fn event_loop(
     spec: Option<SpecDoc>,
     header: String,
     mut input_rx: mpsc::Receiver<Event>,
+    gate: &InputGate,
     resume: bool,
 ) -> Result<()> {
     let mut app = App::new(spec);
@@ -568,6 +718,10 @@ async fn event_loop(
 
     loop {
         terminal.draw(|frame| ui::draw(frame, &app))?;
+        // Honored after the `select!` returns, never inside it: suspending
+        // the terminal while an arm could still redraw would paint the TUI
+        // over the editor.
+        let mut edit_request: Option<PathBuf> = None;
         tokio::select! {
             _ = tick.tick(), if app.turn_active || app.turn_pending => {}
             _ = git_tick.tick() => app.request_git_refresh(),
@@ -791,6 +945,7 @@ async fn event_loop(
                         }
                     }
                     Action::RestoreCancel => app.push_system("restore annulé"),
+                    Action::EditFile(path) => edit_request = Some(path),
                     Action::None => {}
                 }
                 // @-mention index (item 4 ante): the walk runs on a blocking
@@ -880,6 +1035,36 @@ async fn event_loop(
                 if let Some(status) = maybe {
                     app.on_git_status(status);
                 }
+            }
+        }
+        // The editor owns the terminal for as long as it runs: a blocking
+        // call on a runtime worker, so `block_in_place` hands the worker's
+        // other tasks to a sibling thread (multi-thread runtime, see
+        // `main.rs`) instead of stalling them.
+        if let Some(path) = edit_request {
+            let mouse = app.mouse_enabled;
+            let ran = match tokio::task::block_in_place(|| {
+                edit_file(terminal, gate, mouse, &path, &working_dir)
+            }) {
+                Ok(note) => {
+                    if let Some(note) = note {
+                        app.push_system(&note);
+                    }
+                    true
+                }
+                Err(note) => {
+                    app.push_system(&note);
+                    false
+                }
+            };
+            if ran {
+                app.on_file_edited(&path);
+                let shown = path.strip_prefix(&working_dir).unwrap_or(&path);
+                app.push_system(&format!(
+                    "{} {} édité",
+                    theme::VIEWER_GLYPH,
+                    shown.display()
+                ));
             }
         }
         // Status bar (task 15): same hand-off as the @-mention index, drained
@@ -1249,6 +1434,67 @@ mod tests {
 
     fn line_text(line: &RoledLine) -> String {
         line.iter().map(|span| span.text.as_str()).collect()
+    }
+
+    #[test]
+    fn resolve_editor_prefers_visual_then_editor_then_vi() {
+        assert_eq!(
+            resolve_editor(Some("nvim"), Some("vim")),
+            ("nvim".to_string(), Vec::new())
+        );
+        assert_eq!(
+            resolve_editor(None, Some("vim")),
+            ("vim".to_string(), Vec::new())
+        );
+        assert_eq!(resolve_editor(None, None), ("vi".to_string(), Vec::new()));
+        assert_eq!(
+            resolve_editor(Some(""), Some("   ")),
+            ("vi".to_string(), Vec::new()),
+            "une variable vide ne choisit pas d'éditeur"
+        );
+    }
+
+    #[test]
+    fn resolve_editor_splits_the_arguments_off_the_program() {
+        assert_eq!(
+            resolve_editor(Some("code --wait"), None),
+            ("code".to_string(), vec!["--wait".to_string()])
+        );
+    }
+
+    /// The reader is the only thing that touches stdin, and the editor needs
+    /// it whole: this locks the hand-off protocol (`suspended` → the reader
+    /// confirms with `parked`, lifted → it goes back to polling) against the
+    /// same check loop `input_thread` runs, minus the stdin poll.
+    #[test]
+    fn the_input_gate_parks_the_reader_then_gives_stdin_back() {
+        let gate = Arc::new(InputGate::default());
+        let reader = Arc::clone(&gate);
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !reader_stop.load(Ordering::Acquire) {
+                if !reader.park_if_suspended() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        });
+
+        assert!(gate.suspend(), "le lecteur confirme avoir lâché stdin");
+        assert!(gate.parked.load(Ordering::Acquire));
+
+        gate.resume();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while gate.parked.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !gate.parked.load(Ordering::Acquire),
+            "le lecteur a repris stdin"
+        );
+
+        stop.store(true, Ordering::Release);
+        handle.join().expect("reader thread");
     }
 
     /// BARRIER — a restore must operate on the store the session's snapshots
@@ -2013,7 +2259,8 @@ mod tests {
             ("/sdd", "/goal"),
             ("/goal", "/files"),
             ("/files", "/explorer"),
-            ("/explorer", "/spec"),
+            ("/explorer", "/edit"),
+            ("/edit", "/spec"),
             ("/spec", "/think"),
             ("/think", "/cost"),
             ("/cost", "/context"),
