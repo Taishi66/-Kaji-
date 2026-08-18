@@ -379,3 +379,19 @@
 - [ ] **15.2** App (état, requête/réponse, déclencheurs) + loop (`spawn_blocking`, canal, `git_tick` 5 s) ; tests App.
 - [ ] **15.3** `draw_status_bar` + root layout + header allégé ; tests ui ; aide/welcome inchangés.
 - [ ] **15.4** format par fichier ; `cargo test -p kaji-cli --lib` (0 échec, baseline 688) ; clippy `-p kaji-cli`. Commit : `feat(tui): barre d'état git façon lualine — dossier courant, branche, ↑↓, ●✚…, +/− (async, tick 5 s)`.
+
+## Task 16 : Glyphes zen — remplacer les emoji de la TUI par des kanji — demande user 2026-08-18
+
+**Spec.** « Supprime les vieilles icônes AI slop (🗂 à côté de workspace) — on ne veut pas ça dans kaji, réutilise des kanji japonais ou d'autre design zen. » Inventaire (grep 2026-08-18) : `🗂` titre explorateur (`ui.rs:822`), `📄` titre lecteur (`ui.rs:872,877`), `📁` barre d'état (`gitstatus.rs`, ×6), `🔀` file de steer dans le titre du composer (`ui.rs` ×5, `mod.rs`, `app.rs`), `⚙` ligne d'outil en cours (`ui.rs:365`), `⚔` `theme::GATE_SYMBOL` (`theme.rs:202`). Restent (symboles texte, monochromes, acceptés) : `⚠`, `✓`, `✗`, `●`, `✚`, `…`, `▸`/`▾`, `⌕`, `↑↓`. Registre existant à honorer : `鍛冶` (header), `思考中` (thinking), `目標` (goal). Bonus : ligne d'état de l'explorateur clippée (`… · q fer`, minor T9).
+
+**Rulings contrôleur :**
+1. **Mapping** (constantes nommées dans `theme.rs`, une seule définition chacune, ex. `pub const EXPLORER_GLYPH: &str = "樹";`) : `🗂` → `樹` (arbre) ; `📄` → `巻` (rouleau) ; `📁` → `在` (ici / se trouve à) ; `🔀` → `列` (file d'attente) ; `⚙` → `工` (ouvrage — 鍛冶 forge) ; `⚔` → `門` (porte / gate). Tous kanji = 2 colonnes, comme les emoji remplacés → aucune math de largeur ne change ; les usages `unicode-width` restent justes.
+2. **Aucun autre emoji** ne subsiste dans `crates/kaji-cli/src/tui/*.rs` (gate grep `[\x{1F000}-\x{1FAFF}]` = 0 hors tests qui asserteraient un ancien glyphe — à mettre à jour vers la constante). Aide/welcome : les mentions textuelles éventuelles suivent.
+3. **Ligne d'état de l'explorateur** : le compte passe dans le titre (`樹 workspace · 49`), le pied devient `. dotfiles · a attacher · q fermer` (33 col) — plus de clip à 48 col.
+4. **Tests** : les tests existants qui matchent `🗂`/`📄`/`📁`/`🔀`/`⚙`/`⚔` sont réécrits sur les constantes (pas de littéral emoji dans les tests) ; un test `theme.rs` affirme que chaque `*_GLYPH` a une largeur d'affichage de 2 ; test explorateur : titre contient ` · {n}` et le pied = la chaîne exacte du ruling 3.
+5. Hors scope : nerd-fonts, changement de `⚠`/`✓`/`⌕`, glyphes configurables.
+
+### Étapes
+- [ ] **16.1** constantes `theme.rs` + remplacement des 6 glyphes (ui.rs, gitstatus.rs, mod.rs, app.rs) + gate grep ; tests adaptés + test largeur.
+- [ ] **16.2** explorateur : compte dans le titre, pied court ; tests.
+- [ ] **16.3** format par fichier ; `cargo test -p kaji-cli --lib` (0 échec, baseline 715) ; clippy `-p kaji-cli`. Commit : `style(tui): glyphes zen — kanji à la place des emoji (樹 巻 在 列 工 門) + pied d'explorateur non clippé`.
