@@ -1,4 +1,4 @@
-use crate::tui::editors::{EditorKind, EditorSpec, EditorState};
+use crate::tui::editors::{self, EditMode, EditorSpec, EditorState, Launch, LaunchContext};
 use crate::tui::gitstatus::GitStatus;
 use crate::tui::theme::SpanRole;
 use crate::tui::ui::sanitize_for_display;
@@ -389,6 +389,9 @@ pub enum Action {
     /// `/editor reset` : `KAJI_EDITOR` sort de la config, l'environnement et la
     /// détection reprennent la main.
     EditorReset,
+    /// `/editor mode <valeur>` — `App` a déjà appliqué le mode à la session,
+    /// l'event loop n'a plus qu'à le persister dans `KAJI_EDIT_MODE`.
+    EditMode(String),
     /// Palette already switched by [`App::run_theme_command`] — carries the
     /// applied name so the event loop can persist it to `KAJI_THEME`. The
     /// switch itself must not wait on the config write: the redraw right
@@ -442,7 +445,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/editor",
-        desc: "choisir l'éditeur (détectés) — /editor <cmd> · reset",
+        desc: "choisir l'éditeur (détectés) — /editor <cmd> · reset · mode <auto|suspend|remote|pane|gui>",
         run: |app| app.run_editor_command(""),
     },
     Command {
@@ -545,6 +548,18 @@ fn edit_command_arg(text: &str) -> Option<&str> {
 /// `/edit` dont le chemin serait `or`.
 fn editor_command_arg(text: &str) -> Option<&str> {
     slash_command_arg(text, "/editor")
+}
+
+/// `/editor mode` est un sous-mot de `/editor <cmd>`, pas une commande à
+/// part : même garde de mot entier que [`slash_command_arg`], pour qu'un
+/// binaire réellement nommé `modeline` ne soit pas lu comme `mode line`.
+fn editor_mode_arg(arg: &str) -> Option<&str> {
+    let rest = arg.strip_prefix("mode")?;
+    if rest.is_empty() || rest.starts_with(' ') {
+        Some(rest.trim())
+    } else {
+        None
+    }
 }
 
 /// A pasted block lands on one line: the composer and the finder query are
@@ -762,6 +777,16 @@ pub struct App {
     /// `event_loop` (`tui::startup_editors`). Vide par défaut : `App::new` ne
     /// lit ni le `PATH` ni la config.
     pub editors: EditorState,
+    /// `KAJI_EDIT_MODE` — env > config, défaut `auto`. Posé par `event_loop`
+    /// au démarrage et par `/editor mode`. `request_edit` s'en sert pour la
+    /// même décision que l'exécution prendra (`editors::plan`) : un tour en
+    /// cours ne bloque que si le lancement resterait un `Suspend`.
+    pub edit_mode: EditMode,
+    /// Ce que kaji voit de son terminal hôte — nvim, Zellij, tmux — posé une
+    /// fois par `event_loop` (`tui::launch_context`) à partir de
+    /// l'environnement et de `working_dir`. Ne change pas en cours de
+    /// session.
+    pub launch_ctx: LaunchContext,
     /// Right-column file viewer. Takes the SPEC panel's slot for as long as
     /// it is open; closing it hands the slot back with no state to restore
     /// (`ui::draw` reads `spec_panel_visible` again).
@@ -844,6 +869,8 @@ impl App {
             theme_picker: None,
             editor_picker: None,
             editors: EditorState::default(),
+            edit_mode: EditMode::default(),
+            launch_ctx: LaunchContext::default(),
             viewer: None,
             explorer: None,
             focus: Focus::default(),
@@ -1641,9 +1668,13 @@ impl App {
     }
 
     /// `/editor` : vide ou `list` = sélecteur, `reset` rend la main à
-    /// l'environnement, sinon la commande donnée devient l'éditeur de la
-    /// session — libre, un binaire hors catalogue compris.
+    /// l'environnement, `mode` bascule/affiche `KAJI_EDIT_MODE`, sinon la
+    /// commande donnée devient l'éditeur de la session — libre, un binaire
+    /// hors catalogue compris.
     fn run_editor_command(&mut self, arg: &str) -> Action {
+        if let Some(mode_arg) = editor_mode_arg(arg) {
+            return self.run_editor_mode_command(mode_arg);
+        }
         if arg.is_empty() || arg.eq_ignore_ascii_case("list") {
             self.open_editor_picker();
             return Action::None;
@@ -1652,6 +1683,48 @@ impl App {
             return self.reset_editor();
         }
         self.select_editor(arg, arg)
+    }
+
+    /// `/editor mode` seul affiche le mode configuré et le mode effectif pour
+    /// l'éditeur courant ; `/editor mode <valeur>` bascule le mode et le
+    /// fait persister par l'event loop.
+    fn run_editor_mode_command(&mut self, arg: &str) -> Action {
+        if arg.is_empty() {
+            self.push_system(&format!(
+                "mode : {} (effectif : {})",
+                self.edit_mode.as_str(),
+                self.effective_edit_mode_label()
+            ));
+            return Action::None;
+        }
+        let Some(mode) = EditMode::parse(arg) else {
+            self.push_system(&format!(
+                "mode inconnu : {arg} — auto | suspend | remote | pane | gui"
+            ));
+            return Action::None;
+        };
+        self.edit_mode = mode;
+        self.push_system(&format!("mode : {}", mode.as_str()));
+        Action::EditMode(mode.as_str().to_string())
+    }
+
+    /// Ce que `editors::plan` choisirait maintenant pour l'éditeur courant —
+    /// le fichier cible n'entre dans aucune branche de `plan` (seulement dans
+    /// l'argv qu'elle construit), donc un chemin d'espace réservé suffit ici.
+    fn effective_edit_mode_label(&self) -> String {
+        match self.editors.resolve() {
+            Ok(editor) => {
+                let launch = editors::plan(
+                    self.edit_mode,
+                    &self.launch_ctx,
+                    &editor,
+                    std::path::Path::new(""),
+                    None,
+                );
+                editors::launch_label(&launch, &editor)
+            }
+            Err(_) => "aucun éditeur".to_string(),
+        }
     }
 
     /// Loads a file into the right-column viewer and gives it the focus. A
@@ -1681,24 +1754,28 @@ impl App {
     /// same thing the composer would attach. A missing file is deliberately
     /// let through — the editor creates it.
     ///
-    /// Un éditeur terminal est refusé pendant un tour : il prendrait l'écran
-    /// pendant que l'agent écrit dans le même arbre, et deux écrivains sur un
-    /// fichier est un conflit qu'aucun des deux ne voit. Un IDE graphique, lui,
-    /// ne prend rien — il passe, avec l'avertissement qui va avec.
+    /// Un lancement qui suspendrait le terminal (`Launch::Suspend`) est
+    /// refusé pendant un tour : il prendrait l'écran pendant que l'agent
+    /// écrit dans le même arbre, et deux écrivains sur un fichier est un
+    /// conflit qu'aucun des deux ne voit. Tout le reste — IDE graphique,
+    /// nvim hôte, pane Zellij/tmux — ne prend rien : ça passe, avec
+    /// l'avertissement qui va avec.
     fn request_edit(&mut self, path: &str, line: Option<usize>) -> Action {
-        let detached = self
-            .editors
-            .resolve()
-            .is_ok_and(|editor| editor.kind == EditorKind::Gui);
-        let busy = self.turn_active || self.turn_pending;
-        if busy && !detached {
-            self.push_system("un tour est en cours — attends la fin");
-            return Action::None;
-        }
         let raw = path.trim_start_matches('@');
         let resolved = crate::tui::mentions::resolve(raw, &self.working_dir);
         if resolved.is_dir() {
             self.push_system(&format!("{raw} : dossier, pas un fichier"));
+            return Action::None;
+        }
+        let busy = self.turn_active || self.turn_pending;
+        let non_blocking = self.editors.resolve().is_ok_and(|editor| {
+            !matches!(
+                editors::plan(self.edit_mode, &self.launch_ctx, &editor, &resolved, line),
+                Launch::Suspend(_)
+            )
+        });
+        if busy && !non_blocking {
+            self.push_system("un tour est en cours — attends la fin");
             return Action::None;
         }
         if busy {
@@ -1755,6 +1832,30 @@ impl App {
             explorer.refresh();
         }
         self.request_git_refresh();
+    }
+
+    /// `r` : recharge le fichier affiché depuis le disque. Une édition non
+    /// bloquante (task 19b — nvim hôte, pane Zellij/tmux) ne prévient jamais
+    /// kaji quand elle termine, contrairement à `edit_file` qui rend la main
+    /// à la sortie de l'éditeur ; le lecteur doit donc pouvoir le redemander.
+    fn reload_viewer(&mut self) {
+        let Some((display, scroll)) = self
+            .viewer
+            .as_ref()
+            .map(|viewer| (viewer.path.clone(), viewer.scroll))
+        else {
+            return;
+        };
+        let resolved = crate::tui::mentions::resolve(&display, &self.working_dir);
+        let viewport = self.viewer_viewport();
+        match crate::tui::viewer::load(&display, &resolved) {
+            Ok(mut reloaded) => {
+                reloaded.scroll = scroll.min(reloaded.max_scroll(viewport));
+                self.viewer = Some(reloaded);
+                self.push_system(&format!("{} {display} rechargé", theme::VIEWER_GLYPH));
+            }
+            Err(e) => self.push_system(&format!("lecture impossible : {e}")),
+        }
     }
 
     /// The reader while it holds the focus, which is when it takes the chat's
@@ -1816,6 +1917,13 @@ impl App {
                 // The pane stays open — attaching is a step in writing a
                 // message, not a reason to lose what you were reading.
                 self.focus = Focus::Composer;
+                return Action::None;
+            }
+            // Non-blocking editing (task 19b) never says when it's done — no
+            // suspended kaji to hand the terminal back on exit — so the
+            // viewer has to be told to look again.
+            KeyCode::Char('r') if !ctrl => {
+                self.reload_viewer();
                 return Action::None;
             }
             _ => {}
@@ -4488,6 +4596,94 @@ mod tests {
 
         assert_eq!(app.on_event(&key(KeyCode::Char('e'))), Action::None);
         assert!(last_line(&app).contains("un tour est en cours"));
+    }
+
+    /// Task 19b : un lancement non bloquant (nvim hôte, pane Zellij/tmux) ne
+    /// prend rien au tour en cours, exactement comme le graphique de 19a.
+    #[test]
+    fn a_zellij_pane_edit_is_allowed_during_a_turn_with_a_warning() {
+        let (mut app, dir) = app_with_open_viewer();
+        app.editors = EditorState {
+            selected: Some("vim".to_string()),
+            ..EditorState::default()
+        };
+        app.launch_ctx = LaunchContext {
+            zellij: true,
+            cwd: dir.path().to_path_buf(),
+            ..LaunchContext::default()
+        };
+        app.turn_active = true;
+
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('e'))),
+            Action::EditFile {
+                path: dir.path().join("long.txt"),
+                line: Some(1),
+            }
+        );
+        assert!(
+            last_line(&app).contains("le tour continue"),
+            "{}",
+            last_line(&app)
+        );
+    }
+
+    #[test]
+    fn slash_editor_mode_switches_and_persists() {
+        let mut app = App::new(None);
+
+        assert_eq!(
+            submit(&mut app, "/editor mode pane"),
+            Action::EditMode("pane".to_string())
+        );
+        assert_eq!(app.edit_mode, EditMode::Pane);
+        assert!(last_line(&app).contains("mode : pane"));
+    }
+
+    #[test]
+    fn slash_editor_mode_alone_shows_the_configured_and_effective_mode() {
+        let mut app = App::new(None);
+        app.editors = editor_state(&["vim"]);
+
+        assert_eq!(submit(&mut app, "/editor mode"), Action::None);
+        assert!(
+            last_line(&app).contains("mode : auto"),
+            "{}",
+            last_line(&app)
+        );
+        assert!(
+            last_line(&app).contains("effectif : suspend"),
+            "{}",
+            last_line(&app)
+        );
+    }
+
+    #[test]
+    fn slash_editor_mode_rejects_an_unknown_value() {
+        let mut app = App::new(None);
+
+        assert_eq!(submit(&mut app, "/editor mode bogus"), Action::None);
+        assert!(
+            last_line(&app).contains("mode inconnu"),
+            "{}",
+            last_line(&app)
+        );
+        assert_eq!(app.edit_mode, EditMode::Auto);
+    }
+
+    #[test]
+    fn r_reloads_the_viewer_from_disk_with_its_scroll_clamped() {
+        let (mut app, dir) = app_with_open_viewer();
+        app.on_event(&key(KeyCode::Char('G')));
+        assert_eq!(app.viewer.as_ref().unwrap().scroll, 180);
+
+        std::fs::write(dir.path().join("long.txt"), "court\n").unwrap();
+        assert_eq!(app.on_event(&key(KeyCode::Char('r'))), Action::None);
+
+        let viewer = app.viewer.as_ref().expect("le lecteur reste ouvert");
+        assert_eq!(viewer.lines, vec!["court"]);
+        assert_eq!(viewer.scroll, 0, "scroll ramené dans le nouveau fichier");
+        assert!(last_line(&app).contains("rechargé"), "{}", last_line(&app));
     }
 
     #[test]

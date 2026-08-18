@@ -994,9 +994,9 @@ fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
     // it is what brings it back.
     let focused = app.focus == Focus::Viewer;
     let keys = if focused {
-        "j/k défiler · e éditer · a attacher @ · q fermer · Ctrl+O chat"
+        "j/k défiler · e éditer · r recharger · a attacher @ · q fermer · Ctrl+O chat"
     } else {
-        "j/k défiler · e éditer · a attacher @ · q fermer"
+        "j/k défiler · e éditer · r recharger · a attacher @ · q fermer"
     };
     let footer = if viewer.truncated {
         format!(" … tronqué ({} lus) · {keys} ", viewer::read_limit_label())
@@ -2450,7 +2450,7 @@ mod tests {
         assert!(content.contains("a.rs"), "got:\n{content}");
         assert!(content.contains("fn main()"), "got:\n{content}");
         assert!(
-            content.contains("j/k défiler · e éditer"),
+            content.contains("j/k défiler · e éditer · r recharger"),
             "got:\n{content}"
         );
         assert!(

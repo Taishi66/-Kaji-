@@ -232,7 +232,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
         "/files" => "(Ctrl+P) recherche floue de fichiers",
         "/explorer" => "(Ctrl+E) explorateur de fichiers",
         "/edit" => "(ou e) éditer un fichier — /edit <chemin>[:ligne]",
-        "/editor" => "choisir l'éditeur/IDE (<cmd> | list | reset)",
+        "/editor" => "choisir l'éditeur/IDE (<cmd> | list | reset | mode)",
         "/spec" => "(F2) panneau SPEC on/off",
         "/think" => "(F3) raisonnement du modèle (思考中)",
         "/cost" => "usage tokens/coût (session, 5 h, 7 j)",
@@ -264,7 +264,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             ("", "le chat se replie quand le lecteur a le focus"),
             (
                 "e",
-                "éditer dans $EDITOR (lecteur/explorateur) · /edit <chemin>",
+                "éditer ($EDITOR, nvim hôte ou pane Zellij/tmux selon KAJI_EDIT_MODE) · /edit <chemin>",
             ),
             (
                 "Ctrl+S",
@@ -293,7 +293,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             "Ctrl+E explorateur de fichiers (/explorer)",
             "Ctrl+O change de volet (composer → explorateur → lecteur)",
             "  le chat se replie quand le lecteur a le focus",
-            "e éditer dans $EDITOR (lecteur/explorateur) · /edit <chemin>",
+            "e éditer ($EDITOR, nvim hôte ou pane Zellij/tmux selon KAJI_EDIT_MODE) · /edit <chemin>",
             "Ctrl+S steer : envoie les messages en file au tour en cours",
             "Shift+Tab change le mode (approve → smart → auto)",
             "Esc interrompt · Ctrl+C quitte",
@@ -559,6 +559,62 @@ fn startup_editors() -> editors::EditorState {
     editors::EditorState::from_env(Config::global().get_param::<String>("KAJI_EDITOR").ok())
 }
 
+/// `KAJI_EDIT_MODE` — même précédence env > config que le thème et
+/// l'éditeur. Une valeur inconnue ne bloque jamais le lancement : `auto`
+/// s'applique, et l'avertissement est rendu par l'appelant après
+/// `maybe_push_welcome` — même contrainte d'ordre que `apply_startup_theme`.
+fn startup_edit_mode() -> (editors::EditMode, Option<String>) {
+    match Config::global().get_param::<String>("KAJI_EDIT_MODE") {
+        Ok(value) => match editors::EditMode::parse(&value) {
+            Some(mode) => (mode, None),
+            None => (
+                editors::EditMode::Auto,
+                Some(format!("KAJI_EDIT_MODE invalide ({value}) — auto appliqué")),
+            ),
+        },
+        Err(_) => (editors::EditMode::Auto, None),
+    }
+}
+
+/// Ce que kaji voit de son terminal hôte — lu une fois au démarrage, jamais
+/// relu : ces variables ne changent pas en cours de session.
+fn launch_context(working_dir: &Path) -> editors::LaunchContext {
+    editors::LaunchContext {
+        nvim: std::env::var("NVIM").ok(),
+        zellij: std::env::var_os("ZELLIJ").is_some(),
+        tmux: std::env::var_os("TMUX").is_some(),
+        cwd: working_dir.to_path_buf(),
+    }
+}
+
+/// Un mode forcé (`remote`/`pane`/`gui`) qui ne peut pas s'appliquer dans le
+/// contexte courant retombe sur `Suspend` à l'intérieur même de
+/// `editors::plan` — sa signature pure n'a pas de place pour l'expliquer.
+/// `auto`/`suspend` qui atterrissent sur `Suspend` sont le cas ordinaire et
+/// restent silencieux.
+fn edit_mode_fallback_note(mode: editors::EditMode, launch: &editors::Launch) -> Option<String> {
+    if !matches!(launch, editors::Launch::Suspend(_)) {
+        return None;
+    }
+    let reason = match mode {
+        editors::EditMode::Remote => "$NVIM absent ou éditeur non-nvim",
+        editors::EditMode::Pane => "ni Zellij ni tmux détecté",
+        editors::EditMode::Gui => "éditeur non graphique",
+        editors::EditMode::Auto | editors::EditMode::Suspend => return None,
+    };
+    Some(format!(
+        "mode {} indisponible ({reason}) — suspend",
+        mode.as_str()
+    ))
+}
+
+fn launch_spawn_failure(launch: &editors::Launch, editor: &editors::Editor, err: &str) -> String {
+    format!(
+        "{} : échec ({err}) — repli sur $EDITOR ?",
+        editors::launch_label(launch, editor)
+    )
+}
+
 fn editor_not_found(program: &str) -> String {
     format!("éditeur introuvable : {program} — définis $EDITOR ou /editor pour en choisir un")
 }
@@ -599,29 +655,59 @@ fn edit_file(
     }
 }
 
-/// Un IDE graphique n'a pas besoin du terminal : on le lance et on le laisse
-/// vivre — ni suspension, ni attente. Ses flux vont au vide, sinon le premier
-/// avertissement qu'il écrit passe par-dessus le TUI. Un fil à part attend le
-/// lanceur, qui rend la main aussitôt : sans ce `wait`, chaque `e` laisserait
-/// un zombie jusqu'à la fin de la session.
-fn open_detached(
-    editor: &editors::Editor,
-    path: &Path,
-    line: Option<usize>,
-    working_dir: &Path,
-) -> std::result::Result<(), String> {
-    let mut child = std::process::Command::new(&editor.program)
-        .args(editor.argv(path, line))
+/// Un lancement `Detached`/`Remote`/`Pane` n'a pas besoin du terminal : on le
+/// lance et on le laisse vivre — ni suspension, ni attente. Ses flux vont au
+/// vide, sinon le premier avertissement qu'il écrit passe par-dessus le TUI.
+/// Un fil à part attend le lanceur, qui rend la main aussitôt : sans ce
+/// `wait`, chaque édition laisserait un zombie jusqu'à la fin de la session.
+fn spawn_launch(argv: &[String], working_dir: &Path) -> std::result::Result<(), String> {
+    let [program, args @ ..] = argv else {
+        return Err("commande vide".to_string());
+    };
+    let mut child = std::process::Command::new(program)
+        .args(args)
         .current_dir(working_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|_| editor_not_found(&editor.program))?;
+        .map_err(|e| e.to_string())?;
     std::thread::spawn(move || {
         let _ = child.wait();
     });
     Ok(())
+}
+
+/// Le chemin `Suspend` (T18), tiré en commun par ses deux appelants : le
+/// lancement ordinaire, et le repli d'un spawn non bloquant en échec quand
+/// aucun tour n'est actif.
+fn run_suspend_edit(
+    terminal: &mut ratatui::DefaultTerminal,
+    gate: &InputGate,
+    app: &mut App,
+    editor: &editors::Editor,
+    path: &Path,
+    line: Option<usize>,
+    working_dir: &Path,
+) {
+    let shown = path.strip_prefix(working_dir).unwrap_or(path);
+    let mouse = app.mouse_enabled;
+    match tokio::task::block_in_place(|| {
+        edit_file(terminal, gate, mouse, editor, path, line, working_dir)
+    }) {
+        Ok(note) => {
+            if let Some(note) = note {
+                app.push_system(&note);
+            }
+            app.on_file_edited(path);
+            app.push_system(&format!(
+                "{} {} édité",
+                theme::VIEWER_GLYPH,
+                shown.display()
+            ));
+        }
+        Err(note) => app.push_system(&note),
+    }
 }
 
 /// Mirrors exactly what `run` turned on, in reverse — anything left on here
@@ -697,11 +783,17 @@ async fn event_loop(
     let working_dir = session_working_dir(&session_manager, session_id).await;
     app.set_working_dir(working_dir.clone());
     app.editors = startup_editors();
+    let (edit_mode, edit_mode_warning) = startup_edit_mode();
+    app.edit_mode = edit_mode;
+    app.launch_ctx = launch_context(&working_dir);
     app.request_git_refresh();
     let theme_warning = apply_startup_theme();
     seed_chat(&mut app, &conversation);
     maybe_push_welcome(&mut app);
     if let Some(warning) = theme_warning {
+        app.push_system(&warning);
+    }
+    if let Some(warning) = edit_mode_warning {
         app.push_system(&warning);
     }
     let disabled_checkpoints = checkpoints_disabled_line(
@@ -889,6 +981,15 @@ async fn event_loop(
                             app.push_system(&format!("éditeur oublié mais config inchangée : {e}"));
                         }
                     }
+                    // Comme `Action::Editor` — `App` a déjà basculé le mode
+                    // pour la session, l'event loop ne fait que le persister.
+                    Action::EditMode(value) => {
+                        if let Err(e) = Config::global().set_param("KAJI_EDIT_MODE", &value) {
+                            app.push_system(&format!(
+                                "mode d'édition appliqué mais non enregistré : {e}"
+                            ));
+                        }
+                    }
                     Action::Cost => {
                         let report = cost_report(&session_manager, session_id).await;
                         app.push_system_lines(report);
@@ -1073,49 +1174,58 @@ async fn event_loop(
                 }
             }
         }
-        // A terminal editor owns the terminal for as long as it runs: a
-        // blocking call on a runtime worker, so `block_in_place` hands the
-        // worker's other tasks to a sibling thread (multi-thread runtime, see
-        // `main.rs`) instead of stalling them. A graphical one takes nothing
-        // and is simply spawned.
+        // `Suspend` owns the terminal for as long as it runs: a blocking call
+        // on a runtime worker, so `block_in_place` hands the worker's other
+        // tasks to a sibling thread (multi-thread runtime, see `main.rs`)
+        // instead of stalling them. `Detached`/`Remote`/`Pane` take nothing
+        // and are simply spawned (`spawn_launch`).
         if let Some((path, line)) = edit_request {
             let shown = path.strip_prefix(&working_dir).unwrap_or(&path).to_owned();
             match app.editors.resolve() {
                 Err(note) => app.push_system(&note),
-                Ok(editor) if editor.kind == editors::EditorKind::Gui => {
-                    match open_detached(&editor, &path, line, &working_dir) {
-                        Ok(()) => app.push_system(&format!(
-                            "{} {} ouvert dans {}",
-                            theme::VIEWER_GLYPH,
-                            shown.display(),
-                            editor.program_name()
-                        )),
-                        Err(note) => app.push_system(&note),
-                    }
-                }
                 Ok(editor) => {
-                    let mouse = app.mouse_enabled;
-                    let ran = match tokio::task::block_in_place(|| {
-                        edit_file(terminal, gate, mouse, &editor, &path, line, &working_dir)
-                    }) {
-                        Ok(note) => {
-                            if let Some(note) = note {
-                                app.push_system(&note);
+                    let launch =
+                        editors::plan(app.edit_mode, &app.launch_ctx, &editor, &path, line);
+                    if let Some(note) = edit_mode_fallback_note(app.edit_mode, &launch) {
+                        app.push_system(&note);
+                    }
+                    let busy = app.turn_active || app.turn_pending;
+                    match &launch {
+                        editors::Launch::Suspend(_) => {
+                            run_suspend_edit(
+                                terminal,
+                                gate,
+                                &mut app,
+                                &editor,
+                                &path,
+                                line,
+                                &working_dir,
+                            );
+                        }
+                        editors::Launch::Detached(argv)
+                        | editors::Launch::Remote(argv)
+                        | editors::Launch::Pane(argv) => match spawn_launch(argv, &working_dir) {
+                            Ok(()) => app.push_system(&format!(
+                                "{} {} ouvert ({})",
+                                theme::VIEWER_GLYPH,
+                                shown.display(),
+                                editors::launch_label(&launch, &editor)
+                            )),
+                            Err(err) => {
+                                app.push_system(&launch_spawn_failure(&launch, &editor, &err));
+                                if !busy {
+                                    run_suspend_edit(
+                                        terminal,
+                                        gate,
+                                        &mut app,
+                                        &editor,
+                                        &path,
+                                        line,
+                                        &working_dir,
+                                    );
+                                }
                             }
-                            true
-                        }
-                        Err(note) => {
-                            app.push_system(&note);
-                            false
-                        }
-                    };
-                    if ran {
-                        app.on_file_edited(&path);
-                        app.push_system(&format!(
-                            "{} {} édité",
-                            theme::VIEWER_GLYPH,
-                            shown.display()
-                        ));
+                        },
                     }
                 }
             }
