@@ -294,6 +294,10 @@ pub struct Agent {
     /// therefore its `working_dir`) is known — see that method's doc
     /// comment for why this can't happen inside `with_config` itself.
     checkpoint_store: Option<Arc<CheckpointStore>>,
+    /// Why `wire_checkpoint_store` refused to wire a store, when it did.
+    /// `None` covers both "checkpointing works" and "nothing tried to wire
+    /// it" — the TUI only surfaces a reason it actually has.
+    checkpoint_disabled_reason: Option<&'static str>,
     /// Test-only override of the directory `checkpoint_project` resolves —
     /// lets tests inject a project path without a real session lookup or
     /// mutating the real process `current_dir` (unsafe to do per-test under
@@ -542,6 +546,7 @@ impl Agent {
             current_turn_seq: std::sync::atomic::AtomicI64::new(0),
             current_session_id: Mutex::new(None),
             checkpoint_store: None,
+            checkpoint_disabled_reason: None,
             #[cfg(test)]
             checkpoint_project_override: None,
         }
@@ -596,6 +601,11 @@ impl Agent {
     /// `Agent` (`warn!`) rather than failing session construction —
     /// checkpoints are a recoverability nicety, never a hard requirement to
     /// start kaji.
+    ///
+    /// The same reasoning gates `checkpoint::eligibility` first: a working
+    /// directory whose per-turn `git add -A` would cost seconds (no repo, so
+    /// no `.gitignore`; or `~`/`/`) gets no store at all, and
+    /// `checkpoint_disabled_reason` carries the why to the TUI.
     pub async fn wire_checkpoint_store(&mut self, session_id: &str) {
         let session = match self
             .config
@@ -613,6 +623,17 @@ impl Agent {
                 return;
             }
         };
+        if let Err(ineligible) =
+            crate::checkpoint::eligibility(&session.working_dir, dirs::home_dir().as_deref())
+        {
+            warn!(
+                path = %session.working_dir.display(),
+                reason = ineligible.reason(),
+                "checkpoint: directory not eligible, checkpointing disabled"
+            );
+            self.checkpoint_disabled_reason = Some(ineligible.reason());
+            return;
+        }
         match CheckpointStore::for_project(&session.working_dir) {
             Ok(store) => self.checkpoint_store = Some(Arc::new(store)),
             Err(error) => {
@@ -639,6 +660,14 @@ impl Agent {
     /// would `git add -A` an unrelated directory.
     pub fn checkpoint_store(&self) -> Option<Arc<CheckpointStore>> {
         self.checkpoint_store.clone()
+    }
+
+    /// Short French wording explaining why this session has no checkpoint
+    /// store, when `wire_checkpoint_store` deliberately declined to wire one
+    /// (see `checkpoint::eligibility`). The TUI shows it at boot and in place
+    /// of `/checkpoints` and `/restore` output.
+    pub fn checkpoint_disabled_reason(&self) -> Option<&'static str> {
+        self.checkpoint_disabled_reason
     }
 
     pub(crate) fn stop_hook_block_cap(&self) -> u32 {
@@ -6151,6 +6180,41 @@ echo start >> "$PLUGIN_ROOT/hook.log"
         Ok(())
     }
 
+    /// Builds an `Agent` and a session whose `working_dir` is `project_dir`,
+    /// then runs the production wiring path on it. The caller must already
+    /// hold an `env_lock::lock_env` guard with `KAJI_PATH_ROOT` set — see
+    /// `checkpoint_store_for_test`.
+    async fn wire_checkpoint_store_for(project_dir: &std::path::Path) -> Result<Agent> {
+        let temp_dir = tempfile::tempdir()?;
+        let session_manager = Arc::new(SessionManager::new(temp_dir.path().join("data")));
+        let permission_manager = Arc::new(PermissionManager::new(temp_dir.path().join("data")));
+        let config = AgentConfig::new(
+            session_manager.clone(),
+            permission_manager,
+            None,
+            KajiMode::Auto,
+            true,
+            KajiPlatform::KajiCli,
+        );
+        let mut agent = Agent::with_config(config);
+        let session = session_manager
+            .create_session(
+                project_dir.to_path_buf(),
+                "test".to_string(),
+                SessionType::Hidden,
+                KajiMode::Auto,
+            )
+            .await?;
+
+        assert!(
+            agent.checkpoint_store.is_none(),
+            "a freshly constructed Agent must not auto-wire a checkpoint store"
+        );
+
+        agent.wire_checkpoint_store(&session.id).await;
+        Ok(agent)
+    }
+
     /// FIX B1 — production wiring: `wire_checkpoint_store` (not the
     /// `#[cfg(test)]`-only `set_checkpoint_store_for_test` setter every
     /// other checkpoint test above uses) must populate `checkpoint_store`
@@ -6169,34 +6233,14 @@ echo start >> "$PLUGIN_ROOT/hook.log"
                 Some(data_root.path().to_str().expect("utf8 temp path")),
             ),
         ]);
+        let init = crate::subprocess::git_command()
+            .arg("-C")
+            .arg(project_dir.path())
+            .args(["init", "-q"])
+            .output()?;
+        assert!(init.status.success(), "git init must succeed");
 
-        let temp_dir = tempfile::tempdir()?;
-        let session_manager = Arc::new(SessionManager::new(temp_dir.path().join("data")));
-        let permission_manager = Arc::new(PermissionManager::new(temp_dir.path().join("data")));
-        let config = AgentConfig::new(
-            session_manager.clone(),
-            permission_manager,
-            None,
-            KajiMode::Auto,
-            true,
-            KajiPlatform::KajiCli,
-        );
-        let mut agent = Agent::with_config(config);
-        let session = session_manager
-            .create_session(
-                project_dir.path().to_path_buf(),
-                "test".to_string(),
-                SessionType::Hidden,
-                KajiMode::Auto,
-            )
-            .await?;
-
-        assert!(
-            agent.checkpoint_store.is_none(),
-            "a freshly constructed Agent must not auto-wire a checkpoint store"
-        );
-
-        agent.wire_checkpoint_store(&session.id).await;
+        let agent = wire_checkpoint_store_for(project_dir.path()).await?;
 
         assert!(
             agent.checkpoint_store.is_some(),
@@ -6205,6 +6249,34 @@ echo start >> "$PLUGIN_ROOT/hook.log"
              point), not the #[cfg(test)]-only set_checkpoint_store_for_test setter",
             project_dir.path().display()
         );
+        assert_eq!(agent.checkpoint_disabled_reason(), None);
+        Ok(())
+    }
+
+    /// ⛔ BARRIÈRE latence — le `git add -A` de chaque tour est awaité avant
+    /// le premier token. Hors dépôt git rien ne l'élague (constat user
+    /// 2026-08-18 : 58 s avant le 1er token depuis `~`), donc le store n'est
+    /// pas câblé du tout et la raison remonte à la TUI.
+    #[tokio::test]
+    async fn checkpoint_store_is_not_wired_outside_a_git_repo() -> Result<()> {
+        let data_root = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let _guard = env_lock::lock_env([
+            ("KAJI_STATE_MACHINE", None::<&str>),
+            (
+                "KAJI_PATH_ROOT",
+                Some(data_root.path().to_str().expect("utf8 temp path")),
+            ),
+        ]);
+
+        let agent = wire_checkpoint_store_for(project_dir.path()).await?;
+
+        assert!(
+            agent.checkpoint_store.is_none(),
+            "un dossier hors dépôt git ne doit jamais être snapshotté ({})",
+            project_dir.path().display()
+        );
+        assert_eq!(agent.checkpoint_disabled_reason(), Some("hors dépôt git"));
         Ok(())
     }
 

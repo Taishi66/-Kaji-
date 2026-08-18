@@ -478,6 +478,18 @@ fn input_thread(tx: mpsc::Sender<Event>) {
 /// session only *proposes* the chdir (`session/builder.rs`), so the process cwd
 /// is a different tree as soon as the user declines; it stays the fallback for
 /// a session that can't be read.
+/// `checkpoints désactivés — <raison>` when `wire_checkpoint_store` declined
+/// to snapshot this session's working directory (see
+/// `kaji::checkpoint::eligibility`), `None` otherwise. An absent store with no
+/// reason stays silent: that is the ordinary shape of every non-TUI caller,
+/// not a refusal that needs explaining.
+fn checkpoints_disabled_line(has_store: bool, reason: Option<&str>) -> Option<String> {
+    if has_store {
+        return None;
+    }
+    reason.map(|reason| format!("checkpoints désactivés — {reason}"))
+}
+
 async fn session_working_dir(session_manager: &SessionManager, session_id: &str) -> PathBuf {
     match session_manager.get_session(session_id, false).await {
         Ok(session) => session.working_dir,
@@ -518,6 +530,13 @@ async fn event_loop(
     maybe_push_welcome(&mut app);
     if let Some(warning) = theme_warning {
         app.push_system(&warning);
+    }
+    let disabled_checkpoints = checkpoints_disabled_line(
+        agent.checkpoint_store().is_some(),
+        agent.checkpoint_disabled_reason(),
+    );
+    if let Some(line) = &disabled_checkpoints {
+        app.push_system(&format!("{line} ({})", working_dir.display()));
     }
     if resume {
         apply_interrupted_turn_marker(
@@ -692,8 +711,12 @@ async fn event_loop(
                         let report = docker_report();
                         app.push_system_lines(report);
                     }
-                    Action::Checkpoints => {
-                        match session_manager.events_for_session(session_id).await {
+                    Action::Checkpoints => match &disabled_checkpoints {
+                        // Sans store, le journal ne contient aucun checkpoint :
+                        // « aucun checkpoint » se lirait comme un historique
+                        // vide plutôt que comme une fonctionnalité coupée.
+                        Some(line) => app.push_system(line),
+                        None => match session_manager.events_for_session(session_id).await {
                             Ok(events) => {
                                 let lines = checkpoints_lines(&events);
                                 if lines.is_empty() {
@@ -703,20 +726,27 @@ async fn event_loop(
                                 }
                             }
                             Err(e) => app.push_system(&format!("erreur /checkpoints : {e}")),
-                        }
-                    }
+                        },
+                    },
                     // Only opens the confirmation modal — spec §3: "jamais
                     // automatique", the actual store/session mutation only
                     // ever runs from `Action::RestoreConfirm` below.
                     Action::Restore(id) => {
-                        let is_net = match session_manager.events_for_session(session_id).await {
-                            Ok(events) => is_pre_restore_checkpoint(&events, &id),
-                            Err(e) => {
-                                app.push_system(&format!("erreur /restore : {e}"));
-                                false
-                            }
-                        };
-                        app.open_restore_confirm(id, is_net);
+                        if let Some(line) = &disabled_checkpoints {
+                            // Ouvrir la modale mènerait à un refus après
+                            // confirmation, pour un id qui n'a jamais pu exister.
+                            app.push_system(line);
+                        } else {
+                            let is_net =
+                                match session_manager.events_for_session(session_id).await {
+                                    Ok(events) => is_pre_restore_checkpoint(&events, &id),
+                                    Err(e) => {
+                                        app.push_system(&format!("erreur /restore : {e}"));
+                                        false
+                                    }
+                                };
+                            app.open_restore_confirm(id, is_net);
+                        }
                     }
                     Action::RestoreConfirm => {
                         if let Some(id) = app.take_pending_restore() {
@@ -1317,6 +1347,22 @@ mod tests {
             "sans l'id dans la ligne, /restore <id> est impossible à saisir : {text}"
         );
         assert!(text.contains("corrige le bug"), "aperçu du prompt : {text}");
+    }
+
+    /// La ligne sert au boot, à `/checkpoints` et à `/restore` : muette dès
+    /// qu'un store existe, et muette aussi sans raison (un store absent sans
+    /// refus explicite n'a rien à annoncer).
+    #[test]
+    fn checkpoints_disabled_line_speaks_only_for_an_explicit_refusal() {
+        assert_eq!(
+            checkpoints_disabled_line(false, Some("hors dépôt git")).as_deref(),
+            Some("checkpoints désactivés — hors dépôt git")
+        );
+        assert_eq!(checkpoints_disabled_line(false, None), None);
+        assert_eq!(
+            checkpoints_disabled_line(true, Some("répertoire home")),
+            None
+        );
     }
 
     #[test]

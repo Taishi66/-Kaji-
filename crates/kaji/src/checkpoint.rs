@@ -80,6 +80,62 @@ fn project_key(work_tree: &Path) -> String {
     bytes_to_hex(digest).chars().take(16).collect()
 }
 
+/// Why a directory must not be snapshotted. See [`eligibility`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointIneligible {
+    NotAGitWorkTree,
+    HomeDirectory,
+    FilesystemRoot,
+}
+
+impl CheckpointIneligible {
+    /// Short user-facing wording, surfaced by the TUI next to
+    /// `checkpoints désactivés`.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NotAGitWorkTree => "hors dépôt git",
+            Self::HomeDirectory => "répertoire home",
+            Self::FilesystemRoot => "racine du système",
+        }
+    }
+}
+
+/// Whether `dir` may be used as a checkpoint work tree.
+///
+/// Every snapshot starts with `git add -A` over the whole work tree, awaited
+/// before the turn's first token. Outside a git repo there is no `.gitignore`
+/// to prune the walk, and on `~` or `/` the walk covers everything the user
+/// owns: a session started from the home directory spent 58 s staging files
+/// before each turn could begin. Checkpointing is a recoverability nicety, so
+/// these directories lose it rather than paying that cost.
+///
+/// `dir` is checked before its git toplevel so that a home directory which is
+/// itself a repo (dotfiles) reports `HomeDirectory`, and so that `/` reports
+/// `FilesystemRoot` instead of the incidental `NotAGitWorkTree`. Both sides of
+/// every comparison are canonicalized: on macOS a tempdir resolves through
+/// `/private`, and `$HOME` may be a symlink.
+pub fn eligibility(dir: &Path, home: Option<&Path>) -> Result<(), CheckpointIneligible> {
+    let home = home.map(canonical);
+    let dir = canonical(dir);
+    let check = |path: &Path| {
+        if path.parent().is_none() {
+            return Err(CheckpointIneligible::FilesystemRoot);
+        }
+        if home.as_deref() == Some(path) {
+            return Err(CheckpointIneligible::HomeDirectory);
+        }
+        Ok(())
+    };
+
+    check(&dir)?;
+    let toplevel = git_toplevel(&dir).ok_or(CheckpointIneligible::NotAGitWorkTree)?;
+    check(&canonical(&toplevel))
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn git_toplevel(project: &Path) -> Option<PathBuf> {
     let output = git_command()
         .arg("-C")
@@ -977,5 +1033,73 @@ mod tests {
         fs::write(proj.join("a.txt"), "v2").unwrap();
         store.restore(&id).expect("restore sans contention");
         assert_eq!(fs::read_to_string(proj.join("a.txt")).unwrap(), "v1");
+    }
+
+    fn git_init(dir: &Path) {
+        let init = git_command()
+            .arg("-C")
+            .arg(dir)
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "git init must succeed");
+    }
+
+    #[test]
+    fn eligibility_accepts_a_git_repo_and_its_subdirectories() {
+        let root = TempDir::new().unwrap();
+        let repo = root.path();
+        git_init(repo);
+        let sub = repo.join("sub");
+        fs::create_dir(&sub).unwrap();
+
+        assert_eq!(eligibility(repo, None), Ok(()));
+        assert_eq!(eligibility(&sub, None), Ok(()));
+    }
+
+    #[test]
+    fn eligibility_refuses_a_directory_outside_any_git_repo() {
+        let root = TempDir::new().unwrap();
+
+        assert_eq!(
+            eligibility(root.path(), None),
+            Err(CheckpointIneligible::NotAGitWorkTree)
+        );
+    }
+
+    /// Un home versionné (dotfiles) est un dépôt git valide : c'est bien le
+    /// coût du `add -A` sur tout le home qu'on refuse, pas l'absence de repo.
+    #[test]
+    fn eligibility_refuses_the_home_directory_even_when_it_is_a_repo() {
+        let home = TempDir::new().unwrap();
+        git_init(home.path());
+
+        assert_eq!(
+            eligibility(home.path(), Some(home.path())),
+            Err(CheckpointIneligible::HomeDirectory)
+        );
+    }
+
+    /// Le toplevel compte autant que `dir` : lancé depuis `~/sous-dossier`
+    /// d'un home versionné, le snapshot couvrirait quand même tout le home.
+    #[test]
+    fn eligibility_refuses_a_subdirectory_of_a_versioned_home() {
+        let home = TempDir::new().unwrap();
+        git_init(home.path());
+        let sub = home.path().join("workspace");
+        fs::create_dir(&sub).unwrap();
+
+        assert_eq!(
+            eligibility(&sub, Some(home.path())),
+            Err(CheckpointIneligible::HomeDirectory)
+        );
+    }
+
+    #[test]
+    fn eligibility_refuses_the_filesystem_root() {
+        assert_eq!(
+            eligibility(Path::new("/"), None),
+            Err(CheckpointIneligible::FilesystemRoot)
+        );
     }
 }
