@@ -429,3 +429,17 @@
 - [ ] **18.1** `resolve_editor` + `Action::EditFile` + touches `e` (lecteur, explorateur) + `/edit` + gating tour actif + tests App.
 - [ ] **18.2** `InputGate` + suspend/run/resume dans `mod.rs` + après-édition (reload viewer, refresh explorateur, git) + lignes système ; test InputGate.
 - [ ] **18.3** aide/welcome/pied lecteur ; format par fichier ; `cargo test -p kaji-cli --lib` (0 échec, baseline 717) ; clippy `-p kaji-cli`. Commit : `feat(tui): éditer un fichier dans $EDITOR — touche e (lecteur/explorateur) et /edit <chemin>, TUI suspendue puis reprise`.
+
+## Task 19 : Fixes pre-mortem git — locale forcée et verrous optionnels désactivés pour les lectures d'arrière-plan — 2026-08-18
+
+**Spec.** Pre-mortem `09 - Meta/premortems/kaji-tui-2026-08-18.md` § Bugs réels : (1) `gitstatus.rs::read` parse `git diff HEAD --shortstat` sur les mots `insertion`/`deletion` (`parse_shortstat`, ~L111-123) mais `git_output` (~L143-155) n'impose pas la locale → sur Arch/Ubuntu en `fr_FR` git écrit « suppressions(-) » → `deletions` = 0 en permanence ; (2) `git status --porcelain=v2 --branch` toutes les 5 s sans `GIT_OPTIONAL_LOCKS=0` → peut prendre `.git/index.lock` et faire échouer un `git commit`/`git add` concurrent de l'utilisateur (« index.lock: File exists ») ; (3) mineur : `dir_label` (~L233) n'est pas passé par `sanitize_for_display` contrairement à `branch_label`.
+
+**Rulings contrôleur :**
+1. `git_output` (les deux appels) pose `.env("LC_ALL", "C")` **et** `.env("GIT_OPTIONAL_LOCKS", "0")`. Extraire la construction dans `fn git_command_for(dir: &Path, args: &[&str]) -> Command` (pub(crate) ou testable) pour que le test lise `Command::get_envs()`.
+2. `dir_label` retourne le libellé passé par `sanitize_for_display` (comme `branch_label`).
+3. Tests : `git_command_for` porte exactement `LC_ALL=C` et `GIT_OPTIONAL_LOCKS=0` (assert sur `get_envs()`) ; `read` en dépôt temp reste vert ; test `render`/`dir_label` avec un chemin contenant `\x1b` → nettoyé. Pas de test dépendant de la locale du process (env global, tests parallèles).
+4. Hors scope : `--numstat`, timeout du latch (PM2), tout le reste du pre-mortem.
+
+### Étapes
+- [ ] **19.1** `gitstatus.rs` : `git_command_for` + envs + `dir_label` sanitisé + 2 tests ; `cargo test -p kaji-cli --lib gitstatus`.
+- [ ] **19.2** format par fichier ; `cargo test -p kaji-cli --lib` (0 échec, baseline 730) ; clippy `-p kaji-cli`. Commit : `fix(tui): barre git — LC_ALL=C (−del en locale fr) et GIT_OPTIONAL_LOCKS=0 (pas de index.lock volé), dossier sanitisé`.
