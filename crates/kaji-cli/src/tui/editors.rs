@@ -6,7 +6,7 @@
 //! sur un `vi` qui peut ne pas être là.
 
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorKind {
@@ -326,6 +326,201 @@ impl EditorState {
     }
 }
 
+/// `KAJI_EDIT_MODE` (env > config, défaut `auto`) — ce que `/editor mode`
+/// bascule et que [`plan`] consulte pour décider comment ouvrir un fichier
+/// sans quitter kaji.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EditMode {
+    #[default]
+    Auto,
+    Suspend,
+    Remote,
+    Pane,
+    Gui,
+}
+
+impl EditMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "suspend" => Some(Self::Suspend),
+            "remote" => Some(Self::Remote),
+            "pane" => Some(Self::Pane),
+            "gui" => Some(Self::Gui),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Suspend => "suspend",
+            Self::Remote => "remote",
+            Self::Pane => "pane",
+            Self::Gui => "gui",
+        }
+    }
+}
+
+/// Ce que kaji voit de son terminal hôte, posé une fois par `event_loop` à
+/// partir de l'environnement et de `App::working_dir` — [`plan`] ne lit
+/// jamais l'environnement lui-même, ce qui le garde pur et testable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchContext {
+    /// `$NVIM` — l'adresse du socket que le nvim hôte pose dans ses
+    /// `:terminal`.
+    pub nvim: Option<String>,
+    pub zellij: bool,
+    pub tmux: bool,
+    pub cwd: PathBuf,
+}
+
+/// Ce que [`plan`] a décidé, argv complet (programme en tête) — `mod.rs` n'a
+/// plus qu'à l'exécuter : suspendre le terminal, ou lancer sans suspension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Launch {
+    /// Éditeur terminal prenant l'écran — le chemin T18 (`edit_file`).
+    Suspend(Vec<String>),
+    /// Éditeur graphique lancé sans suspension — le chemin 19a
+    /// (`open_detached`).
+    Detached(Vec<String>),
+    /// `nvim --server $NVIM --remote-tab` — ouvre dans le nvim hôte.
+    Remote(Vec<String>),
+    /// Un pane du multiplexeur (Zellij ou tmux) — le premier mot de l'argv
+    /// dit lequel.
+    Pane(Vec<String>),
+}
+
+fn full_argv(editor: &Editor, file: &Path, line: Option<usize>) -> Vec<String> {
+    std::iter::once(editor.program.clone())
+        .chain(editor.argv(file, line))
+        .collect()
+}
+
+/// Branche (a) : le nvim hôte peut recevoir l'onglet directement — seulement
+/// si l'éditeur résolu EST ce nvim, sinon un `code` choisi comme
+/// `KAJI_EDITOR` deviendrait un onglet du serveur juste parce que kaji tourne
+/// dans son `:terminal`.
+fn plan_remote(
+    ctx: &LaunchContext,
+    editor: &Editor,
+    file: &Path,
+    line: Option<usize>,
+) -> Option<Launch> {
+    let addr = ctx.nvim.as_ref()?;
+    if !editor.program.ends_with("nvim") {
+        return None;
+    }
+    let mut argv = vec![
+        editor.program.clone(),
+        "--server".to_string(),
+        addr.clone(),
+        "--remote-tab".to_string(),
+    ];
+    if let Some(line) = line {
+        argv.push(format!("+{line}"));
+    }
+    argv.push(file.to_string_lossy().into_owned());
+    Some(Launch::Remote(argv))
+}
+
+/// Branches (c)/(d) : Zellij d'abord — les deux variables peuvent coexister
+/// (tmux lancé dans un pane Zellij), et Zellij est celui qui tourne au
+/// premier plan.
+fn plan_pane(
+    ctx: &LaunchContext,
+    editor: &Editor,
+    file: &Path,
+    line: Option<usize>,
+) -> Option<Launch> {
+    let cwd = ctx.cwd.to_string_lossy().into_owned();
+    if ctx.zellij {
+        let mut argv = vec![
+            "zellij".to_string(),
+            "run".to_string(),
+            "-f".to_string(),
+            "-c".to_string(),
+            "--cwd".to_string(),
+            cwd,
+            "-n".to_string(),
+            "kaji edit".to_string(),
+            "--".to_string(),
+        ];
+        argv.extend(full_argv(editor, file, line));
+        return Some(Launch::Pane(argv));
+    }
+    if ctx.tmux {
+        let command = full_argv(editor, file, line)
+            .iter()
+            .map(|word| shell_quote(word))
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Some(Launch::Pane(vec![
+            "tmux".to_string(),
+            "split-window".to_string(),
+            "-h".to_string(),
+            "-c".to_string(),
+            cwd,
+            command,
+        ]));
+    }
+    None
+}
+
+/// Un mot comme argument shell unique — `'` s'échappe en fermant le quoting,
+/// une apostrophe littérale échappée, puis en le rouvrant.
+fn shell_quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// `auto` essaie, dans l'ordre, le nvim hôte, l'éditeur graphique détaché,
+/// puis le multiplexeur — le premier qui s'applique gagne, `Suspend` en
+/// dernier repli. Les modes forcés retombent sur `Suspend` quand leur
+/// condition n'est pas là plutôt que d'échouer : `mod.rs` compare `mode` au
+/// résultat pour savoir s'il doit expliquer le repli.
+pub fn plan(
+    mode: EditMode,
+    ctx: &LaunchContext,
+    editor: &Editor,
+    file: &Path,
+    line: Option<usize>,
+) -> Launch {
+    match mode {
+        EditMode::Auto => plan_remote(ctx, editor, file, line)
+            .or_else(|| {
+                (editor.kind == EditorKind::Gui)
+                    .then(|| Launch::Detached(full_argv(editor, file, line)))
+            })
+            .or_else(|| plan_pane(ctx, editor, file, line))
+            .unwrap_or_else(|| Launch::Suspend(full_argv(editor, file, line))),
+        EditMode::Suspend => Launch::Suspend(full_argv(editor, file, line)),
+        EditMode::Remote => plan_remote(ctx, editor, file, line)
+            .unwrap_or_else(|| Launch::Suspend(full_argv(editor, file, line))),
+        EditMode::Pane => plan_pane(ctx, editor, file, line)
+            .unwrap_or_else(|| Launch::Suspend(full_argv(editor, file, line))),
+        EditMode::Gui if editor.kind == EditorKind::Gui => {
+            Launch::Detached(full_argv(editor, file, line))
+        }
+        EditMode::Gui => Launch::Suspend(full_argv(editor, file, line)),
+    }
+}
+
+/// Étiquette humaine pour la ligne système de succès et pour `/editor mode`
+/// — `Pane` lit son multiplexeur sur son propre argv (`zellij`/`tmux` en
+/// tête, voir [`plan_pane`]) plutôt que de le redemander à `ctx`, pour ne
+/// jamais dévier de ce qui a réellement tourné.
+pub fn launch_label(launch: &Launch, editor: &Editor) -> String {
+    match launch {
+        Launch::Suspend(_) => "suspend".to_string(),
+        Launch::Detached(_) => editor.program_name().to_string(),
+        Launch::Remote(_) => "nvim hôte".to_string(),
+        Launch::Pane(argv) => match argv.first().map(String::as_str) {
+            Some("zellij") => "pane zellij".to_string(),
+            _ => "pane tmux".to_string(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +704,298 @@ mod tests {
         assert_eq!(state.env_label().as_deref(), Some("$EDITOR = nano"));
         state.editor = None;
         assert_eq!(state.env_label(), None);
+    }
+
+    fn ctx(nvim: Option<&str>, zellij: bool, tmux: bool) -> LaunchContext {
+        LaunchContext {
+            nvim: nvim.map(str::to_string),
+            zellij,
+            tmux,
+            cwd: PathBuf::from("/work"),
+        }
+    }
+
+    #[test]
+    fn edit_mode_parse_is_case_insensitive_and_rejects_unknown_values() {
+        assert_eq!(EditMode::parse("AUTO"), Some(EditMode::Auto));
+        assert_eq!(EditMode::parse("Suspend"), Some(EditMode::Suspend));
+        assert_eq!(EditMode::parse("remote"), Some(EditMode::Remote));
+        assert_eq!(EditMode::parse("PANE"), Some(EditMode::Pane));
+        assert_eq!(EditMode::parse(" gui "), Some(EditMode::Gui));
+        assert_eq!(EditMode::parse("bogus"), None);
+    }
+
+    #[test]
+    fn edit_mode_defaults_to_auto() {
+        assert_eq!(EditMode::default(), EditMode::Auto);
+    }
+
+    #[test]
+    fn auto_prefers_the_host_nvim_over_everything_else() {
+        let editor = Editor::from(spec("nvim"));
+        let launch = plan(
+            EditMode::Auto,
+            &ctx(Some("/tmp/nvim.sock"), true, true),
+            &editor,
+            &PathBuf::from("a.rs"),
+            Some(3),
+        );
+        assert_eq!(
+            launch,
+            Launch::Remote(vec![
+                "nvim".into(),
+                "--server".into(),
+                "/tmp/nvim.sock".into(),
+                "--remote-tab".into(),
+                "+3".into(),
+                "a.rs".into(),
+            ]),
+            "nvim hôte gagne même avec Zellij et tmux tous les deux présents"
+        );
+    }
+
+    #[test]
+    fn auto_prefers_a_detached_gui_editor_before_the_multiplexer() {
+        let editor = Editor::from(spec("code"));
+        let launch = plan(
+            EditMode::Auto,
+            &ctx(None, true, true),
+            &editor,
+            &PathBuf::from("a.rs"),
+            None,
+        );
+        assert_eq!(launch, Launch::Detached(vec!["code".into(), "a.rs".into()]));
+    }
+
+    #[test]
+    fn auto_uses_the_zellij_pane_when_no_nvim_host_or_gui_editor_applies() {
+        let editor = Editor::from(spec("vim"));
+        let launch = plan(
+            EditMode::Auto,
+            &ctx(None, true, true),
+            &editor,
+            &PathBuf::from("a.rs"),
+            Some(5),
+        );
+        assert_eq!(
+            launch,
+            Launch::Pane(vec![
+                "zellij".into(),
+                "run".into(),
+                "-f".into(),
+                "-c".into(),
+                "--cwd".into(),
+                "/work".into(),
+                "-n".into(),
+                "kaji edit".into(),
+                "--".into(),
+                "vim".into(),
+                "+5".into(),
+                "a.rs".into(),
+            ]),
+            "Zellij gagne sur tmux quand les deux sont là"
+        );
+    }
+
+    #[test]
+    fn auto_falls_back_to_tmux_when_zellij_is_absent() {
+        let editor = Editor::from(spec("vim"));
+        let launch = plan(
+            EditMode::Auto,
+            &ctx(None, false, true),
+            &editor,
+            &PathBuf::from("a.rs"),
+            None,
+        );
+        assert_eq!(
+            launch,
+            Launch::Pane(vec![
+                "tmux".into(),
+                "split-window".into(),
+                "-h".into(),
+                "-c".into(),
+                "/work".into(),
+                "'vim' 'a.rs'".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn auto_falls_back_to_suspend_with_no_host_context_at_all() {
+        let editor = Editor::from(spec("vim"));
+        let launch = plan(
+            EditMode::Auto,
+            &LaunchContext::default(),
+            &editor,
+            &PathBuf::from("a.rs"),
+            None,
+        );
+        assert_eq!(launch, Launch::Suspend(vec!["vim".into(), "a.rs".into()]));
+    }
+
+    #[test]
+    fn remote_mode_appends_the_line_flag_only_when_a_line_is_given() {
+        let editor = Editor::from(spec("nvim"));
+        let with_line = plan(
+            EditMode::Remote,
+            &ctx(Some("/tmp/s"), false, false),
+            &editor,
+            &PathBuf::from("a.rs"),
+            Some(7),
+        );
+        assert_eq!(
+            with_line,
+            Launch::Remote(vec![
+                "nvim".into(),
+                "--server".into(),
+                "/tmp/s".into(),
+                "--remote-tab".into(),
+                "+7".into(),
+                "a.rs".into(),
+            ])
+        );
+        let without_line = plan(
+            EditMode::Remote,
+            &ctx(Some("/tmp/s"), false, false),
+            &editor,
+            &PathBuf::from("a.rs"),
+            None,
+        );
+        assert_eq!(
+            without_line,
+            Launch::Remote(vec![
+                "nvim".into(),
+                "--server".into(),
+                "/tmp/s".into(),
+                "--remote-tab".into(),
+                "a.rs".into(),
+            ]),
+            "pas de +N nu sans ligne"
+        );
+    }
+
+    #[test]
+    fn remote_mode_without_nvim_host_falls_back_to_suspend() {
+        let editor = Editor::from(spec("nvim"));
+        let launch = plan(
+            EditMode::Remote,
+            &LaunchContext::default(),
+            &editor,
+            &PathBuf::from("a.rs"),
+            None,
+        );
+        assert_eq!(launch, Launch::Suspend(vec!["nvim".into(), "a.rs".into()]));
+    }
+
+    #[test]
+    fn remote_mode_with_a_non_nvim_editor_falls_back_to_suspend() {
+        let editor = Editor::from(spec("vim"));
+        let launch = plan(
+            EditMode::Remote,
+            &ctx(Some("/tmp/nvim.sock"), false, false),
+            &editor,
+            &PathBuf::from("a.rs"),
+            None,
+        );
+        assert_eq!(launch, Launch::Suspend(vec!["vim".into(), "a.rs".into()]));
+    }
+
+    #[test]
+    fn pane_mode_without_a_multiplexer_falls_back_to_suspend() {
+        let editor = Editor::from(spec("vim"));
+        let launch = plan(
+            EditMode::Pane,
+            &LaunchContext::default(),
+            &editor,
+            &PathBuf::from("a.rs"),
+            None,
+        );
+        assert_eq!(launch, Launch::Suspend(vec!["vim".into(), "a.rs".into()]));
+    }
+
+    #[test]
+    fn gui_mode_on_a_terminal_editor_falls_back_to_suspend() {
+        let editor = Editor::from(spec("vim"));
+        let launch = plan(
+            EditMode::Gui,
+            &LaunchContext::default(),
+            &editor,
+            &PathBuf::from("a.rs"),
+            None,
+        );
+        assert_eq!(launch, Launch::Suspend(vec!["vim".into(), "a.rs".into()]));
+    }
+
+    #[test]
+    fn gui_mode_on_a_gui_editor_detaches() {
+        let editor = Editor::from(spec("code"));
+        let launch = plan(
+            EditMode::Gui,
+            &LaunchContext::default(),
+            &editor,
+            &PathBuf::from("a.rs"),
+            None,
+        );
+        assert_eq!(launch, Launch::Detached(vec!["code".into(), "a.rs".into()]));
+    }
+
+    #[test]
+    fn suspend_mode_always_suspends_even_with_a_full_host_context() {
+        let editor = Editor::from(spec("nvim"));
+        let launch = plan(
+            EditMode::Suspend,
+            &ctx(Some("/tmp/nvim.sock"), true, true),
+            &editor,
+            &PathBuf::from("a.rs"),
+            None,
+        );
+        assert_eq!(launch, Launch::Suspend(vec!["nvim".into(), "a.rs".into()]));
+    }
+
+    /// Un chemin avec un espace et une apostrophe : chaque mot est entre
+    /// apostrophes, et l'apostrophe littérale ferme/rouvre le quoting au
+    /// lieu de casser la commande shell.
+    #[test]
+    fn tmux_pane_quotes_each_argv_word_posix_style() {
+        let editor = Editor::from(spec("vim"));
+        let file = PathBuf::from("my file's.rs");
+        let launch = plan(
+            EditMode::Pane,
+            &ctx(None, false, true),
+            &editor,
+            &file,
+            Some(2),
+        );
+        let Launch::Pane(argv) = launch else {
+            panic!("pane attendu");
+        };
+        assert_eq!(
+            argv,
+            vec![
+                "tmux".to_string(),
+                "split-window".to_string(),
+                "-h".to_string(),
+                "-c".to_string(),
+                "/work".to_string(),
+                r"'vim' '+2' 'my file'\''s.rs'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_label_names_the_multiplexer_and_the_gui_program() {
+        let vim = Editor::from(spec("vim"));
+        let code = Editor::from(spec("code"));
+        assert_eq!(launch_label(&Launch::Suspend(vec![]), &vim), "suspend");
+        assert_eq!(launch_label(&Launch::Remote(vec![]), &vim), "nvim hôte");
+        assert_eq!(launch_label(&Launch::Detached(vec![]), &code), "code");
+        assert_eq!(
+            launch_label(&Launch::Pane(vec!["zellij".into()]), &vim),
+            "pane zellij"
+        );
+        assert_eq!(
+            launch_label(&Launch::Pane(vec!["tmux".into()]), &vim),
+            "pane tmux"
+        );
     }
 }
