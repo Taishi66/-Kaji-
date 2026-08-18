@@ -21,7 +21,11 @@ pub enum EditorKind {
 pub enum LineArg {
     /// `+42 fichier` — la convention vi.
     Plus,
-    /// `--goto fichier:42` : `--goto` est déjà dans les arguments du spec.
+    /// `--goto fichier:42` — VS Code et ses dérivés. Le drapeau est émis par
+    /// [`Editor::argv`] plutôt que porté par les arguments du spec :
+    /// `KAJI_EDITOR` est une commande libre (`code --wait`) qui hérite de la
+    /// convention sans hériter des arguments, et `code --wait fichier:42`
+    /// ouvrirait un fichier réellement nommé `fichier:42`.
     GotoColon,
     /// `fichier:42`.
     FileColon,
@@ -104,14 +108,14 @@ pub const EDITORS: &[EditorSpec] = &[
     EditorSpec {
         id: "code",
         program: "code",
-        args: &["--goto"],
+        args: &[],
         kind: EditorKind::Gui,
         line_arg: LineArg::GotoColon,
     },
     EditorSpec {
         id: "cursor",
         program: "cursor",
-        args: &["--goto"],
+        args: &[],
         kind: EditorKind::Gui,
         line_arg: LineArg::GotoColon,
     },
@@ -160,9 +164,11 @@ impl Editor {
                 argv.push(format!("+{line}"));
                 argv.push(file);
             }
-            (Some(line), LineArg::GotoColon | LineArg::FileColon) => {
+            (Some(line), LineArg::GotoColon) => {
+                argv.push("--goto".to_string());
                 argv.push(format!("{file}:{line}"));
             }
+            (Some(line), LineArg::FileColon) => argv.push(format!("{file}:{line}")),
             (Some(line), LineArg::IdeaLine) => {
                 argv.push("--line".to_string());
                 argv.push(line.to_string());
@@ -171,6 +177,24 @@ impl Editor {
             _ => argv.push(file),
         }
         argv
+    }
+
+    /// Une ligne de commande libre (`KAJI_EDITOR`, `$VISUAL`, `$EDITOR`)
+    /// découpée sur les blancs : aucun shell ne l'exécute, donc ni guillemets
+    /// ni redirections. Le `kind` et la convention de ligne viennent du
+    /// catalogue quand le programme y figure, sinon c'est un éditeur terminal
+    /// en `+N` ; les arguments, eux, restent ceux de l'utilisateur.
+    pub fn from_command(command: &str) -> Self {
+        let mut words = command.split_whitespace();
+        let program = words.next().unwrap_or_default().to_string();
+        let args = words.map(str::to_string).collect();
+        let spec = lookup(&program);
+        Self {
+            kind: spec.map_or(EditorKind::Terminal, |spec| spec.kind),
+            line_arg: spec.map_or(LineArg::Plus, |spec| spec.line_arg),
+            program,
+            args,
+        }
     }
 
     /// Le nom du programme sans son chemin : `KAJI_EDITOR=/opt/bin/nvim` doit
@@ -220,10 +244,8 @@ fn is_executable(path: &Path) -> bool {
 }
 
 /// `KAJI_EDITOR` > `$VISUAL` > `$EDITOR` > premier terminal détecté. Les trois
-/// premiers sont des lignes de commande libres (`code --wait`), découpées sur
-/// les blancs : aucun shell ne les exécute, donc ni guillemets ni redirections.
-/// Le `kind` et la convention de ligne viennent du catalogue quand le
-/// programme y figure, sinon c'est un éditeur terminal en `+N`.
+/// premiers sont des lignes de commande libres, lues par
+/// [`Editor::from_command`].
 pub fn resolve(
     kaji_editor: Option<&str>,
     visual: Option<&str>,
@@ -235,26 +257,13 @@ pub fn resolve(
         .flatten()
         .find(|value| !value.trim().is_empty())
     {
-        return Ok(from_command(command));
+        return Ok(Editor::from_command(command));
     }
     detected
         .iter()
         .find(|spec| spec.kind == EditorKind::Terminal)
         .map(|spec| Editor::from(*spec))
         .ok_or_else(no_editor_message)
-}
-
-fn from_command(command: &str) -> Editor {
-    let mut words = command.split_whitespace();
-    let program = words.next().unwrap_or_default().to_string();
-    let args = words.map(str::to_string).collect();
-    let spec = lookup(&program);
-    Editor {
-        kind: spec.map_or(EditorKind::Terminal, |spec| spec.kind),
-        line_arg: spec.map_or(LineArg::Plus, |spec| spec.line_arg),
-        program,
-        args,
-    }
 }
 
 fn lookup(program: &str) -> Option<&'static EditorSpec> {
@@ -407,6 +416,22 @@ mod tests {
         assert!(err.contains("nvim, vim, vi"), "{err}");
     }
 
+    /// `--goto` appartient à la convention, pas au catalogue : une commande
+    /// libre hérite de la première sans hériter du second, et `code --wait
+    /// fichier:42` ouvrirait un fichier réellement nommé `fichier:42`.
+    #[test]
+    fn goto_colon_emits_its_own_flag_after_the_user_arguments() {
+        let editor = Editor::from_command("code --wait");
+        assert_eq!(
+            editor.argv(&PathBuf::from("src/app.rs"), Some(42)),
+            vec!["--wait", "--goto", "src/app.rs:42"]
+        );
+        assert_eq!(
+            editor.argv(&PathBuf::from("src/app.rs"), None),
+            vec!["--wait", "src/app.rs"]
+        );
+    }
+
     #[test]
     fn a_free_command_keeps_its_arguments_and_the_catalogue_traits() {
         let editor = resolve(Some("code --wait"), None, None, &[]).unwrap();
@@ -437,6 +462,11 @@ mod tests {
             argv_of("code", Some(42)),
             vec!["--goto", "src/app.rs:42"],
             "code veut --goto devant fichier:ligne"
+        );
+        assert_eq!(
+            argv_of("code", None),
+            vec!["src/app.rs"],
+            "pas de --goto nu"
         );
         assert_eq!(argv_of("zed", Some(42)), vec!["src/app.rs:42"]);
         assert_eq!(

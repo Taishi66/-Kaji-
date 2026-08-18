@@ -4372,10 +4372,10 @@ mod tests {
         app.on_event(&key(KeyCode::Char('j')));
         assert_eq!(
             app.on_event(&key(KeyCode::Enter)),
-            Action::Editor("code --goto".to_string())
+            Action::Editor("code".to_string())
         );
         assert!(app.editor_picker.is_none(), "le sélecteur se ferme");
-        assert_eq!(app.editors.selected.as_deref(), Some("code --goto"));
+        assert_eq!(app.editors.selected.as_deref(), Some("code"));
         assert_eq!(last_line(&app), "éditeur : code");
     }
 
@@ -4383,7 +4383,7 @@ mod tests {
     fn the_editor_picker_offers_the_environment_and_choosing_it_resets() {
         let mut app = App::new(None);
         app.editors = EditorState {
-            selected: Some("code --goto".to_string()),
+            selected: Some("code".to_string()),
             visual: Some("nvim".to_string()),
             ..editor_state(&["nvim"])
         };
@@ -4458,7 +4458,7 @@ mod tests {
     fn a_graphical_editor_opens_during_a_turn_with_a_warning() {
         let (mut app, dir) = app_with_open_viewer();
         app.editors = EditorState {
-            selected: Some("code --goto".to_string()),
+            selected: Some("code".to_string()),
             ..EditorState::default()
         };
         app.turn_active = true;

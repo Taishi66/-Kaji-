@@ -601,22 +601,27 @@ fn edit_file(
 
 /// Un IDE graphique n'a pas besoin du terminal : on le lance et on le laisse
 /// vivre — ni suspension, ni attente. Ses flux vont au vide, sinon le premier
-/// avertissement qu'il écrit passe par-dessus le TUI.
+/// avertissement qu'il écrit passe par-dessus le TUI. Un fil à part attend le
+/// lanceur, qui rend la main aussitôt : sans ce `wait`, chaque `e` laisserait
+/// un zombie jusqu'à la fin de la session.
 fn open_detached(
     editor: &editors::Editor,
     path: &Path,
     line: Option<usize>,
     working_dir: &Path,
 ) -> std::result::Result<(), String> {
-    std::process::Command::new(&editor.program)
+    let mut child = std::process::Command::new(&editor.program)
         .args(editor.argv(path, line))
         .current_dir(working_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map(|_| ())
-        .map_err(|_| editor_not_found(&editor.program))
+        .map_err(|_| editor_not_found(&editor.program))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// Mirrors exactly what `run` turned on, in reverse — anything left on here
