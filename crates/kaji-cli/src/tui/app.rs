@@ -1,3 +1,4 @@
+use crate::tui::editors::{EditorKind, EditorSpec, EditorState};
 use crate::tui::gitstatus::GitStatus;
 use crate::tui::theme::SpanRole;
 use crate::tui::ui::sanitize_for_display;
@@ -63,6 +64,48 @@ pub struct ThemePicker {
     /// Palette active à l'ouverture : Esc la remet, et la liste la marque
     /// `(actuel)`.
     pub initial: usize,
+}
+
+/// Une ligne du sélecteur d'éditeur (`/editor`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditorRow {
+    /// Un éditeur du catalogue trouvé sur le `PATH`.
+    Detected(&'static EditorSpec),
+    /// `$VISUAL`/`$EDITOR` : la choisir efface `KAJI_EDITOR` et rend la main à
+    /// l'environnement.
+    Env(String),
+}
+
+impl EditorRow {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Detected(spec) => spec.id,
+            Self::Env(_) => "(env)",
+        }
+    }
+
+    /// Ce que la ligne montre à droite de son nom — la commande complète quand
+    /// elle dit plus que l'identifiant, sinon rien.
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            Self::Detected(spec) => {
+                let command = spec.command();
+                (command != spec.id).then_some(command)
+            }
+            Self::Env(label) => Some(label.clone()),
+        }
+    }
+}
+
+/// Sélecteur d'éditeur (`/editor`) — contrairement au thème il n'y a rien à
+/// prévisualiser : se déplacer ne change rien, seul Enter choisit.
+#[derive(Debug)]
+pub struct EditorPicker {
+    pub selected: usize,
+    pub rows: Vec<EditorRow>,
+    /// Rang de la résolution courante, marqué `(actuel)`. `None` quand
+    /// `KAJI_EDITOR` désigne une commande qui n'est dans aucune ligne.
+    pub current: Option<usize>,
 }
 
 /// Hard ceiling on what the Tab detail panel reads back from disk to diff a
@@ -333,10 +376,19 @@ pub enum Action {
     /// the event loop only still has to cancel the turn it was driving.
     GoalClear,
     /// `e` on the viewer/explorer or `/edit <chemin>` — carries the absolute
-    /// path to open. Only the event loop can honor it: suspending the TUI for
-    /// the editor needs the terminal and the input thread, neither of which
-    /// `App` owns.
-    EditFile(std::path::PathBuf),
+    /// path to open and, when the caller knows it, the line to land on. Only
+    /// the event loop can honor it: suspending the TUI for the editor needs
+    /// the terminal and the input thread, neither of which `App` owns.
+    EditFile {
+        path: std::path::PathBuf,
+        line: Option<usize>,
+    },
+    /// Éditeur déjà choisi pour la session par [`App::run_editor_command`] —
+    /// la boucle d'événements n'a plus qu'à l'écrire dans `KAJI_EDITOR`.
+    Editor(String),
+    /// `/editor reset` : `KAJI_EDITOR` sort de la config, l'environnement et la
+    /// détection reprennent la main.
+    EditorReset,
     /// Palette already switched by [`App::run_theme_command`] — carries the
     /// applied name so the event loop can persist it to `KAJI_THEME`. The
     /// switch itself must not wait on the config write: the redraw right
@@ -385,8 +437,13 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/edit",
-        desc: "éditer un fichier dans $EDITOR — /edit <chemin>, ou e depuis le lecteur/explorateur",
+        desc: "éditer un fichier — /edit <chemin>[:ligne], ou e depuis le lecteur/explorateur",
         run: |app| app.run_edit_command(""),
+    },
+    Command {
+        name: "/editor",
+        desc: "choisir l'éditeur (détectés) — /editor <cmd> · reset",
+        run: |app| app.run_editor_command(""),
     },
     Command {
         name: "/spec",
@@ -481,6 +538,13 @@ fn goal_command_arg(text: &str) -> Option<&str> {
 /// autocomplete it; with a path it lands here.
 fn edit_command_arg(text: &str) -> Option<&str> {
     slash_command_arg(text, "/edit")
+}
+
+/// `/editor` alone IS in `COMMANDS` (arg-less = sélecteur). Le mot entier
+/// exigé par [`slash_command_arg`] est ce qui l'empêche d'être lu comme un
+/// `/edit` dont le chemin serait `or`.
+fn editor_command_arg(text: &str) -> Option<&str> {
+    slash_command_arg(text, "/editor")
 }
 
 /// A pasted block lands on one line: the composer and the finder query are
@@ -692,6 +756,12 @@ pub struct App {
     /// Sélecteur de thème (`/theme`) — même contrat d'overlay que le finder :
     /// tant qu'il est `Some`, il capture le clavier.
     pub theme_picker: Option<ThemePicker>,
+    /// Sélecteur d'éditeur (`/editor`) — même contrat d'overlay.
+    pub editor_picker: Option<EditorPicker>,
+    /// Éditeurs détectés, environnement et choix courant, posés par
+    /// `event_loop` (`tui::startup_editors`). Vide par défaut : `App::new` ne
+    /// lit ni le `PATH` ni la config.
+    pub editors: EditorState,
     /// Right-column file viewer. Takes the SPEC panel's slot for as long as
     /// it is open; closing it hands the slot back with no state to restore
     /// (`ui::draw` reads `spec_panel_visible` again).
@@ -772,6 +842,8 @@ impl App {
             mention_suppressed: false,
             finder: None,
             theme_picker: None,
+            editor_picker: None,
+            editors: EditorState::default(),
             viewer: None,
             explorer: None,
             focus: Focus::default(),
@@ -1470,6 +1542,118 @@ impl App {
         Action::None
     }
 
+    /// Ouvre le sélecteur d'éditeur (`/editor`, `/editor list`) : les éditeurs
+    /// détectés, plus la ligne `$VISUAL`/`$EDITOR` quand elle est définie.
+    /// Sans une seule ligne à montrer, dire quoi taper vaut mieux qu'une boîte
+    /// vide.
+    pub fn open_editor_picker(&mut self) {
+        if self.modal_active() {
+            return;
+        }
+        let mut rows: Vec<EditorRow> = self
+            .editors
+            .detected
+            .iter()
+            .map(|spec| EditorRow::Detected(spec))
+            .collect();
+        if let Some(label) = self.editors.env_label() {
+            rows.push(EditorRow::Env(label));
+        }
+        if rows.is_empty() {
+            self.push_system("aucun éditeur détecté — /editor <commande>");
+            return;
+        }
+        let current = self.current_editor_row(&rows);
+        self.editor_picker = Some(EditorPicker {
+            selected: current.unwrap_or(0),
+            rows,
+            current,
+        });
+    }
+
+    fn current_editor_row(&self, rows: &[EditorRow]) -> Option<usize> {
+        if self.editors.selected.is_none() && self.editors.env_label().is_some() {
+            return rows.iter().position(|row| matches!(row, EditorRow::Env(_)));
+        }
+        let resolved = self.editors.resolve().ok()?;
+        rows.iter().position(|row| match row {
+            EditorRow::Detected(spec) => spec.program == resolved.program_name(),
+            EditorRow::Env(_) => false,
+        })
+    }
+
+    fn editor_picker_select(&mut self, index: usize) {
+        if let Some(picker) = self.editor_picker.as_mut() {
+            picker.selected = index.min(picker.rows.len() - 1);
+        }
+    }
+
+    fn editor_picker_move(&mut self, delta: isize) {
+        let Some(picker) = self.editor_picker.as_mut() else {
+            return;
+        };
+        let count = picker.rows.len();
+        let step = delta.rem_euclid(count as isize) as usize;
+        picker.selected = (picker.selected + step) % count;
+    }
+
+    fn editor_picker_key(&mut self, key: &KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('n' | 'j') if ctrl => self.editor_picker_move(1),
+            KeyCode::Char('k') if ctrl => self.editor_picker_move(-1),
+            KeyCode::Down | KeyCode::Char('j') if !ctrl => self.editor_picker_move(1),
+            KeyCode::Up | KeyCode::Char('k') if !ctrl => self.editor_picker_move(-1),
+            KeyCode::Home => self.editor_picker_select(0),
+            KeyCode::End => self.editor_picker_select(usize::MAX),
+            KeyCode::Enter => {
+                let Some(picker) = self.editor_picker.take() else {
+                    return Action::None;
+                };
+                return match &picker.rows[picker.selected] {
+                    EditorRow::Detected(spec) => self.select_editor(&spec.command(), spec.id),
+                    EditorRow::Env(_) => self.reset_editor(),
+                };
+            }
+            KeyCode::Esc | KeyCode::Char('q') if !ctrl => self.editor_picker = None,
+            _ => {}
+        }
+        Action::None
+    }
+
+    fn select_editor(&mut self, command: &str, label: &str) -> Action {
+        self.editors.selected = Some(command.to_string());
+        self.push_system(&format!("éditeur : {label}"));
+        Action::Editor(command.to_string())
+    }
+
+    fn reset_editor(&mut self) -> Action {
+        self.editors.selected = None;
+        let source = match self.editors.resolve() {
+            Ok(_) => self
+                .editors
+                .env_label()
+                .unwrap_or_else(|| "détection du PATH".to_string()),
+            Err(note) => note,
+        };
+        self.push_system(&format!("éditeur : {source}"));
+        Action::EditorReset
+    }
+
+    /// `/editor` : vide ou `list` = sélecteur, `reset` rend la main à
+    /// l'environnement, sinon la commande donnée devient l'éditeur de la
+    /// session — libre, un binaire hors catalogue compris.
+    fn run_editor_command(&mut self, arg: &str) -> Action {
+        if arg.is_empty() || arg.eq_ignore_ascii_case("list") {
+            self.open_editor_picker();
+            return Action::None;
+        }
+        if arg.eq_ignore_ascii_case("reset") {
+            return self.reset_editor();
+        }
+        self.select_editor(arg, arg)
+    }
+
     /// Loads a file into the right-column viewer and gives it the focus. A
     /// directory, a missing file or an unreadable one is reported as a system
     /// line instead of opening an empty pane.
@@ -1497,10 +1681,17 @@ impl App {
     /// same thing the composer would attach. A missing file is deliberately
     /// let through — the editor creates it.
     ///
-    /// Refused mid-turn: the agent is writing to that same tree, and two
-    /// writers on one file is a conflict neither side can see.
-    fn request_edit(&mut self, path: &str) -> Action {
-        if self.turn_active || self.turn_pending {
+    /// Un éditeur terminal est refusé pendant un tour : il prendrait l'écran
+    /// pendant que l'agent écrit dans le même arbre, et deux écrivains sur un
+    /// fichier est un conflit qu'aucun des deux ne voit. Un IDE graphique, lui,
+    /// ne prend rien — il passe, avec l'avertissement qui va avec.
+    fn request_edit(&mut self, path: &str, line: Option<usize>) -> Action {
+        let detached = self
+            .editors
+            .resolve()
+            .is_ok_and(|editor| editor.kind == EditorKind::Gui);
+        let busy = self.turn_active || self.turn_pending;
+        if busy && !detached {
             self.push_system("un tour est en cours — attends la fin");
             return Action::None;
         }
@@ -1510,15 +1701,40 @@ impl App {
             self.push_system(&format!("{raw} : dossier, pas un fichier"));
             return Action::None;
         }
-        Action::EditFile(resolved)
+        if busy {
+            self.push_system_lines(vec![vec![RoledSpan::dim(
+                "le tour continue — éditions concurrentes à ta charge",
+            )]]);
+        }
+        Action::EditFile {
+            path: resolved,
+            line,
+        }
     }
 
     fn run_edit_command(&mut self, arg: &str) -> Action {
         if arg.is_empty() {
-            self.push_system("usage : /edit <chemin>");
+            self.push_system("usage : /edit <chemin>[:ligne]");
             return Action::None;
         }
-        self.request_edit(arg)
+        let (path, line) = self.split_line_suffix(arg);
+        self.request_edit(&path, line)
+    }
+
+    /// `src/app.rs:42` — le suffixe n'est une ligne que s'il est numérique et
+    /// que le chemin littéral n'existe pas : un fichier réellement nommé
+    /// `notes:42` s'ouvre lui-même plutôt qu'une ligne de `notes`.
+    fn split_line_suffix(&self, arg: &str) -> (String, Option<usize>) {
+        let Some((path, line)) = arg.rsplit_once(':') else {
+            return (arg.to_string(), None);
+        };
+        let Ok(line) = line.parse::<usize>() else {
+            return (arg.to_string(), None);
+        };
+        if crate::tui::mentions::resolve(arg.trim_start_matches('@'), &self.working_dir).exists() {
+            return (arg.to_string(), None);
+        }
+        (path.to_string(), Some(line))
     }
 
     /// The editor had the terminal and the file may have changed under the
@@ -1581,12 +1797,17 @@ impl App {
                 return Action::None;
             }
             // The pane is read-only by design (task 8) — `e` is how a file
-            // read here reaches an editor, without kaji growing one.
+            // read here reaches an editor, without kaji growing one. L'éditeur
+            // s'ouvre là où on lisait : la première ligne visible.
             KeyCode::Char('e') if !ctrl => {
-                let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path.clone()) else {
+                let Some((path, scroll)) = self
+                    .viewer
+                    .as_ref()
+                    .map(|viewer| (viewer.path.clone(), viewer.scroll))
+                else {
                     return Action::None;
                 };
-                return self.request_edit(&path);
+                return self.request_edit(&path, Some(scroll + 1));
             }
             KeyCode::Char('a') if !ctrl => {
                 if let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path.clone()) {
@@ -1686,7 +1907,7 @@ impl App {
                 let Some(path) = self.explorer_file_path() else {
                     return Action::None;
                 };
-                return self.request_edit(&path);
+                return self.request_edit(&path, None);
             }
             KeyCode::Char('a') => {
                 if let Some(path) = self.explorer_mention_path() {
@@ -2179,9 +2400,10 @@ impl App {
 
     pub fn on_event(&mut self, ev: &Event) -> Action {
         if let Event::Mouse(mouse) = ev {
-            // The finder and the theme picker are overlays: the wheel under
-            // them would scroll a chat the overlay is covering.
-            if self.finder.is_some() || self.theme_picker.is_some() {
+            // The finder and the pickers are overlays: the wheel under them
+            // would scroll a chat the overlay is covering.
+            if self.finder.is_some() || self.theme_picker.is_some() || self.editor_picker.is_some()
+            {
                 return Action::None;
             }
             // The wheel follows the pointer: over the file viewer it scrolls
@@ -2220,7 +2442,10 @@ impl App {
                         .filter(|c| !c.is_control())
                         .collect();
                     self.finder_insert(&pasted);
-                } else if self.theme_picker.is_none() && self.focus == Focus::Composer {
+                } else if self.theme_picker.is_none()
+                    && self.editor_picker.is_none()
+                    && self.focus == Focus::Composer
+                {
                     self.insert_pasted(text);
                 }
             }
@@ -2248,6 +2473,9 @@ impl App {
             // the other.
             if self.theme_picker.is_some() {
                 return self.theme_picker_key(key);
+            }
+            if self.editor_picker.is_some() {
+                return self.editor_picker_key(key);
             }
             // The pane chords sit above the panes themselves: `Ctrl+E` has to
             // reach the explorer from inside the viewer, and `Ctrl+O` has to
@@ -2578,6 +2806,9 @@ impl App {
                     }
                     if let Some(arg) = theme_command_arg(&text) {
                         return self.run_theme_command(arg);
+                    }
+                    if let Some(arg) = editor_command_arg(&text) {
+                        return self.run_editor_command(arg);
                     }
                     if let Some(arg) = edit_command_arg(&text) {
                         return self.run_edit_command(arg);
@@ -3828,13 +4059,27 @@ mod tests {
     }
 
     #[test]
-    fn e_asks_to_edit_the_file_the_viewer_shows() {
+    fn e_asks_to_edit_the_file_the_viewer_shows_at_the_line_it_shows() {
         let (mut app, dir) = app_with_open_viewer();
         assert_eq!(
             app.on_event(&key(KeyCode::Char('e'))),
-            Action::EditFile(dir.path().join("long.txt"))
+            Action::EditFile {
+                path: dir.path().join("long.txt"),
+                line: Some(1),
+            }
         );
         assert!(app.viewer.is_some(), "le lecteur reste ouvert");
+
+        app.on_event(&key(KeyCode::PageDown));
+        let scroll = app.viewer.as_ref().unwrap().scroll;
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('e'))),
+            Action::EditFile {
+                path: dir.path().join("long.txt"),
+                line: Some(scroll + 1),
+            },
+            "l'éditeur ouvre là où on lisait"
+        );
     }
 
     #[test]
@@ -3961,7 +4206,10 @@ mod tests {
         app.on_event(&key(KeyCode::Char('j')));
         assert_eq!(
             app.on_event(&key(KeyCode::Char('e'))),
-            Action::EditFile(dir.path().join("README.md"))
+            Action::EditFile {
+                path: dir.path().join("README.md"),
+                line: None,
+            }
         );
     }
 
@@ -3970,7 +4218,10 @@ mod tests {
         let (mut app, dir) = app_with_mention_fixture();
         assert_eq!(
             submit(&mut app, "/edit src/tui/app.rs"),
-            Action::EditFile(dir.path().join("src/tui/app.rs"))
+            Action::EditFile {
+                path: dir.path().join("src/tui/app.rs"),
+                line: None,
+            }
         );
     }
 
@@ -3979,8 +4230,41 @@ mod tests {
         let (mut app, dir) = app_with_mention_fixture();
         assert_eq!(
             submit(&mut app, "/edit @nouveau.rs"),
-            Action::EditFile(dir.path().join("nouveau.rs")),
+            Action::EditFile {
+                path: dir.path().join("nouveau.rs"),
+                line: None,
+            },
             "l'éditeur crée le fichier"
+        );
+    }
+
+    #[test]
+    fn slash_edit_reads_a_line_suffix_unless_the_file_really_is_named_that_way() {
+        let (mut app, dir) = app_with_mention_fixture();
+        assert_eq!(
+            submit(&mut app, "/edit src/tui/app.rs:42"),
+            Action::EditFile {
+                path: dir.path().join("src/tui/app.rs"),
+                line: Some(42),
+            }
+        );
+        assert_eq!(
+            submit(&mut app, "/edit src/tui/app.rs:tail"),
+            Action::EditFile {
+                path: dir.path().join("src/tui/app.rs:tail"),
+                line: None,
+            },
+            "un suffixe non numérique fait partie du chemin"
+        );
+
+        std::fs::write(dir.path().join("notes:42"), "x\n").unwrap();
+        assert_eq!(
+            submit(&mut app, "/edit notes:42"),
+            Action::EditFile {
+                path: dir.path().join("notes:42"),
+                line: None,
+            },
+            "un fichier qui porte ce nom gagne sur la ligne"
         );
     }
 
@@ -4042,6 +4326,168 @@ mod tests {
                 .text
                 .contains("un tour est en cours")
         );
+    }
+
+    fn editor_state(ids: &[&str]) -> EditorState {
+        EditorState {
+            detected: ids
+                .iter()
+                .map(|id| {
+                    crate::tui::editors::EDITORS
+                        .iter()
+                        .find(|spec| spec.id == *id)
+                        .expect("éditeur au catalogue")
+                })
+                .collect(),
+            ..EditorState::default()
+        }
+    }
+
+    fn last_line(app: &App) -> &str {
+        &app.chat.last().expect("ligne système").text
+    }
+
+    #[test]
+    fn slash_editor_opens_the_picker_on_the_current_resolution() {
+        let mut app = App::new(None);
+        app.editors = editor_state(&["nvim", "code"]);
+
+        assert_eq!(submit(&mut app, "/editor"), Action::None);
+        let picker = app.editor_picker.as_ref().expect("sélecteur ouvert");
+        assert_eq!(picker.rows.len(), 2, "aucune ligne (env) sans $EDITOR");
+        assert_eq!(
+            picker.current,
+            Some(0),
+            "le repli est le premier éditeur terminal détecté"
+        );
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn the_editor_picker_enter_chooses_the_command_and_says_which() {
+        let mut app = App::new(None);
+        app.editors = editor_state(&["nvim", "code"]);
+        app.open_editor_picker();
+
+        app.on_event(&key(KeyCode::Char('j')));
+        assert_eq!(
+            app.on_event(&key(KeyCode::Enter)),
+            Action::Editor("code --goto".to_string())
+        );
+        assert!(app.editor_picker.is_none(), "le sélecteur se ferme");
+        assert_eq!(app.editors.selected.as_deref(), Some("code --goto"));
+        assert_eq!(last_line(&app), "éditeur : code");
+    }
+
+    #[test]
+    fn the_editor_picker_offers_the_environment_and_choosing_it_resets() {
+        let mut app = App::new(None);
+        app.editors = EditorState {
+            selected: Some("code --goto".to_string()),
+            visual: Some("nvim".to_string()),
+            ..editor_state(&["nvim"])
+        };
+        app.open_editor_picker();
+
+        let picker = app.editor_picker.as_ref().expect("sélecteur ouvert");
+        assert_eq!(picker.rows.len(), 2);
+        assert_eq!(picker.rows[1].detail().as_deref(), Some("$VISUAL = nvim"));
+
+        app.on_event(&key(KeyCode::End));
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::EditorReset);
+        assert_eq!(app.editors.selected, None);
+        assert_eq!(last_line(&app), "éditeur : $VISUAL = nvim");
+    }
+
+    #[test]
+    fn the_editor_picker_swallows_every_key_it_does_not_use() {
+        let mut app = App::new(None);
+        app.editors = editor_state(&["nvim", "vim"]);
+        app.open_editor_picker();
+
+        for c in "abc".chars() {
+            assert_eq!(app.on_event(&key(KeyCode::Char(c))), Action::None);
+        }
+        assert!(app.input.is_empty(), "rien ne fuit dans le composer");
+        assert!(app.editor_picker.is_some());
+
+        app.on_event(&key(KeyCode::Esc));
+        assert!(app.editor_picker.is_none());
+        assert_eq!(app.editors.selected, None, "Esc ne choisit rien");
+    }
+
+    #[test]
+    fn slash_editor_takes_a_free_command_as_it_is() {
+        let mut app = App::new(None);
+        assert_eq!(
+            submit(&mut app, "/editor kak -e"),
+            Action::Editor("kak -e".to_string())
+        );
+        assert_eq!(app.editors.selected.as_deref(), Some("kak -e"));
+        assert_eq!(last_line(&app), "éditeur : kak -e");
+    }
+
+    #[test]
+    fn slash_editor_reset_hands_the_choice_back_to_the_detection() {
+        let mut app = App::new(None);
+        app.editors = EditorState {
+            selected: Some("kak".to_string()),
+            ..editor_state(&["nvim"])
+        };
+
+        assert_eq!(submit(&mut app, "/editor reset"), Action::EditorReset);
+        assert_eq!(app.editors.selected, None);
+        assert_eq!(last_line(&app), "éditeur : détection du PATH");
+    }
+
+    /// Le cul-de-sac que la tâche 19a existe pour supprimer : sans rien de
+    /// détecté ni d'exporté, `/editor` dit quoi taper.
+    #[test]
+    fn slash_editor_without_a_single_editor_says_what_to_type() {
+        let mut app = App::new(None);
+        assert_eq!(submit(&mut app, "/editor"), Action::None);
+        assert!(app.editor_picker.is_none());
+        assert!(
+            last_line(&app).contains("/editor <commande>"),
+            "{}",
+            last_line(&app)
+        );
+    }
+
+    #[test]
+    fn a_graphical_editor_opens_during_a_turn_with_a_warning() {
+        let (mut app, dir) = app_with_open_viewer();
+        app.editors = EditorState {
+            selected: Some("code --goto".to_string()),
+            ..EditorState::default()
+        };
+        app.turn_active = true;
+
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('e'))),
+            Action::EditFile {
+                path: dir.path().join("long.txt"),
+                line: Some(1),
+            }
+        );
+        assert!(
+            last_line(&app).contains("le tour continue"),
+            "{}",
+            last_line(&app)
+        );
+    }
+
+    #[test]
+    fn a_terminal_editor_still_waits_for_the_turn_to_end() {
+        let (mut app, _dir) = app_with_open_viewer();
+        app.editors = EditorState {
+            selected: Some("nvim".to_string()),
+            ..EditorState::default()
+        };
+        app.turn_active = true;
+
+        assert_eq!(app.on_event(&key(KeyCode::Char('e'))), Action::None);
+        assert!(last_line(&app).contains("un tour est en cours"));
     }
 
     #[test]

@@ -107,6 +107,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     draw_finder(frame, app);
     draw_theme_picker(frame, app);
+    draw_editor_picker(frame, app);
 
     if app.gate_open {
         draw_gate_modal(frame);
@@ -773,6 +774,68 @@ fn draw_theme_picker(frame: &mut Frame, app: &App) {
         })
         .collect();
     lines.push(Line::from(Span::styled(THEME_PICKER_FOOTER, theme::dim())));
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+/// Plus large que le sélecteur de thème : une ligne y porte une commande, pas
+/// un nom de palette.
+const EDITOR_PICKER_WIDTH: u16 = 52;
+const EDITOR_PICKER_FOOTER: &str = "↑↓ · Enter choisir · Esc annuler";
+
+/// Sélecteur d'éditeur (`/editor`) — les éditeurs détectés sur le `PATH`, plus
+/// `$VISUAL`/`$EDITOR` quand l'environnement en propose un. Rien ne s'applique
+/// avant Enter : contrairement au thème, il n'y a pas d'aperçu à donner.
+fn draw_editor_picker(frame: &mut Frame, app: &App) {
+    let Some(picker) = &app.editor_picker else {
+        return;
+    };
+    let full = frame.area();
+    let width = (u32::from(full.width) * 90 / 100).min(EDITOR_PICKER_WIDTH.into()) as u16;
+    let height = picker.rows.len() as u16 + 3;
+    if width < 12 || full.height < height {
+        return;
+    }
+    let area = Rect {
+        x: full.x + (full.width - width) / 2,
+        y: full.y + (full.height - height) / 2,
+        width,
+        height,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_active())
+        .title(Span::styled(" éditeur ", theme::title()));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = picker
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let selected = i == picker.selected;
+            let marker = if selected { "▸ " } else { "  " };
+            let style = if selected {
+                theme::accent()
+            } else {
+                theme::text()
+            };
+            let mut spans = vec![
+                Span::styled(marker, theme::accent()),
+                Span::styled(row.name().to_string(), style),
+            ];
+            if let Some(detail) = row.detail() {
+                spans.push(Span::styled(format!("  {detail}"), theme::dim()));
+            }
+            if picker.current == Some(i) {
+                spans.push(Span::styled(" (actuel)", theme::dim()));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    lines.push(Line::from(Span::styled(EDITOR_PICKER_FOOTER, theme::dim())));
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
@@ -2339,6 +2402,40 @@ mod tests {
         assert!(content.contains("nord (actuel)"), "got:\n{content}");
         assert!(content.contains("▸ nord"), "sélection sur l'actif");
         assert!(content.contains("Enter valider"), "got:\n{content}");
+    }
+
+    #[test]
+    fn the_editor_picker_lists_what_was_detected_and_the_environment() {
+        let _theme = theme::test_guard();
+        let mut app = App::new(None);
+        app.editors = crate::tui::editors::EditorState {
+            detected: crate::tui::editors::EDITORS
+                .iter()
+                .filter(|spec| matches!(spec.id, "nvim" | "emacs"))
+                .collect(),
+            visual: Some("nvim".to_string()),
+            ..Default::default()
+        };
+        app.open_editor_picker();
+
+        let content = rendered(&app, 80, 20);
+
+        assert!(content.contains("éditeur"), "got:\n{content}");
+        assert!(content.contains("nvim"), "got:\n{content}");
+        assert!(
+            content.contains("▸ (env)"),
+            "$VISUAL l'emporte sans KAJI_EDITOR, got:\n{content}"
+        );
+        assert!(
+            content.contains("emacs  emacs -nw"),
+            "la commande complète quand elle diffère de l'id, got:\n{content}"
+        );
+        assert!(content.contains("(env)"), "got:\n{content}");
+        assert!(
+            content.contains("$VISUAL = nvim (actuel)"),
+            "got:\n{content}"
+        );
+        assert!(content.contains("Enter choisir"), "got:\n{content}");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 pub mod app;
 pub mod diff;
+pub mod editors;
 pub mod explorer;
 pub mod fuzzy;
 pub mod gitstatus;
@@ -230,7 +231,8 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
         "/goal" => "boucle évaluée vers un but (<condition> | clear)",
         "/files" => "(Ctrl+P) recherche floue de fichiers",
         "/explorer" => "(Ctrl+E) explorateur de fichiers",
-        "/edit" => "(ou e) éditer un fichier dans $EDITOR",
+        "/edit" => "(ou e) éditer un fichier — /edit <chemin>[:ligne]",
+        "/editor" => "choisir l'éditeur/IDE (<cmd> | list | reset)",
         "/spec" => "(F2) panneau SPEC on/off",
         "/think" => "(F3) raisonnement du modèle (思考中)",
         "/cost" => "usage tokens/coût (session, 5 h, 7 j)",
@@ -550,19 +552,15 @@ fn input_thread(tx: mpsc::Sender<Event>, gate: &InputGate) {
     }
 }
 
-/// `$VISUAL`, then `$EDITOR`, then `vi` — the POSIX order every other TUI
-/// follows. The value is a command line, not a program name (`code --wait`),
-/// split on whitespace: no shell runs it, so quoting and redirections are out
-/// of scope.
-pub fn resolve_editor(visual: Option<&str>, editor: Option<&str>) -> (String, Vec<String>) {
-    let mut words = [visual, editor]
-        .into_iter()
-        .flatten()
-        .find(|value| !value.trim().is_empty())
-        .unwrap_or("vi")
-        .split_whitespace();
-    let program = words.next().unwrap_or("vi").to_string();
-    (program, words.map(str::to_string).collect())
+/// Éditeur de démarrage : `KAJI_EDITOR` — comme pour le thème, `get_param` lit
+/// déjà la variable d'environnement avant le fichier de config, la précédence
+/// env > config n'a donc pas à être refaite ici.
+fn startup_editors() -> editors::EditorState {
+    editors::EditorState::from_env(Config::global().get_param::<String>("KAJI_EDITOR").ok())
+}
+
+fn editor_not_found(program: &str) -> String {
+    format!("éditeur introuvable : {program} — définis $EDITOR ou /editor pour en choisir un")
 }
 
 /// Suspends the TUI, hands the terminal to the user's editor, takes it back:
@@ -577,18 +575,15 @@ fn edit_file(
     terminal: &mut ratatui::DefaultTerminal,
     gate: &InputGate,
     mouse: bool,
+    editor: &editors::Editor,
     path: &Path,
+    line: Option<usize>,
     working_dir: &Path,
 ) -> std::result::Result<Option<String>, String> {
-    let (program, args) = resolve_editor(
-        std::env::var("VISUAL").ok().as_deref(),
-        std::env::var("EDITOR").ok().as_deref(),
-    );
     gate.suspend();
     leave_terminal(mouse);
-    let status = std::process::Command::new(&program)
-        .args(&args)
-        .arg(path)
+    let status = std::process::Command::new(&editor.program)
+        .args(editor.argv(path, line))
         .current_dir(working_dir)
         .status();
     enter_terminal(mouse);
@@ -600,8 +595,28 @@ fn edit_file(
             Some(code) => format!("éditeur : code {code}"),
             None => "éditeur : interrompu".to_string(),
         })),
-        Err(_) => Err(format!("éditeur introuvable : {program} — définis $EDITOR")),
+        Err(_) => Err(editor_not_found(&editor.program)),
     }
+}
+
+/// Un IDE graphique n'a pas besoin du terminal : on le lance et on le laisse
+/// vivre — ni suspension, ni attente. Ses flux vont au vide, sinon le premier
+/// avertissement qu'il écrit passe par-dessus le TUI.
+fn open_detached(
+    editor: &editors::Editor,
+    path: &Path,
+    line: Option<usize>,
+    working_dir: &Path,
+) -> std::result::Result<(), String> {
+    std::process::Command::new(&editor.program)
+        .args(editor.argv(path, line))
+        .current_dir(working_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| editor_not_found(&editor.program))
 }
 
 /// Mirrors exactly what `run` turned on, in reverse — anything left on here
@@ -676,6 +691,7 @@ async fn event_loop(
     let session_manager = SessionManager::instance();
     let working_dir = session_working_dir(&session_manager, session_id).await;
     app.set_working_dir(working_dir.clone());
+    app.editors = startup_editors();
     app.request_git_refresh();
     let theme_warning = apply_startup_theme();
     seed_chat(&mut app, &conversation);
@@ -723,7 +739,7 @@ async fn event_loop(
         // Honored after the `select!` returns, never inside it: suspending
         // the terminal while an arm could still redraw would paint the TUI
         // over the editor.
-        let mut edit_request: Option<PathBuf> = None;
+        let mut edit_request: Option<(PathBuf, Option<usize>)> = None;
         tokio::select! {
             _ = tick.tick(), if app.turn_active || app.turn_pending => {}
             _ = git_tick.tick() => app.request_git_refresh(),
@@ -855,6 +871,19 @@ async fn event_loop(
                             app.push_system(&format!("thème appliqué mais non enregistré : {e}"));
                         }
                     }
+                    // `App` a déjà changé d'éditeur pour la session — comme le
+                    // thème, l'écriture de config ne doit pas retarder le
+                    // prochain `e`.
+                    Action::Editor(command) => {
+                        if let Err(e) = Config::global().set_param("KAJI_EDITOR", &command) {
+                            app.push_system(&format!("éditeur appliqué mais non enregistré : {e}"));
+                        }
+                    }
+                    Action::EditorReset => {
+                        if let Err(e) = Config::global().delete("KAJI_EDITOR") {
+                            app.push_system(&format!("éditeur oublié mais config inchangée : {e}"));
+                        }
+                    }
                     Action::Cost => {
                         let report = cost_report(&session_manager, session_id).await;
                         app.push_system_lines(report);
@@ -947,7 +976,7 @@ async fn event_loop(
                         }
                     }
                     Action::RestoreCancel => app.push_system("restore annulé"),
-                    Action::EditFile(path) => edit_request = Some(path),
+                    Action::EditFile { path, line } => edit_request = Some((path, line)),
                     Action::None => {}
                 }
                 // @-mention index (item 4 ante): the walk runs on a blocking
@@ -1039,34 +1068,51 @@ async fn event_loop(
                 }
             }
         }
-        // The editor owns the terminal for as long as it runs: a blocking
-        // call on a runtime worker, so `block_in_place` hands the worker's
-        // other tasks to a sibling thread (multi-thread runtime, see
-        // `main.rs`) instead of stalling them.
-        if let Some(path) = edit_request {
-            let mouse = app.mouse_enabled;
-            let ran = match tokio::task::block_in_place(|| {
-                edit_file(terminal, gate, mouse, &path, &working_dir)
-            }) {
-                Ok(note) => {
-                    if let Some(note) = note {
-                        app.push_system(&note);
+        // A terminal editor owns the terminal for as long as it runs: a
+        // blocking call on a runtime worker, so `block_in_place` hands the
+        // worker's other tasks to a sibling thread (multi-thread runtime, see
+        // `main.rs`) instead of stalling them. A graphical one takes nothing
+        // and is simply spawned.
+        if let Some((path, line)) = edit_request {
+            let shown = path.strip_prefix(&working_dir).unwrap_or(&path).to_owned();
+            match app.editors.resolve() {
+                Err(note) => app.push_system(&note),
+                Ok(editor) if editor.kind == editors::EditorKind::Gui => {
+                    match open_detached(&editor, &path, line, &working_dir) {
+                        Ok(()) => app.push_system(&format!(
+                            "{} {} ouvert dans {}",
+                            theme::VIEWER_GLYPH,
+                            shown.display(),
+                            editor.program_name()
+                        )),
+                        Err(note) => app.push_system(&note),
                     }
-                    true
                 }
-                Err(note) => {
-                    app.push_system(&note);
-                    false
+                Ok(editor) => {
+                    let mouse = app.mouse_enabled;
+                    let ran = match tokio::task::block_in_place(|| {
+                        edit_file(terminal, gate, mouse, &editor, &path, line, &working_dir)
+                    }) {
+                        Ok(note) => {
+                            if let Some(note) = note {
+                                app.push_system(&note);
+                            }
+                            true
+                        }
+                        Err(note) => {
+                            app.push_system(&note);
+                            false
+                        }
+                    };
+                    if ran {
+                        app.on_file_edited(&path);
+                        app.push_system(&format!(
+                            "{} {} édité",
+                            theme::VIEWER_GLYPH,
+                            shown.display()
+                        ));
+                    }
                 }
-            };
-            if ran {
-                app.on_file_edited(&path);
-                let shown = path.strip_prefix(&working_dir).unwrap_or(&path);
-                app.push_system(&format!(
-                    "{} {} édité",
-                    theme::VIEWER_GLYPH,
-                    shown.display()
-                ));
             }
         }
         // Status bar (task 15): same hand-off as the @-mention index, drained
@@ -1436,32 +1482,6 @@ mod tests {
 
     fn line_text(line: &RoledLine) -> String {
         line.iter().map(|span| span.text.as_str()).collect()
-    }
-
-    #[test]
-    fn resolve_editor_prefers_visual_then_editor_then_vi() {
-        assert_eq!(
-            resolve_editor(Some("nvim"), Some("vim")),
-            ("nvim".to_string(), Vec::new())
-        );
-        assert_eq!(
-            resolve_editor(None, Some("vim")),
-            ("vim".to_string(), Vec::new())
-        );
-        assert_eq!(resolve_editor(None, None), ("vi".to_string(), Vec::new()));
-        assert_eq!(
-            resolve_editor(Some(""), Some("   ")),
-            ("vi".to_string(), Vec::new()),
-            "une variable vide ne choisit pas d'éditeur"
-        );
-    }
-
-    #[test]
-    fn resolve_editor_splits_the_arguments_off_the_program() {
-        assert_eq!(
-            resolve_editor(Some("code --wait"), None),
-            ("code".to_string(), vec!["--wait".to_string()])
-        );
     }
 
     /// The reader is the only thing that touches stdin, and the editor needs
@@ -2262,7 +2282,8 @@ mod tests {
             ("/goal", "/files"),
             ("/files", "/explorer"),
             ("/explorer", "/edit"),
-            ("/edit", "/spec"),
+            ("/edit", "/editor"),
+            ("/editor", "/spec"),
             ("/spec", "/think"),
             ("/think", "/cost"),
             ("/cost", "/context"),
