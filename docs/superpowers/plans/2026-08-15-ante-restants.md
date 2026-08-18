@@ -457,3 +457,20 @@
 ### Étapes
 - [ ] **20.1** constantes + `explorer_target` + `viewer_width(total, explorer_open)` + appelants dans `draw` ; tests ruling 3 ; `cargo test -p kaji-cli --lib ui`.
 - [ ] **20.2** format par fichier ; `cargo test -p kaji-cli --lib` (0 échec, baseline 732) ; clippy `-p kaji-cli`. Commit : `feat(tui): layout — explorateur 22 % (max 40), lecteur 40 % quand l'arbre est ouvert : le chat garde ~la moitié de l'écran`.
+
+## Task 21 : Chat replié quand le lecteur a le focus (zoom lecteur) — demande user 2026-08-18
+
+**Spec.** « En mode display du fichier on toggle off le chat, quand on en sort on toggle on. » Ruling contrôleur : le déclencheur est le **focus** du lecteur (`Focus::Viewer`), pas l'ouverture — `a` (attacher) et `Ctrl+O` rendent le focus au composer et doivent rendre le chat. État : `ui.rs::draw` (root `[header, body, status]`, body = explorateur | chat/composer | lecteur-ou-SPEC), `viewer_width(total, explorer_open)` / `explorer_width` (Task 20), `App.focus`, `Focus::{Composer, Viewer, Explorer}`, pied du lecteur `j/k défiler · e éditer · a attacher @ · q fermer` (`draw_viewer`), tests layout table-driven + balayage 0-400 (Task 20).
+
+**Rulings contrôleur :**
+1. **Quand `app.focus == Focus::Viewer` et `app.viewer.is_some()`** : la colonne chat est repliée — le body devient `[explorateur (largeur habituelle, si ouvert) | lecteur = tout le reste]` ; le **composer reste dessiné** sous le lecteur (même hauteur 3, pleine largeur du lecteur) pour que l'utilisateur voie sa saisie en attente et le titre steer/chrono ; header et barre d'état inchangés. Le chat n'est pas détruit : son état de scroll est conservé (rien à faire, on ne le dessine simplement pas).
+2. **Sinon** : layout Task 20 inchangé (chat + lecteur 40/45 %).
+3. **Focus explorateur** : chat visible (inchangé) — seul le lecteur zoome.
+4. Souris : la molette utilise `point_in_viewer` — le rect du lecteur (`viewer_rect`/`viewer_viewport` mémorisés au draw) doit refléter la nouvelle géométrie ; hors lecteur, la molette ne scrolle rien quand le chat est replié.
+5. Pied du lecteur : `j/k défiler · e éditer · a attacher @ · q fermer · Ctrl+O chat` **seulement en mode replié** (le pied normal reste tel quel ; il est déjà tronqué sous 100 col — en mode replié la largeur est grande). Aide/welcome : ligne `Ctrl+O` complétée « (le chat se replie quand le lecteur a le focus) ».
+6. Tests : `draw` TestBackend 200×40 : (a) lecteur ouvert + focus composer → 3 colonnes (titres `chat` et `巻` présents, chat ≥ 90 col) ; (b) focus lecteur → titre `chat` absent, cadre `巻` large (≥ 150 col avec explorateur fermé), composer présent en bas ; (c) explorateur ouvert + focus lecteur → `樹` + `巻`, pas de `chat` ; (d) `Ctrl+O` depuis le lecteur → chat de retour ; (e) `a` depuis le lecteur → focus composer et chat de retour ; balayage 0-400 : aucune largeur négative/0 pour le lecteur en mode replié (≥ 40 quand total ≥ 40 + explorateur).
+7. Hors scope : zoom manuel `z` persistant, repli de l'explorateur, animation.
+
+### Étapes
+- [ ] **21.1** `ui.rs::draw` : branche « lecteur focalisé » (géométrie + composer sous le lecteur + rects souris) ; `draw_viewer` pied conditionnel ; aide.
+- [ ] **21.2** tests ruling 6 ; format par fichier ; `cargo test -p kaji-cli --lib` (0 échec, baseline 734) ; clippy `-p kaji-cli`. Commit : `feat(tui): le chat se replie quand le lecteur a le focus — lecteur pleine largeur, composer conservé, retour au layout normal avec Ctrl+O/q/a`.
