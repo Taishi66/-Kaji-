@@ -1522,10 +1522,9 @@ mod tests {
         );
     }
 
-    /// Couleur de la première cellule portant l'initiale de `needle`, dans la
-    /// première ligne du chat dessiné qui contient `needle` — lit le buffer
-    /// rendu, donc ce que le terminal affiche, pas les `Line` construites.
-    fn drawn_fg(app: &App, needle: &str) -> ratatui::style::Color {
+    /// Buffer du chat seul dessiné dans une grille 80×20 — ce que le terminal
+    /// affiche, pas les `Line` construites.
+    fn drawn_chat(app: &App) -> ratatui::buffer::Buffer {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -1534,23 +1533,124 @@ mod tests {
         terminal
             .draw(|frame| draw_chat(frame, app, frame.area()))
             .expect("draw must succeed against a TestBackend");
-        let buffer = terminal.backend().buffer();
-        let head = needle.chars().next().expect("non-empty needle");
+        terminal.backend().buffer().clone()
+    }
 
+    fn row_containing(buffer: &ratatui::buffer::Buffer, needle: &str) -> u16 {
         for y in 0..buffer.area.height {
             let row: String = (0..buffer.area.width)
                 .map(|x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
                 .collect();
-            if !row.contains(needle) {
-                continue;
-            }
-            for x in 0..buffer.area.width {
-                if buffer[(x, y)].symbol().starts_with(head) {
-                    return buffer[(x, y)].fg;
-                }
+            if row.contains(needle) {
+                return y;
             }
         }
         panic!("aucune ligne du chat ne contient {needle:?}");
+    }
+
+    fn cell_starting_with(buffer: &ratatui::buffer::Buffer, row: u16, head: char) -> u16 {
+        (0..buffer.area.width)
+            .find(|&x| buffer[(x, row)].symbol().starts_with(head))
+            .unwrap_or_else(|| panic!("aucune cellule de la ligne {row} ne commence par {head:?}"))
+    }
+
+    /// Couleur de la première cellule portant l'initiale de `needle`, dans la
+    /// première ligne du chat dessiné qui contient `needle`.
+    fn drawn_fg(app: &App, needle: &str) -> ratatui::style::Color {
+        let buffer = drawn_chat(app);
+        let row = row_containing(&buffer, needle);
+        let head = needle.chars().next().expect("non-empty needle");
+        buffer[(cell_starting_with(&buffer, row, head), row)].fg
+    }
+
+    /// Rectangle du texte de chat pour un buffer dessiné par [`drawn_chat`] —
+    /// mêmes bordures et marges que [`draw_chat`].
+    fn drawn_chat_rect(buffer: &ratatui::buffer::Buffer) -> Rect {
+        chat_content_rect(Block::default().borders(Borders::ALL).inner(buffer.area))
+    }
+
+    /// Sans la bande de fond, un prompt et une réponse sont indiscernables en
+    /// `mono`, où toutes les teintes de texte se ressemblent.
+    #[test]
+    fn a_user_prompt_carries_the_palette_band_and_an_agent_line_does_not() {
+        let _theme = theme::test_guard();
+
+        for name in ["mono", "zen"] {
+            theme::set_active(name).expect("thème intégré");
+            let mut app = App::new(None);
+            app.push_user("bonjour");
+            app.apply_agent_event(&text_message("m1", "réponse"));
+
+            let buffer = drawn_chat(&app);
+            let band = theme::active().user_bg;
+            let prompt_row = row_containing(&buffer, "bonjour");
+            let prefix_x = cell_starting_with(&buffer, prompt_row, 'v');
+            let text_x = cell_starting_with(&buffer, prompt_row, 'b');
+
+            assert_eq!(buffer[(prefix_x, prompt_row)].bg, band, "{name} : préfixe");
+            assert_eq!(buffer[(text_x, prompt_row)].bg, band, "{name} : texte");
+            assert_eq!(
+                buffer[(text_x, prompt_row)].fg,
+                theme::user_color(),
+                "{name}"
+            );
+
+            let agent_row = row_containing(&buffer, "réponse");
+            let agent_x = cell_starting_with(&buffer, agent_row, 'r');
+            assert_ne!(
+                buffer[(agent_x, agent_row)].bg,
+                band,
+                "{name} : la réponse reste hors bande"
+            );
+        }
+    }
+
+    /// `Paragraph` ne stylise que les cellules portant un grapheme (ratatui
+    /// 0.30, `render_line`) : le fond d'une `Line` ne peut pas atteindre le
+    /// bord droit du chat, la bande s'arrête donc au dernier caractère.
+    #[test]
+    fn the_user_band_covers_the_prompt_text_and_stops_there() {
+        let _theme = theme::test_guard();
+        theme::set_active("zen").expect("zen is a built-in theme");
+        let mut app = App::new(None);
+        app.push_user("bonjour");
+
+        let buffer = drawn_chat(&app);
+        let band = theme::active().user_bg;
+        let row = row_containing(&buffer, "bonjour");
+        let chat_rect = drawn_chat_rect(&buffer);
+        let text_end = cell_starting_with(&buffer, row, 'b') + "bonjour".len() as u16;
+
+        for x in chat_rect.x..text_end {
+            assert_eq!(buffer[(x, row)].bg, band, "colonne {x}");
+        }
+        assert_ne!(
+            buffer[(chat_rect.x + chat_rect.width - 1, row)].bg,
+            band,
+            "la bande ne va pas jusqu'au bord du chat"
+        );
+    }
+
+    #[test]
+    fn a_user_prompt_band_follows_a_theme_change_after_the_fact() {
+        let _theme = theme::test_guard();
+        theme::set_active("zen").expect("zen is a built-in theme");
+        let mut app = App::new(None);
+        app.push_user("bonjour");
+        let zen_band = theme::active().user_bg;
+
+        theme::set_active("mono").expect("mono is a built-in theme");
+
+        let buffer = drawn_chat(&app);
+        let row = row_containing(&buffer, "bonjour");
+        let x = cell_starting_with(&buffer, row, 'b');
+
+        assert_eq!(buffer[(x, row)].bg, theme::active().user_bg);
+        assert_ne!(
+            buffer[(x, row)].bg,
+            zen_band,
+            "la palette du push ne doit rien figer"
+        );
     }
 
     /// Un bloc `rendered` poussé sous un thème doit se re-colorer au draw

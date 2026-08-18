@@ -13,6 +13,9 @@ pub struct Palette {
     pub muted: Color,
     /// Préfixe utilisateur.
     pub user: Color,
+    /// Bande de fond sous les prompts utilisateur, seul repère qui les
+    /// distingue des réponses quand les teintes de texte se ressemblent.
+    pub user_bg: Color,
     /// Titres, agent, en-têtes de tableau.
     pub gold: Color,
     /// Accent actif : étage en cours, spinner, curseur, alerte.
@@ -33,6 +36,7 @@ pub static THEMES: [Palette; 6] = [
         text: Color::Rgb(200, 200, 195),
         muted: Color::DarkGray,
         user: Color::Rgb(84, 110, 140),
+        user_bg: Color::Rgb(30, 34, 48),
         gold: Color::Rgb(196, 164, 106),
         accent: Color::Rgb(203, 88, 65),
         border_inactive: Color::Rgb(84, 110, 140),
@@ -44,6 +48,7 @@ pub static THEMES: [Palette; 6] = [
         text: Color::Rgb(56, 56, 56),
         muted: Color::Rgb(120, 118, 111),
         user: Color::Rgb(59, 91, 130),
+        user_bg: Color::Rgb(232, 232, 246),
         gold: Color::Rgb(138, 109, 42),
         accent: Color::Rgb(180, 50, 31),
         border_inactive: Color::Rgb(140, 158, 182),
@@ -55,6 +60,7 @@ pub static THEMES: [Palette; 6] = [
         text: Color::Rgb(216, 222, 233),
         muted: Color::Rgb(76, 86, 106),
         user: Color::Rgb(136, 192, 208),
+        user_bg: Color::Rgb(59, 66, 82),
         gold: Color::Rgb(235, 203, 139),
         accent: Color::Rgb(191, 97, 106),
         border_inactive: Color::Rgb(94, 129, 172),
@@ -66,6 +72,7 @@ pub static THEMES: [Palette; 6] = [
         text: Color::Rgb(235, 219, 178),
         muted: Color::Rgb(146, 131, 116),
         user: Color::Rgb(131, 165, 152),
+        user_bg: Color::Rgb(60, 56, 54),
         gold: Color::Rgb(250, 189, 47),
         accent: Color::Rgb(251, 73, 52),
         border_inactive: Color::Rgb(102, 92, 84),
@@ -77,6 +84,7 @@ pub static THEMES: [Palette; 6] = [
         text: Color::Rgb(131, 148, 150),
         muted: Color::Rgb(101, 123, 131),
         user: Color::Rgb(38, 139, 210),
+        user_bg: Color::Rgb(7, 54, 66),
         gold: Color::Rgb(181, 137, 0),
         accent: Color::Rgb(220, 50, 47),
         border_inactive: Color::Rgb(88, 110, 117),
@@ -87,7 +95,8 @@ pub static THEMES: [Palette; 6] = [
         name: "mono",
         text: Color::Reset,
         muted: Color::DarkGray,
-        user: Color::Gray,
+        user: Color::White,
+        user_bg: Color::DarkGray,
         gold: Color::White,
         accent: Color::White,
         border_inactive: Color::DarkGray,
@@ -247,7 +256,8 @@ pub fn text() -> Style {
 }
 
 pub fn user() -> Style {
-    Style::default().fg(active().user)
+    let palette = active();
+    Style::default().fg(palette.user).bg(palette.user_bg)
 }
 
 pub fn agent() -> Style {
@@ -435,6 +445,7 @@ mod tests {
             mono.text,
             mono.muted,
             mono.user,
+            mono.user_bg,
             mono.gold,
             mono.accent,
             mono.border_inactive,
@@ -444,6 +455,32 @@ mod tests {
             assert!(
                 !matches!(color, Color::Rgb(..)),
                 "mono must stay palette-free, got {color:?}"
+            );
+        }
+    }
+
+    /// Un prompt doit rester lisiblement distinct d'une réponse et du texte
+    /// courant dans chaque palette — c'est la raison d'être de `user_bg`, et
+    /// une palette ajoutée sans lui ferait régresser `mono`, où toutes les
+    /// teintes se ressemblent.
+    #[test]
+    fn every_palette_sets_a_user_band_that_differs_from_agent_and_text() {
+        let _guard = test_guard();
+
+        for (index, palette) in THEMES.iter().enumerate() {
+            set_active_index(index);
+            assert_eq!(
+                user().bg,
+                Some(palette.user_bg),
+                "{} : le prompt doit porter sa bande",
+                palette.name
+            );
+            assert_ne!(user(), agent(), "{}", palette.name);
+            assert_ne!(user(), text(), "{}", palette.name);
+            assert_ne!(
+                palette.user, palette.user_bg,
+                "{} : texte du prompt invisible sur sa propre bande",
+                palette.name
             );
         }
     }
