@@ -474,3 +474,18 @@
 ### Étapes
 - [ ] **21.1** `ui.rs::draw` : branche « lecteur focalisé » (géométrie + composer sous le lecteur + rects souris) ; `draw_viewer` pied conditionnel ; aide.
 - [ ] **21.2** tests ruling 6 ; format par fichier ; `cargo test -p kaji-cli --lib` (0 échec, baseline 734) ; clippy `-p kaji-cli`. Commit : `feat(tui): le chat se replie quand le lecteur a le focus — lecteur pleine largeur, composer conservé, retour au layout normal avec Ctrl+O/q/a`.
+
+## Task 22 : Prompts utilisateur sur fond teinté (tous thèmes) + invariant de distinguabilité — demande user 2026-08-18
+
+**Spec.** Capture user en `mono` : `vous ▸ …` (Gray) et les réponses (Reset) sont indiscernables ; demande : « la couleur de mes prompts et celle des réponses doivent être différentes » → choix user « **fond** » (bande de fond teintée sous chaque prompt, dans tous les thèmes). État : `theme.rs` — `Palette { text, muted, user, gold, accent, border_inactive, code_bg, chart_alt }` ×7 (zen, light, nord, gruvbox, solarized, mono, + …), `user()` = `fg(user)`, `agent()` = `fg(gold)+BOLD`, `text()` ; `ui.rs::push_chat_line` — `Sender::User => push_plain_lines(lines, text, USER_PREFIX, theme::user())` ; le chat est un `Paragraph` avec `Wrap { trim: false }`.
+
+**Rulings contrôleur :**
+1. **Nouveau champ `Palette.user_bg: Color`** (une valeur par palette, harmonieuse : zen = sumi légèrement indigo, light = lavande pâle, nord/gruvbox/solarized = leur `bg1`/`base02` équivalent, mono = `Color::DarkGray` avec texte user `Color::White`) ; `theme::user()` devient `fg(user).bg(user_bg)` ; nouvel accesseur `theme::user_bg()` si un producteur en a besoin.
+2. **Bande** : la ligne du prompt (préfixe `vous ▸` + texte, et chaque ligne de continuation d'un prompt multi-ligne) porte le fond ; **pleine largeur du chat** si `ratatui::text::Line::style(...)` peint toute la ligne (à vérifier par un test qui lit une cellule à `width-1`) ; sinon (fallback) le fond ne couvre que le texte — dire lequel dans le rapport. Aucun changement pour agent/system/thinking.
+3. **Invariant** (test `theme.rs`, itère les palettes) : pour chaque palette active, `user() != agent()`, `user() != text()`, `user().bg.is_some()` et `user_bg != code_bg`… **non** : `user_bg` peut égaler `code_bg` si c'est le plus harmonieux — l'invariant est seulement `user() != agent()`, `user() != text()`, `user_bg` défini. Ajouter aussi `mono` : `user` fg = `White` (pas Gray) pour contraste sur `DarkGray`.
+4. Test ui (TestBackend, `test_guard`, thème `mono` puis `zen`) : après `push_user("bonjour")` + draw, la cellule sous « bonjour » a `bg == user_bg` de la palette active, et une cellule d'une ligne agent n'a pas ce bg ; le style suit un `/theme` en session (déjà résolu au draw — juste l'asserter).
+5. Hors scope : barre `▎`, fond sur les réponses, réglage du fond par l'utilisateur.
+
+### Étapes
+- [ ] **22.1** `theme.rs` : champ + valeurs + `user()` + tests invariant ; `ui.rs` : bande (Line style) + test cellule ; `cargo test -p kaji-cli --lib theme` / `--lib ui`.
+- [ ] **22.2** format par fichier ; `cargo test -p kaji-cli --lib` (0 échec, baseline 740) ; clippy `-p kaji-cli`. Commit : `feat(tui): prompts utilisateur sur fond teinté (user_bg par palette) — distinguables des réponses dans tous les thèmes, mono compris`.
