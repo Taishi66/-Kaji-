@@ -57,7 +57,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // One right column, two possible tenants: the file viewer takes the slot
     // while it is open and hands it straight back to the SPEC panel on close —
     // nothing to save and restore, the panel's own visibility answers again.
-    let right = if app.viewer.is_some() {
+    // A focused viewer takes no right column at all: it folds the chat away and
+    // reads in its place (task 21), the explorer keeping the width it had.
+    let right = if app.zoomed_viewer().is_some() {
+        None
+    } else if app.viewer.is_some() {
         Some([Constraint::Min(0), Constraint::Length(viewer_cols)])
     } else if app.spec_panel_visible() {
         Some([
@@ -67,7 +71,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     } else {
         None
     };
-    let (chat_area, right_area) = match right {
+    let (main_area, right_area) = match right {
         Some(constraints) => {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
@@ -78,15 +82,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
         None => (body, None),
     };
 
-    let left = Layout::default()
+    // The composer stays under whichever pane owns the column, so a message in
+    // progress and the turn's chrono remain visible while reading.
+    let column = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(3)])
-        .split(chat_area);
+        .split(main_area);
 
-    draw_chat(frame, app, left[0]);
-    draw_input(frame, app, left[1]);
-    draw_palette(frame, app, left[1]);
-    draw_mentions(frame, app, left[1]);
+    match app.zoomed_viewer() {
+        Some(viewer) => draw_viewer(frame, app, viewer, column[0]),
+        None => draw_chat(frame, app, column[0]),
+    }
+    draw_input(frame, app, column[1]);
+    draw_palette(frame, app, column[1]);
+    draw_mentions(frame, app, column[1]);
     if let Some(area) = right_area {
         match &app.viewer {
             Some(viewer) => draw_viewer(frame, app, viewer, area),
@@ -918,15 +927,20 @@ fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
             sanitize_for_display(&viewer.path)
         )
     };
-    let footer = if viewer.truncated {
-        format!(
-            " … tronqué ({} lus) · j/k défiler · e éditer · a attacher @ · q fermer ",
-            viewer::read_limit_label()
-        )
+    // `Ctrl+O` is only worth naming while the chat is folded behind the pane —
+    // it is what brings it back.
+    let focused = app.focus == Focus::Viewer;
+    let keys = if focused {
+        "j/k défiler · e éditer · a attacher @ · q fermer · Ctrl+O chat"
     } else {
-        " j/k défiler · e éditer · a attacher @ · q fermer ".to_string()
+        "j/k défiler · e éditer · a attacher @ · q fermer"
     };
-    let border = if app.focus == Focus::Viewer {
+    let footer = if viewer.truncated {
+        format!(" … tronqué ({} lus) · {keys} ", viewer::read_limit_label())
+    } else {
+        format!(" {keys} ")
+    };
+    let border = if focused {
         theme::border_active()
     } else {
         theme::border_inactive()
@@ -2451,5 +2465,163 @@ mod tests {
             content.contains("    main.rs"),
             "indentation 2 col, got:\n{content}"
         );
+    }
+
+    /// The chat block's own top-left corner, which is what tells a folded chat
+    /// (task 21) from the `Ctrl+O chat` hint the folded reader's footer carries.
+    fn chat_frame_row(content: &str) -> Option<&str> {
+        content.lines().find(|line| line.contains("┌ chat"))
+    }
+
+    /// Column a needle sits at in a rendered row. Wide glyphs count as one
+    /// column here rather than two, so distances are compared with slack.
+    fn column_of(row: &str, needle: &str) -> usize {
+        let (before, _) = row
+            .split_once(needle)
+            .unwrap_or_else(|| panic!("{needle} absent de {row:?}"));
+        before.chars().count()
+    }
+
+    fn ctrl(code: KeyCode) -> Event {
+        Event::Key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        })
+    }
+
+    fn app_with_a_focused_viewer(explorer: bool) -> (App, tempfile::TempDir) {
+        let (mut app, dir) = app_on_a_project("README.md", "hello\n");
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        if explorer {
+            app.toggle_explorer();
+        }
+        app.open_viewer("README.md");
+        assert_eq!(app.focus, Focus::Viewer);
+        (app, dir)
+    }
+
+    #[test]
+    fn the_three_columns_stand_while_the_composer_holds_the_focus() {
+        let (mut app, _dir) = app_with_a_focused_viewer(true);
+        app.focus = Focus::Composer;
+
+        let content = rendered(&app, 200, 40);
+        let row = chat_frame_row(&content)
+            .unwrap_or_else(|| panic!("le chat garde sa colonne, got:\n{content}"));
+        assert!(row.contains(theme::EXPLORER_GLYPH), "got:\n{content}");
+        assert!(row.contains(theme::VIEWER_GLYPH), "got:\n{content}");
+        assert!(
+            column_of(row, theme::VIEWER_GLYPH) - column_of(row, "┌ chat") >= 90,
+            "colonne de chat trop étroite : {row:?}"
+        );
+    }
+
+    #[test]
+    fn the_focused_viewer_folds_the_chat_and_keeps_the_composer() {
+        let (app, _dir) = app_with_a_focused_viewer(false);
+
+        let content = rendered(&app, 200, 40);
+        assert!(
+            chat_frame_row(&content).is_none(),
+            "le chat est replié, got:\n{content}"
+        );
+        let row = content
+            .lines()
+            .find(|line| line.contains(theme::VIEWER_GLYPH))
+            .expect("cadre du lecteur");
+        assert!(
+            column_of(row, "┐") >= 150,
+            "le lecteur prend la place du chat : {row:?}"
+        );
+        assert!(content.contains("hello"), "got:\n{content}");
+        assert!(content.contains("┌ message"), "composer, got:\n{content}");
+        assert!(content.contains("Ctrl+O chat"), "got:\n{content}");
+    }
+
+    #[test]
+    fn the_explorer_keeps_its_column_beside_a_folded_chat() {
+        let (app, _dir) = app_with_a_focused_viewer(true);
+
+        let content = rendered(&app, 200, 40);
+        assert!(
+            chat_frame_row(&content).is_none(),
+            "le chat est replié, got:\n{content}"
+        );
+        let row = content
+            .lines()
+            .find(|line| line.contains(theme::VIEWER_GLYPH))
+            .expect("cadre du lecteur");
+        assert!(row.contains(theme::EXPLORER_GLYPH), "got:\n{content}");
+        assert!(
+            column_of(row, theme::EXPLORER_GLYPH) < column_of(row, theme::VIEWER_GLYPH),
+            "arbre à gauche, lecteur à droite : {row:?}"
+        );
+        assert!(content.contains("▸ src"), "got:\n{content}");
+    }
+
+    #[test]
+    fn ctrl_o_out_of_the_viewer_unfolds_the_chat() {
+        let (mut app, _dir) = app_with_a_focused_viewer(false);
+        assert!(chat_frame_row(&rendered(&app, 200, 40)).is_none());
+
+        app.on_event(&ctrl(KeyCode::Char('o')));
+
+        assert_eq!(app.focus, Focus::Composer);
+        let content = rendered(&app, 200, 40);
+        assert!(
+            chat_frame_row(&content).is_some(),
+            "le chat revient avec le focus, got:\n{content}"
+        );
+        assert!(content.contains(theme::VIEWER_GLYPH), "got:\n{content}");
+    }
+
+    #[test]
+    fn attaching_from_the_viewer_unfolds_the_chat() {
+        let (mut app, _dir) = app_with_a_focused_viewer(false);
+
+        app.on_event(&key(KeyCode::Char('a')));
+
+        assert_eq!(app.focus, Focus::Composer);
+        assert!(app.input.contains("README.md"), "input : {:?}", app.input);
+        let content = rendered(&app, 200, 40);
+        assert!(
+            chat_frame_row(&content).is_some(),
+            "le chat revient avec le focus, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn the_folded_viewer_keeps_a_column_across_terminal_widths() {
+        for total in 0..=400u16 {
+            for explorer_open in [false, true] {
+                let explorer = if explorer_open {
+                    explorer_width(total, viewer_width(total, true))
+                } else {
+                    0
+                };
+                let folded = total.saturating_sub(explorer);
+                assert!(
+                    folded > 0 || total == 0,
+                    "lecteur replié à 0 @ total={total}, explorateur={explorer}"
+                );
+                if total >= VIEWER_MIN_WIDTH + explorer {
+                    assert!(
+                        folded >= VIEWER_MIN_WIDTH,
+                        "lecteur={folded} @ total={total}, explorateur={explorer}"
+                    );
+                }
+            }
+        }
+
+        let (app, _dir) = app_with_a_focused_viewer(true);
+        for width in [40u16, 60, 100, 200] {
+            let content = rendered(&app, width, 12);
+            assert!(
+                content.contains(theme::VIEWER_GLYPH),
+                "lecteur absent @ {width}, got:\n{content}"
+            );
+        }
     }
 }

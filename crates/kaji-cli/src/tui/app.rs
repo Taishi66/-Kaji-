@@ -1541,6 +1541,13 @@ impl App {
         self.request_git_refresh();
     }
 
+    /// The reader while it holds the focus, which is when it takes the chat's
+    /// column too (task 21): reading a file is a full-width activity, and the
+    /// chat comes back as soon as the focus does.
+    pub fn zoomed_viewer(&self) -> Option<&crate::tui::viewer::Viewer> {
+        self.viewer.as_ref().filter(|_| self.focus == Focus::Viewer)
+    }
+
     /// Rows of file content the pane paints, from the last measured geometry
     /// minus its two borders (the header rides the top border as a title).
     /// Floors at one so a viewer that has never been drawn still scrolls.
@@ -2181,6 +2188,9 @@ impl App {
             // the file, anywhere else the chat.
             let on_viewer = self.point_in_viewer(mouse.column, mouse.row);
             let viewport = self.viewer_viewport();
+            // A folded chat is not on screen to be scrolled: off the reader,
+            // the wheel does nothing rather than move a pane nobody can see.
+            let zoomed = self.zoomed_viewer().is_some();
             match mouse.kind {
                 MouseEventKind::ScrollUp if on_viewer => {
                     if let Some(viewer) = self.viewer.as_mut() {
@@ -2192,8 +2202,8 @@ impl App {
                         viewer.scroll_down(SCROLL_WHEEL as usize, viewport);
                     }
                 }
-                MouseEventKind::ScrollUp => self.scroll_wheel_up(),
-                MouseEventKind::ScrollDown => self.scroll_wheel_down(),
+                MouseEventKind::ScrollUp if !zoomed => self.scroll_wheel_up(),
+                MouseEventKind::ScrollDown if !zoomed => self.scroll_wheel_down(),
                 _ => {}
             }
             return Action::None;
@@ -3872,15 +3882,23 @@ mod tests {
         assert_eq!(app.viewer.as_ref().unwrap().scroll, SCROLL_WHEEL as usize);
         assert_eq!(app.scroll_offset, 0, "le chat n'a pas bougé");
 
-        app.on_event(&Event::Mouse(MouseEvent {
+        let off_the_pane = Event::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 5,
             row: 5,
             modifiers: KeyModifiers::NONE,
-        }));
+        });
+        app.on_event(&off_the_pane);
+        assert_eq!(
+            app.scroll_offset, 0,
+            "le chat replié derrière le lecteur n'est pas là pour défiler"
+        );
+
+        app.focus = Focus::Composer;
+        app.on_event(&off_the_pane);
         assert_eq!(
             app.scroll_offset, SCROLL_WHEEL,
-            "hors du lecteur la molette rend le chat"
+            "chat déplié : hors du lecteur la molette le rend"
         );
     }
 

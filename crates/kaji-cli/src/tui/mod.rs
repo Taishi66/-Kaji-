@@ -248,7 +248,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
 fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledLine> {
     let mut lines = vec![vec![RoledSpan::title("navigation")]];
     if mouse_enabled {
-        let rows: [(&str, &str); 12] = [
+        let rows: [(&str, &str); 13] = [
             ("molette", "défile le chat (3 lignes/cran)"),
             ("PageUp/PageDown", "défile par page · Home/End"),
             ("Ctrl+↑/↓", "saute au tour précédent/suivant"),
@@ -259,6 +259,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
                 "Ctrl+O",
                 "change de volet (composer → explorateur → lecteur)",
             ),
+            ("", "le chat se replie quand le lecteur a le focus"),
             (
                 "e",
                 "éditer dans $EDITOR (lecteur/explorateur) · /edit <chemin>",
@@ -289,6 +290,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             "Ctrl+P recherche floue de fichiers (/files)",
             "Ctrl+E explorateur de fichiers (/explorer)",
             "Ctrl+O change de volet (composer → explorateur → lecteur)",
+            "  le chat se replie quand le lecteur a le focus",
             "e éditer dans $EDITOR (lecteur/explorateur) · /edit <chemin>",
             "Ctrl+S steer : envoie les messages en file au tour en cours",
             "Shift+Tab change le mode (approve → smart → auto)",
