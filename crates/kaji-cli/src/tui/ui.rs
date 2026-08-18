@@ -26,7 +26,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // side widths are decided against the full body width before anything is
     // split, so the viewer keeps its share whatever the explorer takes.
     let viewer_cols = if app.viewer.is_some() {
-        viewer_width(root[1].width)
+        viewer_width(root[1].width, app.explorer.is_some())
     } else {
         0
     };
@@ -771,21 +771,44 @@ fn draw_theme_picker(frame: &mut Frame, app: &App) {
 const SPEC_PERCENT: u16 = 28;
 
 const VIEWER_PERCENT: u16 = 45;
+/// Share of the body the viewer takes once the explorer tree is also open.
+/// Lower than [`VIEWER_PERCENT`] because the chat, not the reader, is why the
+/// side panes exist — a second pane opening must not grow the reader's cut of
+/// the space the explorer just freed, or the chat keeps shrinking every time
+/// another pane joins it.
+const VIEWER_PERCENT_WITH_EXPLORER: u16 = 40;
 const VIEWER_MIN_WIDTH: u16 = 40;
 /// Columns the chat keeps whatever the side panes ask for — a layout that eats
 /// the whole terminal would hide the conversation they are opened for.
 const MIN_CHAT_WIDTH: u16 = 20;
 
-fn viewer_width(total: u16) -> u16 {
-    let target = (u32::from(total) * u32::from(VIEWER_PERCENT) / 100) as u16;
+/// Percentage of the body the viewer claims depends on whether the explorer
+/// tree is also open: with the tree open, the viewer is sized off what is
+/// left after the tree's share rather than the full body, and at a lower
+/// percentage — see [`VIEWER_PERCENT_WITH_EXPLORER`].
+fn viewer_width(total: u16, explorer_open: bool) -> u16 {
+    let (base, percent) = if explorer_open {
+        (
+            total.saturating_sub(explorer_target(total)),
+            VIEWER_PERCENT_WITH_EXPLORER,
+        )
+    } else {
+        (total, VIEWER_PERCENT)
+    };
+    let target = (u32::from(base) * u32::from(percent) / 100) as u16;
     target
         .max(VIEWER_MIN_WIDTH)
         .min(total.saturating_sub(MIN_CHAT_WIDTH))
 }
 
-const EXPLORER_PERCENT: u16 = 30;
+const EXPLORER_PERCENT: u16 = 22;
 const EXPLORER_MIN_WIDTH: u16 = 24;
-const EXPLORER_MAX_WIDTH: u16 = 48;
+const EXPLORER_MAX_WIDTH: u16 = 40;
+
+fn explorer_target(total: u16) -> u16 {
+    ((u32::from(total) * u32::from(EXPLORER_PERCENT) / 100) as u16)
+        .clamp(EXPLORER_MIN_WIDTH, EXPLORER_MAX_WIDTH)
+}
 
 /// Sacrifice order on a narrow terminal: the explorer gives way first, then the
 /// viewer, and the chat never drops under [`MIN_CHAT_WIDTH`]. `right` is what
@@ -796,9 +819,7 @@ fn explorer_width(total: u16, right: u16) -> u16 {
     if room < EXPLORER_MIN_WIDTH {
         return 0;
     }
-    let target = ((u32::from(total) * u32::from(EXPLORER_PERCENT) / 100) as u16)
-        .clamp(EXPLORER_MIN_WIDTH, EXPLORER_MAX_WIDTH);
-    target.min(room)
+    explorer_target(total).min(room)
 }
 
 /// Left-column file tree (task 9). The pane keeps no scroll offset of its own:
@@ -2252,9 +2273,53 @@ mod tests {
 
     #[test]
     fn viewer_width_keeps_a_floor_for_both_columns() {
-        assert_eq!(viewer_width(120), 54);
-        assert_eq!(viewer_width(60), 40, "plancher de 40 colonnes");
-        assert_eq!(viewer_width(50), 30, "le chat garde ses 20 colonnes");
+        assert_eq!(viewer_width(120, false), 54);
+        assert_eq!(viewer_width(60, false), 40, "plancher de 40 colonnes");
+        assert_eq!(viewer_width(50, false), 30, "le chat garde ses 20 colonnes");
+    }
+
+    #[test]
+    fn layout_widths_follow_the_agreed_table() {
+        let cases = [
+            (200u16, 40u16, 64u16, 96u16),
+            (120, 26, 40, 54),
+            (100, 24, 40, 36),
+            (80, 0, 40, 40),
+        ];
+        for (total, expected_explorer, expected_viewer, expected_chat) in cases {
+            let viewer = viewer_width(total, true);
+            let explorer = explorer_width(total, viewer);
+            let chat = total - explorer - viewer;
+            assert_eq!(viewer, expected_viewer, "lecteur @ {total}");
+            assert_eq!(explorer, expected_explorer, "explorateur @ {total}");
+            assert_eq!(chat, expected_chat, "chat @ {total}");
+        }
+
+        assert_eq!(
+            viewer_width(200, false),
+            90,
+            "45 % inchangé sans explorateur"
+        );
+    }
+
+    #[test]
+    fn chat_never_drops_below_its_floor_across_terminal_widths() {
+        for total in 0..=400u16 {
+            for explorer_open in [false, true] {
+                let viewer = viewer_width(total, explorer_open);
+                let explorer = if explorer_open {
+                    explorer_width(total, viewer)
+                } else {
+                    0
+                };
+                let chat = total.saturating_sub(explorer).saturating_sub(viewer);
+                assert!(
+                    chat >= total.min(MIN_CHAT_WIDTH),
+                    "chat={chat} plancher={} @ total={total}, explorer_open={explorer_open}",
+                    total.min(MIN_CHAT_WIDTH)
+                );
+            }
+        }
     }
 
     #[test]
@@ -2268,16 +2333,16 @@ mod tests {
 
     #[test]
     fn explorer_width_gives_way_before_the_viewer_and_the_chat() {
-        assert_eq!(explorer_width(120, 0), 36, "30 % sans lecteur");
+        assert_eq!(explorer_width(120, 0), 26, "22 % sans lecteur");
         assert_eq!(
-            explorer_width(120, viewer_width(120)),
-            36,
-            "30 % avec lecteur"
+            explorer_width(120, viewer_width(120, true)),
+            26,
+            "22 % avec lecteur"
         );
-        assert_eq!(explorer_width(200, 0), EXPLORER_MAX_WIDTH, "plafond de 48");
+        assert_eq!(explorer_width(200, 0), EXPLORER_MAX_WIDTH, "plafond de 40");
         assert_eq!(explorer_width(50, 0), EXPLORER_MIN_WIDTH, "plancher de 24");
         assert_eq!(
-            explorer_width(80, viewer_width(80)),
+            explorer_width(80, viewer_width(80, true)),
             0,
             "l'explorateur cède en premier plutôt que d'écraser le chat"
         );
