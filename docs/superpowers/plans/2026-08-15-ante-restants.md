@@ -395,3 +395,19 @@
 - [ ] **16.1** constantes `theme.rs` + remplacement des 6 glyphes (ui.rs, gitstatus.rs, mod.rs, app.rs) + gate grep ; tests adaptés + test largeur.
 - [ ] **16.2** explorateur : compte dans le titre, pied court ; tests.
 - [ ] **16.3** format par fichier ; `cargo test -p kaji-cli --lib` (0 échec, baseline 715) ; clippy `-p kaji-cli`. Commit : `style(tui): glyphes zen — kanji à la place des emoji (樹 巻 在 列 工 門) + pied d'explorateur non clippé`.
+
+## Task 17 : Checkpoints — ne jamais snapshotter hors d'un dépôt git ni le home (latence 58 s+ avant le 1er token) — constat user 2026-08-18
+
+**Spec.** Constat : dans la TUI, une question triviale reste 58 s+ en `思考中` avec `↑0 ↓0` (aucun token reçu) alors que `kaji run -t "<même question>"` répond en 2,2 s. Cause : la TUI est le seul chemin qui câble un `CheckpointStore` (`Agent::wire_checkpoint_store`, `agent.rs:599-626`, appelé par `crates/kaji-cli/src/commands/tui.rs`) et **chaque tour** commence par `snapshot_checkpoint` → `CheckpointStore::snapshot` → `git add -A` sur tout `session.working_dir` (`checkpoint.rs:336-339`), awaité avant le premier token (`agent.rs:2277-2280`). Session lancée depuis `~` (barre d'état `在 ~`) ou `~/workspace` (49 projets) → `add -A` sur le home entier, sans `.gitignore`, à chaque tour. Aucune borne de taille ni d'éligibilité aujourd'hui (`for_project` accepte n'importe quel dossier).
+
+**Rulings contrôleur :**
+1. **Éligibilité** (fonction pure testée dans `crates/kaji/src/checkpoint.rs`, ex. `pub fn eligibility(dir: &Path, home: Option<&Path>) -> Result<(), CheckpointIneligible>` avec un enum de raisons `NotAGitWorkTree | HomeDirectory | FilesystemRoot`) : le snapshot n'est autorisé que si `dir` est **dans un dépôt git** (`git rev-parse --show-toplevel` réussit, exécuté via `kaji::subprocess::git_command()` — ou détection d'un `.git` sur `dir`/ancêtres, au choix, en le disant) **et** que ni `dir` ni le toplevel n'est le home (`dirs::home_dir()`/`$HOME`) ni `/`. Le work tree snapshotté reste `session.working_dir` (inchangé).
+2. **Câblage** : `wire_checkpoint_store` évalue l'éligibilité avant `for_project` ; inéligible → `checkpoint_store` reste `None` + `warn!` avec la raison + la raison exposée par `pub fn checkpoint_disabled_reason(&self) -> Option<&'static str>` (texte français court : « hors dépôt git », « répertoire home », « racine du système »). `for_project` lui-même ne change pas (tests existants sur tempdir non-git intacts).
+3. **TUI** : au boot, si `agent.checkpoint_store().is_none()` et qu'une raison existe → une ligne système dim `checkpoints désactivés — {raison} ({dir})` ; `/checkpoints` et `/restore` répondent `checkpoints désactivés — {raison}` au lieu de lister vide / échouer.
+4. **Tests** : `checkpoint.rs` — éligibilité : tempdir git init → Ok ; tempdir sans git → `NotAGitWorkTree` ; `home` passé = le tempdir git → `HomeDirectory` ; `/` → `FilesystemRoot` ; sous-dossier d'un dépôt → Ok. `agent.rs` (test existant `wire_checkpoint_store` ~L6154-6202 en modèle) : session dont `working_dir` est un tempdir **non git** → `checkpoint_store` None + raison `hors dépôt git` (RED d'abord) ; tempdir git → Some. TUI : test App/loop léger si atteignable (ligne système au boot) sinon disclosed.
+5. Hors scope : borne par nombre de fichiers, snapshot en parallèle du provider, `.gitignore` global.
+
+### Étapes
+- [ ] **17.1** `checkpoint.rs` éligibilité + tests ; `wire_checkpoint_store` + raison + test RED→GREEN ; `cargo test -p kaji --lib checkpoint` + `--lib agents::agent::tests::` (filtre checkpoint).
+- [ ] **17.2** TUI : ligne système au boot + `/checkpoints`/`/restore` ; `cargo test -p kaji-cli --lib`.
+- [ ] **17.3** format par fichier ; clippy `-p kaji`, `-p kaji-cli`. Commit : `fix(checkpoint): pas de snapshot hors dépôt git ni sur le home — supprime les 58 s d'attente avant le 1er token en session ~`.
