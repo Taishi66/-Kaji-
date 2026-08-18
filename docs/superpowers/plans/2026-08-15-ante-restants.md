@@ -443,3 +443,17 @@
 ### Étapes
 - [ ] **19.1** `gitstatus.rs` : `git_command_for` + envs + `dir_label` sanitisé + 2 tests ; `cargo test -p kaji-cli --lib gitstatus`.
 - [ ] **19.2** format par fichier ; `cargo test -p kaji-cli --lib` (0 échec, baseline 730) ; clippy `-p kaji-cli`. Commit : `fix(tui): barre git — LC_ALL=C (−del en locale fr) et GIT_OPTIONAL_LOCKS=0 (pas de index.lock volé), dossier sanitisé`.
+
+## Task 20 : Layout 3 colonnes — explorateur plus étroit, chat prioritaire — demande user 2026-08-18
+
+**Spec.** Capture user (terminal ~200 col, explorateur + lecteur ouverts) : explorateur 48 (plafond), lecteur 90 (45 % du total), chat ~60 → l'aide se replie. État : `ui.rs:773-802` — `VIEWER_PERCENT 45`, `VIEWER_MIN_WIDTH 40`, `MIN_CHAT_WIDTH 20`, `viewer_width(total)`, `EXPLORER_PERCENT 30`, `EXPLORER_MIN_WIDTH 24`, `EXPLORER_MAX_WIDTH 48`, `explorer_width(total, right)` (ordre de sacrifice : explorateur d'abord, puis lecteur, chat ≥ 20 — à conserver).
+
+**Rulings contrôleur :**
+1. `EXPLORER_PERCENT = 22`, `EXPLORER_MAX_WIDTH = 40` (min 24 inchangé). Helper `explorer_target(total) = clamp(22 %·total, 24, 40)` réutilisé par `explorer_width`.
+2. `viewer_width(total, explorer_open: bool)` : base = si explorateur ouvert `total − explorer_target(total)` sinon `total` ; pourcentage **40** si explorateur ouvert, **45** sinon ; puis `.max(VIEWER_MIN_WIDTH).min(total − MIN_CHAT_WIDTH)` (inchangé). `explorer_width(total, right)` garde sa logique de « room » (sacrifice explorateur d'abord).
+3. Attendus (test table-driven) : 200 col → explorateur 40 · lecteur 64 · chat 96 ; 120 → 26 · 40 · 54 ; 100 → 24 · 40 · 36 ; 80 → 0 (non peint) · 40 · 40 ; sans explorateur, 200 → lecteur 90 (45 %) inchangé ; balayage 0-400 col : chat ≥ 20 partout (test existant conservé).
+4. Aucun autre changement (SPEC_PERCENT, ordre des colonnes, footer). Doc-comment de `viewer_width` : pourquoi le pourcentage baisse quand l'arbre est ouvert (le chat est la raison d'être des volets).
+
+### Étapes
+- [ ] **20.1** constantes + `explorer_target` + `viewer_width(total, explorer_open)` + appelants dans `draw` ; tests ruling 3 ; `cargo test -p kaji-cli --lib ui`.
+- [ ] **20.2** format par fichier ; `cargo test -p kaji-cli --lib` (0 échec, baseline 732) ; clippy `-p kaji-cli`. Commit : `feat(tui): layout — explorateur 22 % (max 40), lecteur 40 % quand l'arbre est ouvert : le chat garde ~la moitié de l'écran`.
