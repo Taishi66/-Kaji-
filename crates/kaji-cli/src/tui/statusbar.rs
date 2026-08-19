@@ -8,7 +8,9 @@
 //! a terminal.
 
 use crate::tui::app::{self, App};
-use crate::tui::{gitstatus, theme};
+use crate::tui::{gitstatus, icons, theme};
+use kaji::config::KajiMode;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 /// Two spaces (間) rather than a bullet: the bar separates by breathing.
@@ -70,17 +72,42 @@ fn place_spans(
     )
 }
 
-/// A hanko is vermilion whatever it seals, so the mode rides on the kanji
-/// alone. `REVERSED` fills the seal with the accent and hands the kanji the
-/// terminal's own background — legible on a light theme as on a dark one.
+/// The seal names the mode with its kanji, `REVERSED` in the mode's colour so
+/// it stays legible on a light theme as on a dark one; the icon (unless
+/// `KAJI_ICONS=text`) and, while unfolded, the mode's word ride beside it in
+/// that same colour, not reversed.
 fn seal_spans(app: &App) -> Vec<Span<'static>> {
-    vec![
-        Span::styled(
-            format!(" {} ", app::kaji_mode_seal(app.kaji_mode)),
-            theme::seal(),
-        ),
-        Span::raw(" "),
-    ]
+    let color = mode_color(app.kaji_mode);
+    let mut spans = vec![Span::styled(
+        format!(" {} ", app::kaji_mode_seal(app.kaji_mode)),
+        theme::seal(color),
+    )];
+
+    if let Some(icon) = icons::mode_icon(app.icons, app.kaji_mode) {
+        spans.push(Span::styled(format!(" {icon}"), Style::default().fg(color)));
+    }
+
+    if app.seal_unfolded() {
+        spans.push(Span::styled(
+            format!(" {}", app::kaji_mode_badge(app.kaji_mode)),
+            Style::default().fg(color),
+        ));
+    }
+
+    spans.push(Span::raw("  "));
+    spans
+}
+
+/// Ce que le sceau promet, en couleur : l'humain décide (indigo, celui de
+/// `vous ▸`), kaji juge (or, celui de 鍛冶), personne n'est consulté
+/// (vermillon), aucun outil ne tourne (gris).
+fn mode_color(mode: KajiMode) -> Color {
+    match mode {
+        KajiMode::Approve => theme::user_color(),
+        KajiMode::SmartApprove => theme::gold_color(),
+        KajiMode::Auto => theme::accent_color(),
+        KajiMode::Chat => theme::muted_color(),
+    }
 }
 
 /// The forge's numbers, right to left of the trailing margin. The fire burns
@@ -118,14 +145,17 @@ fn telemetry_spans(app: &App, with_model: bool) -> Vec<Span<'static>> {
 
     if app.turn_active {
         let elapsed = app.turn_started.map(|t| t.elapsed()).unwrap_or_default();
+        let phase = app
+            .current_tool()
+            .map(truncate_tool_name)
+            .unwrap_or_else(|| theme::THINKING_GLYPH.to_string());
         push_group(
             &mut spans,
             Span::styled(
                 format!(
-                    "{} {} {}s",
+                    "{} {} {phase}",
                     theme::FIRE_GLYPH,
-                    theme::blade_frame(elapsed),
-                    elapsed.as_secs()
+                    theme::blade_frame(elapsed)
                 ),
                 theme::accent(),
             ),
@@ -134,6 +164,19 @@ fn telemetry_spans(app: &App, with_model: bool) -> Vec<Span<'static>> {
 
     spans.push(Span::raw(" "));
     spans
+}
+
+/// Cells a tool name is owed on the fire before it is cut — the place keeps
+/// priority through [`fits`], so a long MCP-qualified name never gets to
+/// contest it.
+const FIRE_PHASE_MAX_WIDTH: usize = 24;
+
+fn truncate_tool_name(name: &str) -> String {
+    if name.chars().count() <= FIRE_PHASE_MAX_WIDTH {
+        return name.to_string();
+    }
+    let head: String = name.chars().take(FIRE_PHASE_MAX_WIDTH - 1).collect();
+    format!("{head}…")
 }
 
 fn push_group(spans: &mut Vec<Span<'static>>, group: Span<'static>) {
@@ -163,7 +206,10 @@ fn total_width(spans: &[Span<'static>]) -> usize {
 mod tests {
     use super::*;
     use crate::tui::gitstatus::GitStatus;
-    use kaji::config::KajiMode;
+    use crate::tui::icons::IconSet;
+    use kaji::agents::AgentEvent;
+    use kaji::conversation::message::Message;
+    use rmcp::model::CallToolRequestParams;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
     use test_case::test_case;
@@ -172,6 +218,13 @@ mod tests {
         let mut app = App::new(None);
         app.set_working_dir(PathBuf::from(dir));
         app
+    }
+
+    fn running_tool(app: &mut App, name: &str) {
+        app.apply_agent_event(&AgentEvent::Message(
+            Message::assistant()
+                .with_tool_request("t1", Ok(CallToolRequestParams::new(name.to_string()))),
+        ));
     }
 
     fn on_a_branch() -> GitStatus {
@@ -196,7 +249,7 @@ mod tests {
     #[test_case(KajiMode::Approve, "承"; "approve")]
     #[test_case(KajiMode::SmartApprove, "智"; "smart")]
     #[test_case(KajiMode::Chat, "話"; "chat")]
-    fn the_seal_carries_the_mode_as_a_kanji_and_stays_vermilion(mode: KajiMode, kanji: &str) {
+    fn the_seal_carries_the_mode_as_a_kanji_folded_over_its_word(mode: KajiMode, kanji: &str) {
         let _theme = theme::test_guard();
         let mut app = app_at("/tmp/project");
         app.kaji_mode = mode;
@@ -205,13 +258,131 @@ mod tests {
         let rendered = text(&line);
 
         assert!(rendered.starts_with(&format!(" {kanji} ")), "{rendered:?}");
-        assert_eq!(line.spans[0].style, theme::seal(), "{mode:?}");
         for word in ["auto", "approve", "smart", "chat"] {
             assert!(
                 !rendered.contains(word),
-                "le mot du mode reste hors de la barre : {rendered:?}"
+                "le mot du mode reste replié : {rendered:?}"
             );
         }
+    }
+
+    /// La couleur est la seconde traduction du kanji, et elle dit qui décide :
+    /// l'humain, kaji, ou personne.
+    #[test_case(KajiMode::Approve; "approve_est_indigo")]
+    #[test_case(KajiMode::SmartApprove; "smart_est_or")]
+    #[test_case(KajiMode::Auto; "auto_est_vermillon")]
+    #[test_case(KajiMode::Chat; "chat_est_inerte")]
+    fn the_seal_and_its_icon_take_the_modes_colour(mode: KajiMode) {
+        let _theme = theme::test_guard();
+        let mut app = app_at("/tmp/project");
+        app.kaji_mode = mode;
+        let expected = match mode {
+            KajiMode::Approve => theme::user_color(),
+            KajiMode::SmartApprove => theme::gold_color(),
+            KajiMode::Auto => theme::accent_color(),
+            KajiMode::Chat => theme::muted_color(),
+        };
+
+        let line = render(&app, 100);
+
+        assert_eq!(line.spans[0].style, theme::seal(expected), "{mode:?}");
+        assert_eq!(
+            line.spans[1].style,
+            Style::default().fg(expected),
+            "l'icône porte la couleur du sceau sans l'inverser : {mode:?}"
+        );
+    }
+
+    #[test_case(KajiMode::Approve; "approve")]
+    #[test_case(KajiMode::SmartApprove; "smart")]
+    #[test_case(KajiMode::Auto; "auto")]
+    #[test_case(KajiMode::Chat; "chat")]
+    fn the_icon_follows_the_seal_and_the_text_fallback_drops_it(mode: KajiMode) {
+        let _theme = theme::test_guard();
+        let mut app = app_at("/tmp/project");
+        app.kaji_mode = mode;
+        let icon = icons::mode_icon(IconSet::Nerd, mode).expect("une icône par mode");
+
+        let with_icon = text(&render(&app, 100));
+        app.icons = IconSet::Text;
+        let without = text(&render(&app, 100));
+
+        assert!(
+            with_icon.contains(icon),
+            "{mode:?} : icône absente de {with_icon:?}"
+        );
+        assert!(!without.contains(icon), "{mode:?} : {without:?}");
+        assert!(
+            without.starts_with(&format!(
+                " {}   {} ",
+                app::kaji_mode_seal(mode),
+                theme::DIR_GLYPH
+            )),
+            "le repli texte rend la barre d'avant l'icône : {without:?}"
+        );
+    }
+
+    /// Le kanji ne se traduit pas tout seul : le mot se déplie à côté du sceau
+    /// au démarrage et à chaque changement de mode, puis s'efface.
+    #[test]
+    fn an_unfolded_seal_spells_its_mode_out_next_to_the_kanji() {
+        let _theme = theme::test_guard();
+        let mut app = app_at("/tmp/project");
+        app.kaji_mode = KajiMode::SmartApprove;
+
+        assert!(!text(&render(&app, 100)).contains("smart"));
+
+        app.unfold_seal();
+        let rendered = text(&render(&app, 100));
+
+        assert!(rendered.starts_with(" 智 "), "{rendered:?}");
+        assert!(rendered.contains("smart"), "{rendered:?}");
+        assert!(
+            rendered.contains(&format!("smart  {}", theme::DIR_GLYPH)),
+            "le mot se déplie hors du sceau, avant le lieu : {rendered:?}"
+        );
+    }
+
+    /// Le composer garde le chrono (`刻 12s`) : la barre dit ce qui brûle, pas
+    /// depuis combien de temps.
+    #[test]
+    fn the_fire_names_the_running_tool_and_leaves_the_chrono_to_the_composer() {
+        let _theme = theme::test_guard();
+        let mut app = app_at("/tmp/project");
+        app.turn_active = true;
+        app.turn_started = Some(Instant::now() - Duration::from_secs(12));
+
+        let thinking = text(&render(&app, 130));
+        assert!(
+            thinking.contains(&format!("{} ", theme::FIRE_GLYPH)),
+            "{thinking:?}"
+        );
+        assert!(thinking.contains(theme::THINKING_GLYPH), "{thinking:?}");
+        assert!(!thinking.contains("12s"), "{thinking:?}");
+
+        running_tool(&mut app, "shell");
+        let running = text(&render(&app, 130));
+
+        assert!(running.contains("shell"), "{running:?}");
+        assert!(!running.contains(theme::THINKING_GLYPH), "{running:?}");
+        assert!(!running.contains("12s"), "{running:?}");
+    }
+
+    /// Un nom d'outil MCP à rallonge ne doit pas manger le lieu : le feu le
+    /// coupe avant que `fits()` ait à arbitrer.
+    #[test]
+    fn a_long_tool_name_is_cut_by_the_fire_itself() {
+        let _theme = theme::test_guard();
+        let mut app = app_at("/tmp/project");
+        app.turn_active = true;
+        running_tool(&mut app, "developer__shell_with_a_very_long_qualified_name");
+
+        let rendered = text(&render(&app, 130));
+
+        assert!(
+            rendered.contains("developer__shell_with_a…"),
+            "{rendered:?}"
+        );
     }
 
     #[test_case(0, "0"; "zero")]
@@ -248,7 +419,6 @@ mod tests {
             "les totaux attendent : {rendered:?}"
         );
         assert!(rendered.contains(theme::FIRE_GLYPH), "{rendered:?}");
-        assert!(rendered.contains("12s"), "{rendered:?}");
     }
 
     #[test]
@@ -329,6 +499,12 @@ mod tests {
             line.width()
         );
         assert!(rendered.starts_with(" 自 "), "{rendered:?}");
+        assert!(
+            rendered.contains(
+                icons::mode_icon(IconSet::Nerd, KajiMode::Auto).expect("une icône par mode")
+            ),
+            "l'icône ne se coupe jamais : {rendered:?}"
+        );
         assert!(rendered.contains(theme::DIR_GLYPH), "{rendered:?}");
         assert!(!rendered.contains("claude-fable-5"), "{rendered:?}");
         assert!(rendered.contains("$1.30"), "{rendered:?}");
@@ -395,7 +571,7 @@ mod tests {
             "炭 120↑ 340↓",
             "$0.42",
             "火",
-            "12s",
+            theme::THINKING_GLYPH,
         ] {
             assert!(
                 rendered.contains(expected),
@@ -413,8 +589,9 @@ mod tests {
 
         let rendered = text(&render(&app, 130));
 
+        let icon = icons::mode_icon(IconSet::Nerd, KajiMode::Auto).expect("une icône par mode");
         assert!(
-            rendered.starts_with(&format!(" 自  {} /tmp/project ", theme::DIR_GLYPH)),
+            rendered.starts_with(&format!(" 自  {icon}  {} /tmp/project ", theme::DIR_GLYPH)),
             "{rendered:?}"
         );
         assert!(!rendered.contains(theme::PLACE_SEPARATOR), "{rendered:?}");

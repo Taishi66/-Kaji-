@@ -4,6 +4,7 @@ pub mod editors;
 pub mod explorer;
 pub mod fuzzy;
 pub mod gitstatus;
+pub mod icons;
 pub mod markdown;
 pub mod mentions;
 pub mod report;
@@ -255,7 +256,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
 fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledLine> {
     let mut lines = vec![vec![RoledSpan::title("navigation")]];
     if mouse_enabled {
-        let rows: [(&str, &str); 13] = [
+        let rows: [(&str, &str); 14] = [
             ("molette", "défile le chat (3 lignes/cran)"),
             ("PageUp/PageDown", "défile par page · Home/End"),
             ("Ctrl+↑/↓", "saute au tour précédent/suivant"),
@@ -278,6 +279,10 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             (
                 "Shift+Tab",
                 "change le mode (承 approve → 智 smart → 自 auto) — sceau à gauche de la barre d'état",
+            ),
+            (
+                "barre d'état",
+                "sceau coloré = mode · 在 lieu ⟩ branche · 炭 tokens ↑entrée ↓sortie · $ coût · 火 outil en cours",
             ),
             ("Esc", "interrompt · Ctrl+C quitte"),
             ("Option+glisser", "sélectionner du texte"),
@@ -304,6 +309,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             "e éditer ($EDITOR, nvim hôte ou pane Zellij/tmux selon KAJI_EDIT_MODE) · /edit <chemin>",
             "Ctrl+S steer : envoie les messages en file au tour en cours",
             "Shift+Tab change le mode (承 approve → 智 smart → 自 auto) — sceau à gauche de la barre d'état",
+            "barre d'état sceau coloré = mode · 在 lieu ⟩ branche · 炭 tokens ↑entrée ↓sortie · $ coût · 火 outil en cours",
             "Esc interrompt · Ctrl+C quitte",
         ] {
             lines.push(vec![RoledSpan::new(text, content_role)]);
@@ -584,6 +590,14 @@ fn startup_edit_mode() -> (editors::EditMode, Option<String>) {
     }
 }
 
+/// `KAJI_ICONS` — même précédence env > config que `KAJI_EDIT_MODE`. Une
+/// valeur inconnue ne bloque jamais le lancement : les icônes s'appliquent,
+/// et l'avertissement est rendu par l'appelant après `maybe_push_welcome`.
+fn startup_icons() -> (icons::IconSet, Option<String>) {
+    let value = Config::global().get_param::<String>("KAJI_ICONS").ok();
+    icons::resolve(value.as_deref())
+}
+
 /// Ce que kaji voit de son terminal hôte — lu une fois au démarrage, jamais
 /// relu : ces variables ne changent pas en cours de session.
 fn launch_context(working_dir: &Path) -> editors::LaunchContext {
@@ -835,6 +849,8 @@ async fn event_loop(
     app.editors = startup_editors();
     let (edit_mode, edit_mode_warning) = startup_edit_mode();
     app.edit_mode = edit_mode;
+    let (icons, icons_warning) = startup_icons();
+    app.icons = icons;
     app.launch_ctx = launch_context(&working_dir);
     app.request_git_refresh();
     let theme_warning = apply_startup_theme();
@@ -844,6 +860,9 @@ async fn event_loop(
         app.push_system(&warning);
     }
     if let Some(warning) = edit_mode_warning {
+        app.push_system(&warning);
+    }
+    if let Some(warning) = icons_warning {
         app.push_system(&warning);
     }
     let disabled_checkpoints = checkpoints_disabled_line(
@@ -888,7 +907,7 @@ async fn event_loop(
         // over the editor.
         let mut edit_request: Option<(PathBuf, Option<usize>)> = None;
         tokio::select! {
-            _ = tick.tick(), if app.turn_active || app.turn_pending => {}
+            _ = tick.tick(), if app.turn_active || app.turn_pending || app.seal_unfolded() => {}
             _ = git_tick.tick() => app.request_git_refresh(),
             ev = input_rx.recv() => {
                 let Some(ev) = ev else { break };
@@ -1530,6 +1549,11 @@ fn seed_chat(app: &mut App, conversation: &kaji::conversation::Conversation) {
 fn maybe_push_welcome(app: &mut App) {
     if app.chat.is_empty() {
         push_welcome(app, false);
+        app.push_system(&format!(
+            "{} · Shift+Tab pour changer",
+            app::mode_line(app.kaji_mode)
+        ));
+        app.unfold_seal();
     }
 }
 
@@ -2358,6 +2382,47 @@ mod tests {
         assert!(!text.contains("↑/↓ rappelle"));
         assert!(text.contains("PageUp/PageDown/Home/End"));
         assert!(text.contains("Ctrl+↑/↓"));
+    }
+
+    /// Le mode est une information de sécurité : au premier démarrage la
+    /// session dit en clair ce qu'il autorise, et par où en changer.
+    #[test]
+    fn maybe_push_welcome_says_what_the_current_mode_allows() {
+        let mut app = App::new(None);
+        app.kaji_mode = KajiMode::Approve;
+
+        maybe_push_welcome(&mut app);
+
+        let text = welcome_text(&app);
+        assert!(text.contains(&app::mode_line(KajiMode::Approve)), "{text}");
+        assert!(text.contains("Shift+Tab pour changer"), "{text}");
+    }
+
+    /// La légende de la barre reste en texte pur : un `/help` qui rendrait des
+    /// glyphes PUA serait illisible sur le terminal qui a justement besoin de
+    /// la légende.
+    #[test]
+    fn push_welcome_explains_the_status_bar_without_a_private_use_glyph() {
+        for mouse_enabled in [true, false] {
+            let mut app = App::new(None);
+            app.mouse_enabled = mouse_enabled;
+
+            push_welcome(&mut app, true);
+
+            let text = welcome_text(&app);
+            assert!(
+                text.contains("barre d'état"),
+                "souris={mouse_enabled} : {text}"
+            );
+            assert!(
+                text.contains(&format!("{} outil en cours", theme::FIRE_GLYPH)),
+                "souris={mouse_enabled} : {text}"
+            );
+            assert!(
+                !text.chars().any(|c| ('\u{e000}'..='\u{f8ff}').contains(&c)),
+                "souris={mouse_enabled} : {text}"
+            );
+        }
     }
 
     #[test]

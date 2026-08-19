@@ -9,16 +9,20 @@ pub struct Palette {
     pub name: &'static str,
     /// Texte courant.
     pub text: Color,
-    /// Lignes système, raisonnement, ambiance de démarrage.
+    /// Lignes système, raisonnement, ambiance de démarrage — l'inerte, ce qui
+    /// ne demande rien.
     pub muted: Color,
-    /// Préfixe utilisateur.
+    /// Préfixe utilisateur — l'indigo est l'humain, partout où c'est lui qui
+    /// décide.
     pub user: Color,
     /// Bande de fond sous les prompts utilisateur, seul repère qui les
     /// distingue des réponses quand les teintes de texte se ressemblent.
     pub user_bg: Color,
-    /// Titres, agent, en-têtes de tableau.
+    /// Titres, agent, en-têtes de tableau — l'or est kaji lui-même et ce qu'il
+    /// vaut.
     pub gold: Color,
-    /// Accent actif : étage en cours, spinner, curseur, alerte.
+    /// Accent actif : étage en cours, spinner, curseur, alerte — le chaud, ce
+    /// qui tourne maintenant.
     pub accent: Color,
     pub border_inactive: Color,
     /// Fond des puces de code inline.
@@ -173,6 +177,10 @@ pub fn accent_color() -> Color {
     active().accent
 }
 
+pub fn muted_color() -> Color {
+    active().muted
+}
+
 pub fn chart_alt_color() -> Color {
     active().chart_alt
 }
@@ -221,9 +229,10 @@ pub const TOOL_GLYPH: &str = "工";
 pub const ELAPSED_GLYPH: &str = "刻";
 pub const GATE_GLYPH: &str = "門";
 /// Forge de la barre d'état : le charbon compte les tokens, le feu ne brûle
-/// que pendant un tour.
+/// que pendant un tour et dit ce qu'il brûle — un outil, ou la réflexion.
 pub const TOKENS_GLYPH: &str = "炭";
 pub const FIRE_GLYPH: &str = "火";
+pub const THINKING_GLYPH: &str = "思";
 /// Sépare le lieu de la branche sur la barre d'état — une seule cellule, à la
 /// différence des glyphes ci-dessus.
 pub const PLACE_SEPARATOR: &str = "⟩";
@@ -292,13 +301,13 @@ pub fn accent() -> Style {
     Style::default().fg(active().accent)
 }
 
-/// Sceau (hanko) du mode, à gauche de la barre d'état : toujours vermillon,
-/// c'est le kanji qui porte le mode. `REVERSED` passe l'accent en fond, donc
-/// le kanji reprend la couleur de fond du terminal et reste lisible en thème
-/// clair comme en sombre, sans couleur de texte codée en dur.
-pub fn seal() -> Style {
+/// Sceau (hanko) du mode, à gauche de la barre d'état : la couleur vient du
+/// mode (`statusbar::mode_color`), le kanji le nomme. `REVERSED` passe cette
+/// couleur en fond, donc le kanji reprend la couleur de fond du terminal et
+/// reste lisible en thème clair comme en sombre, sans couleur codée en dur.
+pub fn seal(color: Color) -> Style {
     Style::default()
-        .fg(active().accent)
+        .fg(color)
         .add_modifier(Modifier::REVERSED | Modifier::BOLD)
 }
 
@@ -409,6 +418,7 @@ mod tests {
             GATE_GLYPH,
             TOKENS_GLYPH,
             FIRE_GLYPH,
+            THINKING_GLYPH,
         ] {
             assert_eq!(ratatui::text::Span::raw(glyph).width(), 2, "{glyph}");
         }

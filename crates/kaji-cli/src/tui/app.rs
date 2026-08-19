@@ -1,5 +1,6 @@
 use crate::tui::editors::{self, EditMode, EditorSpec, EditorState, Launch, LaunchContext};
 use crate::tui::gitstatus::GitStatus;
+use crate::tui::icons::IconSet;
 use crate::tui::theme::SpanRole;
 use crate::tui::ui::sanitize_for_display;
 use crate::tui::{diff, theme};
@@ -26,6 +27,10 @@ use std::time::{Duration, Instant};
 
 const SCROLL_PAGE: u16 = 10;
 const SCROLL_WHEEL: u16 = 3;
+
+/// Combien de temps le sceau garde son mot déplié — le temps de le lire au
+/// démarrage et après un Shift+Tab, pas plus : la barre revient au silence.
+const SEAL_UNFOLD: Duration = Duration::from_secs(4);
 
 /// Rows the file finder ever paints, however many paths matched — the list is
 /// scanned with the eyes, not scrolled through by the thousand.
@@ -340,8 +345,24 @@ pub fn kaji_mode_badge(mode: KajiMode) -> &'static str {
     }
 }
 
-/// The kanji the status bar's seal carries. The seal is vermilion whatever the
-/// mode, so this glyph is the only thing that says which one is running.
+/// Ce que le mode autorise, en une ligne — poussée au démarrage et à chaque
+/// Shift+Tab, seule source du libellé pour les deux.
+pub fn mode_line(mode: KajiMode) -> String {
+    let promise = match mode {
+        KajiMode::Approve => "kaji demande avant chaque outil",
+        KajiMode::SmartApprove => "kaji demande pour les outils risqués",
+        KajiMode::Auto => "kaji agit sans demander",
+        KajiMode::Chat => "aucun outil",
+    };
+    format!(
+        "mode : {} {} — {promise}",
+        kaji_mode_badge(mode),
+        kaji_mode_seal(mode)
+    )
+}
+
+/// The kanji the status bar's seal carries, and the colour the bar gives it
+/// (`statusbar::mode_color`), are what say which mode is running.
 pub fn kaji_mode_seal(mode: KajiMode) -> &'static str {
     match mode {
         KajiMode::Auto => "自",
@@ -658,6 +679,13 @@ pub struct App {
     /// cycles: the badge must update on the redraw that follows the keypress,
     /// not after the agent round-trip the event loop then performs.
     pub kaji_mode: KajiMode,
+    /// Jusqu'à quand le sceau de la barre d'état déplie le mot du mode —
+    /// `None` au repos. Posé par [`App::unfold_seal`] au démarrage et à chaque
+    /// changement de mode.
+    seal_unfolded_until: Option<Instant>,
+    /// `KAJI_ICONS` — env > config, défaut `Nerd`. Posé par `event_loop` au
+    /// démarrage : `App::new` ne lit pas la config.
+    pub icons: IconSet,
     /// Checkpoint id awaiting y/n confirmation from `/restore <id>` — mirrors
     /// `tool_approval`'s shape (an `Option` carrying the payload the modal
     /// needs, taken by `event_loop` rather than cleared inline in
@@ -847,6 +875,8 @@ impl App {
             tool_approval: None,
             approval_detail: None,
             kaji_mode: KajiMode::default(),
+            seal_unfolded_until: None,
+            icons: IconSet::Nerd,
             pending_restore: None,
             pending_restore_files_only: false,
             driver: PassDriver::Idle,
@@ -1703,7 +1733,7 @@ impl App {
     fn run_editor_mode_command(&mut self, arg: &str) -> Action {
         if arg.is_empty() {
             self.push_system(&format!(
-                "mode : {} (effectif : {})",
+                "éditeur : {} (effectif : {})",
                 self.edit_mode.as_str(),
                 self.effective_edit_mode_label()
             ));
@@ -1716,7 +1746,7 @@ impl App {
             return Action::None;
         };
         self.edit_mode = mode;
-        self.push_system(&format!("mode : {}", mode.as_str()));
+        self.push_system(&format!("éditeur : {}", mode.as_str()));
         Action::EditMode(mode.as_str().to_string())
     }
 
@@ -2427,8 +2457,27 @@ impl App {
     /// the caller owns the agent update and the config write.
     pub fn cycle_kaji_mode(&mut self) -> KajiMode {
         self.kaji_mode = next_kaji_mode(self.kaji_mode);
-        self.push_system(&format!("mode : {}", kaji_mode_badge(self.kaji_mode)));
+        self.push_system(&mode_line(self.kaji_mode));
+        self.unfold_seal();
         self.kaji_mode
+    }
+
+    /// Déplie le mot du mode à côté du sceau : le kanji seul ne se traduit pas
+    /// tout seul la première fois qu'on le voit.
+    pub fn unfold_seal(&mut self) {
+        self.seal_unfolded_until = Some(Instant::now() + SEAL_UNFOLD);
+    }
+
+    pub fn seal_unfolded(&self) -> bool {
+        self.seal_unfolded_until
+            .is_some_and(|until| until > Instant::now())
+    }
+
+    /// Ce que le feu de la barre d'état brûle : le dernier outil demandé qui
+    /// attend encore sa réponse.
+    pub fn current_tool(&self) -> Option<&str> {
+        let idx = *self.pending_tools.values().max()?;
+        Some(self.chat.get(idx)?.tool.as_ref()?.name.as_str())
     }
 
     /// Arms the `/restore <id>` y/n modal — mirrors `start_pass` pushing its
@@ -4665,7 +4714,7 @@ mod tests {
             Action::EditMode("pane".to_string())
         );
         assert_eq!(app.edit_mode, EditMode::Pane);
-        assert!(last_line(&app).contains("mode : pane"));
+        assert!(last_line(&app).contains("éditeur : pane"));
     }
 
     /// Comme `list`/`reset`, `mode` est insensible à la casse.
@@ -4687,7 +4736,7 @@ mod tests {
 
         assert_eq!(submit(&mut app, "/editor mode"), Action::None);
         assert!(
-            last_line(&app).contains("mode : auto"),
+            last_line(&app).contains("éditeur : auto"),
             "{}",
             last_line(&app)
         );
@@ -6494,8 +6543,69 @@ mod tests {
                 .last()
                 .expect("system line pushed")
                 .text
-                .contains(&format!("mode : {}", kaji_mode_badge(expected)))
+                .contains(&mode_line(expected))
         );
+    }
+
+    /// Le kanji seul ne se traduit pas : le changement de mode déplie le mot à
+    /// côté du sceau, le temps de le lire.
+    #[test]
+    fn shift_tab_unfolds_the_seal() {
+        let mut app = App::new(None);
+
+        assert!(!app.seal_unfolded(), "replié au repos");
+        app.on_event(&key(KeyCode::BackTab));
+
+        assert!(app.seal_unfolded());
+    }
+
+    #[test]
+    fn the_unfolded_seal_folds_back_once_its_delay_has_run_out() {
+        let mut app = App::new(None);
+        app.unfold_seal();
+
+        app.seal_unfolded_until = Some(Instant::now() - Duration::from_secs(1));
+
+        assert!(!app.seal_unfolded());
+    }
+
+    #[test_case(KajiMode::Approve, "approve", "承", "kaji demande avant chaque outil"; "approve")]
+    #[test_case(KajiMode::SmartApprove, "smart", "智", "kaji demande pour les outils risqués"; "smart")]
+    #[test_case(KajiMode::Auto, "auto", "自", "kaji agit sans demander"; "auto")]
+    #[test_case(KajiMode::Chat, "chat", "話", "aucun outil"; "chat")]
+    fn mode_line_says_the_word_the_kanji_and_what_the_mode_allows(
+        mode: KajiMode,
+        word: &str,
+        kanji: &str,
+        promise: &str,
+    ) {
+        assert_eq!(
+            mode_line(mode),
+            format!("mode : {word} {kanji} — {promise}")
+        );
+    }
+
+    /// Le feu de la barre d'état dit l'outil en cours — le dernier demandé qui
+    /// attend encore sa réponse, pas le premier de la file.
+    #[test]
+    fn current_tool_names_the_last_request_still_waiting() {
+        let mut app = App::new(None);
+        assert_eq!(app.current_tool(), None);
+
+        app.apply_agent_event(&AgentEvent::Message(
+            Message::assistant().with_tool_request("t1", Ok(CallToolRequestParams::new("shell"))),
+        ));
+        app.apply_agent_event(&AgentEvent::Message(
+            Message::assistant().with_tool_request("t2", Ok(CallToolRequestParams::new("write"))),
+        ));
+
+        assert_eq!(app.current_tool(), Some("write"));
+
+        app.apply_agent_event(&AgentEvent::Message(
+            Message::user().with_tool_response("t2", Ok(CallToolResult::success(vec![]))),
+        ));
+
+        assert_eq!(app.current_tool(), Some("shell"));
     }
 
     /// Shift+Tab is the reflex for "previous item" while a list is open, and
