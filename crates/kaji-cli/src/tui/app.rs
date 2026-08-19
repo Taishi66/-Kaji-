@@ -1892,10 +1892,11 @@ impl App {
     }
 
     /// Rows of file content the pane paints, from the last measured geometry
-    /// minus its two borders (the header rides the top border as a title).
-    /// Floors at one so a viewer that has never been drawn still scrolls.
+    /// minus its two borders (the header rides the top border as a title) and
+    /// les deux lignes de marge intérieure de `draw_viewer`. Floors at one so a
+    /// viewer that has never been drawn still scrolls.
     fn viewer_viewport(&self) -> usize {
-        usize::from(self.viewer_area.get().height.saturating_sub(2)).max(1)
+        usize::from(self.viewer_area.get().height.saturating_sub(4)).max(1)
     }
 
     fn point_in_viewer(&self, column: u16, row: u16) -> bool {
@@ -4133,7 +4134,8 @@ mod tests {
     }
 
     /// Viewer open on a 200-line file, with the geometry `draw_viewer` would
-    /// have measured: a 20-line viewport, so the half-page jumps are testable.
+    /// have measured: 24 lignes moins deux bordures et deux marges, soit un
+    /// viewport de 20 lignes, so the half-page jumps are testable.
     fn app_with_open_viewer() -> (App, tempfile::TempDir) {
         let (mut app, dir) = app_with_mention_fixture();
         std::fs::write(dir.path().join("long.txt"), "x\n".repeat(200)).unwrap();
@@ -4142,7 +4144,7 @@ mod tests {
             x: 60,
             y: 1,
             width: 40,
-            height: 22,
+            height: 24,
         });
         (app, dir)
     }

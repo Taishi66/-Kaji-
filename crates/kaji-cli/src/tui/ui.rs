@@ -86,7 +86,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // progress and the turn's chrono remain visible while reading.
     let column = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .constraints([Constraint::Min(3), Constraint::Length(5)])
         .split(main_area);
 
     match app.zoomed_viewer() {
@@ -183,18 +183,40 @@ const CHAT_MAX_WIDTH: u16 = 102;
 /// borders — applied on both sides, inside the width cap above.
 const CHAT_HORIZONTAL_MARGIN: u16 = 1;
 
+/// Le vide (間) que tout volet bordé garde sous sa bordure haute et au-dessus
+/// de sa bordure basse.
+const PANE_VERTICAL_MARGIN: u16 = 1;
+
+/// Marge gauche des volets dont le texte est coupé plutôt qu'enroulé
+/// (composer, lecteur, explorateur, SPEC) — le chat a la sienne, appliquée des
+/// deux côtés sous son plafond de largeur.
+const PANE_LEFT_MARGIN: u16 = 1;
+
 fn chat_width(inner_width: u16) -> u16 {
     inner_width.min(CHAT_MAX_WIDTH)
 }
 
 /// Applies the width cap, then the horizontal margin inside it — every
 /// downstream measurement (wrapped_rows, chat_overflow) must read
-/// `chat_rect.width` rather than recompute it, so they stay in sync.
+/// `chat_rect.width`/`chat_rect.height` rather than recompute them, so they
+/// stay in sync.
 fn chat_content_rect(inner: Rect) -> Rect {
     Rect {
         x: inner.x + CHAT_HORIZONTAL_MARGIN,
+        y: inner.y + PANE_VERTICAL_MARGIN,
         width: chat_width(inner.width).saturating_sub(CHAT_HORIZONTAL_MARGIN * 2),
-        ..inner
+        height: inner.height.saturating_sub(PANE_VERTICAL_MARGIN * 2),
+    }
+}
+
+/// Zone de texte d'un volet bordé, marges comprises. Le bloc, lui, reste
+/// dessiné sur `area` : les bordures et leurs titres n'ont pas de marge.
+fn pane_content_rect(inner: Rect) -> Rect {
+    Rect {
+        x: inner.x + PANE_LEFT_MARGIN,
+        y: inner.y + PANE_VERTICAL_MARGIN,
+        width: inner.width.saturating_sub(PANE_LEFT_MARGIN),
+        height: inner.height.saturating_sub(PANE_VERTICAL_MARGIN * 2),
     }
 }
 
@@ -407,14 +429,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(theme::border_inactive())
         .title(Span::styled(title, title_style));
-    let inner = block.inner(area);
-    // Left breathing room so the text/cursor doesn't collide with the border,
-    // mirroring the chat's `CHAT_HORIZONTAL_MARGIN`.
-    let content = Rect {
-        x: inner.x + 1,
-        width: inner.width.saturating_sub(1),
-        ..inner
-    };
+    let content = pane_content_rect(block.inner(area));
 
     let paragraph = if app.input.is_empty() && !app.turn_active {
         if app.suggestion_loading {
@@ -883,7 +898,7 @@ fn draw_explorer(frame: &mut Frame, app: &App, explorer: &ExplorerState, area: R
         ))
         .title_bottom(Line::from(footer).style(theme::dim()));
 
-    let rows = usize::from(area.height.saturating_sub(2)).max(1);
+    let rows = usize::from(area.height.saturating_sub(2 + PANE_VERTICAL_MARGIN * 2)).max(1);
     let visible = explorer.visible();
     let position = visible
         .iter()
@@ -916,7 +931,9 @@ fn draw_explorer(frame: &mut Frame, app: &App, explorer: &ExplorerState, area: R
             Line::from(Span::styled(format!("{indent}{glyph}{label}"), style))
         })
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+    let content = pane_content_rect(block.inner(area));
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(Text::from(lines)), content);
 }
 
 /// Read-only file pane (task 8). Lines are already sanitized and tab-expanded
@@ -924,7 +941,7 @@ fn draw_explorer(frame: &mut Frame, app: &App, explorer: &ExplorerState, area: R
 /// numbers keep matching the file's.
 fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
     app.viewer_area.set(area);
-    let visible = area.height.saturating_sub(2) as usize;
+    let visible = area.height.saturating_sub(2 + PANE_VERTICAL_MARGIN * 2) as usize;
     let total = viewer.lines.len();
     let first = viewer.scroll.min(total.saturating_sub(1));
     let title = if viewer.binary {
@@ -988,7 +1005,9 @@ fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
             })
             .collect()
     };
-    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+    let content = pane_content_rect(block.inner(area));
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(Text::from(lines)), content);
 }
 
 fn draw_spec(frame: &mut Frame, app: &App, area: Rect) {
@@ -1024,7 +1043,9 @@ fn draw_spec(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(theme::border_inactive())
         .title(" SPEC ");
-    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+    let content = pane_content_rect(block.inner(area));
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(Text::from(lines)), content);
 }
 
 /// The `/restore` y/n confirmation. When the target is a pre-restore
@@ -1406,6 +1427,34 @@ mod tests {
         let rect = chat_content_rect(narrow);
         assert_eq!(rect.x, 2);
         assert_eq!(rect.width, 38);
+    }
+
+    /// Le vide (間) autour du texte : une ligne sous la bordure haute, une
+    /// au-dessus de la bordure basse.
+    #[test]
+    fn chat_content_rect_reserves_a_blank_row_above_and_below_the_text() {
+        let inner = Rect {
+            x: 1,
+            y: 1,
+            width: 80,
+            height: 10,
+        };
+        let rect = chat_content_rect(inner);
+        assert_eq!(rect.y, 2);
+        assert_eq!(rect.height, 8);
+    }
+
+    /// Un volet trop court pour ses marges rend zéro ligne plutôt que de
+    /// déborder sur ses bordures.
+    #[test]
+    fn chat_content_rect_saturates_on_a_pane_too_short_for_its_margins() {
+        let inner = Rect {
+            x: 1,
+            y: 1,
+            width: 80,
+            height: 1,
+        };
+        assert_eq!(chat_content_rect(inner).height, 0);
     }
 
     use kaji::agents::AgentEvent;
@@ -1900,7 +1949,7 @@ mod tests {
             .split(root[1]);
         let left = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
+            .constraints([Constraint::Min(3), Constraint::Length(5)])
             .split(cols[0]);
         let input_area = left[1];
 
@@ -2793,6 +2842,160 @@ mod tests {
             assert!(
                 content.contains(theme::VIEWER_GLYPH),
                 "lecteur absent @ {width}, got:\n{content}"
+            );
+        }
+    }
+
+    /// Ce qu'une ligne rendue porte entre ses bordures verticales : vide pour
+    /// une ligne de marge.
+    fn between_borders(row: &str) -> &str {
+        row.trim_matches(|c: char| c == '│' || c == ' ')
+    }
+
+    fn row_index(content: &str, needle: &str) -> usize {
+        content
+            .lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} absent de :\n{content}"))
+    }
+
+    fn drawn_at(width: u16, height: u16, render: impl FnOnce(&mut Frame)) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(render)
+            .expect("draw must succeed against a TestBackend");
+        buffer_as_string(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn the_chat_leaves_a_blank_row_under_its_top_border() {
+        let mut app = App::new(None);
+        app.push_user("bonjour");
+
+        let content = rendered(&app, 100, 20);
+        let rows: Vec<&str> = content.lines().collect();
+        let top = row_index(&content, "┌ chat");
+
+        assert_eq!(between_borders(rows[top + 1]), "", "got:\n{content}");
+        assert!(rows[top + 2].contains("bonjour"), "got:\n{content}");
+    }
+
+    #[test]
+    fn the_composer_frames_its_input_line_with_a_blank_row() {
+        let app = App::new(None);
+
+        let content = rendered(&app, 100, 20);
+        let rows: Vec<&str> = content.lines().collect();
+        let top = row_index(&content, "┌ message");
+
+        assert_eq!(between_borders(rows[top + 1]), "", "got:\n{content}");
+        assert!(rows[top + 2].contains("écris ici…"), "got:\n{content}");
+        assert_eq!(between_borders(rows[top + 3]), "", "got:\n{content}");
+        assert!(rows[top + 4].contains('└'), "got:\n{content}");
+    }
+
+    /// Le défilement au plus bas (`End`) s'arrête sur la marge, pas sous la
+    /// bordure : la hauteur utile du chat est celle de `chat_content_rect`.
+    #[test]
+    fn the_chat_keeps_its_bottom_margin_when_scrolled_to_the_end() {
+        let mut app = App::new(None);
+        for i in 1..=50 {
+            app.push_system(&format!("ligne{i}"));
+        }
+
+        let content = rendered(&app, 100, 20);
+        let rows: Vec<&str> = content.lines().collect();
+        let top = row_index(&content, "┌ chat");
+        let bottom = top
+            + 1
+            + rows[top + 1..]
+                .iter()
+                .position(|row| row.contains('└'))
+                .expect("bordure basse du chat");
+
+        assert_eq!(between_borders(rows[bottom - 1]), "", "got:\n{content}");
+        assert!(content.contains("ligne50"), "got:\n{content}");
+        // Chaque ligne de chat est suivie d'une ligne vide : 50 messages font
+        // 100 rangées pour une zone de 9 (volet de 13 moins deux bordures et
+        // deux marges), donc un défilement qui démarre rangée 91 — la ligne
+        // vide de « ligne46 », dont le texte est déjà passé au-dessus.
+        assert!(!content.contains("ligne46"), "got:\n{content}");
+        assert!(content.contains("ligne47"), "got:\n{content}");
+    }
+
+    #[test]
+    fn the_viewer_frames_its_lines_with_a_blank_row_and_a_left_column() {
+        let file: String = (1..=100).map(|i| format!("ligne{i}\n")).collect();
+        let (mut app, _dir) = app_on_a_project("n.txt", &file);
+        app.open_viewer("n.txt");
+
+        let content = drawn_at(60, 20, |frame| {
+            draw_viewer(
+                frame,
+                &app,
+                app.viewer.as_ref().expect("lecteur ouvert"),
+                frame.area(),
+            )
+        });
+        let rows: Vec<&str> = content.lines().collect();
+
+        assert_eq!(between_borders(rows[1]), "", "got:\n{content}");
+        assert_eq!(
+            column_of(rows[2], "ligne1"),
+            6,
+            "bordure + marge + numéro sur 3 colonnes + espace, got:\n{content}"
+        );
+        assert!(content.contains("ligne16"), "16 lignes, got:\n{content}");
+        assert!(!content.contains("ligne17"), "got:\n{content}");
+        assert_eq!(between_borders(rows[18]), "", "got:\n{content}");
+    }
+
+    #[test]
+    fn the_explorer_frames_its_entries_with_a_blank_row_and_a_left_column() {
+        let (mut app, dir) = app_on_a_project("f01.txt", "x");
+        for i in 2..=12 {
+            std::fs::write(dir.path().join(format!("f{i:02}.txt")), "x").unwrap();
+        }
+        app.toggle_explorer();
+
+        let content = drawn_at(40, 12, |frame| {
+            draw_explorer(
+                frame,
+                &app,
+                app.explorer.as_ref().expect("explorateur ouvert"),
+                frame.area(),
+            )
+        });
+        let rows: Vec<&str> = content.lines().collect();
+
+        assert_eq!(between_borders(rows[1]), "", "got:\n{content}");
+        assert_eq!(
+            column_of(rows[2], "f01.txt"),
+            4,
+            "bordure + marge + glyphe de fichier, got:\n{content}"
+        );
+        assert!(content.contains("f08.txt"), "8 entrées, got:\n{content}");
+        assert!(!content.contains("f09.txt"), "got:\n{content}");
+        assert_eq!(between_borders(rows[10]), "", "got:\n{content}");
+    }
+
+    #[test]
+    fn a_short_terminal_keeps_its_status_bar_and_does_not_panic() {
+        let mut app = App::new(None);
+        app.push_user("bonjour");
+
+        for height in [8u16, 10, 12] {
+            let content = rendered(&app, 80, height);
+            let rows: Vec<&str> = content.lines().collect();
+            assert_eq!(rows.len(), usize::from(height));
+            assert!(
+                rows[usize::from(height) - 1]
+                    .contains(crate::tui::app::kaji_mode_seal(app.kaji_mode)),
+                "barre d'état @ {height}, got:\n{content}"
             );
         }
     }
