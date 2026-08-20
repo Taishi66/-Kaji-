@@ -1,6 +1,8 @@
 # Barre hanko lisible (icône Octicons + couleur par mode) + marges intérieures des volets — Implementation Plan
 
 > Contrôleur : Fable (planifie, review, rulings). Exécuteur : Opus. Décisions user en session 2026-08-19 : garder le sceau kanji, **icône de traduction Nerd Font Octicons** (choix « OCT » sur aperçu terminal), couleur du sceau par mode, marges haut/bas dans les volets (« caractères collés aux bordures », capture 2026-08-19 09:14).
+>
+> **État 2026-08-20 : plan terminé.** T1 livrée (`1882adefd`), T2 livrée (`8ac2f7c56`) et reviewée conforme sur les 8 points de spec (codepoints f456/f510/f52a/f442 exacts, ligne de boot gardée `--resume` dans `maybe_push_welcome`, 850 tests verts, clippy vert). Validation manuelle user 2026-08-20 : Ctrl+E et Ctrl+P fonctionnels. Écart mineur accepté : `truncate_tool_name` compte des chars, pas des cellules — sans effet sur les noms d'outils ASCII.
 
 **Goal:** (T1) aérer la TUI : une ligne de marge en haut et en bas à l'intérieur de chaque volet bordé, une colonne à gauche/droite là où elle manque. (T2) rendre le mode compréhensible d'un coup d'œil : sceau coloré selon le mode + icône Octicons (famille verrou), légende dépliée 4 s au boot et au changement de mode, `火` qui dit *quoi* (outil / réflexion) au lieu de doublonner le chrono, ligne de boot, `/help`, désambiguïsation `mode :` / `éditeur :`. Repli texte (`KAJI_ICONS=text`) = barre actuelle sans icône.
 
