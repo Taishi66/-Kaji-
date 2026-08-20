@@ -126,10 +126,17 @@ impl ForgeState {
         }
     }
 
+    /// Annuler la dernière tâche vive arme le repli au lieu de fermer le volet
+    /// net : l'annulation est un verdict, elle se lit comme les autres.
     pub fn mark_cancelled(&mut self, id: &str) {
-        if let Some(task) = self.tasks.get_mut(id) {
-            task.status = ForgeStatus::Cancelled;
-            task.current_tool = None;
+        let had_running = self.running_count() > 0;
+        let Some(task) = self.tasks.get_mut(id) else {
+            return;
+        };
+        task.status = ForgeStatus::Cancelled;
+        task.current_tool = None;
+        if had_running && self.running_count() == 0 {
+            self.folds_at = Some(Instant::now() + FORGE_FOLD);
         }
     }
 
@@ -254,6 +261,34 @@ mod tests {
 
         assert_eq!(state.tasks["t1"].status, ForgeStatus::Cancelled);
         assert_eq!(state.running_count(), 0);
+    }
+
+    #[test]
+    fn cancelling_the_last_live_task_arms_the_fold() {
+        let mut state = ForgeState::default();
+        state.apply_snapshot(vec![snapshot("t1", SubagentTaskStatus::Running)]);
+
+        state.mark_cancelled("t1");
+
+        let armed = state.folds_at.expect("repli armé à l'annulation");
+        assert!(state.visible(), "le volet se replie, il ne claque pas");
+
+        state.apply_snapshot(vec![]);
+        assert_eq!(state.folds_at, Some(armed));
+    }
+
+    #[test]
+    fn cancelling_one_of_several_leaves_the_fold_unarmed() {
+        let mut state = ForgeState::default();
+        state.apply_snapshot(vec![
+            snapshot("t1", SubagentTaskStatus::Running),
+            snapshot("t2", SubagentTaskStatus::Running),
+        ]);
+
+        state.mark_cancelled("t1");
+
+        assert!(state.folds_at.is_none(), "la forge tourne encore");
+        assert_eq!(state.running_count(), 1);
     }
 
     #[test]
