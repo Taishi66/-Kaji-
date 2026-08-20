@@ -1,5 +1,5 @@
 use crate::agents::extension::PlatformExtensionContext;
-use crate::agents::mcp_client::{Error, McpClientTrait};
+use crate::agents::mcp_client::{Error, McpClientTrait, SubagentTaskSnapshot, SubagentTaskStatus};
 use crate::agents::subagent_handler::{run_subagent_task, OnMessageCallback, SubagentRunParams};
 use crate::agents::subagent_task_config::{TaskConfig, DEFAULT_SUBAGENT_MAX_TURNS};
 use crate::agents::tool_execution::ToolCallContext;
@@ -2070,6 +2070,56 @@ impl McpClientTrait for SummonClient {
 
         Some(lines.join("\n"))
     }
+
+    async fn subagent_snapshot(&self) -> Vec<SubagentTaskSnapshot> {
+        self.cleanup_completed_tasks().await;
+
+        let mut snapshots: Vec<SubagentTaskSnapshot> = self
+            .background_tasks
+            .lock()
+            .await
+            .values()
+            .map(|task| SubagentTaskSnapshot {
+                id: task.id.clone(),
+                description: task.description.clone(),
+                status: SubagentTaskStatus::Running,
+                turns: task.turns.load(Ordering::Relaxed),
+                elapsed_secs: task.started_at.elapsed().as_secs(),
+                result: None,
+                error: None,
+            })
+            .collect();
+
+        snapshots.extend(self.completed_tasks.lock().await.values().map(|task| {
+            let (status, result, error) = match &task.result {
+                Ok(output) => (SubagentTaskStatus::Completed, Some(output.clone()), None),
+                Err(message) => (SubagentTaskStatus::Failed, None, Some(message.clone())),
+            };
+            SubagentTaskSnapshot {
+                id: task.id.clone(),
+                description: task.description.clone(),
+                status,
+                turns: task.turns_taken,
+                elapsed_secs: task.duration.as_secs(),
+                result,
+                error,
+            }
+        }));
+
+        snapshots.sort_by(|a, b| a.id.cmp(&b.id));
+        snapshots
+    }
+
+    async fn cancel_subagent(&self, task_id: &str) -> bool {
+        let task = self.background_tasks.lock().await.remove(task_id);
+        match task {
+            Some(task) => {
+                task.cancellation_token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Resolve a requested `working_dir` override against the parent session
@@ -3149,5 +3199,144 @@ You review code."#;
             .await
             .unwrap();
         assert!(extract_text(&result.content[0]).contains("final output"));
+    }
+
+    fn pending_background_task(id: &str, description: &str, turns: u32) -> BackgroundTask {
+        BackgroundTask {
+            id: id.to_string(),
+            description: description.to_string(),
+            started_at: Instant::now(),
+            turns: Arc::new(AtomicU32::new(turns)),
+            last_activity: Arc::new(AtomicU64::new(current_epoch_millis())),
+            handle: tokio::spawn(std::future::pending()),
+            cancellation_token: CancellationToken::new(),
+            notification_buffer: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_subagent_snapshot_reports_running_task() {
+        let client = SummonClient::new(create_test_context()).unwrap();
+
+        client.background_tasks.lock().await.insert(
+            "20260820_1".to_string(),
+            pending_background_task("20260820_1", "Running analysis", 7),
+        );
+
+        let snapshot = client.subagent_snapshot().await;
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].id, "20260820_1");
+        assert_eq!(snapshot[0].description, "Running analysis");
+        assert_eq!(snapshot[0].status, SubagentTaskStatus::Running);
+        assert_eq!(snapshot[0].turns, 7);
+        assert!(snapshot[0].result.is_none());
+        assert!(snapshot[0].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_subagent_snapshot_reports_completed_and_failed_tasks() {
+        let client = SummonClient::new(create_test_context()).unwrap();
+
+        {
+            let mut completed = client.completed_tasks.lock().await;
+            completed.insert(
+                "20260820_1".to_string(),
+                CompletedTask {
+                    id: "20260820_1".to_string(),
+                    description: "Successful task".to_string(),
+                    result: Ok("done".to_string()),
+                    turns_taken: 5,
+                    duration: Duration::from_secs(60),
+                    completed_at: Instant::now(),
+                },
+            );
+            completed.insert(
+                "20260820_2".to_string(),
+                CompletedTask {
+                    id: "20260820_2".to_string(),
+                    description: "Failed task".to_string(),
+                    result: Err("boom".to_string()),
+                    turns_taken: 3,
+                    duration: Duration::from_secs(30),
+                    completed_at: Instant::now(),
+                },
+            );
+        }
+
+        let snapshot = client.subagent_snapshot().await;
+
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].status, SubagentTaskStatus::Completed);
+        assert_eq!(snapshot[0].turns, 5);
+        assert_eq!(snapshot[0].elapsed_secs, 60);
+        assert_eq!(snapshot[0].result.as_deref(), Some("done"));
+        assert!(snapshot[0].error.is_none());
+        assert_eq!(snapshot[1].status, SubagentTaskStatus::Failed);
+        assert_eq!(snapshot[1].turns, 3);
+        assert_eq!(snapshot[1].elapsed_secs, 30);
+        assert!(snapshot[1].result.is_none());
+        assert_eq!(snapshot[1].error.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn test_subagent_snapshot_is_sorted_by_id() {
+        let client = SummonClient::new(create_test_context()).unwrap();
+
+        {
+            let mut running = client.background_tasks.lock().await;
+            running.insert(
+                "20260820_3".to_string(),
+                pending_background_task("20260820_3", "Third", 1),
+            );
+            running.insert(
+                "20260820_1".to_string(),
+                pending_background_task("20260820_1", "First", 1),
+            );
+        }
+        client.completed_tasks.lock().await.insert(
+            "20260820_2".to_string(),
+            CompletedTask {
+                id: "20260820_2".to_string(),
+                description: "Second".to_string(),
+                result: Ok("done".to_string()),
+                turns_taken: 2,
+                duration: Duration::from_secs(10),
+                completed_at: Instant::now(),
+            },
+        );
+
+        let ids: Vec<String> = client
+            .subagent_snapshot()
+            .await
+            .into_iter()
+            .map(|task| task.id)
+            .collect();
+
+        assert_eq!(ids, ["20260820_1", "20260820_2", "20260820_3"]);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_subagent_unknown_task() {
+        let client = SummonClient::new(create_test_context()).unwrap();
+
+        assert!(!client.cancel_subagent("20260820_999").await);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_subagent_running_task() {
+        let client = SummonClient::new(create_test_context()).unwrap();
+        let task = pending_background_task("20260820_1", "Cancellable task", 3);
+        let token = task.cancellation_token.clone();
+
+        client
+            .background_tasks
+            .lock()
+            .await
+            .insert("20260820_1".to_string(), task);
+
+        assert!(client.cancel_subagent("20260820_1").await);
+        assert!(token.is_cancelled());
+        assert!(client.background_tasks.lock().await.is_empty());
     }
 }

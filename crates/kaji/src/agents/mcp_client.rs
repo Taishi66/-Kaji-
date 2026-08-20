@@ -82,6 +82,24 @@ impl KajiMcpHostInfo {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentTaskStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentTaskSnapshot {
+    pub id: String,
+    pub description: String,
+    pub status: SubagentTaskStatus,
+    pub turns: u32,
+    pub elapsed_secs: u64,
+    pub result: Option<String>,
+    pub error: Option<String>,
+}
+
 #[async_trait::async_trait]
 pub trait McpClientTrait: Send + Sync {
     async fn list_tools(
@@ -155,6 +173,18 @@ pub trait McpClientTrait: Send + Sync {
 
     async fn update_working_dir(&self, _new_dir: PathBuf) -> Result<(), Error> {
         Ok(())
+    }
+
+    /// Live view of the subagent tasks the extension tracks; empty unless the
+    /// extension owns subagents (summon overrides this).
+    async fn subagent_snapshot(&self) -> Vec<SubagentTaskSnapshot> {
+        Vec::new()
+    }
+
+    /// Cancel a tracked subagent task; false unless the extension owns
+    /// subagents (summon overrides this).
+    async fn cancel_subagent(&self, _task_id: &str) -> bool {
+        false
     }
 }
 

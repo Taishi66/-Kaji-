@@ -39,8 +39,9 @@ use crate::action_required_manager::ActionRequiredManager;
 use crate::agents::extension::{Envs, ProcessExit};
 use crate::agents::extension_malware_check;
 use crate::agents::mcp_client::{
-    KajiMcpClientCapabilities, KajiMcpHostInfo, McpClient, McpClientTrait,
+    KajiMcpClientCapabilities, KajiMcpHostInfo, McpClient, McpClientTrait, SubagentTaskSnapshot,
 };
+use crate::agents::platform_extensions::summon;
 use crate::builtin_extension::get_builtin_extension;
 use crate::config::extensions::name_to_key;
 use crate::config::search_path::SearchPaths;
@@ -2146,6 +2147,20 @@ impl ExtensionManager {
         }
 
         Ok(vec![ContentBlock::text(output_parts.join("\n"))])
+    }
+
+    pub async fn subagent_snapshot(&self) -> Vec<SubagentTaskSnapshot> {
+        match self.get_server_client(summon::EXTENSION_NAME).await {
+            Some(client) => client.subagent_snapshot().await,
+            None => Vec::new(),
+        }
+    }
+
+    pub async fn cancel_subagent(&self, task_id: &str) -> bool {
+        match self.get_server_client(summon::EXTENSION_NAME).await {
+            Some(client) => client.cancel_subagent(task_id).await,
+            None => false,
+        }
     }
 
     async fn get_server_client(&self, name: impl Into<String>) -> Option<McpClientBox> {

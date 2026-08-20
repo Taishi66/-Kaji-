@@ -11,7 +11,7 @@ use tracing_futures::Instrument;
 use super::container::Container;
 use super::final_output_tool::FinalOutputTool;
 use super::gen_ai_telemetry;
-use super::mcp_client::KajiMcpHostInfo;
+use super::mcp_client::{KajiMcpHostInfo, SubagentTaskSnapshot};
 use super::tool_confirmation_router::ToolConfirmationRouter;
 use super::tool_execution::{
     tool_stream, ToolCallResult, ToolStream, ToolStreamItem, CHAT_MODE_TOOL_SKIPPED_RESPONSE,
@@ -1767,6 +1767,14 @@ impl Agent {
 
     pub async fn get_extension_configs(&self) -> Vec<ExtensionConfig> {
         self.extension_configs_for_persistence().await
+    }
+
+    pub async fn subagent_snapshot(&self) -> Vec<SubagentTaskSnapshot> {
+        self.extension_manager.subagent_snapshot().await
+    }
+
+    pub async fn cancel_subagent(&self, task_id: &str) -> bool {
+        self.extension_manager.cancel_subagent(task_id).await
     }
 
     /// Handle a confirmation response for a tool request
