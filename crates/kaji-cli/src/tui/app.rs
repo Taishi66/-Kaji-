@@ -3,8 +3,8 @@ use crate::tui::gitstatus::GitStatus;
 use crate::tui::icons::IconSet;
 use crate::tui::theme::SpanRole;
 use crate::tui::ui::sanitize_for_display;
-use crate::tui::{diff, theme};
-use kaji::agents::AgentEvent;
+use crate::tui::{diff, forge, theme};
+use kaji::agents::{AgentEvent, SUBAGENT_TOOL_REQUEST_TYPE};
 use kaji::config::KajiMode;
 use kaji::conversation::Conversation;
 use kaji::conversation::message::{
@@ -19,7 +19,7 @@ use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use ratatui::layout::Rect;
-use rmcp::model::{JsonObject, Role};
+use rmcp::model::{JsonObject, Role, ServerNotification};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::Read;
@@ -844,6 +844,9 @@ pub struct App {
     /// [`App::abort_drivers_on_provider_error`]. Re-armed per turn by
     /// `reset_turn_visibility`.
     turn_had_error: bool,
+    /// Le volet 炉 forge : ce que les lames déléguées font, alimenté par le
+    /// tick 1 s d'`event_loop` et par les notifications MCP des subagents.
+    pub forge: forge::ForgeState,
 }
 
 impl App {
@@ -918,6 +921,7 @@ impl App {
             focus: Focus::default(),
             viewer_area: Cell::new(Rect::default()),
             turn_had_error: false,
+            forge: forge::ForgeState::default(),
         }
     }
 
@@ -3153,9 +3157,36 @@ impl App {
             // Usage (both derive from the same provider response) — accumulating
             // both would double the token tally shown in the header.
             AgentEvent::MessageUsage { .. } => {}
+            AgentEvent::McpNotification((_, notification)) => {
+                self.apply_mcp_notification(notification)
+            }
             AgentEvent::HistoryReplaced(_) => self.push_system("— historique compacté —"),
-            _ => {}
         }
+    }
+
+    /// La seule notification MCP que la TUI lit : `subagent_tool_request`, qui
+    /// dit quel outil la lame déléguée vient de demander. Le payload vient d'un
+    /// serveur, jamais de nous — tout champ manquant le fait passer sans bruit.
+    #[expect(deprecated)]
+    fn apply_mcp_notification(&mut self, notification: &ServerNotification) {
+        let ServerNotification::LoggingMessageNotification(log) = notification else {
+            return;
+        };
+        let data = &log.params.data;
+        if data.get("type").and_then(|value| value.as_str()) != Some(SUBAGENT_TOOL_REQUEST_TYPE) {
+            return;
+        }
+        let Some(subagent_id) = data.get("subagent_id").and_then(|value| value.as_str()) else {
+            return;
+        };
+        let Some(tool_name) = data
+            .get("tool_call")
+            .and_then(|call| call.get("name"))
+            .and_then(|name| name.as_str())
+        else {
+            return;
+        };
+        self.forge.apply_tool_notification(subagent_id, tool_name);
     }
 
     fn apply_usage(&mut self, usage: &ProviderUsage) {
@@ -7481,5 +7512,50 @@ mod tests {
         assert_eq!(app.goal.as_ref().expect("un but").iteration, 1);
         let kinds: Vec<&str> = goal_events(&mut app).iter().map(|(k, _)| *k).collect();
         assert_eq!(kinds, vec!["goal_end", "goal_start"]);
+    }
+
+    #[expect(deprecated)]
+    fn logging_notification(data: serde_json::Value) -> AgentEvent {
+        AgentEvent::McpNotification((
+            "req-1".to_string(),
+            ServerNotification::LoggingMessageNotification(rmcp::model::Notification::new(
+                rmcp::model::LoggingMessageNotificationParam::new(
+                    rmcp::model::LoggingLevel::Info,
+                    data,
+                ),
+            )),
+        ))
+    }
+
+    #[test]
+    fn subagent_tool_request_feeds_the_forge() {
+        let mut app = App::new(None);
+
+        app.apply_agent_event(&logging_notification(serde_json::json!({
+            "type": SUBAGENT_TOOL_REQUEST_TYPE,
+            "subagent_id": "task_1",
+            "tool_call": { "name": "developer__shell", "arguments": { "command": "ls" } },
+        })));
+
+        let task = app.forge.tasks.get("task_1").expect("une tâche de forge");
+        assert_eq!(task.current_tool.as_deref(), Some("developer__shell"));
+    }
+
+    #[test_case(serde_json::json!({
+        "type": "autre_chose",
+        "subagent_id": "task_1",
+        "tool_call": { "name": "developer__shell" },
+    }) ; "un autre type de payload")]
+    #[test_case(serde_json::json!({
+        "type": SUBAGENT_TOOL_REQUEST_TYPE,
+        "tool_call": { "name": "developer__shell" },
+    }) ; "sans subagent_id")]
+    #[test_case(serde_json::json!("pas un objet") ; "data qui n'est pas un objet")]
+    fn foreign_payloads_leave_the_forge_untouched(data: serde_json::Value) {
+        let mut app = App::new(None);
+
+        app.apply_agent_event(&logging_notification(data));
+
+        assert!(app.forge.tasks.is_empty());
     }
 }

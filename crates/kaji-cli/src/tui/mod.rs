@@ -2,6 +2,7 @@ pub mod app;
 pub mod diff;
 pub mod editors;
 pub mod explorer;
+pub mod forge;
 pub mod fuzzy;
 pub mod gitstatus;
 pub mod icons;
@@ -51,6 +52,11 @@ use tokio_util::sync::CancellationToken;
 /// terminal left open costs two short `git` calls every 5 s, fast enough that
 /// a commit made in another window shows up on its own.
 const GIT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Le rythme du volet forge : assez rapide pour que le chrono d'une lame
+/// avance à l'œil, assez lent pour qu'un parent au repos ne relise pas l'état
+/// des subagents en boucle.
+const FORGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 pub async fn run(
     agent: Agent,
@@ -899,6 +905,12 @@ async fn event_loop(
     // read that is already in flight is never doubled (`request_git_refresh`).
     let mut git_tick = tokio::time::interval(GIT_REFRESH_INTERVAL);
     git_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Le battement du volet forge. `turn_active` est ce qui fait découvrir la
+    // première tâche — un `delegate` se produit forcément pendant un tour ; les
+    // deux autres gardes prennent le relais quand le parent est retombé au
+    // repos mais que des lames tournent encore.
+    let mut forge_tick = tokio::time::interval(FORGE_REFRESH_INTERVAL);
+    forge_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         terminal.draw(|frame| ui::draw(frame, &app))?;
@@ -909,6 +921,9 @@ async fn event_loop(
         tokio::select! {
             _ = tick.tick(), if app.turn_active || app.turn_pending || app.seal_unfolded() => {}
             _ = git_tick.tick() => app.request_git_refresh(),
+            _ = forge_tick.tick(), if app.turn_active || !app.forge.tasks.is_empty() || app.forge.visible() => {
+                app.forge.apply_snapshot(agent.subagent_snapshot().await);
+            }
             ev = input_rx.recv() => {
                 let Some(ev) = ev else { break };
                 match app.on_event(&ev) {
