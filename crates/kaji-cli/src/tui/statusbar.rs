@@ -1,7 +1,7 @@
 //! The bottom bar (« hanko & forge ») — the mode's vermilion seal, then the
 //! place (directory ⟩ branch and repository state), an empty middle, and the
-//! forge's telemetry pinned right: model, 炭 tokens, cost, and 火 while a turn
-//! burns.
+//! forge's telemetry pinned right: model, 炭 tokens, cost, 遣 the blades running
+//! behind a folded 炉 panel, and 火 while a turn burns.
 //!
 //! Pure like [`crate::tui::gitstatus::render`], which it delegates the place
 //! to: the whole line is built and fitted here, so it is unit-testable without
@@ -101,7 +101,7 @@ fn seal_spans(app: &App) -> Vec<Span<'static>> {
 /// Ce que le sceau promet, en couleur : l'humain décide (indigo, celui de
 /// `vous ▸`), kaji juge (or, celui de 鍛冶), personne n'est consulté
 /// (vermillon), aucun outil ne tourne (gris).
-fn mode_color(mode: KajiMode) -> Color {
+pub(crate) fn mode_color(mode: KajiMode) -> Color {
     match mode {
         KajiMode::Approve => theme::user_color(),
         KajiMode::SmartApprove => theme::gold_color(),
@@ -140,6 +140,14 @@ fn telemetry_spans(app: &App, with_model: bool) -> Vec<Span<'static>> {
         push_group(
             &mut spans,
             Span::styled(format!("${cost:.2}"), theme::gold()),
+        );
+    }
+
+    let blades = app.forge.running_count();
+    if blades > 0 && !app.forge.visible() {
+        push_group(
+            &mut spans,
+            Span::styled(format!("{} {blades}", theme::SUBAGENT_GLYPH), theme::dim()),
         );
     }
 
@@ -205,6 +213,7 @@ fn total_width(spans: &[Span<'static>]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::forge::{ForgeStatus, ForgeTask, ForgeView};
     use crate::tui::gitstatus::GitStatus;
     use crate::tui::icons::IconSet;
     use kaji::agents::AgentEvent;
@@ -225,6 +234,22 @@ mod tests {
             Message::assistant()
                 .with_tool_request("t1", Ok(CallToolRequestParams::new(name.to_string()))),
         ));
+    }
+
+    fn running_blade(app: &mut App, id: &str) {
+        app.forge.tasks.insert(
+            id.to_string(),
+            ForgeTask {
+                id: id.to_string(),
+                description: id.to_string(),
+                status: ForgeStatus::Running,
+                current_tool: None,
+                elapsed_secs: 0,
+                turns: 0,
+                result: None,
+                error: None,
+            },
+        );
     }
 
     fn on_a_branch() -> GitStatus {
@@ -382,6 +407,40 @@ mod tests {
         assert!(
             rendered.contains("developer__shell_with_a…"),
             "{rendered:?}"
+        );
+    }
+
+    /// Le compte des lames n'a de valeur que quand le volet 炉 est replié :
+    /// ouvert, il les nomme une par une et la barre se tairait pour rien.
+    #[test]
+    fn the_bar_counts_the_running_blades_only_while_the_forge_panel_is_folded() {
+        let _theme = theme::test_guard();
+        let mut app = app_at("/tmp/project");
+
+        assert!(
+            !text(&render(&app, 130)).contains(theme::SUBAGENT_GLYPH),
+            "aucune lame déléguée"
+        );
+
+        running_blade(&mut app, "t1");
+        running_blade(&mut app, "t2");
+        assert!(app.forge.visible(), "deux lames vives ouvrent le volet");
+        assert!(
+            !text(&render(&app, 130)).contains(theme::SUBAGENT_GLYPH),
+            "le volet dit déjà tout"
+        );
+
+        app.forge.view = ForgeView::ForcedClosed;
+        let rendered = text(&render(&app, 130));
+        assert!(
+            rendered.contains(&format!("{} 2", theme::SUBAGENT_GLYPH)),
+            "{rendered:?}"
+        );
+
+        app.forge.tasks.clear();
+        assert!(
+            !text(&render(&app, 130)).contains(theme::SUBAGENT_GLYPH),
+            "plus rien ne tourne"
         );
     }
 

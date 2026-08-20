@@ -1,5 +1,6 @@
-use crate::tui::app::{App, ChatLine, Focus, RoledLine, Sender, ToolApprovalRequest};
+use crate::tui::app::{self, App, ChatLine, Focus, RoledLine, Sender, ToolApprovalRequest};
 use crate::tui::explorer::ExplorerState;
+use crate::tui::forge::{ForgeStatus, ForgeTask};
 use crate::tui::viewer::{self, Viewer};
 use crate::tui::{markdown, statusbar, theme};
 use kaji_core::sdd::StageStatus;
@@ -22,11 +23,28 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_header(frame, app, root[0]);
     draw_status_bar(frame, app, root[2]);
 
-    // Three columns at most: explorer | chat/composer | viewer-or-SPEC. Both
-    // side widths are decided against the full body width before anything is
-    // split, so the viewer keeps its share whatever the explorer takes.
+    // Quatre colonnes au plus : explorateur | chat/composer | lecteur-ou-SPEC |
+    // forge. La forge est prélevée la première, au bord droit : les trois
+    // autres se partagent ce qui reste, comme si le terminal était plus étroit.
+    let forge_cols = if app.forge.visible() {
+        forge_width(root[1].width)
+    } else {
+        0
+    };
+    let (body_area, forge_area) = if forge_cols > 0 {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(forge_cols)])
+            .split(root[1]);
+        (cols[0], Some(cols[1]))
+    } else {
+        (root[1], None)
+    };
+
+    // Both side widths are decided against the full body width before anything
+    // is split, so the viewer keeps its share whatever the explorer takes.
     let viewer_cols = if app.viewer.is_some() {
-        viewer_width(root[1].width, app.explorer.is_some())
+        viewer_width(body_area.width, app.explorer.is_some())
     } else {
         0
     };
@@ -35,12 +53,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let right_cols = if viewer_cols > 0 {
         viewer_cols
     } else if app.spec_panel_visible() {
-        (u32::from(root[1].width) * u32::from(SPEC_PERCENT) / 100) as u16
+        (u32::from(body_area.width) * u32::from(SPEC_PERCENT) / 100) as u16
     } else {
         0
     };
     let explorer_cols = if app.explorer.is_some() {
-        explorer_width(root[1].width, right_cols)
+        explorer_width(body_area.width, right_cols)
     } else {
         0
     };
@@ -48,10 +66,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(explorer_cols), Constraint::Min(0)])
-            .split(root[1]);
+            .split(body_area);
         (Some(cols[0]), cols[1])
     } else {
-        (None, root[1])
+        (None, body_area)
     };
 
     // One right column, two possible tenants: the file viewer takes the slot
@@ -104,6 +122,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if let (Some(area), Some(explorer)) = (explorer_area, &app.explorer) {
         draw_explorer(frame, app, explorer, area);
+    }
+    if let Some(area) = forge_area {
+        draw_forge(frame, app, area);
     }
     draw_finder(frame, app);
     draw_theme_picker(frame, app);
@@ -861,6 +882,19 @@ fn explorer_width(total: u16, right: u16) -> u16 {
     explorer_target(total).min(room)
 }
 
+/// Colonne fixe du volet forge : les deux lignes d'une tâche sont calibrées
+/// dessus, il ne gagnerait rien à s'élargir.
+const FORGE_WIDTH: u16 = 32;
+
+/// Même arbitrage que [`explorer_width`], sans le dégradé : le volet s'ouvre
+/// entier ou pas du tout, et jamais sur les [`MIN_CHAT_WIDTH`] colonnes du chat.
+fn forge_width(total: u16) -> u16 {
+    if total.saturating_sub(MIN_CHAT_WIDTH) < FORGE_WIDTH {
+        return 0;
+    }
+    FORGE_WIDTH
+}
+
 /// Left-column file tree (task 9). The pane keeps no scroll offset of its own:
 /// the window slides to keep the cursor row visible, the way the finder's list
 /// does.
@@ -934,6 +968,134 @@ fn draw_explorer(frame: &mut Frame, app: &App, explorer: &ExplorerState, area: R
     let content = pane_content_rect(block.inner(area));
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(Text::from(lines)), content);
+}
+
+/// Ce que le volet promet en pied, et qui n'a de sens qu'avec une lame à
+/// désigner — les touches sont celles de la task 4.
+const FORGE_FOOTER: &str = " ↑/↓ · Enter fiche · x annule ";
+
+/// Deux lignes par lame : la première la nomme, la seconde dit ce qu'elle
+/// brûle. Le main agent ouvre la liste sur le même patron, sans être
+/// sélectionnable.
+const FORGE_ROWS_PER_BLADE: usize = 2;
+
+/// Cellules qu'un `{glyphe} 遣 ` prend avant la description.
+const FORGE_BLADE_INDENT: u16 = 5;
+
+/// Volet droit des lames déléguées (炉). Comme l'explorateur, il ne garde pas
+/// de décalage à lui : la fenêtre glisse pour tenir la sélection visible.
+fn draw_forge(frame: &mut Frame, app: &App, area: Rect) {
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::border_inactive())
+        .title(Span::styled(
+            format!(" {} forge ", theme::FORGE_GLYPH),
+            theme::title(),
+        ));
+    if !app.forge.tasks.is_empty() {
+        block = block.title_bottom(Line::from(FORGE_FOOTER).style(theme::dim()));
+    }
+
+    let content = pane_content_rect(block.inner(area));
+    let lines = forge_lines(app, content.width, usize::from(content.height));
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(Text::from(lines)), content);
+}
+
+fn forge_lines(app: &App, width: u16, rows: usize) -> Vec<Line<'static>> {
+    let running_tool = app.current_tool().filter(|_| app.turn_active);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!(" {} ", app::kaji_mode_seal(app.kaji_mode)),
+                theme::seal(statusbar::mode_color(app.kaji_mode)),
+            ),
+            Span::styled(format!(" {}", theme::KAJI_GLYPH), theme::title()),
+        ]),
+        Line::from(Span::styled(
+            format!("   {}", forge_phase(running_tool)),
+            if app.turn_active {
+                theme::accent()
+            } else {
+                theme::dim()
+            },
+        )),
+    ];
+
+    let elapsed = app.turn_started.map(|t| t.elapsed()).unwrap_or_default();
+    let slots = rows.saturating_sub(FORGE_ROWS_PER_BLADE) / FORGE_ROWS_PER_BLADE;
+    let first = app.forge.selected.saturating_sub(slots.saturating_sub(1));
+    for (rank, task) in app.forge.tasks.values().enumerate().skip(first).take(slots) {
+        let (mark, mut style) = forge_mark(task, elapsed);
+        if rank == app.forge.selected {
+            style = theme::accent();
+        }
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{mark} {} {}",
+                theme::SUBAGENT_GLYPH,
+                forge_description(&task.description, width)
+            ),
+            style,
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "   {} · {}",
+                forge_verdict(task),
+                forge_duration(task.elapsed_secs)
+            ),
+            style,
+        )));
+    }
+    lines
+}
+
+/// Le glyphe dit l'issue d'un coup d'œil, la couleur dit si elle est encore
+/// en jeu : une lame vive pulse, un verdict inerte s'éteint.
+fn forge_mark(task: &ForgeTask, elapsed: std::time::Duration) -> (String, Style) {
+    match task.status {
+        ForgeStatus::Running => (theme::blade_frame(elapsed).to_string(), theme::accent()),
+        ForgeStatus::Done => ("✓".to_string(), theme::dim()),
+        ForgeStatus::Failed => ("✗".to_string(), theme::accent()),
+        ForgeStatus::Cancelled => ("✗".to_string(), theme::dim()),
+    }
+}
+
+fn forge_verdict(task: &ForgeTask) -> String {
+    match task.status {
+        ForgeStatus::Running => forge_phase(task.current_tool.as_deref()),
+        ForgeStatus::Done => "terminé".to_string(),
+        ForgeStatus::Failed => "échec".to_string(),
+        ForgeStatus::Cancelled => "annulé".to_string(),
+    }
+}
+
+/// Ce qui brûle, ou la réflexion quand rien ne brûle — même partage que le feu
+/// de la barre d'état.
+fn forge_phase(tool: Option<&str>) -> String {
+    match tool {
+        Some(tool) => format!("{} {tool}", theme::FIRE_GLYPH),
+        None => theme::THINKING_GLYPH.to_string(),
+    }
+}
+
+/// Sous la minute le chrono se compte en secondes ; au-delà, la seconde près
+/// n'apprend plus rien.
+fn forge_duration(secs: u64) -> String {
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    format!("{}m{:02}s", secs / 60, secs % 60)
+}
+
+fn forge_description(description: &str, width: u16) -> String {
+    let budget = usize::from(width.saturating_sub(FORGE_BLADE_INDENT));
+    let description = sanitize_for_display(&description.replace('\n', "␊"));
+    if description.chars().count() <= budget {
+        return description;
+    }
+    let head: String = description.chars().take(budget.saturating_sub(1)).collect();
+    format!("{head}…")
 }
 
 /// Read-only file pane (task 8). Lines are already sanitized and tab-expanded
@@ -2614,6 +2776,203 @@ mod tests {
             tree < 36 && tree < file,
             "arbre à gauche ({tree}), lecteur à droite ({file}) : {row:?}"
         );
+    }
+
+    fn blade(id: &str, description: &str, status: ForgeStatus) -> ForgeTask {
+        ForgeTask {
+            id: id.to_string(),
+            description: description.to_string(),
+            status,
+            current_tool: None,
+            elapsed_secs: 7,
+            turns: 2,
+            result: None,
+            error: None,
+        }
+    }
+
+    fn app_at_the_forge(blades: Vec<ForgeTask>) -> App {
+        let mut app = App::new(None);
+        for blade in blades {
+            app.forge.tasks.insert(blade.id.clone(), blade);
+        }
+        app
+    }
+
+    #[test]
+    fn the_forge_panel_names_every_blade_and_what_it_burns() {
+        let _theme = theme::test_guard();
+        let mut app = app_at_the_forge(vec![
+            blade("t1", "auditer les tests", ForgeStatus::Running),
+            blade("t2", "relire le diff", ForgeStatus::Running),
+            blade("t3", "compter les lignes", ForgeStatus::Done),
+        ]);
+        app.forge.tasks.get_mut("t1").unwrap().current_tool = Some("developer__shell".to_string());
+
+        let content = rendered(&app, 130, 24);
+
+        // Un kanji occupe deux cellules, dont la seconde se relit comme une
+        // espace : le tampon ne rend jamais « 炉 forge » d'un bloc.
+        for expected in [
+            theme::FORGE_GLYPH,
+            "forge",
+            theme::SUBAGENT_GLYPH,
+            "auditer les tests",
+            "relire le diff",
+            "compter les lignes",
+            "developer__shell",
+            theme::THINKING_GLYPH,
+            "✓",
+            "terminé",
+            "7s",
+            "↑/↓ · Enter fiche · x annule",
+        ] {
+            assert!(
+                content.contains(expected),
+                "{expected} manquant, got:\n{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folded_forge_leaves_the_column_to_the_chat() {
+        let mut app =
+            app_at_the_forge(vec![blade("t1", "auditer les tests", ForgeStatus::Running)]);
+        assert!(app.forge.visible());
+
+        app.forge.view = crate::tui::forge::ForgeView::ForcedClosed;
+        let content = rendered(&app, 130, 24);
+
+        assert!(!content.contains("forge"), "got:\n{content}");
+        assert!(!content.contains("auditer les tests"), "got:\n{content}");
+    }
+
+    /// Ouvert à la main sur une forge vide, le volet n'a personne à désigner :
+    /// son pied promettrait des touches sans effet.
+    #[test]
+    fn an_empty_panel_opens_without_promising_any_key() {
+        let mut app = App::new(None);
+        app.forge.view = crate::tui::forge::ForgeView::ForcedOpen;
+
+        let content = rendered(&app, 130, 24);
+
+        assert!(content.contains("forge"), "got:\n{content}");
+        assert!(!content.contains("Enter fiche"), "got:\n{content}");
+    }
+
+    /// La sélection reprend le style du curseur de l'explorateur, sur les deux
+    /// lignes de la tâche — un verdict inerte doit se distinguer de celui qu'on
+    /// s'apprête à ouvrir.
+    #[test]
+    fn the_selected_blade_takes_the_explorer_cursor_style_on_both_its_lines() {
+        let _theme = theme::test_guard();
+        let mut app = app_at_the_forge(vec![
+            blade("t1", "auditer les tests", ForgeStatus::Done),
+            blade("t2", "relire le diff", ForgeStatus::Done),
+        ]);
+        app.forge.view = crate::tui::forge::ForgeView::ForcedOpen;
+
+        let lines = forge_lines(&app, 29, 18);
+
+        assert_eq!(lines.len(), 6, "deux lignes d'en-tête, deux par tâche");
+        assert_eq!(lines[2].spans[0].style, theme::accent());
+        assert_eq!(lines[3].spans[0].style, theme::accent());
+        assert_eq!(lines[4].spans[0].style, theme::dim());
+        assert_eq!(lines[5].spans[0].style, theme::dim());
+
+        app.forge.selected = 1;
+        let lines = forge_lines(&app, 29, 18);
+
+        assert_eq!(lines[2].spans[0].style, theme::dim());
+        assert_eq!(lines[3].spans[0].style, theme::dim());
+        assert_eq!(lines[4].spans[0].style, theme::accent());
+        assert_eq!(lines[5].spans[0].style, theme::accent());
+    }
+
+    #[test]
+    fn a_blade_chrono_switches_to_minutes_past_the_minute() {
+        assert_eq!(forge_duration(7), "7s");
+        assert_eq!(forge_duration(59), "59s");
+        assert_eq!(forge_duration(60), "1m00s");
+        assert_eq!(forge_duration(605), "10m05s");
+    }
+
+    #[test]
+    fn forge_width_gives_way_rather_than_crushing_the_chat() {
+        assert_eq!(forge_width(130), FORGE_WIDTH);
+        assert_eq!(
+            forge_width(52),
+            FORGE_WIDTH,
+            "le chat garde ses 20 colonnes"
+        );
+        assert_eq!(forge_width(51), 0);
+        assert_eq!(forge_width(0), 0);
+    }
+
+    #[test]
+    fn a_sixty_column_terminal_keeps_the_forge_and_the_chat_gives_way() {
+        let app = app_at_the_forge(vec![blade("t1", "auditer les tests", ForgeStatus::Running)]);
+
+        let content = rendered(&app, 60, 20);
+
+        let row = content
+            .lines()
+            .find(|line| line.contains("forge"))
+            .expect("le volet garde son titre");
+        assert!(
+            row.contains("chat"),
+            "le chat cède sans disparaître : {row:?}"
+        );
+        assert!(
+            row.find("chat") < row.find("forge"),
+            "le volet reste au bord droit : {row:?}"
+        );
+        assert!(
+            row.ends_with('┐'),
+            "le volet tient dans la largeur : {row:?}"
+        );
+        assert!(content.contains("auditer les tests"), "got:\n{content}");
+    }
+
+    /// Le volet plus court que la liste : la fenêtre glisse pour garder la
+    /// sélection visible, comme l'arbre de l'explorateur.
+    #[test]
+    fn a_twelve_row_terminal_slides_the_window_onto_the_selection() {
+        let app_blades = |selected: usize| {
+            let mut app = app_at_the_forge(vec![
+                blade("t1", "auditer les tests", ForgeStatus::Running),
+                blade("t2", "relire le diff", ForgeStatus::Running),
+                blade("t3", "compter les lignes", ForgeStatus::Running),
+                blade("t4", "relever les logs", ForgeStatus::Running),
+            ]);
+            app.forge.selected = selected;
+            app
+        };
+
+        let top = rendered(&app_blades(0), 130, 12);
+        assert!(top.contains("auditer les tests"), "got:\n{top}");
+        assert!(!top.contains("relever les logs"), "got:\n{top}");
+
+        let bottom = rendered(&app_blades(3), 130, 12);
+        assert!(bottom.contains("relever les logs"), "got:\n{bottom}");
+        assert!(!bottom.contains("auditer les tests"), "got:\n{bottom}");
+    }
+
+    #[test]
+    fn a_long_description_is_cut_by_an_ellipsis_inside_the_panel() {
+        let app = app_at_the_forge(vec![blade(
+            "t1",
+            &"écriture du rapport ".repeat(5),
+            ForgeStatus::Running,
+        )]);
+
+        let content = rendered(&app, 130, 24);
+
+        let row = content
+            .lines()
+            .find(|line| line.contains("écriture"))
+            .expect("la tâche est nommée");
+        assert!(row.contains("écriture du rapport écr…"), "{row:?}");
     }
 
     #[test]
