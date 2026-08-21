@@ -713,6 +713,11 @@ pub struct App {
     /// [`Self::pending_restore`] : l'id est porté jusqu'à l'event loop, seul
     /// endroit d'où le summon s'atteint.
     pub pending_forge_cancel: Option<String>,
+    /// Id de la lame dont le lecteur montre la fiche. C'est l'id qui fait
+    /// autorité, jamais le titre : deux délégations d'un même fan-out portent
+    /// la même description, et le premier snapshot renomme celles qu'une
+    /// notification d'outil avait nommées par leur id.
+    forge_sheet_open: Option<String>,
     pub driver: PassDriver,
     /// Goal session (item 5 ante) — kept after it ends so `/goal` can still
     /// report the last outcome. [`App::goal_driver`] is what says whether it
@@ -899,6 +904,7 @@ impl App {
             pending_restore: None,
             pending_restore_files_only: false,
             pending_forge_cancel: None,
+            forge_sheet_open: None,
             driver: PassDriver::Idle,
             goal: None,
             goal_buffer: String::new(),
@@ -1798,6 +1804,7 @@ impl App {
         match crate::tui::viewer::load(path, &resolved) {
             Ok(viewer) => {
                 self.viewer = Some(viewer);
+                self.forge_sheet_open = None;
                 self.focus = Focus::Viewer;
             }
             Err(e) => {
@@ -1809,6 +1816,7 @@ impl App {
 
     pub fn close_viewer(&mut self) {
         self.viewer = None;
+        self.forge_sheet_open = None;
         self.focus = Focus::Composer;
     }
 
@@ -2128,23 +2136,26 @@ impl App {
     /// La fiche de la lame désignée, dans le lecteur : ce que la colonne du
     /// volet n'a pas la place de dire.
     fn open_forge_sheet(&mut self) {
-        let Some(sheet) = self.forge.selected_task().map(|task| forge_sheet(task, 0)) else {
+        let Some((id, sheet)) = self
+            .forge
+            .selected_task()
+            .map(|task| (task.id.clone(), forge_sheet(task, 0)))
+        else {
             return;
         };
         self.viewer = Some(sheet);
+        self.forge_sheet_open = Some(id);
         self.focus = Focus::Viewer;
     }
 
     /// La fiche est une vue, pas une copie : tant que le lecteur montre celle
-    /// d'une lame encore listée, chaque tick la réécrit — la position de lecture
-    /// reste où l'œil l'a laissée.
+    /// d'une lame encore listée, chaque tick la réécrit — titre compris, donc un
+    /// renommage suit au lieu de geler. La position de lecture reste où l'œil
+    /// l'a laissée.
     pub fn refresh_forge_sheet(&mut self) {
-        let Some(sheet) = self.viewer.as_ref().and_then(|open| {
-            self.forge
-                .tasks
-                .values()
-                .find(|task| forge_sheet_title(&task.description) == open.path)
-                .map(|task| forge_sheet(task, open.scroll))
+        let Some(sheet) = self.forge_sheet_open.as_ref().and_then(|id| {
+            let task = self.forge.tasks.get(id)?;
+            Some(forge_sheet(task, self.viewer.as_ref()?.scroll))
         }) else {
             return;
         };
@@ -3576,7 +3587,11 @@ fn forge_sheet(task: &forge::ForgeTask, scroll: usize) -> crate::tui::viewer::Vi
     if let Some((label, body)) = forge_sheet_verdict(task) {
         lines.push(String::new());
         lines.push(format!("{label:<FORGE_SHEET_LABEL$}:"));
-        lines.extend(body.lines().map(str::to_string));
+        // Rien ne promet qu'un agent replie ce qu'il rend : une erreur d'une
+        // seule ligne de mille caractères, le lecteur la rogne en silence.
+        for line in body.lines() {
+            lines.extend(wrap_words(line, FORGE_SHEET_WRAP));
+        }
     }
     crate::tui::viewer::Viewer {
         path: forge_sheet_title(&task.description),
@@ -3647,6 +3662,7 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kaji::agents::{SubagentTaskSnapshot, SubagentTaskStatus};
     use kaji::conversation::message::{Message, MessageErrorKind};
     use kaji::providers::base::Usage;
     use ratatui::crossterm::event::{
@@ -7826,6 +7842,23 @@ mod tests {
         }
     }
 
+    fn snapshot(
+        id: &str,
+        description: &str,
+        status: SubagentTaskStatus,
+        turns: u32,
+    ) -> SubagentTaskSnapshot {
+        SubagentTaskSnapshot {
+            id: id.to_string(),
+            description: description.to_string(),
+            status,
+            turns,
+            elapsed_secs: 7,
+            result: None,
+            error: None,
+        }
+    }
+
     /// Les tâches sont posées à la main : `ForgeView::Auto` reste intact, donc
     /// le volet n'est visible que si une lame tourne encore.
     fn app_at_the_forge(blades: Vec<forge::ForgeTask>) -> App {
@@ -8016,6 +8049,111 @@ mod tests {
         app.refresh_forge_sheet();
 
         assert_eq!(app.viewer.as_ref().expect("lecteur").lines, before);
+    }
+
+    /// Une fiche ouverte puis remplacée par un fichier : le tick n'a plus rien à
+    /// suivre, et surtout pas à réécrire le fichier avec une fiche.
+    #[test]
+    fn opening_a_file_over_a_sheet_ends_the_forge_tick_s_claim_on_the_reader() {
+        let (mut app, dir) = app_with_open_viewer();
+        std::fs::write(dir.path().join("note.md"), "une note\n").unwrap();
+        app.forge.tasks.insert(
+            "t1".to_string(),
+            blade("t1", "auditer les tests", forge::ForgeStatus::Running),
+        );
+        app.forge.selected = 0;
+        app.focus = Focus::Forge;
+        app.on_event(&key(KeyCode::Enter));
+        assert!(app.viewer.as_ref().expect("fiche").path.contains("auditer"));
+
+        app.open_viewer("note.md");
+        app.refresh_forge_sheet();
+
+        let viewer = app.viewer.as_ref().expect("le fichier");
+        assert_eq!(viewer.path, "note.md");
+        assert_eq!(viewer.lines, vec!["une note"]);
+
+        app.close_viewer();
+        app.refresh_forge_sheet();
+        assert!(app.viewer.is_none(), "rien ne rouvre le lecteur tout seul");
+    }
+
+    /// Deux délégations peuvent porter la même description — c'est même le cas
+    /// courant d'un fan-out. La fiche suit la tâche ouverte, pas son libellé.
+    #[test]
+    fn two_blades_sharing_a_description_keep_their_own_sheet() {
+        let mut app = app_at_the_forge(vec![
+            blade("t1", "auditer les tests", forge::ForgeStatus::Running),
+            blade("t2", "auditer les tests", forge::ForgeStatus::Running),
+        ]);
+        app.focus = Focus::Forge;
+        app.on_event(&key(KeyCode::Down));
+        app.on_event(&key(KeyCode::Enter));
+
+        app.forge.apply_snapshot(vec![
+            snapshot("t1", "auditer les tests", SubagentTaskStatus::Running, 9),
+            snapshot("t2", "auditer les tests", SubagentTaskStatus::Running, 3),
+        ]);
+        app.refresh_forge_sheet();
+
+        let sheet = app.viewer.as_ref().expect("fiche").lines.join("\n");
+        assert!(
+            sheet.contains("tours    : 3"),
+            "la fiche doit porter t2, pas sa jumelle :\n{sheet}"
+        );
+    }
+
+    /// Une lame vue par sa notification d'outil n'a que son id pour nom, jusqu'au
+    /// premier snapshot. La fiche ouverte entre les deux suit le renommage au
+    /// lieu de geler sur un titre que plus rien n'alimente.
+    #[test]
+    fn a_sheet_opened_before_the_first_snapshot_follows_the_renaming() {
+        let mut app = App::new(None);
+        app.forge
+            .apply_tool_notification("task_7", "developer__shell");
+        app.focus = Focus::Forge;
+        app.on_event(&key(KeyCode::Enter));
+        assert_eq!(app.viewer.as_ref().expect("fiche").path, "遣 task_7");
+
+        app.forge.apply_snapshot(vec![snapshot(
+            "task_7",
+            "relire le diff",
+            SubagentTaskStatus::Running,
+            4,
+        )]);
+        app.refresh_forge_sheet();
+
+        let viewer = app.viewer.as_ref().expect("fiche");
+        assert_eq!(viewer.path, "遣 relire le diff");
+        let sheet = viewer.lines.join("\n");
+        assert!(sheet.contains("relire le diff"), "{sheet}");
+        assert!(sheet.contains("tours    : 4"), "{sheet}");
+    }
+
+    /// Un résultat ou une erreur arrive d'un agent : rien ne garantit qu'il soit
+    /// déjà replié. Non replié ici, le lecteur le rogne sans le dire — et la
+    /// fiche n'existe que pour rendre ça lisible.
+    #[test]
+    fn a_long_result_is_folded_like_the_rest_of_the_sheet() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Done,
+        )]);
+        app.forge.tasks.get_mut("t1").unwrap().result =
+            Some(["verdict"; 25].join(" une ligne de deux cents caractères "));
+        app.forge.view = forge::ForgeView::ForcedOpen;
+        app.focus = Focus::Forge;
+
+        app.on_event(&key(KeyCode::Enter));
+
+        let lines = &app.viewer.as_ref().expect("fiche").lines;
+        assert!(
+            lines.iter().all(|line| line.chars().count() <= 76 + 11),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|line| line.starts_with("résultat")));
+        assert!(lines.iter().filter(|line| line.contains("verdict")).count() > 1);
     }
 
     #[test]
