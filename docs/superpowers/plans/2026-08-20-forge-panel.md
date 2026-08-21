@@ -3,6 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > Contrôleur : Fable (planifie, review, rulings). Exécuteur : Opus. Décisions user 2026-08-20 : volet latéral, Enter = fiche détail, auto-forge (ouverture/repli auto), double alimentation snapshot + notifications.
+>
+> **État 2026-08-21 : plan terminé.** T1-T4 livrées et reviewées (commits `f9add4df1`..`50e2aa810`, 7 commits), review finale de branche « With fixes » puis vague corrigée et re-reviewée propre (spinner sur l'horloge de la tâche, garde e/a/r sur la fiche, titre sans newline, refresh sur notification, fiche suivie par id, troncature en cellules). 903 tests kaji-cli + 1909 kaji verts, clippy propre. Suivi ouvert : unifier les troncatures chars→cellules (goal_badge, truncate_tool_name, truncate_for_modal, forge_sheet_title, wrap_words) — brouillon d'issue prêt, PAT local sans scope createIssue.
 
 **Goal:** Un volet latéral droit qui montre en temps réel l'agent principal et chaque subagent (statut, outil en cours, durée), s'ouvre seul quand un subagent démarre, se replie 5 s après la fin du dernier, et permet fiche détail (Enter) et annulation (x).
 
