@@ -149,7 +149,7 @@ fn try_render_table(lines: &[&str], width: u16) -> Option<Vec<Line<'static>>> {
     let mut natural_widths = vec![1usize; num_cols];
     for row in std::iter::once(header).chain(data_rows.iter()) {
         for (i, cell) in row.iter().enumerate() {
-            natural_widths[i] = natural_widths[i].max(cell.chars().count());
+            natural_widths[i] = natural_widths[i].max(table_cell_width(cell));
         }
     }
     let col_widths = fit_table_to_budget(&natural_widths, table_budget_for_width(width))?;
@@ -215,31 +215,78 @@ fn fit_table_to_budget(natural_widths: &[usize], total_budget: usize) -> Option<
     Some(widths)
 }
 
-fn fit_table_cell(content: &str, width: usize) -> String {
-    let chars: Vec<char> = content.chars().collect();
-    if chars.len() <= width {
-        let mut s: String = chars.into_iter().collect();
-        s.push_str(&" ".repeat(width - s.chars().count()));
-        s
-    } else if width == 0 {
-        String::new()
-    } else {
-        let truncated: String = chars[..width - 1].iter().collect();
-        format!("{truncated}…")
-    }
+/// Width a cell occupies once its inline markup is consumed, so `**abc**`
+/// claims 3 columns rather than 7. Char count, like the rest of the table
+/// measurements.
+fn table_cell_width(cell: &str) -> usize {
+    render_inline_spans(cell)
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum()
 }
 
+/// Fits a cell's inline spans to `width` plain-text chars: pads with trailing
+/// spaces, or truncates at `width - 1` chars followed by `…`, which inherits
+/// the style of the span it cuts through.
+fn fit_table_cell_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let content_width: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+    if content_width <= width {
+        let mut spans = spans;
+        if content_width < width {
+            spans.push(Span::styled(
+                " ".repeat(width - content_width),
+                theme::text(),
+            ));
+        }
+        return spans;
+    }
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut fitted = Vec::new();
+    let mut remaining = width - 1;
+    let mut ellipsis_style = theme::text();
+    for span in spans {
+        let len = span.content.chars().count();
+        if len <= remaining {
+            remaining -= len;
+            fitted.push(span);
+            continue;
+        }
+        ellipsis_style = span.style;
+        if remaining > 0 {
+            let head: String = span.content.chars().take(remaining).collect();
+            fitted.push(Span::styled(head, span.style));
+        }
+        break;
+    }
+    fitted.push(Span::styled("…", ellipsis_style));
+    fitted
+}
+
+/// Renders one table row. Cells go through the same inline parser as ordinary
+/// lines, so `**bold**`, `*italic*` and `` `code` `` are styled instead of
+/// printed as markers; header cells add `BOLD` on top of the inline style each
+/// span already carries.
 fn table_row_line(cells: &[String], col_widths: &[usize], header: bool) -> Line<'static> {
+    let pad_style = if header {
+        theme::text().add_modifier(Modifier::BOLD)
+    } else {
+        theme::text()
+    };
     let mut spans = vec![Span::styled("│", theme::dim())];
     for (i, &width) in col_widths.iter().enumerate() {
         let content = cells.get(i).map(String::as_str).unwrap_or("");
-        let cell = fit_table_cell(content, width);
-        let style = if header {
-            theme::text().add_modifier(Modifier::BOLD)
-        } else {
-            theme::text()
-        };
-        spans.push(Span::styled(format!(" {cell} "), style));
+        let cell = fit_table_cell_spans(render_inline_spans(content), width);
+        spans.push(Span::styled(" ", pad_style));
+        spans.extend(cell.into_iter().map(|mut span| {
+            if header {
+                span.style = span.style.add_modifier(Modifier::BOLD);
+            }
+            span
+        }));
+        spans.push(Span::styled(" ", pad_style));
         spans.push(Span::styled("│", theme::dim()));
     }
     Line::from(spans)
@@ -785,6 +832,102 @@ mod tests {
             );
         }
         assert!(plain_text(&lines[3]).contains('…'));
+    }
+
+    #[test]
+    fn table_cell_renders_bold_inline_markup() {
+        let lines = render_markdown(
+            "| jour | ciel |\n| - | - |\n| **Jeu 20 août** | pluie |",
+            100,
+        );
+        let row = &lines[3];
+        let text = plain_text(row);
+        assert!(text.contains("Jeu 20 août"), "cell not rendered: {text}");
+        assert!(
+            !text.contains("**"),
+            "bold markers leaked into the cell: {text}"
+        );
+        let bold = row
+            .spans
+            .iter()
+            .find(|s| s.content == "Jeu 20 août")
+            .expect("bold cell span");
+        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn table_column_widths_ignore_inline_markers() {
+        let lines = render_markdown("| h | x |\n| - | - |\n| **abc** | y |", 100);
+        assert_eq!(plain_text(&lines[0]), "┌─────┬───┐");
+        assert_eq!(plain_text(&lines[1]), "│ h   │ x │");
+        assert_eq!(plain_text(&lines[3]), "│ abc │ y │");
+    }
+
+    #[test]
+    fn table_truncates_styled_cell_span_aware() {
+        let long = "z".repeat(200);
+        let input = format!("| a | b |\n| - | - |\n| x | **{long}** |");
+        let lines = render_markdown(&input, 102);
+        assert_eq!(lines.len(), 5);
+        let row = plain_text(&lines[3]);
+        assert_eq!(row.chars().count(), plain_text(&lines[0]).chars().count());
+        assert!(row.chars().count() <= 100, "row exceeds budget: {row}");
+        assert!(
+            row.ends_with("… │"),
+            "row should end with an ellipsis: {row}"
+        );
+        assert!(
+            !row.contains('*'),
+            "bold markers leaked into the cell: {row}"
+        );
+        let truncated = lines[3]
+            .spans
+            .iter()
+            .find(|s| s.content.starts_with("zz"))
+            .expect("truncated bold span");
+        assert!(truncated.style.add_modifier.contains(Modifier::BOLD));
+        let ellipsis = lines[3]
+            .spans
+            .iter()
+            .find(|s| s.content == "…")
+            .expect("ellipsis span");
+        assert!(ellipsis.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn table_cell_renders_inline_code() {
+        let _theme = theme::test_guard();
+        let lines = render_markdown("| a | b |\n| - | - |\n| `cargo test` | y |", 100);
+        let row = &lines[3];
+        assert!(!plain_text(row).contains('`'));
+        let code = row
+            .spans
+            .iter()
+            .find(|s| s.content == "cargo test")
+            .expect("code cell span");
+        assert_eq!(code.style, theme::code_inline());
+    }
+
+    #[test]
+    fn table_header_cell_keeps_bold_on_top_of_inline_style() {
+        let _theme = theme::test_guard();
+        let lines = render_markdown("| **x** | `y` |\n| - | - |\n| a | b |", 100);
+        let header = &lines[1];
+        assert_eq!(plain_text(header), "│ x │ y │");
+        let bold = header
+            .spans
+            .iter()
+            .find(|s| s.content == "x")
+            .expect("bold header span");
+        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
+        let code = header
+            .spans
+            .iter()
+            .find(|s| s.content == "y")
+            .expect("code header span");
+        assert_eq!(code.style.bg, theme::code_inline().bg);
+        assert_eq!(code.style.fg, theme::code_inline().fg);
+        assert!(code.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
