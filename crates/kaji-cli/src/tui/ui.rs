@@ -2,7 +2,7 @@ use crate::tui::app::{self, App, ChatLine, Focus, RoledLine, Sender, ToolApprova
 use crate::tui::explorer::ExplorerState;
 use crate::tui::forge::{ForgeStatus, ForgeTask};
 use crate::tui::viewer::{self, Viewer};
-use crate::tui::{markdown, statusbar, theme};
+use crate::tui::{gitstatus, markdown, statusbar, theme};
 use kaji_core::sdd::StageStatus;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -982,6 +982,10 @@ const FORGE_ROWS_PER_BLADE: usize = 2;
 /// Cellules qu'un `{glyphe} 遣 ` prend avant la description.
 const FORGE_BLADE_INDENT: u16 = 5;
 
+/// Ce qu'une description coupée laisse à la place du texte perdu — une
+/// cellule, décomptée du budget avant la coupe.
+const FORGE_ELLIPSIS: &str = "…";
+
 /// Volet droit des lames déléguées (炉). Comme l'explorateur, il ne garde pas
 /// de décalage à lui : la fenêtre glisse pour tenir la sélection visible.
 fn draw_forge(frame: &mut Frame, app: &App, area: Rect) {
@@ -1088,14 +1092,29 @@ fn forge_duration(secs: u64) -> String {
     format!("{}m{:02}s", secs / 60, secs % 60)
 }
 
+/// Le budget se compte en cellules, comme [`gitstatus::display_width`] le fait
+/// pour le lieu de la barre d'état : un kanji en vaut deux, et un budget en
+/// `chars()` laisserait une description japonaise déborder la colonne — où le
+/// `Paragraph` la rognerait en silence, sans le `…` qui signale la coupe.
 fn forge_description(description: &str, width: u16) -> String {
     let budget = usize::from(width.saturating_sub(FORGE_BLADE_INDENT));
     let description = sanitize_for_display(&description.replace('\n', "␊"));
-    if description.chars().count() <= budget {
+    if gitstatus::display_width(&description) <= budget {
         return description;
     }
-    let head: String = description.chars().take(budget.saturating_sub(1)).collect();
-    format!("{head}…")
+
+    let mut used = gitstatus::display_width(FORGE_ELLIPSIS);
+    let mut head = String::new();
+    let mut buffer = [0u8; 4];
+    for c in description.chars() {
+        let cell = gitstatus::display_width(c.encode_utf8(&mut buffer));
+        if used + cell > budget {
+            break;
+        }
+        used += cell;
+        head.push(c);
+    }
+    format!("{head}{FORGE_ELLIPSIS}")
 }
 
 /// Read-only file pane (task 8). Lines are already sanitized and tab-expanded
@@ -2973,6 +2992,36 @@ mod tests {
             .find(|line| line.contains("écriture"))
             .expect("la tâche est nommée");
         assert!(row.contains("écriture du rapport écr…"), "{row:?}");
+    }
+
+    /// Un kanji vaut deux cellules : un budget compté en `chars()` laisse une
+    /// description japonaise déborder la colonne, où le `Paragraph` la rogne en
+    /// silence — sans le `…` qui dit qu'il manque du texte.
+    #[test]
+    fn a_wide_glyph_description_is_cut_on_cells_not_on_characters() {
+        let description = "鍛冶場の遣いを探す長い説明テキスト";
+        let budget = usize::from(29 - FORGE_BLADE_INDENT);
+        assert!(
+            description.chars().count() <= budget,
+            "le cas ne prouve rien si le compte de caractères tronque déjà"
+        );
+
+        let cut = forge_description(description, 29);
+
+        assert!(cut.ends_with('…'), "{cut:?}");
+        assert!(
+            gitstatus::display_width(&cut) <= budget,
+            "{} cellules pour {budget} : {cut:?}",
+            gitstatus::display_width(&cut)
+        );
+
+        let app = app_at_the_forge(vec![blade("t1", description, ForgeStatus::Running)]);
+        let content = rendered(&app, 130, 24);
+        let row = content
+            .lines()
+            .find(|line| line.contains('探'))
+            .expect("la tâche est nommée");
+        assert!(row.contains('…'), "{row:?}");
     }
 
     #[test]

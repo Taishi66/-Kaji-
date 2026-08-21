@@ -307,7 +307,7 @@ fn truncate_left(label: &str, budget: usize) -> String {
 
 /// Cells, not chars: ratatui measures every span with unicode-width, so a
 /// `chars().count()` budget would let a kanji or a CJK path overflow the bar.
-fn display_width(text: &str) -> usize {
+pub(crate) fn display_width(text: &str) -> usize {
     Span::raw(text).width()
 }
 
