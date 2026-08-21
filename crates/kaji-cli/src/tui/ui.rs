@@ -1031,11 +1031,10 @@ fn forge_lines(app: &App, width: u16, rows: usize) -> Vec<Line<'static>> {
         )),
     ];
 
-    let elapsed = app.turn_started.map(|t| t.elapsed()).unwrap_or_default();
     let slots = rows.saturating_sub(FORGE_ROWS_PER_BLADE) / FORGE_ROWS_PER_BLADE;
     let first = app.forge.selected.saturating_sub(slots.saturating_sub(1));
     for (rank, task) in app.forge.tasks.values().enumerate().skip(first).take(slots) {
-        let (mark, mut style) = forge_mark(task, elapsed);
+        let (mark, mut style) = forge_mark(task);
         // Deux lames vives partagent l'accent : sans le fond, celle que `x`
         // annulerait ne se distinguerait pas de ses voisines.
         if rank == app.forge.selected {
@@ -1063,9 +1062,17 @@ fn forge_lines(app: &App, width: u16, rows: usize) -> Vec<Line<'static>> {
 
 /// Le glyphe dit l'issue d'un coup d'œil, la couleur dit si elle est encore
 /// en jeu : une lame vive pulse, un verdict inerte s'éteint.
-fn forge_mark(task: &ForgeTask, elapsed: std::time::Duration) -> (String, Style) {
+///
+/// La lame bat sur son propre chrono, pas sur celui du tour : le cas d'usage du
+/// volet est le parent revenu au repos pendant que des délégations tournent, et
+/// `turn_started` y est déjà `None` — l'animation serait figée là où elle a le
+/// plus à dire.
+fn forge_mark(task: &ForgeTask) -> (String, Style) {
     match task.status {
-        ForgeStatus::Running => (theme::blade_frame(elapsed).to_string(), theme::accent()),
+        ForgeStatus::Running => (
+            theme::blade_frame(std::time::Duration::from_secs(task.elapsed_secs)).to_string(),
+            theme::accent(),
+        ),
         ForgeStatus::Done => ("✓".to_string(), theme::dim()),
         ForgeStatus::Failed => ("✗".to_string(), theme::accent()),
         ForgeStatus::Cancelled => ("✗".to_string(), theme::dim()),
@@ -2915,6 +2922,23 @@ mod tests {
         assert_eq!(lines[3].spans[0].style, theme::dim());
         assert_eq!(lines[4].spans[0].style, selected);
         assert_eq!(lines[5].spans[0].style, selected);
+    }
+
+    /// Le cas d'usage principal du volet est justement le parent au repos
+    /// pendant que des lames tournent : la lame s'anime sur son propre chrono,
+    /// sinon `turn_started` remis à `None` en fin de tour la fige.
+    #[test]
+    fn a_blade_spins_on_its_own_clock_while_the_parent_sits_idle() {
+        let mut app =
+            app_at_the_forge(vec![blade("t1", "auditer les tests", ForgeStatus::Running)]);
+        assert!(!app.turn_active && app.turn_started.is_none());
+
+        app.forge.tasks.get_mut("t1").unwrap().elapsed_secs = 1;
+        let first = forge_lines(&app, 29, 18)[2].spans[0].content.clone();
+        app.forge.tasks.get_mut("t1").unwrap().elapsed_secs = 2;
+        let second = forge_lines(&app, 29, 18)[2].spans[0].content.clone();
+
+        assert_ne!(first, second, "la lame doit tourner : {first} / {second}");
     }
 
     /// Deux lames vives portent la même couleur d'avant-plan : sans le fond de

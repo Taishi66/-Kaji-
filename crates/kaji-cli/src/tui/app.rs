@@ -1983,6 +1983,14 @@ impl App {
                 self.close_viewer();
                 return Action::None;
             }
+            // Les trois touches de fichier ne valent que pour un fichier : sur
+            // une fiche de forge, `viewer.path` est un titre (`遣 …`), pas un
+            // chemin — `e` ouvrirait l'éditeur sur un fantôme et le créerait.
+            KeyCode::Char('e') | KeyCode::Char('a') | KeyCode::Char('r')
+                if !ctrl && self.forge_sheet_open.is_some() =>
+            {
+                return Action::None;
+            }
             // The pane is read-only by design (task 8) — `e` is how a file
             // read here reaches an editor, without kaji growing one. L'éditeur
             // s'ouvre là où on lisait : la première ligne visible.
@@ -3348,6 +3356,9 @@ impl App {
             return;
         };
         self.forge.apply_tool_notification(subagent_id, tool_name);
+        // La notification arrive entre deux snapshots : sans ça, la fiche
+        // ouverte annoncerait l'outil du tick précédent jusqu'au suivant.
+        self.refresh_forge_sheet();
     }
 
     fn apply_usage(&mut self, usage: &ProviderUsage) {
@@ -3563,10 +3574,14 @@ const FORGE_SHEET_LABEL: usize = 9;
 /// l'en-tête du lecteur.
 const FORGE_SHEET_TITLE: usize = 60;
 
-/// Ce qui identifie la fiche d'une lame dans le lecteur : le tick s'en sert pour
-/// reconnaître la sienne et la réécrire ([`App::refresh_forge_sheet`]).
+/// L'en-tête de la fiche dans le lecteur. C'est un titre, pas un chemin, et
+/// pas non plus une clé : [`App::refresh_forge_sheet`] suit l'id de la tâche,
+/// donc un renommage se contente de réécrire cette ligne.
 fn forge_sheet_title(description: &str) -> String {
-    let head: String = description.chars().take(FORGE_SHEET_TITLE).collect();
+    let head: String = sanitize_for_display(&description.replace('\n', "␊"))
+        .chars()
+        .take(FORGE_SHEET_TITLE)
+        .collect();
     format!("{} {head}", theme::SUBAGENT_GLYPH)
 }
 
@@ -8049,6 +8064,90 @@ mod tests {
         app.refresh_forge_sheet();
 
         assert_eq!(app.viewer.as_ref().expect("lecteur").lines, before);
+    }
+
+    /// Le lecteur montre un fichier ou une fiche, et ses touches de fichier ne
+    /// valent que pour un fichier : `e` ouvrirait un éditeur sur un chemin
+    /// fantôme (et le créerait), `a` attacherait `遣 …` en @mention, `r`
+    /// relirait un fichier qui n'existe pas.
+    #[test]
+    fn the_file_keys_of_the_reader_do_nothing_on_a_forge_sheet() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        app.focus = Focus::Forge;
+        app.on_event(&key(KeyCode::Enter));
+        let sheet = app.viewer.as_ref().expect("fiche").lines.clone();
+        let chat = app.chat.len();
+
+        assert_eq!(app.on_event(&key(KeyCode::Char('e'))), Action::None);
+        app.on_event(&key(KeyCode::Char('a')));
+        app.on_event(&key(KeyCode::Char('r')));
+
+        assert!(app.input.is_empty(), "rien n'est attaché au composer");
+        assert_eq!(app.focus, Focus::Viewer, "la fiche garde le clavier");
+        assert_eq!(app.viewer.as_ref().expect("fiche").lines, sheet);
+        assert_eq!(app.chat.len(), chat, "aucune ligne système inventée");
+    }
+
+    #[test]
+    fn the_file_keys_of_the_reader_still_answer_on_a_file() {
+        let (mut app, _dir) = app_with_open_viewer();
+
+        app.on_event(&key(KeyCode::Char('a')));
+
+        assert_eq!(app.input, "@long.txt ");
+    }
+
+    /// Une description multi-ligne mettrait un vrai saut de ligne dans le titre
+    /// du cadre du lecteur, qui n'en attend pas.
+    #[test]
+    fn a_multiline_description_never_breaks_the_sheet_title() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests\npuis relire le diff",
+            forge::ForgeStatus::Running,
+        )]);
+        app.focus = Focus::Forge;
+
+        app.on_event(&key(KeyCode::Enter));
+
+        let path = &app.viewer.as_ref().expect("fiche").path;
+        assert!(!path.contains('\n'), "{path:?}");
+        assert!(path.contains('␊'), "{path:?}");
+    }
+
+    /// Le snapshot bat une fois par seconde, la notification d'outil arrive
+    /// entre deux : la fiche ouverte doit dire l'outil courant, pas celui du
+    /// tick précédent.
+    #[test]
+    fn a_tool_notification_refreshes_the_open_sheet() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        app.focus = Focus::Forge;
+        app.on_event(&key(KeyCode::Enter));
+        assert!(
+            !app.viewer
+                .as_ref()
+                .expect("fiche")
+                .lines
+                .join("\n")
+                .contains("outil")
+        );
+
+        app.apply_agent_event(&logging_notification(serde_json::json!({
+            "type": SUBAGENT_TOOL_REQUEST_TYPE,
+            "subagent_id": "t1",
+            "tool_call": { "name": "developer__shell" },
+        })));
+
+        let sheet = app.viewer.as_ref().expect("fiche").lines.join("\n");
+        assert!(sheet.contains("outil    : developer__shell"), "{sheet}");
     }
 
     /// Une fiche ouverte puis remplacée par un fichier : le tick n'a plus rien à
