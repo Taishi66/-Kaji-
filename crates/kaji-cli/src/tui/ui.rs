@@ -989,9 +989,14 @@ const FORGE_ELLIPSIS: &str = "…";
 /// Volet droit des lames déléguées (炉). Comme l'explorateur, il ne garde pas
 /// de décalage à lui : la fenêtre glisse pour tenir la sélection visible.
 fn draw_forge(frame: &mut Frame, app: &App, area: Rect) {
+    let border = if app.focus == Focus::Forge {
+        theme::border_active()
+    } else {
+        theme::border_inactive()
+    };
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme::border_inactive())
+        .border_style(border)
         .title(Span::styled(
             format!(" {} forge ", theme::FORGE_GLYPH),
             theme::title(),
@@ -1031,8 +1036,10 @@ fn forge_lines(app: &App, width: u16, rows: usize) -> Vec<Line<'static>> {
     let first = app.forge.selected.saturating_sub(slots.saturating_sub(1));
     for (rank, task) in app.forge.tasks.values().enumerate().skip(first).take(slots) {
         let (mark, mut style) = forge_mark(task, elapsed);
+        // Deux lames vives partagent l'accent : sans le fond, celle que `x`
+        // annulerait ne se distinguerait pas de ses voisines.
         if rank == app.forge.selected {
-            style = theme::accent();
+            style = theme::accent().bg(theme::user_bg_color());
         }
         lines.push(Line::from(Span::styled(
             format!(
@@ -1084,8 +1091,9 @@ fn forge_phase(tool: Option<&str>) -> String {
 }
 
 /// Sous la minute le chrono se compte en secondes ; au-delà, la seconde près
-/// n'apprend plus rien.
-fn forge_duration(secs: u64) -> String {
+/// n'apprend plus rien. La fiche détail (`App::forge_sheet`) lit le même chrono
+/// que le volet.
+pub fn forge_duration(secs: u64) -> String {
     if secs < 60 {
         return format!("{secs}s");
     }
@@ -2890,12 +2898,13 @@ mod tests {
             blade("t2", "relire le diff", ForgeStatus::Done),
         ]);
         app.forge.view = crate::tui::forge::ForgeView::ForcedOpen;
+        let selected = theme::accent().bg(theme::user_bg_color());
 
         let lines = forge_lines(&app, 29, 18);
 
         assert_eq!(lines.len(), 6, "deux lignes d'en-tête, deux par tâche");
-        assert_eq!(lines[2].spans[0].style, theme::accent());
-        assert_eq!(lines[3].spans[0].style, theme::accent());
+        assert_eq!(lines[2].spans[0].style, selected);
+        assert_eq!(lines[3].spans[0].style, selected);
         assert_eq!(lines[4].spans[0].style, theme::dim());
         assert_eq!(lines[5].spans[0].style, theme::dim());
 
@@ -2904,8 +2913,61 @@ mod tests {
 
         assert_eq!(lines[2].spans[0].style, theme::dim());
         assert_eq!(lines[3].spans[0].style, theme::dim());
-        assert_eq!(lines[4].spans[0].style, theme::accent());
-        assert_eq!(lines[5].spans[0].style, theme::accent());
+        assert_eq!(lines[4].spans[0].style, selected);
+        assert_eq!(lines[5].spans[0].style, selected);
+    }
+
+    /// Deux lames vives portent la même couleur d'avant-plan : sans le fond de
+    /// la sélection, celle que `x` annulerait ne se distingue plus des autres.
+    #[test]
+    fn a_live_selected_blade_is_told_apart_by_its_background() {
+        let _theme = theme::test_guard();
+        let mut app = app_at_the_forge(vec![
+            blade("t1", "auditer les tests", ForgeStatus::Running),
+            blade("t2", "relire le diff", ForgeStatus::Running),
+        ]);
+        app.forge.view = crate::tui::forge::ForgeView::ForcedOpen;
+
+        let lines = forge_lines(&app, 29, 18);
+
+        assert_eq!(lines[2].spans[0].style.bg, Some(theme::user_bg_color()));
+        assert_eq!(lines[3].spans[0].style.bg, Some(theme::user_bg_color()));
+        assert_eq!(lines[4].spans[0].style.bg, None, "une lame non désignée");
+        assert_eq!(lines[5].spans[0].style.bg, None);
+        assert_eq!(
+            lines[4].spans[0].style.fg, lines[2].spans[0].style.fg,
+            "le fond distingue, l'avant-plan dit toujours le statut"
+        );
+    }
+
+    /// Le volet qui a le clavier le dit par sa bordure, comme l'explorateur —
+    /// sans quoi ↑/↓ et `x` agiraient depuis un volet d'apparence inerte.
+    #[test]
+    fn the_focused_forge_wears_the_active_border() {
+        let _theme = theme::test_guard();
+        let mut app =
+            app_at_the_forge(vec![blade("t1", "auditer les tests", ForgeStatus::Running)]);
+
+        let inactive = border_row_fg(&app);
+        app.focus = Focus::Forge;
+
+        assert_ne!(border_row_fg(&app), inactive);
+        assert_eq!(border_row_fg(&app), theme::accent_color());
+    }
+
+    /// Couleur de la bordure droite du volet forge, prise sur la colonne la
+    /// plus à droite du cadre.
+    fn border_row_fg(app: &App) -> ratatui::style::Color {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(130, 24);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| draw(frame, app))
+            .expect("draw must succeed against a TestBackend");
+        let buffer = terminal.backend().buffer();
+        buffer[(129, 1)].fg
     }
 
     #[test]

@@ -243,6 +243,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
         "/goal" => "boucle évaluée vers un but (<condition> | clear)",
         "/files" => "(Ctrl+P) recherche floue de fichiers",
         "/explorer" => "(Ctrl+E) explorateur de fichiers",
+        "/forge" => "(Ctrl+F) volet forge — subagents en cours",
         "/edit" => "(ou e) éditer un fichier — /edit <chemin>[:ligne]",
         "/editor" => "choisir l'éditeur/IDE (<cmd> | list | reset | mode)",
         "/spec" => "(F2) panneau SPEC on/off",
@@ -262,7 +263,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
 fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledLine> {
     let mut lines = vec![vec![RoledSpan::title("navigation")]];
     if mouse_enabled {
-        let rows: [(&str, &str); 14] = [
+        let rows: [(&str, &str); 15] = [
             ("molette", "défile le chat (3 lignes/cran)"),
             ("PageUp/PageDown", "défile par page · Home/End"),
             ("Ctrl+↑/↓", "saute au tour précédent/suivant"),
@@ -270,8 +271,12 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             ("Ctrl+P", "recherche floue de fichiers (/files)"),
             ("Ctrl+E", "explorateur de fichiers (/explorer)"),
             (
+                "Ctrl+F",
+                "volet forge (/forge) — qui fait quoi : subagents, statut, outil en cours",
+            ),
+            (
                 "Ctrl+O",
-                "change de volet (composer → explorateur → lecteur)",
+                "change de volet (composer → explorateur → lecteur → forge)",
             ),
             ("", "le chat se replie quand le lecteur a le focus"),
             (
@@ -288,7 +293,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             ),
             (
                 "barre d'état",
-                "sceau coloré = mode · 在 lieu ⟩ branche · 炭 tokens ↑entrée ↓sortie · $ coût · 火 outil en cours",
+                "sceau coloré = mode · 在 lieu ⟩ branche · 炭 tokens ↑entrée ↓sortie · $ coût · 火 outil en cours · 遣 subagents actifs",
             ),
             ("Esc", "interrompt · Ctrl+C quitte"),
             ("Option+glisser", "sélectionner du texte"),
@@ -310,12 +315,13 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             "Ctrl+↑/↓ saute au tour précédent/suivant",
             "Ctrl+P recherche floue de fichiers (/files)",
             "Ctrl+E explorateur de fichiers (/explorer)",
-            "Ctrl+O change de volet (composer → explorateur → lecteur)",
+            "Ctrl+F volet forge (/forge) — qui fait quoi : subagents, statut, outil en cours",
+            "Ctrl+O change de volet (composer → explorateur → lecteur → forge)",
             "  le chat se replie quand le lecteur a le focus",
             "e éditer ($EDITOR, nvim hôte ou pane Zellij/tmux selon KAJI_EDIT_MODE) · /edit <chemin>",
             "Ctrl+S steer : envoie les messages en file au tour en cours",
             "Shift+Tab change le mode (承 approve → 智 smart → 自 auto) — sceau à gauche de la barre d'état",
-            "barre d'état sceau coloré = mode · 在 lieu ⟩ branche · 炭 tokens ↑entrée ↓sortie · $ coût · 火 outil en cours",
+            "barre d'état sceau coloré = mode · 在 lieu ⟩ branche · 炭 tokens ↑entrée ↓sortie · $ coût · 火 outil en cours · 遣 subagents actifs",
             "Esc interrompt · Ctrl+C quitte",
         ] {
             lines.push(vec![RoledSpan::new(text, content_role)]);
@@ -923,6 +929,7 @@ async fn event_loop(
             _ = git_tick.tick() => app.request_git_refresh(),
             _ = forge_tick.tick(), if app.turn_active || !app.forge.tasks.is_empty() || app.forge.visible() => {
                 app.forge.apply_snapshot(agent.subagent_snapshot().await);
+                app.refresh_forge_sheet();
             }
             ev = input_rx.recv() => {
                 let Some(ev) = ev else { break };
@@ -1166,6 +1173,28 @@ async fn event_loop(
                         }
                     }
                     Action::RestoreCancel => app.push_system("restore annulé"),
+                    // Le summon fait foi : une lame qui a fini pendant que la
+                    // question était à l'écran refuse d'être annulée, et le
+                    // volet ne doit pas prétendre le contraire.
+                    Action::ForgeCancel => {
+                        if let Some(id) = app.take_pending_forge_cancel() {
+                            let description = app
+                                .forge
+                                .tasks
+                                .get(&id)
+                                .map(|task| task.description.clone())
+                                .unwrap_or_else(|| id.clone());
+                            if agent.cancel_subagent(&id).await {
+                                app.forge.mark_cancelled(&id);
+                                app.push_system(&format!(
+                                    "{} {description} — annulée",
+                                    theme::SUBAGENT_GLYPH
+                                ));
+                            } else {
+                                app.push_system("forge : tâche déjà terminée");
+                            }
+                        }
+                    }
                     Action::EditFile { path, line } => edit_request = Some((path, line)),
                     Action::None => {}
                 }
@@ -2440,6 +2469,53 @@ mod tests {
         }
     }
 
+    /// Le volet forge n'a aucune trace à l'écran tant qu'aucune lame ne tourne :
+    /// l'aide est le seul endroit où l'on apprend qu'il existe.
+    #[test]
+    fn push_welcome_names_the_forge_chord_in_both_forms() {
+        for mouse_enabled in [true, false] {
+            let mut app = App::new(None);
+            app.mouse_enabled = mouse_enabled;
+
+            push_welcome(&mut app, true);
+
+            let text = welcome_text(&app);
+            for needle in [
+                "Ctrl+F",
+                "volet forge",
+                "/forge",
+                "→ forge",
+                theme::SUBAGENT_GLYPH,
+            ] {
+                assert!(
+                    text.contains(needle),
+                    "souris={mouse_enabled} : {needle} absent de\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_forge_row_follows_the_explorer_row_in_the_navigation_table() {
+        let lines = navigation_section(true, SpanRole::Text);
+
+        assert_eq!(lines.len(), 16, "un titre puis 15 lignes de navigation");
+
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|line| line.iter().map(|span| span.text.as_str()).collect())
+            .collect();
+        let explorer = rows
+            .iter()
+            .position(|row| row.contains("Ctrl+E"))
+            .expect("la ligne Ctrl+E");
+        assert!(
+            rows[explorer + 1].contains("Ctrl+F"),
+            "{:?}",
+            rows[explorer]
+        );
+    }
+
     #[test]
     fn push_welcome_lists_every_command_from_the_table() {
         let mut app = App::new(None);
@@ -2533,7 +2609,8 @@ mod tests {
             ("/sdd", "/goal"),
             ("/goal", "/files"),
             ("/files", "/explorer"),
-            ("/explorer", "/edit"),
+            ("/explorer", "/forge"),
+            ("/forge", "/edit"),
             ("/edit", "/editor"),
             ("/editor", "/spec"),
             ("/spec", "/think"),

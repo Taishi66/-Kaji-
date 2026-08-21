@@ -173,6 +173,13 @@ pub fn gold_color() -> Color {
     active().gold
 }
 
+/// Le fond du message utilisateur, réutilisé par toute sélection qui doit se
+/// lire quand l'avant-plan est déjà pris par un autre sens (le statut d'une
+/// lame de forge, par exemple).
+pub fn user_bg_color() -> Color {
+    active().user_bg
+}
+
 pub fn accent_color() -> Color {
     active().accent
 }

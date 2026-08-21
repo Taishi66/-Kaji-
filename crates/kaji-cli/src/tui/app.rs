@@ -45,6 +45,7 @@ pub enum Focus {
     Composer,
     Viewer,
     Explorer,
+    Forge,
 }
 
 /// Fuzzy file finder (`Ctrl+P`, `/files`) — telescope's gesture: a query line,
@@ -398,6 +399,9 @@ pub enum Action {
     Restore(String),
     RestoreConfirm,
     RestoreCancel,
+    /// `y` sur la question d'annulation d'une lame — l'id attend dans
+    /// `pending_forge_cancel`, seul l'event loop peut atteindre le summon.
+    ForgeCancel,
     /// `Ctrl+S` — flush queued steer messages into the running turn.
     SteerNow,
     /// Parsed `/goal <condition>` — the event loop asks [`App::goal_set`] for
@@ -467,6 +471,14 @@ pub const COMMANDS: &[Command] = &[
         desc: "(ou Ctrl+E) explorateur de fichiers — j/k naviguer, ⏎ ouvrir, a attacher @",
         run: |app| {
             app.toggle_explorer();
+            Action::None
+        },
+    },
+    Command {
+        name: "/forge",
+        desc: "(ou Ctrl+F) volet forge — subagents en cours, ↑/↓ choisir, ⏎ la fiche, x annuler",
+        run: |app| {
+            app.toggle_forge();
             Action::None
         },
     },
@@ -697,6 +709,10 @@ pub struct App {
     /// construction, which the confirm modal and the success message must
     /// say honestly.
     pub pending_restore_files_only: bool,
+    /// Lame dont l'annulation attend son `y` — même forme que
+    /// [`Self::pending_restore`] : l'id est porté jusqu'à l'event loop, seul
+    /// endroit d'où le summon s'atteint.
+    pub pending_forge_cancel: Option<String>,
     pub driver: PassDriver,
     /// Goal session (item 5 ante) — kept after it ends so `/goal` can still
     /// report the last outcome. [`App::goal_driver`] is what says whether it
@@ -882,6 +898,7 @@ impl App {
             icons: IconSet::Nerd,
             pending_restore: None,
             pending_restore_files_only: false,
+            pending_forge_cancel: None,
             driver: PassDriver::Idle,
             goal: None,
             goal_buffer: String::new(),
@@ -2033,11 +2050,39 @@ impl App {
         }
     }
 
-    /// `Ctrl+O`: composer → explorer → viewer → composer, skipping whatever is
-    /// closed. Attaching from a pane hands the keyboard back to the composer,
-    /// and without this chord nothing ever gave it back.
+    /// `Ctrl+F` / `/forge`. Le volet suit la main, sauf sur une forge vide :
+    /// sans extension summon aucune lame n'a jamais tourné, et ouvrir donnerait
+    /// un cadre muet pour toute réponse.
+    pub fn toggle_forge(&mut self) {
+        if self.forge.tasks.is_empty() && !self.forge.visible() {
+            self.push_system("forge : aucune tâche");
+            return;
+        }
+        self.forge.toggle();
+        if self.forge.visible() {
+            self.focus = Focus::Forge;
+        } else if self.focus == Focus::Forge {
+            self.focus = Focus::Composer;
+        }
+    }
+
+    fn close_forge(&mut self) {
+        self.forge.view = forge::ForgeView::ForcedClosed;
+        if self.focus == Focus::Forge {
+            self.focus = Focus::Composer;
+        }
+    }
+
+    /// `Ctrl+O`: composer → explorer → viewer → forge → composer, skipping
+    /// whatever is closed. Attaching from a pane hands the keyboard back to the
+    /// composer, and without this chord nothing ever gave it back.
     pub fn cycle_focus(&mut self) {
-        const ORDER: [Focus; 3] = [Focus::Composer, Focus::Explorer, Focus::Viewer];
+        const ORDER: [Focus; 4] = [
+            Focus::Composer,
+            Focus::Explorer,
+            Focus::Viewer,
+            Focus::Forge,
+        ];
         let start = ORDER.iter().position(|f| *f == self.focus).unwrap_or(0);
         for step in 1..=ORDER.len() {
             let next = ORDER[(start + step) % ORDER.len()];
@@ -2045,12 +2090,91 @@ impl App {
                 Focus::Composer => true,
                 Focus::Explorer => self.explorer.is_some(),
                 Focus::Viewer => self.viewer.is_some(),
+                Focus::Forge => self.forge.visible(),
             };
             if open {
                 self.focus = next;
                 return;
             }
         }
+    }
+
+    /// Toutes les touches pendant que la forge a le focus. Comme l'explorateur
+    /// c'est un volet, pas une surimpression : il répond ou il ignore, et un `j`
+    /// égaré n'atterrit jamais dans le composer derrière.
+    fn forge_key(&mut self, key: &KeyEvent) -> Action {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Action::None;
+        }
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.forge_move(1),
+            KeyCode::Char('k') | KeyCode::Up => self.forge_move(-1),
+            KeyCode::Enter => self.open_forge_sheet(),
+            KeyCode::Char('x') => self.open_forge_cancel_confirm(),
+            KeyCode::Esc => self.close_forge(),
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// La ligne 0 est la première lame : l'agent principal ouvre la liste sans
+    /// être sélectionnable, il n'y a rien à lui demander.
+    fn forge_move(&mut self, delta: isize) {
+        let last = self.forge.tasks.len().saturating_sub(1) as isize;
+        let target = self.forge.selected as isize + delta;
+        self.forge.selected = target.clamp(0, last) as usize;
+    }
+
+    /// La fiche de la lame désignée, dans le lecteur : ce que la colonne du
+    /// volet n'a pas la place de dire.
+    fn open_forge_sheet(&mut self) {
+        let Some(sheet) = self.forge.selected_task().map(|task| forge_sheet(task, 0)) else {
+            return;
+        };
+        self.viewer = Some(sheet);
+        self.focus = Focus::Viewer;
+    }
+
+    /// La fiche est une vue, pas une copie : tant que le lecteur montre celle
+    /// d'une lame encore listée, chaque tick la réécrit — la position de lecture
+    /// reste où l'œil l'a laissée.
+    pub fn refresh_forge_sheet(&mut self) {
+        let Some(sheet) = self.viewer.as_ref().and_then(|open| {
+            self.forge
+                .tasks
+                .values()
+                .find(|task| forge_sheet_title(&task.description) == open.path)
+                .map(|task| forge_sheet(task, open.scroll))
+        }) else {
+            return;
+        };
+        self.viewer = Some(sheet);
+    }
+
+    /// `x` : une lame se coupe, elle ne s'interrompt pas par accident — même
+    /// patron que `/restore`, la question est posée avant que quoi que ce soit
+    /// n'atteigne le summon.
+    fn open_forge_cancel_confirm(&mut self) {
+        let Some(task) = self.forge.selected_task() else {
+            return;
+        };
+        if task.status != forge::ForgeStatus::Running {
+            self.push_system("forge : tâche déjà terminée");
+            return;
+        }
+        let id = task.id.clone();
+        let question = format!(
+            "annuler {} {} ? y/n",
+            theme::SUBAGENT_GLYPH,
+            task.description
+        );
+        self.push_system(&question);
+        self.scroll_offset = 0;
+        self.pending_forge_cancel = Some(id);
+    }
+
+    pub fn take_pending_forge_cancel(&mut self) -> Option<String> {
+        self.pending_forge_cancel.take()
     }
 
     /// Every key while the explorer holds the focus. Like the viewer it is a
@@ -2545,12 +2669,16 @@ impl App {
         self.close_orphaned_tool_requests();
     }
 
-    /// A y/n modal (tool approval, gate, or restore confirmation) is on
-    /// screen and owns the keyboard — the palette must not open underneath
-    /// it, and the plain arrows must fall back to chat scroll instead of
-    /// history recall (see `on_event`'s `modal_active` local).
+    /// A y/n modal (tool approval, gate, restore confirmation or forge
+    /// cancellation) is on screen and owns the keyboard — the palette must
+    /// not open underneath it, and the plain arrows must fall back to chat
+    /// scroll instead of history recall (see `on_event`'s `modal_active`
+    /// local).
     pub fn modal_active(&self) -> bool {
-        self.tool_approval.is_some() || self.gate_open || self.pending_restore.is_some()
+        self.tool_approval.is_some()
+            || self.gate_open
+            || self.pending_restore.is_some()
+            || self.pending_forge_cancel.is_some()
     }
 
     /// Commands whose name starts with the current input, trimmed — empty
@@ -2674,6 +2802,10 @@ impl App {
                         self.toggle_explorer();
                         return Action::None;
                     }
+                    KeyCode::Char('f') => {
+                        self.toggle_forge();
+                        return Action::None;
+                    }
                     KeyCode::Char('o') => {
                         self.cycle_focus();
                         return Action::None;
@@ -2686,6 +2818,15 @@ impl App {
             }
             if self.focus == Focus::Explorer {
                 return self.explorer_key(key);
+            }
+            if self.focus == Focus::Forge {
+                // Le repli automatique ne demande la permission à personne : le
+                // volet peut disparaître sous le focus, et la touche qui le
+                // découvre appartient au composer.
+                if self.forge.visible() {
+                    return self.forge_key(key);
+                }
+                self.focus = Focus::Composer;
             }
         }
         // A y/n modal (tool approval or gate) swallows Enter/chars, but bare
@@ -2814,6 +2955,15 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::RestoreCancel,
                 _ => Action::None,
             };
+        }
+        // Une lame vit sa vie : la question n'attend pas, et tout ce qui n'est
+        // pas un `y` franc la laisse tourner.
+        if self.pending_forge_cancel.is_some() {
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                return Action::ForgeCancel;
+            }
+            self.pending_forge_cancel = None;
+            return Action::None;
         }
         match key.code {
             KeyCode::Backspace
@@ -3388,6 +3538,110 @@ impl App {
         self.last_agent_msg_id = None;
         self.agent_stream_idx = None;
     }
+}
+
+/// Largeur de repli de la prose de la fiche. Le lecteur peut être plus large,
+/// mais une ligne qui traverse un écran entier ne se lit plus.
+const FORGE_SHEET_WRAP: usize = 76;
+
+/// Largeur du champ de gauche : tous les intitulés tiennent dedans, donc les
+/// valeurs commencent à la même colonne.
+const FORGE_SHEET_LABEL: usize = 9;
+
+/// Ce qu'un titre de fiche garde d'une description — au-delà il déborderait de
+/// l'en-tête du lecteur.
+const FORGE_SHEET_TITLE: usize = 60;
+
+/// Ce qui identifie la fiche d'une lame dans le lecteur : le tick s'en sert pour
+/// reconnaître la sienne et la réécrire ([`App::refresh_forge_sheet`]).
+fn forge_sheet_title(description: &str) -> String {
+    let head: String = description.chars().take(FORGE_SHEET_TITLE).collect();
+    format!("{} {head}", theme::SUBAGENT_GLYPH)
+}
+
+fn forge_sheet(task: &forge::ForgeTask, scroll: usize) -> crate::tui::viewer::Viewer {
+    let mut lines = forge_sheet_field("tâche", &task.description);
+    lines.extend(forge_sheet_field(
+        "statut",
+        &format!(
+            "{} · {}",
+            forge_status_label(task.status),
+            crate::tui::ui::forge_duration(task.elapsed_secs)
+        ),
+    ));
+    lines.extend(forge_sheet_field("tours", &task.turns.to_string()));
+    if let Some(tool) = task.current_tool.as_deref() {
+        lines.extend(forge_sheet_field("outil", tool));
+    }
+    if let Some((label, body)) = forge_sheet_verdict(task) {
+        lines.push(String::new());
+        lines.push(format!("{label:<FORGE_SHEET_LABEL$}:"));
+        lines.extend(body.lines().map(str::to_string));
+    }
+    crate::tui::viewer::Viewer {
+        path: forge_sheet_title(&task.description),
+        lines: lines
+            .iter()
+            .map(|line| sanitize_for_display(line))
+            .collect(),
+        scroll,
+        truncated: false,
+        binary: false,
+    }
+}
+
+/// Ce qu'une lame a laissé derrière elle — l'erreur d'abord : un échec dont on
+/// lirait le résultat partiel avant la cause se raconterait à l'envers.
+fn forge_sheet_verdict(task: &forge::ForgeTask) -> Option<(&'static str, &str)> {
+    match (task.error.as_deref(), task.result.as_deref()) {
+        (Some(error), _) => Some(("erreur", error)),
+        (None, Some(result)) => Some(("résultat", result)),
+        (None, None) => None,
+    }
+}
+
+fn forge_status_label(status: forge::ForgeStatus) -> &'static str {
+    match status {
+        forge::ForgeStatus::Running => "en cours",
+        forge::ForgeStatus::Done => "terminé",
+        forge::ForgeStatus::Failed => "échec",
+        forge::ForgeStatus::Cancelled => "annulé",
+    }
+}
+
+fn forge_sheet_field(label: &str, value: &str) -> Vec<String> {
+    let indent = " ".repeat(FORGE_SHEET_LABEL + 2);
+    wrap_words(value, FORGE_SHEET_WRAP)
+        .into_iter()
+        .enumerate()
+        .map(|(rank, chunk)| {
+            if rank == 0 {
+                format!("{label:<FORGE_SHEET_LABEL$}: {chunk}")
+            } else {
+                format!("{indent}{chunk}")
+            }
+        })
+        .collect()
+}
+
+/// Repli sur les espaces. Un mot plus long que la largeur part seul sur sa
+/// ligne : le lecteur rogne, il ne coupe pas un chemin en deux.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current = word.to_string();
+        } else if current.chars().count() + 1 + word.chars().count() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_string();
+        }
+    }
+    lines.push(current);
+    lines
 }
 
 #[cfg(test)]
@@ -7557,5 +7811,309 @@ mod tests {
         app.apply_agent_event(&logging_notification(data));
 
         assert!(app.forge.tasks.is_empty());
+    }
+
+    fn blade(id: &str, description: &str, status: forge::ForgeStatus) -> forge::ForgeTask {
+        forge::ForgeTask {
+            id: id.to_string(),
+            description: description.to_string(),
+            status,
+            current_tool: None,
+            elapsed_secs: 7,
+            turns: 2,
+            result: None,
+            error: None,
+        }
+    }
+
+    /// Les tâches sont posées à la main : `ForgeView::Auto` reste intact, donc
+    /// le volet n'est visible que si une lame tourne encore.
+    fn app_at_the_forge(blades: Vec<forge::ForgeTask>) -> App {
+        let mut app = App::new(None);
+        for blade in blades {
+            app.forge.tasks.insert(blade.id.clone(), blade);
+        }
+        app
+    }
+
+    #[test]
+    fn ctrl_f_opens_the_forge_then_gives_the_composer_its_keys_back() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Done,
+        )]);
+        assert!(!app.forge.visible());
+
+        assert_eq!(app.on_event(&ctrl_key(KeyCode::Char('f'))), Action::None);
+        assert_eq!(app.forge.view, forge::ForgeView::ForcedOpen);
+        assert_eq!(app.focus, Focus::Forge);
+
+        app.on_event(&ctrl_key(KeyCode::Char('f')));
+        assert_eq!(app.forge.view, forge::ForgeView::ForcedClosed);
+        assert_eq!(app.focus, Focus::Composer);
+        assert!(app.input.is_empty(), "Ctrl+F ne tape rien dans le composer");
+    }
+
+    #[test]
+    fn slash_forge_toggles_the_panel_like_the_chord() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Done,
+        )]);
+
+        for c in "/forge".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
+
+        assert_eq!(app.forge.view, forge::ForgeView::ForcedOpen);
+        assert_eq!(app.focus, Focus::Forge);
+        assert!(app.input.is_empty());
+    }
+
+    /// Sans extension summon, aucune lame n'a jamais existé : ouvrir donnerait
+    /// un cadre muet pour toute réponse.
+    #[test]
+    fn opening_an_empty_forge_says_there_is_nothing_to_show() {
+        let mut app = App::new(None);
+
+        app.on_event(&ctrl_key(KeyCode::Char('f')));
+
+        assert_eq!(app.forge.view, forge::ForgeView::Auto);
+        assert!(!app.forge.visible());
+        assert_eq!(app.focus, Focus::Composer);
+        assert!(
+            app.chat
+                .last()
+                .expect("une ligne système")
+                .text
+                .contains("forge : aucune tâche")
+        );
+    }
+
+    #[test]
+    fn the_forge_arrows_are_clamped_to_the_blades() {
+        let mut app = app_at_the_forge(vec![
+            blade("t1", "auditer les tests", forge::ForgeStatus::Running),
+            blade("t2", "relire le diff", forge::ForgeStatus::Running),
+        ]);
+        app.focus = Focus::Forge;
+
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.forge.selected, 0, "jamais au-dessus de la première");
+
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.forge.selected, 1);
+        app.on_event(&key(KeyCode::Char('j')));
+        assert_eq!(app.forge.selected, 1, "jamais au-delà de la dernière");
+        app.on_event(&key(KeyCode::Char('k')));
+        assert_eq!(app.forge.selected, 0);
+        assert!(app.input.is_empty(), "rien ne fuit dans le composer");
+    }
+
+    #[test]
+    fn enter_opens_the_blade_sheet_in_the_reader() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        app.forge.tasks.get_mut("t1").unwrap().current_tool = Some("developer__shell".to_string());
+        app.focus = Focus::Forge;
+
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
+
+        let viewer = app.viewer.as_ref().expect("fiche ouverte");
+        assert!(viewer.path.contains("auditer les tests"), "{}", viewer.path);
+        let sheet = viewer.lines.join("\n");
+        for expected in ["tâche", "statut", "en cours", "7s", "tours", "2", "outil"] {
+            assert!(sheet.contains(expected), "{expected} manquant :\n{sheet}");
+        }
+        assert_eq!(app.focus, Focus::Viewer);
+    }
+
+    #[test]
+    fn a_finished_blade_sheet_carries_its_verdict() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Failed,
+        )]);
+        app.forge.tasks.get_mut("t1").unwrap().error = Some("compilation cassée".to_string());
+        app.forge.view = forge::ForgeView::ForcedOpen;
+        app.focus = Focus::Forge;
+
+        app.on_event(&key(KeyCode::Enter));
+
+        let sheet = app.viewer.as_ref().expect("fiche").lines.join("\n");
+        assert!(sheet.contains("échec"), "{sheet}");
+        assert!(sheet.contains("erreur"), "{sheet}");
+        assert!(sheet.contains("compilation cassée"), "{sheet}");
+        assert!(!sheet.contains("outil"), "une lame morte ne brûle rien");
+    }
+
+    /// Le lecteur rogne les lignes trop longues sans le dire : une description
+    /// de délégation, qui fait une phrase, doit être repliée avant d'y entrer.
+    #[test]
+    fn a_long_description_is_folded_under_the_value_column() {
+        let long = "auditer la couverture des tests du volet forge et de sa barre \
+                    d'état, puis relire chaque assertion une à une";
+        let mut app = app_at_the_forge(vec![blade("t1", long, forge::ForgeStatus::Running)]);
+        app.focus = Focus::Forge;
+
+        app.on_event(&key(KeyCode::Enter));
+
+        let lines = &app.viewer.as_ref().expect("fiche").lines;
+        assert!(lines[0].starts_with("tâche    : "), "{:?}", lines[0]);
+        assert!(
+            lines.iter().all(|line| line.chars().count() <= 76 + 11),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].starts_with("           ") && !lines[1].trim().is_empty(),
+            "la suite se range sous la valeur : {:?}",
+            lines[1]
+        );
+        assert_eq!(
+            format!("{}{}", lines[0].trim_start_matches("tâche    : "), lines[1])
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+            long,
+            "repliée, pas tronquée"
+        );
+        assert!(lines[2].starts_with("statut"), "{:?}", lines[2]);
+    }
+
+    /// La fiche est une vue, pas une copie : le tick la réécrit sous les yeux
+    /// plutôt que de laisser un statut périmé à l'écran.
+    #[test]
+    fn the_tick_rewrites_the_open_sheet_and_keeps_the_reading_position() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        app.focus = Focus::Forge;
+        app.on_event(&key(KeyCode::Enter));
+        app.viewer.as_mut().expect("fiche").scroll = 2;
+
+        app.forge.tasks.get_mut("t1").unwrap().status = forge::ForgeStatus::Done;
+        app.refresh_forge_sheet();
+
+        let viewer = app.viewer.as_ref().expect("fiche toujours ouverte");
+        assert_eq!(viewer.scroll, 2);
+        assert!(viewer.lines.join("\n").contains("terminé"));
+    }
+
+    #[test]
+    fn a_file_in_the_reader_is_left_alone_by_the_forge_tick() {
+        let (mut app, _dir) = app_with_open_viewer();
+        let before = app.viewer.as_ref().expect("lecteur").lines.clone();
+
+        app.refresh_forge_sheet();
+
+        assert_eq!(app.viewer.as_ref().expect("lecteur").lines, before);
+    }
+
+    #[test]
+    fn x_on_a_live_blade_asks_before_it_cancels() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        app.focus = Focus::Forge;
+
+        assert_eq!(app.on_event(&key(KeyCode::Char('x'))), Action::None);
+
+        assert_eq!(app.pending_forge_cancel.as_deref(), Some("t1"));
+        let line = &app.chat.last().expect("la question").text;
+        assert!(
+            line.contains("annuler") && line.contains("auditer les tests") && line.contains("y/n"),
+            "{line}"
+        );
+
+        assert_eq!(app.on_event(&key(KeyCode::Char('y'))), Action::ForgeCancel);
+        assert_eq!(app.take_pending_forge_cancel().as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn x_on_a_finished_blade_says_so_instead_of_arming_anything() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Done,
+        )]);
+        app.forge.view = forge::ForgeView::ForcedOpen;
+        app.focus = Focus::Forge;
+
+        app.on_event(&key(KeyCode::Char('x')));
+
+        assert!(app.pending_forge_cancel.is_none());
+        assert!(
+            app.chat
+                .last()
+                .expect("une ligne système")
+                .text
+                .contains("déjà terminée")
+        );
+    }
+
+    #[test]
+    fn anything_but_y_disarms_the_cancel_and_leaves_the_blade_running() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        app.focus = Focus::Forge;
+        app.on_event(&key(KeyCode::Char('x')));
+
+        assert_eq!(app.on_event(&key(KeyCode::Char('n'))), Action::None);
+
+        assert!(app.pending_forge_cancel.is_none());
+        assert_eq!(app.forge.tasks["t1"].status, forge::ForgeStatus::Running);
+        assert!(app.input.is_empty(), "la réponse ne se tape pas non plus");
+    }
+
+    #[test]
+    fn ctrl_o_reaches_the_forge_only_while_it_is_open() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        assert!(app.forge.visible());
+
+        app.on_event(&ctrl_key(KeyCode::Char('o')));
+        assert_eq!(app.focus, Focus::Forge);
+        app.on_event(&ctrl_key(KeyCode::Char('o')));
+        assert_eq!(app.focus, Focus::Composer);
+
+        app.forge.view = forge::ForgeView::ForcedClosed;
+        app.on_event(&ctrl_key(KeyCode::Char('o')));
+        assert_eq!(app.focus, Focus::Composer, "volet fermé : on l'enjambe");
+    }
+
+    /// Le repli automatique ne demande la permission à personne : le volet peut
+    /// disparaître sous le focus, et les touches doivent revenir au composer
+    /// plutôt qu'à un volet que personne ne voit.
+    #[test]
+    fn a_forge_that_folds_under_the_focus_hands_the_keys_back() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Done,
+        )]);
+        app.forge.folds_at = Some(Instant::now() - Duration::from_secs(1));
+        app.focus = Focus::Forge;
+
+        app.on_event(&key(KeyCode::Char('j')));
+
+        assert_eq!(app.focus, Focus::Composer);
+        assert_eq!(app.input, "j");
     }
 }
