@@ -1,3 +1,4 @@
+use crate::tui::gitstatus::display_width;
 use crate::tui::theme;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -215,21 +216,24 @@ fn fit_table_to_budget(natural_widths: &[usize], total_budget: usize) -> Option<
     Some(widths)
 }
 
+const TABLE_ELLIPSIS: &str = "…";
+
 /// Width a cell occupies once its inline markup is consumed, so `**abc**`
-/// claims 3 columns rather than 7. Char count, like the rest of the table
-/// measurements.
+/// claims 3 columns rather than 7. Terminal cells, not chars: an emoji or a
+/// kanji claims 2 columns, and measuring it as 1 drifts every border after it.
 fn table_cell_width(cell: &str) -> usize {
     render_inline_spans(cell)
         .iter()
-        .map(|span| span.content.chars().count())
+        .map(|span| display_width(&span.content))
         .sum()
 }
 
-/// Fits a cell's inline spans to `width` plain-text chars: pads with trailing
-/// spaces, or truncates at `width - 1` chars followed by `…`, which inherits
-/// the style of the span it cuts through.
+/// Fits a cell's inline spans to `width` terminal cells: pads with trailing
+/// spaces, or truncates and appends `…`, which inherits the style of the span
+/// it cuts through. A double-width char that would overrun the budget is
+/// dropped and its cell padded, so the cell always occupies exactly `width`.
 fn fit_table_cell_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
-    let content_width: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+    let content_width: usize = spans.iter().map(|span| display_width(&span.content)).sum();
     if content_width <= width {
         let mut spans = spans;
         if content_width < width {
@@ -240,28 +244,42 @@ fn fit_table_cell_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'st
         }
         return spans;
     }
-    if width == 0 {
+    let ellipsis_width = display_width(TABLE_ELLIPSIS);
+    if width < ellipsis_width {
         return Vec::new();
     }
 
+    let budget = width - ellipsis_width;
     let mut fitted = Vec::new();
-    let mut remaining = width - 1;
+    let mut used = 0;
     let mut ellipsis_style = theme::text();
+    let mut buffer = [0u8; 4];
     for span in spans {
-        let len = span.content.chars().count();
-        if len <= remaining {
-            remaining -= len;
+        let span_width = display_width(&span.content);
+        if used + span_width <= budget {
+            used += span_width;
             fitted.push(span);
             continue;
         }
         ellipsis_style = span.style;
-        if remaining > 0 {
-            let head: String = span.content.chars().take(remaining).collect();
+        let mut head = String::new();
+        for c in span.content.chars() {
+            let cell = display_width(c.encode_utf8(&mut buffer));
+            if used + cell > budget {
+                break;
+            }
+            used += cell;
+            head.push(c);
+        }
+        if !head.is_empty() {
             fitted.push(Span::styled(head, span.style));
         }
         break;
     }
-    fitted.push(Span::styled("…", ellipsis_style));
+    fitted.push(Span::styled(TABLE_ELLIPSIS, ellipsis_style));
+    if used < budget {
+        fitted.push(Span::styled(" ".repeat(budget - used), theme::text()));
+    }
     fitted
 }
 
@@ -717,6 +735,34 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
+    /// Terminal column of every box-drawing junction on the line. Two rows of
+    /// the same table must yield the same vector, otherwise the borders are
+    /// ragged on screen.
+    fn border_columns(line: &Line) -> Vec<usize> {
+        let mut columns = Vec::new();
+        let mut column = 0;
+        let mut buffer = [0u8; 4];
+        for c in plain_text(line).chars() {
+            if "┌┬┐├┼┤└┴┘│".contains(c) {
+                columns.push(column);
+            }
+            column += display_width(c.encode_utf8(&mut buffer));
+        }
+        columns
+    }
+
+    fn assert_borders_aligned(lines: &[Line<'static>]) {
+        let expected = border_columns(&lines[0]);
+        for line in lines {
+            assert_eq!(
+                border_columns(line),
+                expected,
+                "borders drift on row: {}",
+                plain_text(line)
+            );
+        }
+    }
+
     #[test]
     fn renders_bold_text() {
         let lines = render_markdown("hello **world**", 100);
@@ -892,6 +938,47 @@ mod tests {
             .find(|s| s.content == "…")
             .expect("ellipsis span");
         assert!(ellipsis.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn table_column_widths_count_emoji_as_terminal_cells() {
+        assert_eq!(table_cell_width("🌧 Pluie"), display_width("🌧 Pluie"));
+        assert_eq!(table_cell_width("⛅ Nuageux"), display_width("⛅ Nuageux"));
+
+        let lines = render_markdown(
+            "| Temps | Temp |\n| - | - |\n| ⛅ Nuageux | 28°C |\n| 🌧 Pluie | 21°C |\n| Sec | 30°C |",
+            100,
+        );
+        assert_borders_aligned(&lines);
+    }
+
+    #[test]
+    fn table_column_widths_count_cjk_as_terminal_cells() {
+        assert_eq!(table_cell_width("鍛冶場"), 6);
+
+        let lines = render_markdown("| lieu | note |\n| - | - |\n| 鍛冶場 | forge |", 100);
+        assert_borders_aligned(&lines);
+        assert!(plain_text(&lines[3]).contains("鍛冶場"));
+    }
+
+    #[test]
+    fn table_truncates_wide_chars_within_the_cell_budget() {
+        let wide_cell = "⛅".repeat(80);
+        let input = format!("| a | b |\n| - | - |\n| x | {wide_cell} |");
+        let lines = render_markdown(&input, 102);
+        assert_eq!(lines.len(), 5);
+        assert_borders_aligned(&lines);
+        for line in &lines {
+            let width = display_width(&plain_text(line));
+            assert!(width <= 100, "line exceeds the 100-cell budget: {width}");
+        }
+
+        let row = plain_text(&lines[3]);
+        let cells: Vec<&str> = row.split('│').collect();
+        assert!(
+            cells[2].trim_end().ends_with('…'),
+            "truncated cell should end with an ellipsis: {row}"
+        );
     }
 
     #[test]
