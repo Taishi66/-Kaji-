@@ -23,7 +23,7 @@ est le canal qui voyage entre machines et entre utilisateurs).
 | Double scope dès v1 : projet in-repo + user en data dir | Le git est le seul canal qui voyage ; les préférences perso ne vont jamais dans un repo partagé |
 | 1 fait = 1 fichier typé + `MEMORY.md` index généré | Dédup/péremption par fichier, diffs git propres, format déjà bien lu par les autres harness |
 | Architecture A : journal brut SQLite intact + promotion curée en md | Zéro régression (parité legacy/state-machine conservée), migration incrémentale |
-| Retrait de l'extension MCP memory héritée (`crates/kaji-mcp/src/memory/`) + migration one-shot de ses JSON | Elle écrit du JSON dans `.kaji/memory` (collision de chemin) ; un seul système mémoire dans le produit |
+| Retrait de l'extension MCP memory héritée (`crates/kaji-mcp/src/memory/`) + migration one-shot de ses fichiers `.txt` | Elle écrit des `.txt` par catégorie dans `.kaji/memory` (collision de chemin) ; un seul système mémoire dans le produit |
 
 ## S1 — Modèle de données
 
@@ -70,8 +70,9 @@ NULL` = entrée pas encore vue par le curateur.
    attente.
 3. `kaji memory curate` (CLI, run explicite).
 
-**Modèle** : `fast_model` (`crates/kaji/src/model_config.rs`) si configuré, sinon le modèle de
-session ; override par env `KAJI_MEMORY_CURATOR_MODEL`.
+**Modèle** : résolution fast-model existante (`get_fast_model`,
+`crates/kaji/src/model_config.rs:97-113` — env `KAJI_FAST_MODEL`, sinon défaut provider,
+sinon modèle principal) ; override prioritaire par env `KAJI_MEMORY_CURATOR_MODEL`.
 
 **Contrat d'appel** : 1 appel LLM par run. Entrée = entrées brutes non curées + index des faits
 existants (slugs + descriptions). Sortie = JSON strict, liste d'opérations
@@ -94,8 +95,8 @@ dans le repo, jamais committé. Un index par scope, rebuild incrémental par com
 (fichiers md vs index) au boot et après chaque run de curation. Suppression d'un fichier md →
 l'entrée sort de l'index au rebuild suivant.
 
-**Splice inchangé** : les deux sites de splice (`agent.rs:993-1022`,
-`ops_llm.rs:397-408`) ne bougent pas — seule la *composition* du bloc mémoire change dans le
+**Splice inchangé** : les deux sites de splice (`agents/agent.rs:993-1022`,
+`agents/state_machine/ops_llm.rs:397-408`) ne bougent pas — seule la *composition* du bloc mémoire change dans le
 bridge (`recall_prompt` / `splice_memory_block`, `kaji.rs`). Parité legacy/state-machine par
 construction.
 
@@ -106,10 +107,12 @@ budget, en tête.
 
 ## S4 — Migration et cohabitation
 
-- **Extension MCP memory** (`crates/kaji-mcp/src/memory/`) : retirée. Au premier boot qui
-  détecte ses JSON dans `.kaji/memory` : migration one-shot JSON → fichiers md (type
-  `reference` par défaut, `created_by: curator`), originaux renommés `*.legacy`, jamais
-  supprimés.
+- **Extension MCP memory** (`crates/kaji-mcp/src/memory/`) : retirée. Elle stocke des
+  fichiers `.txt` par catégorie (entrées `# tags` + données, séparées par ligne vide) à deux
+  endroits : local `.kaji/memory/*.txt` et dossier memory global du config dir. Migration
+  one-shot au premier accès : un fait md `reference` par catégorie (local → scope projet,
+  global → scope user, `created_by: curator`), originaux renommés `*.txt.legacy`, jamais
+  supprimés. Idempotent (les `.legacy` sont ignorés).
 - **`shared.db` existant** : rien de spécial — les entrées historiques ont `curated_at NULL`
   et sont absorbées au fil de l'eau par les runs de curation normaux.
 - **Git** : committer `.kaji/memory/` est le choix du user. kaji ne touche jamais au
@@ -123,7 +126,7 @@ budget, en tête.
 | `kaji memory list --curated \| --raw` | Liste les faits md (par scope) ou le journal brut |
 | `kaji memory curate` | Run de curation explicite |
 | Suppression d'un fait | Supprimer le fichier md — pas de commande dédiée ; l'index suit au rebuild |
-| Ligne système TUI | `記 N faits mémorisés` après un run de curation qui a écrit N faits |
+| Ligne `記 N faits mémorisés` | En réponse de `/remember` et en sortie de `kaji memory curate` ; pour les runs background fin-de-tour : log tracing en v1 (pas de canal TUI simple depuis une tâche spawn) |
 
 CLI existante (`cli.rs:757-792`, `commands/memory.rs`) : les sous-commandes actuelles restent,
 `list` gagne les deux flags.
