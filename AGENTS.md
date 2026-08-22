@@ -1,6 +1,6 @@
 # AGENTS Instructions
 
-kaji is an AI agent framework in Rust with a CLI interface. The desktop UI target is Tauri v2 on ACP (not yet implemented — see ADR `2026-08-08-ipc-core-lib-tui-inprocess-desktop-acp`); the legacy Electron desktop (`ui/desktop`) has been removed.
+kaji is an AI agent framework in Rust with a CLI interface. The desktop UI target is Tauri v2 on ACP (not yet implemented — see ADR `2026-08-08-ipc-core-lib-tui-inprocess-desktop-acp`, kept in the maintainer's decision log outside this repo); the legacy Electron desktop (`ui/desktop`) has been removed.
 
 ## Workflow
 
