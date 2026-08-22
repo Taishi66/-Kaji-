@@ -8,7 +8,7 @@
 //! d'une tâche encore vivante, la notification ne change jamais un statut.
 
 use kaji::agents::{SubagentTaskSnapshot, SubagentTaskStatus};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Combien de temps le volet survit à sa dernière tâche : le temps de lire le
@@ -33,6 +33,8 @@ pub struct ForgeTask {
     pub turns: u32,
     pub result: Option<String>,
     pub error: Option<String>,
+    /// Rang d'arrivée, estampillé par [`ForgeState::insert`].
+    pub seq: u64,
 }
 
 /// `Auto` laisse le volet suivre l'activité ; les deux autres sont la main de
@@ -53,6 +55,15 @@ pub struct ForgeState {
     /// Instant après lequel le mode `Auto` replie le volet — posé une seule
     /// fois, quand la dernière tâche vivante s'arrête.
     pub folds_at: Option<Instant>,
+    /// Rang de la prochaine lame. Le `BTreeMap` range par id, ce qui
+    /// entrelacerait deux vagues de délégations : c'est ce compteur qui garde
+    /// l'ordre où elles sont nées.
+    next_seq: u64,
+    /// Les ids rangés par une nouvelle vague. Le summon garde ses tâches
+    /// terminées dix minutes (`KAJI_COMPLETED_TASK_TTL_SECS`), donc sans cette
+    /// mémoire le tick suivant les rendrait à la liste dont on vient de les
+    /// sortir.
+    retired: HashSet<String>,
 }
 
 impl ForgeState {
@@ -65,6 +76,9 @@ impl ForgeState {
         let seen: Vec<String> = snap.iter().map(|entry| entry.id.clone()).collect();
 
         for entry in snap {
+            if self.retired.contains(&entry.id) {
+                continue;
+            }
             match self.tasks.get_mut(&entry.id) {
                 Some(task) => {
                     task.description = entry.description;
@@ -89,6 +103,7 @@ impl ForgeState {
                         turns: entry.turns,
                         result: entry.result,
                         error: entry.error,
+                        seq: 0,
                     });
                 }
             }
@@ -111,6 +126,9 @@ impl ForgeState {
     /// Elle arrive souvent avant lui, d'où la création à la volée — l'id tient
     /// lieu de description jusqu'au prochain tick.
     pub fn apply_tool_notification(&mut self, subagent_id: &str, tool_name: &str) {
+        if self.retired.contains(subagent_id) {
+            return;
+        }
         match self.tasks.get_mut(subagent_id) {
             Some(task) => task.current_tool = Some(tool_name.to_string()),
             None => self.insert(ForgeTask {
@@ -122,6 +140,7 @@ impl ForgeState {
                 turns: 0,
                 result: None,
                 error: None,
+                seq: 0,
             }),
         }
     }
@@ -167,18 +186,47 @@ impl ForgeState {
             .count()
     }
 
-    pub fn selected_task(&self) -> Option<&ForgeTask> {
-        self.tasks.values().nth(self.selected)
+    /// L'ordre du volet, et le seul qui vaille pour désigner une ligne : les
+    /// lames vives en tête, les verdicts en dessous, chaque groupe dans son
+    /// ordre d'arrivée. Le `BTreeMap` stocke, il n'ordonne pas.
+    pub fn ordered(&self) -> Vec<&ForgeTask> {
+        let mut ordered: Vec<&ForgeTask> = self.tasks.values().collect();
+        ordered.sort_by_key(|task| (task.status != ForgeStatus::Running, task.seq));
+        ordered
     }
 
-    /// Une lame qui vient de naître rouvre le volet, même refermé à la main :
-    /// la main de l'utilisateur portait sur la fournée précédente.
-    fn insert(&mut self, task: ForgeTask) {
+    pub fn selected_task(&self) -> Option<&ForgeTask> {
+        self.ordered().into_iter().nth(self.selected)
+    }
+
+    /// Estampille le rang d'arrivée et range la vague précédente : une nouvelle
+    /// lame veut dire que les verdicts du dessous ont été lus.
+    ///
+    /// Une lame qui vient de naître rouvre aussi le volet, même refermé à la
+    /// main : la main de l'utilisateur portait sur la fournée précédente.
+    fn insert(&mut self, mut task: ForgeTask) {
         let running = task.status == ForgeStatus::Running;
+        self.retire_finished();
+        task.seq = self.next_seq;
+        self.next_seq += 1;
         self.tasks.insert(task.id.clone(), task);
         if running {
             self.view = ForgeView::Auto;
             self.folds_at = None;
+        }
+        self.clamp_selection();
+    }
+
+    fn retire_finished(&mut self) {
+        let finished: Vec<String> = self
+            .tasks
+            .values()
+            .filter(|task| task.status != ForgeStatus::Running)
+            .map(|task| task.id.clone())
+            .collect();
+        for id in finished {
+            self.tasks.remove(&id);
+            self.retired.insert(id);
         }
     }
 
@@ -198,6 +246,142 @@ fn reconciled_status(status: SubagentTaskStatus) -> ForgeStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ids(state: &ForgeState) -> Vec<&str> {
+        state
+            .ordered()
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect()
+    }
+
+    /// Deux vagues de délégations : la seconde naît alors que la première a
+    /// déjà rendu son verdict.
+    fn two_waves() -> ForgeState {
+        let mut state = ForgeState::default();
+        state.apply_snapshot(vec![
+            snapshot("a", SubagentTaskStatus::Running),
+            snapshot("b", SubagentTaskStatus::Running),
+        ]);
+        state.apply_snapshot(vec![
+            snapshot("a", SubagentTaskStatus::Completed),
+            snapshot("b", SubagentTaskStatus::Running),
+        ]);
+        state
+    }
+
+    #[test]
+    fn the_living_blades_lead_the_finished_ones() {
+        let mut state = ForgeState::default();
+        state.apply_snapshot(vec![snapshot("a", SubagentTaskStatus::Running)]);
+        state.apply_snapshot(vec![
+            snapshot("a", SubagentTaskStatus::Running),
+            snapshot("z", SubagentTaskStatus::Running),
+        ]);
+
+        state.apply_snapshot(vec![
+            snapshot("a", SubagentTaskStatus::Completed),
+            snapshot("z", SubagentTaskStatus::Running),
+        ]);
+
+        assert_eq!(ids(&state), vec!["z", "a"], "le verdict passe sous la lame");
+    }
+
+    #[test]
+    fn two_living_blades_keep_their_arrival_order() {
+        let mut state = ForgeState::default();
+        state.apply_snapshot(vec![snapshot("z", SubagentTaskStatus::Running)]);
+
+        state.apply_snapshot(vec![
+            snapshot("z", SubagentTaskStatus::Running),
+            snapshot("a", SubagentTaskStatus::Running),
+        ]);
+
+        assert_eq!(ids(&state), vec!["z", "a"], "l'ordre d'arrivée, pas l'id");
+    }
+
+    #[test]
+    fn a_new_wave_retires_the_finished_blades() {
+        let mut state = two_waves();
+
+        state.apply_snapshot(vec![
+            snapshot("a", SubagentTaskStatus::Completed),
+            snapshot("b", SubagentTaskStatus::Running),
+            snapshot("c", SubagentTaskStatus::Running),
+        ]);
+
+        assert_eq!(ids(&state), vec!["b", "c"]);
+        assert!(
+            !state.tasks.contains_key("a"),
+            "la vague d'avant est rangée"
+        );
+    }
+
+    /// Le summon garde ses tâches terminées dix minutes
+    /// (`KAJI_COMPLETED_TASK_TTL_SECS`) : sans mémoire des retirées, le tick
+    /// suivant les rendrait à la liste dont la nouvelle vague vient de les
+    /// sortir.
+    #[test]
+    fn a_retired_blade_does_not_come_back_at_the_next_tick() {
+        let mut state = two_waves();
+        let wave_two = vec![
+            snapshot("a", SubagentTaskStatus::Completed),
+            snapshot("b", SubagentTaskStatus::Running),
+            snapshot("c", SubagentTaskStatus::Running),
+        ];
+        state.apply_snapshot(wave_two.clone());
+
+        state.apply_snapshot(wave_two);
+
+        assert_eq!(ids(&state), vec!["b", "c"]);
+    }
+
+    #[test]
+    fn retiring_a_wave_clamps_the_selection() {
+        let mut state = two_waves();
+        state.apply_snapshot(vec![
+            snapshot("a", SubagentTaskStatus::Completed),
+            snapshot("b", SubagentTaskStatus::Completed),
+        ]);
+        state.selected = 1;
+
+        state.apply_snapshot(vec![
+            snapshot("a", SubagentTaskStatus::Completed),
+            snapshot("b", SubagentTaskStatus::Completed),
+            snapshot("c", SubagentTaskStatus::Running),
+        ]);
+
+        assert_eq!(state.selected, 0);
+        assert_eq!(
+            state.selected_task().map(|task| task.id.as_str()),
+            Some("c")
+        );
+    }
+
+    #[test]
+    fn selected_task_follows_the_rendered_order() {
+        let mut state = ForgeState::default();
+        state.apply_snapshot(vec![snapshot("a", SubagentTaskStatus::Running)]);
+        state.apply_snapshot(vec![
+            snapshot("a", SubagentTaskStatus::Running),
+            snapshot("z", SubagentTaskStatus::Running),
+        ]);
+        state.apply_snapshot(vec![
+            snapshot("a", SubagentTaskStatus::Completed),
+            snapshot("z", SubagentTaskStatus::Running),
+        ]);
+
+        state.selected = 0;
+        assert_eq!(
+            state.selected_task().map(|task| task.id.as_str()),
+            Some("z")
+        );
+        state.selected = 1;
+        assert_eq!(
+            state.selected_task().map(|task| task.id.as_str()),
+            Some("a")
+        );
+    }
 
     fn snapshot(id: &str, status: SubagentTaskStatus) -> SubagentTaskSnapshot {
         SubagentTaskSnapshot {

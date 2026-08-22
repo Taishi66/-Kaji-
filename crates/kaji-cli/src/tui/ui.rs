@@ -1033,7 +1033,14 @@ fn forge_lines(app: &App, width: u16, rows: usize) -> Vec<Line<'static>> {
 
     let slots = rows.saturating_sub(FORGE_ROWS_PER_BLADE) / FORGE_ROWS_PER_BLADE;
     let first = app.forge.selected.saturating_sub(slots.saturating_sub(1));
-    for (rank, task) in app.forge.tasks.values().enumerate().skip(first).take(slots) {
+    for (rank, task) in app
+        .forge
+        .ordered()
+        .into_iter()
+        .enumerate()
+        .skip(first)
+        .take(slots)
+    {
         let (mark, mut style) = forge_mark(task);
         // Deux lames vives partagent l'accent : sans le fond, celle que `x`
         // annulerait ne se distinguerait pas de ses voisines.
@@ -2822,12 +2829,16 @@ mod tests {
             turns: 2,
             result: None,
             error: None,
+            seq: 0,
         }
     }
 
+    /// L'ordre du `Vec` est l'ordre d'arrivée : c'est lui que le volet rend,
+    /// pas celui des ids.
     fn app_at_the_forge(blades: Vec<ForgeTask>) -> App {
         let mut app = App::new(None);
-        for blade in blades {
+        for (rank, mut blade) in blades.into_iter().enumerate() {
+            blade.seq = rank as u64;
             app.forge.tasks.insert(blade.id.clone(), blade);
         }
         app
@@ -3037,6 +3048,29 @@ mod tests {
             "le volet tient dans la largeur : {row:?}"
         );
         assert!(content.contains("auditer les tests"), "got:\n{content}");
+    }
+
+    /// Le volet range les lames vives en tête, chaque groupe dans son ordre
+    /// d'arrivée : le `BTreeMap` trie par id, ce qui entrelacerait deux vagues
+    /// de délégations et rendrait la colonne illisible.
+    #[test]
+    fn the_panel_renders_the_living_blades_first_in_arrival_order() {
+        let _theme = theme::test_guard();
+        let app = app_at_the_forge(vec![
+            blade("b", "auditer les tests", ForgeStatus::Running),
+            blade("a", "compter les lignes", ForgeStatus::Done),
+            blade("c", "relire le diff", ForgeStatus::Running),
+        ]);
+
+        let lines = forge_lines(&app, 29, 18);
+
+        let rendered: Vec<&str> = [2, 4, 6]
+            .iter()
+            .map(|row| lines[*row].spans[0].content.as_ref())
+            .collect();
+        assert!(rendered[0].contains("auditer les tests"), "{rendered:?}");
+        assert!(rendered[1].contains("relire le diff"), "{rendered:?}");
+        assert!(rendered[2].contains("compter les lignes"), "{rendered:?}");
     }
 
     /// Le volet plus court que la liste : la fenêtre glisse pour garder la

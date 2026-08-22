@@ -7854,6 +7854,7 @@ mod tests {
             turns: 2,
             result: None,
             error: None,
+            seq: 0,
         }
     }
 
@@ -7875,10 +7876,12 @@ mod tests {
     }
 
     /// Les tâches sont posées à la main : `ForgeView::Auto` reste intact, donc
-    /// le volet n'est visible que si une lame tourne encore.
+    /// le volet n'est visible que si une lame tourne encore. L'ordre du `Vec`
+    /// est l'ordre d'arrivée.
     fn app_at_the_forge(blades: Vec<forge::ForgeTask>) -> App {
         let mut app = App::new(None);
-        for blade in blades {
+        for (rank, mut blade) in blades.into_iter().enumerate() {
+            blade.seq = rank as u64;
             app.forge.tasks.insert(blade.id.clone(), blade);
         }
         app

@@ -248,6 +248,7 @@ mod tests {
                 turns: 0,
                 result: None,
                 error: None,
+                seq: 0,
             },
         );
     }
