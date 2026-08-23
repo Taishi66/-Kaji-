@@ -7,7 +7,10 @@ description = "KAJI core : agent loop, memory, context (toggle SDD/AIAD)"
 license = "Apache-2.0"
 
 [dependencies]
+anyhow = { workspace = true }
 rusqlite = { version = "0.32.1", default-features = false }
+serde = { workspace = true, features = ["derive"] }
+serde_yaml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
