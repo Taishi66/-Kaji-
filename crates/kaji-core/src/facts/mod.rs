@@ -1,3 +1,6 @@
+mod store;
+pub use store::FactStore;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactType {
     Decision,
