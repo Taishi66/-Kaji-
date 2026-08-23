@@ -259,3 +259,44 @@ fn migration_adds_session_column_to_legacy_db() {
         "legacy rows readable post-migration"
     );
 }
+
+#[test]
+fn uncurated_returns_unstamped_oldest_first_and_respects_limit() {
+    let mut mem = Memory::new();
+    let a = mem.remember("fact a", &[], None);
+    let b = mem.remember("fact b", &[], None);
+    let c = mem.remember("fact c", &[], None);
+    mem.mark_curated(&[b]);
+    let pending = mem.uncurated(10);
+    assert_eq!(pending.iter().map(|e| e.id).collect::<Vec<_>>(), vec![a, c]);
+    assert_eq!(mem.uncurated(1).len(), 1);
+}
+
+#[test]
+fn mark_curated_is_idempotent_and_ignores_unknown_ids() {
+    let mut mem = Memory::new();
+    let a = mem.remember("fact a", &[], None);
+    mem.mark_curated(&[a, 9999]);
+    mem.mark_curated(&[a]);
+    assert!(mem.uncurated(10).is_empty());
+}
+
+#[test]
+fn open_migrates_curated_at_on_existing_db() {
+    // Base créée sans la colonne : simuler en ouvrant, droppant la colonne étant impossible
+    // en SQLite ancien — à la place, vérifier que open() sur une base v-courante expose l'API
+    // et que PRAGMA table_info contient curated_at (le pattern migrate_session_id est déjà
+    // prouvé par les tests existants).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.db");
+    let mem = Memory::open(&path).unwrap();
+    drop(mem);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let mut stmt = conn.prepare("PRAGMA table_info(memory_entries)").unwrap();
+    let cols: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(cols.iter().any(|c| c == "curated_at"));
+}

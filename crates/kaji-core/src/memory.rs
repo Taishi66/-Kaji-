@@ -68,6 +68,20 @@ fn migrate_session_id(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Add the curation-timestamp column to a pre-curation database. Same
+/// metadata-only `ALTER TABLE` as `migrate_session_id`; the new column isn't
+/// indexed, so FTS5 external content is unaffected.
+fn migrate_curated_at(conn: &Connection) -> rusqlite::Result<()> {
+    let mut columns = conn.prepare("PRAGMA table_info(memory_entries)")?;
+    let names = columns
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !names.iter().any(|name| name == "curated_at") {
+        conn.execute_batch("ALTER TABLE memory_entries ADD COLUMN curated_at INTEGER")?;
+    }
+    Ok(())
+}
+
 /// `as_of` is in seconds in the API but the DB compares in milliseconds.
 fn as_of_ms(as_of_secs: u64) -> i64 {
     (as_of_secs as i64).saturating_mul(1000)
@@ -138,7 +152,8 @@ CREATE TABLE IF NOT EXISTS memory_entries (
     body TEXT NOT NULL,
     ts INTEGER NOT NULL,
     ttl_ms INTEGER,
-    session_id TEXT NOT NULL DEFAULT ''
+    session_id TEXT NOT NULL DEFAULT '',
+    curated_at INTEGER
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     text, entities, body,
@@ -190,6 +205,7 @@ impl Memory {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
         migrate_session_id(&conn)?;
+        migrate_curated_at(&conn)?;
         Ok(Memory { conn })
     }
 
@@ -432,6 +448,40 @@ impl Memory {
                 row_to_entry,
             )
             .ok()
+    }
+
+    /// Entries a curator hasn't processed yet, oldest first.
+    pub fn uncurated(&self, limit: usize) -> Vec<Entry> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, text, entities, body, ts, ttl_ms, session_id
+                 FROM memory_entries
+                 WHERE curated_at IS NULL
+                 ORDER BY ts ASC, id ASC
+                 LIMIT ?1",
+            )
+            .expect("prepare uncurated select");
+        stmt.query_map([limit], row_to_entry)
+            .map(|iter| iter.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// Stamp `ids` as curated (now). Unknown ids are silently skipped;
+    /// already-curated ids are re-stamped harmlessly.
+    pub fn mark_curated(&mut self, ids: &[u64]) {
+        let curated_at = now_secs() as i64;
+        let tx = self.conn.transaction().expect("mark_curated transaction");
+        {
+            let mut stmt = tx
+                .prepare("UPDATE memory_entries SET curated_at = ?1 WHERE id = ?2")
+                .expect("prepare mark_curated update");
+            for &id in ids {
+                stmt.execute(rusqlite::params![curated_at, id])
+                    .expect("mark_curated update");
+            }
+        }
+        tx.commit().expect("mark_curated commit");
     }
 
     /// Whether an entry with this exact body already exists. Cheap dedup for
