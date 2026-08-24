@@ -1,5 +1,8 @@
 use kaji::conversation::message::Message;
-use kaji::kaji::{ingest_turn, latest_user_instruction, splice_memory_block, SessionMemory};
+use kaji::kaji::{
+    fact_index_path, ingest_turn, latest_user_instruction, project_facts_dir, splice_memory_block,
+    user_facts_dir, SessionMemory,
+};
 
 /// Temporarily point the memory data dir at a fresh temp root, serialized
 /// against the rest of the suite (env_lock keeps one process-wide mutex for
@@ -203,5 +206,63 @@ fn migration_folds_legacy_session_files_into_shared() {
 
         // The legacy file was renamed away so re-opening cannot double-import.
         assert!(!legacy_path.exists(), "legacy DB renamed after import");
+    })
+}
+
+/// Isolate both the data dir and the memory dir override, keeping the temp root
+/// alive for the duration of the test so path assertions can reference it.
+fn with_scope_root(f: impl FnOnce(&std::path::Path)) {
+    let tmp = tempfile::tempdir().unwrap();
+    let guard = env_lock::lock_env([
+        ("KAJI_PATH_ROOT", Some(tmp.path().to_str().unwrap())),
+        ("KAJI_MEMORY_DIR", None),
+    ]);
+    f(tmp.path());
+    drop(guard);
+}
+
+#[test]
+fn project_facts_dir_uses_git_root_or_data_dir() {
+    with_scope_root(|root| {
+        let repo = root.join("repo/nested");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(root.join("repo/.git")).unwrap();
+        assert_eq!(project_facts_dir(&repo), root.join("repo/.kaji/memory"));
+
+        let outside = root.join("nogit");
+        std::fs::create_dir_all(&outside).unwrap();
+        let dir = project_facts_dir(&outside);
+        assert!(
+            dir.starts_with(root.join("data")),
+            "outside a repo the project scope falls back to the data dir: {}",
+            dir.display()
+        );
+        assert!(dir.to_string_lossy().contains("projects"));
+    })
+}
+
+#[test]
+fn user_facts_dir_lives_under_the_memory_dir() {
+    with_scope_root(|root| {
+        assert_eq!(user_facts_dir(), root.join("data/kaji/memory/user"));
+    })
+}
+
+#[test]
+fn fact_index_path_stays_outside_the_repo() {
+    with_scope_root(|root| {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+        let index = fact_index_path(&repo);
+        assert!(index.starts_with(root.join("data/kaji/memory/index")));
+        assert!(!index.starts_with(&repo), "the index is never versioned");
+        assert_eq!(index.extension().and_then(|e| e.to_str()), Some("db"));
+
+        assert_ne!(
+            index,
+            fact_index_path(&root.join("other")),
+            "each working dir gets its own index"
+        );
     })
 }

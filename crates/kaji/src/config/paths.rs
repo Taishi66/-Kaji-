@@ -1,6 +1,6 @@
 use etcetera::{choose_app_strategy, AppStrategy, AppStrategyArgs};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct Paths;
 
@@ -84,6 +84,24 @@ impl Paths {
     pub fn in_data_dir(subpath: &str) -> PathBuf {
         Self::data_dir().join(subpath)
     }
+}
+
+/// Walk up from `start_dir` to the first directory holding a `.git` entry.
+pub fn find_git_root(start_dir: &Path) -> Option<&Path> {
+    let mut check_dir = start_dir;
+
+    loop {
+        if check_dir.join(".git").exists() {
+            return Some(check_dir);
+        }
+        if let Some(parent) = check_dir.parent() {
+            check_dir = parent;
+        } else {
+            break;
+        }
+    }
+
+    None
 }
 
 enum DirType {

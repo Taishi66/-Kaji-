@@ -13,14 +13,15 @@
 //!   anchored context into a plain-text block ready to splice into a system
 //!   prompt. Still only rendered on demand — callers decide when to inject.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use kaji_core::facts::slugify;
 use kaji_core::memory::{Anchored, Entry, Memory, RecallHit, RecallResult};
 
 pub use kaji_core::memory::Entry as MemoryEntry;
 
-use crate::config::paths::Paths;
+use crate::config::paths::{find_git_root, Paths};
 
 /// Rendered prefix for the memory block in a system prompt.
 const BLOCK_HEADER: &str = "## KAJI memory — recalled across sessions";
@@ -41,6 +42,38 @@ fn memory_dir() -> std::path::PathBuf {
         return dir.into();
     }
     Paths::in_data_dir("kaji/memory")
+}
+
+/// Directory holding the project-scoped facts for `working_dir`. Inside a git
+/// worktree the facts live in the repo (`.kaji/memory`) so they travel with it;
+/// outside one they fall back to a per-path dir under the memory dir.
+pub fn project_facts_dir(working_dir: &Path) -> PathBuf {
+    match find_git_root(working_dir) {
+        Some(root) => root.join(".kaji").join("memory"),
+        None => memory_dir().join("projects").join(path_slug(working_dir)),
+    }
+}
+
+/// Directory holding the user-scoped facts, shared across every project.
+pub fn user_facts_dir() -> PathBuf {
+    memory_dir().join("user")
+}
+
+/// Path of the recall index for `working_dir`. Always derived data under the
+/// memory dir, never inside the repo, even when the facts themselves are.
+pub fn fact_index_path(working_dir: &Path) -> PathBuf {
+    memory_dir()
+        .join("index")
+        .join(format!("{}.db", path_slug(working_dir)))
+}
+
+fn path_slug(path: &Path) -> String {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    slugify(absolute.to_string_lossy().as_ref())
 }
 
 /// A file-backed handle over the shared cross-session store, scoped to one

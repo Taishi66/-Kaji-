@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::config::paths::Paths;
+use crate::config::paths::{find_git_root, Paths};
 use crate::hints::import_files::read_referenced_files;
 
 pub const KAJI_HINTS_FILENAME: &str = ".kajihints";
@@ -166,23 +166,6 @@ fn load_hints_from_directory(
             contents.join("\n")
         ))
     }
-}
-
-fn find_git_root(start_dir: &Path) -> Option<&Path> {
-    let mut check_dir = start_dir;
-
-    loop {
-        if check_dir.join(".git").exists() {
-            return Some(check_dir);
-        }
-        if let Some(parent) = check_dir.parent() {
-            check_dir = parent;
-        } else {
-            break;
-        }
-    }
-
-    None
 }
 
 fn get_local_directories(git_root: Option<&Path>, cwd: &Path) -> Vec<PathBuf> {
