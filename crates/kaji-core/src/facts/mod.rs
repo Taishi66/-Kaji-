@@ -1,4 +1,6 @@
+mod index;
 mod store;
+pub use index::{FactHit, FactIndex};
 pub use store::FactStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
