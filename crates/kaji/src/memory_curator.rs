@@ -17,7 +17,7 @@ use serde::Deserialize;
 use crate::config::Config;
 use crate::conversation::message::Message;
 use crate::kaji::{fact_index_path, project_facts_dir, user_facts_dir, SessionMemory};
-use crate::model_config::{complete_fast, get_fast_model, model_config_from_user_config};
+use crate::model_config::{complete_with_model, get_fast_model, model_config_from_user_config};
 use crate::providers::base::Provider;
 use crate::session::redact_text;
 
@@ -41,6 +41,9 @@ Reply [] if nothing is worth keeping."#;
 pub struct CurationOutcome {
     pub created: usize,
     pub updated: usize,
+    /// Facts the curator meant to write but couldn't. Non-zero forbids stamping
+    /// the batch as curated: the entries must survive for the next run.
+    pub failed: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -141,6 +144,7 @@ pub fn apply_ops(
 
         if let Err(err) = store.write(&fact) {
             tracing::warn!(slug = %fact.slug, error = %err, "curator fact write failed");
+            outcome.failed += 1;
             continue;
         }
         if updating {
@@ -153,11 +157,25 @@ pub fn apply_ops(
     outcome
 }
 
+/// Resolve the model a curation run uses. `KAJI_MEMORY_CURATOR_MODEL` wins
+/// outright — over `KAJI_FAST_MODEL` too — so the curator can be pinned to a
+/// model that honours the JSON reply contract. Without it, the fast model.
+pub async fn curator_model(provider_name: &str, model_config: &ModelConfig) -> Result<ModelConfig> {
+    match configured_curator_model_name() {
+        Some(name) if name != model_config.model_name => {
+            Ok(model_config_from_user_config(provider_name, name)?
+                .with_request_headers(model_config.request_headers.clone()))
+        }
+        Some(_) => Ok(model_config.clone()),
+        None => get_fast_model(provider_name, model_config).await,
+    }
+}
+
 /// Curate this session's uncurated journal entries into facts.
 ///
-/// Entries are only stamped as curated once the facts are written *and* the
-/// recall index is refreshed; any earlier failure propagates and leaves the
-/// batch pending.
+/// Entries are only stamped as curated once every op landed on disk and the
+/// recall index is refreshed; any failure — propagated or counted in
+/// [`CurationOutcome::failed`] — leaves the batch pending for the next run.
 pub async fn curate(
     provider: &dyn Provider,
     provider_name: &str,
@@ -171,14 +189,7 @@ pub async fn curate(
         return Ok(CurationOutcome::default());
     }
 
-    let curator_model = match configured_curator_model_name() {
-        Some(name) if name != model_config.model_name => {
-            model_config_from_user_config(provider_name, name)?
-                .with_request_headers(model_config.request_headers.clone())
-        }
-        Some(_) => model_config.clone(),
-        None => get_fast_model(provider_name, model_config).await?,
-    };
+    let curator = curator_model(provider_name, model_config).await?;
 
     let project = FactStore::new(project_facts_dir(working_dir));
     let user = FactStore::new(user_facts_dir());
@@ -194,9 +205,10 @@ pub async fn curate(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let (response, _) = complete_fast(
+    let (response, _) = complete_with_model(
         provider,
-        &curator_model,
+        &curator,
+        model_config,
         session_id,
         &system,
         &[Message::user().with_text(journal)],
@@ -216,6 +228,14 @@ pub async fn curate(
 
     let mut index = FactIndex::open(&fact_index_path(working_dir))?;
     index.rebuild_if_stale(&[("project", &project), ("user", &user)])?;
+
+    if outcome.failed > 0 {
+        tracing::warn!(
+            failed = outcome.failed,
+            "curator fact writes failed; journal batch left uncurated for retry"
+        );
+        return Ok(outcome);
+    }
 
     let ids: Vec<u64> = entries.iter().map(|entry| entry.id).collect();
     memory.mark_curated(&ids);

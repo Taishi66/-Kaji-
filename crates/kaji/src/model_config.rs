@@ -125,26 +125,49 @@ pub async fn complete_fast(
 ) -> Result<(Message, ProviderUsage), ProviderError> {
     let fast_model_config = get_fast_model(provider.get_name(), model_config)
         .await
-        .map_err(|e| ProviderError::ExecutionError(e.to_string()))?
-        .with_thinking_effort(ThinkingEffort::Off);
+        .map_err(|e| ProviderError::ExecutionError(e.to_string()))?;
+
+    complete_with_model(
+        provider,
+        &fast_model_config,
+        model_config,
+        session_id,
+        system,
+        messages,
+        tools,
+    )
+    .await
+}
+
+/// Run a completion on an already-resolved `model`, falling back to `fallback`
+/// if it errors. Callers that resolve their own model use this instead of
+/// [`complete_fast`], which would re-resolve their choice away.
+pub async fn complete_with_model(
+    provider: &dyn Provider,
+    model: &ModelConfig,
+    fallback: &ModelConfig,
+    session_id: &str,
+    system: &str,
+    messages: &[Message],
+    tools: &[Tool],
+) -> Result<(Message, ProviderUsage), ProviderError> {
+    let model = model.clone().with_thinking_effort(ThinkingEffort::Off);
 
     match crate::session_context::with_session_id(
         Some(session_id.to_string()),
-        provider.complete(&fast_model_config, system, messages, tools),
+        provider.complete(&model, system, messages, tools),
     )
     .await
     {
         Ok(response) => Ok(response),
-        Err(e) if fast_model_config.model_name != model_config.model_name => {
+        Err(e) if model.model_name != fallback.model_name => {
             tracing::warn!(
-                "Fast model {} failed with error: {}. Falling back to main model {}",
-                fast_model_config.model_name,
+                "Model {} failed with error: {}. Falling back to main model {}",
+                model.model_name,
                 e,
-                model_config.model_name
+                fallback.model_name
             );
-            let fallback_config = model_config
-                .clone()
-                .with_thinking_effort(ThinkingEffort::Off);
+            let fallback_config = fallback.clone().with_thinking_effort(ThinkingEffort::Off);
             crate::session_context::with_session_id(
                 Some(session_id.to_string()),
                 provider.complete(&fallback_config, system, messages, tools),

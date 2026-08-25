@@ -1,5 +1,6 @@
-use kaji::memory_curator::{apply_ops, parse_curator_ops, CuratorOp, CURATOR_CAP};
+use kaji::memory_curator::{apply_ops, curator_model, parse_curator_ops, CuratorOp, CURATOR_CAP};
 use kaji_core::facts::{CreatedBy, Fact, FactStore, FactType};
+use kaji_providers::model::ModelConfig;
 
 fn op(action: &str, fact_type: &str, slug: &str, body: &str) -> CuratorOp {
     CuratorOp {
@@ -73,4 +74,39 @@ fn apply_never_touches_created_by_user_and_rejects_bad_slugs() {
     assert_eq!(unchanged.body, "corps original");
     assert!(matches!(unchanged.created_by, CreatedBy::User));
     assert!(!tmp.path().join("evil").exists());
+}
+
+#[test]
+fn apply_counts_write_failures_so_the_batch_stays_replayable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let blocker = tmp.path().join("blocked");
+    std::fs::write(&blocker, b"a file, not a directory").unwrap();
+    let project = FactStore::new(blocker.join("facts"));
+    let user = FactStore::new(tmp.path().join("user"));
+
+    let outcome = apply_ops(
+        vec![op("create", "gotcha", "perdu", "corps")],
+        &project,
+        &user,
+        "s1",
+        "2026-08-22",
+    );
+
+    assert_eq!(outcome.failed, 1);
+    assert_eq!(outcome.created + outcome.updated, 0);
+    assert!(project.list().is_empty());
+}
+
+#[tokio::test]
+async fn curator_model_override_wins_over_the_fast_model() {
+    let guard = env_lock::lock_env([
+        ("KAJI_MEMORY_CURATOR_MODEL", Some("curator-choice")),
+        ("KAJI_FAST_MODEL", Some("fast-choice")),
+    ]);
+
+    let main = ModelConfig::new("main-choice");
+    let resolved = curator_model("anthropic", &main).await.unwrap();
+    assert_eq!(resolved.model_name, "curator-choice");
+
+    drop(guard);
 }
