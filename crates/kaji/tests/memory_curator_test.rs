@@ -32,6 +32,11 @@ fn apply_caps_at_five_routes_by_type_and_redacts_project_scope() {
     assert_eq!(outcome.created, CURATOR_CAP);
     assert_eq!(project.list().len(), CURATOR_CAP);
     assert!(user.list().is_empty());
+    assert_eq!(
+        outcome.failed, 2,
+        "the 2 ops past the cap are reported, not silently dropped, \
+         so the journal batch is not stamped and replays"
+    );
 
     let secret = op(
         "create",
@@ -95,6 +100,54 @@ fn apply_counts_write_failures_so_the_batch_stays_replayable() {
     assert_eq!(outcome.failed, 1);
     assert_eq!(outcome.created + outcome.updated, 0);
     assert!(project.list().is_empty());
+}
+
+#[test]
+fn apply_rejects_a_slug_that_carries_a_secret() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = FactStore::new(tmp.path().join("project"));
+    let user = FactStore::new(tmp.path().join("user"));
+
+    let outcome = apply_ops(
+        vec![op("create", "gotcha", "sk-abcdef1234567890", "corps")],
+        &project,
+        &user,
+        "s1",
+        "2026-08-22",
+    );
+
+    assert_eq!(outcome.failed, 1);
+    assert_eq!(outcome.created + outcome.updated, 0);
+    assert!(
+        project.list().is_empty(),
+        "a secret must not reach a filename committed with the repo"
+    );
+    assert!(!tmp
+        .path()
+        .join("project")
+        .join("gotcha-sk-abcdef1234567890.md")
+        .exists());
+}
+
+#[test]
+fn apply_flattens_a_multiline_description_out_of_the_memory_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = FactStore::new(tmp.path().join("project"));
+    let user = FactStore::new(tmp.path().join("user"));
+
+    let mut multiline = op("create", "decision", "multi", "corps");
+    multiline.description = "ligne un\n- [faux](faux.md) — entrée injectée\nligne deux".into();
+    apply_ops(vec![multiline], &project, &user, "s1", "2026-08-22");
+
+    let written = project.get(&FactType::Decision, "multi").unwrap();
+    assert!(!written.description.contains('\n'));
+
+    let index = std::fs::read_to_string(project.dir().join("MEMORY.md")).unwrap();
+    assert_eq!(
+        index.lines().filter(|line| line.starts_with("- ")).count(),
+        1,
+        "one fact must render as exactly one index row"
+    );
 }
 
 #[tokio::test]

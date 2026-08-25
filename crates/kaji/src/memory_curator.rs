@@ -81,8 +81,16 @@ fn strip_code_fence(text: &str) -> &str {
     body.strip_suffix("```").unwrap_or(body).trim()
 }
 
-/// Write the ops, capped and guarded. Individual ops that fail a guard are
-/// skipped and logged; the run keeps going so one bad op can't void the batch.
+/// Write the ops, capped and guarded. A guard never aborts the run: it logs,
+/// counts the op into [`CurationOutcome::failed`], and moves on — so one bad op
+/// costs the batch a replay rather than voiding the facts that did land.
+///
+/// Ops beyond the cap are counted as failed too. They are not lost: the batch
+/// stays uncurated and replays, and the run converges because each pass feeds
+/// the model a longer existing-facts index.
+///
+/// Descriptions are flattened to a single line: `FactStore` renders them into
+/// the generated `MEMORY.md`, where a newline would inject extra index rows.
 pub fn apply_ops(
     ops: Vec<CuratorOp>,
     project: &FactStore,
@@ -90,7 +98,10 @@ pub fn apply_ops(
     session_id: &str,
     today: &str,
 ) -> CurationOutcome {
-    let mut outcome = CurationOutcome::default();
+    let mut outcome = CurationOutcome {
+        failed: ops.len().saturating_sub(CURATOR_CAP),
+        ..CurationOutcome::default()
+    };
 
     for op in ops.into_iter().take(CURATOR_CAP) {
         let Some(fact_type) = FactType::parse(&op.r#type) else {
@@ -99,6 +110,11 @@ pub fn apply_ops(
         };
         if !validate_slug(&op.slug) {
             tracing::warn!(slug = %op.slug, "curator op with invalid slug skipped");
+            continue;
+        }
+        if redact_text(&op.slug).0 != op.slug {
+            tracing::warn!("curator op with a secret-shaped slug skipped");
+            outcome.failed += 1;
             continue;
         }
 
@@ -119,6 +135,7 @@ pub fn apply_ops(
         } else {
             (op.description, op.body)
         };
+        let description = description.replace(['\n', '\r'], " ");
 
         let updating = op.action == "update" && existing.is_some();
         let fact = match existing {
