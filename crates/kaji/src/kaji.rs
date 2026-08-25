@@ -176,6 +176,19 @@ impl SessionMemory {
         self.store.iter()
     }
 
+    /// Entries the curator hasn't processed yet, oldest first. Global like
+    /// recall: a curation run drains whatever the store still owes, whichever
+    /// session recorded it.
+    pub fn uncurated(&self, limit: usize) -> Vec<Entry> {
+        self.store.uncurated(limit)
+    }
+
+    /// Stamp `ids` as curated. Called only once a curation run has fully
+    /// succeeded, so a failed run replays its batch.
+    pub fn mark_curated(&mut self, ids: &[u64]) {
+        self.store.mark_curated(ids);
+    }
+
     /// Drop entries from the shared store. When `session_id` is `Some`, only
     /// that session's entries are removed ("" targets legacy/global entries);
     /// `None` clears the whole store. Returns how many entries were removed.
