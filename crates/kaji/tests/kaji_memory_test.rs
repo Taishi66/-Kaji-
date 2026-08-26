@@ -1,8 +1,17 @@
+use async_trait::async_trait;
 use kaji::conversation::message::Message;
 use kaji::kaji::{
-    fact_index_path, ingest_turn, latest_user_instruction, project_facts_dir, splice_memory_block,
-    user_facts_dir, SessionMemory,
+    curation_due, fact_index_path, ingest_turn, latest_user_instruction, project_facts_dir,
+    run_curation, splice_memory_block, user_facts_dir, SessionMemory, CURATE_DEBOUNCE_SECS,
+    CURATE_MIN_PENDING,
 };
+use kaji::providers::base::{stream_from_single_message, MessageStream, Provider};
+use kaji_core::facts::{FactStore, FactType};
+use kaji_providers::conversation::token_usage::{ProviderUsage, Usage};
+use kaji_providers::errors::ProviderError;
+use kaji_providers::model::ModelConfig;
+use rmcp::model::Tool;
+use std::sync::Arc;
 
 /// Temporarily point the memory data dir at a fresh temp root, serialized
 /// against the rest of the suite (env_lock keeps one process-wide mutex for
@@ -246,6 +255,133 @@ fn user_facts_dir_lives_under_the_memory_dir() {
     with_scope_root(|root| {
         assert_eq!(user_facts_dir(), root.join("data/kaji/memory/user"));
     })
+}
+
+#[test]
+fn curation_due_needs_threshold_and_debounce() {
+    with_root(|| {
+        let session = "curation-due-session";
+        assert!(
+            !curation_due(session, 1_000),
+            "an empty journal never fires"
+        );
+
+        let mut mem = SessionMemory::load(session);
+        for i in 0..CURATE_MIN_PENDING {
+            mem.ingest(&format!("uncurated decision number {i} about the gateway"));
+        }
+        drop(mem);
+
+        assert!(
+            curation_due(session, 1_000),
+            "threshold reached with a cold debounce arms the trigger"
+        );
+        assert!(
+            !curation_due(session, 1_000),
+            "the winning caller stamped the debounce; the next turn is a no-op"
+        );
+        assert!(
+            !curation_due(session, 1_000 + CURATE_DEBOUNCE_SECS - 1),
+            "still inside the debounce window"
+        );
+        assert!(
+            curation_due(session, 1_000 + CURATE_DEBOUNCE_SECS),
+            "past the window an unchanged backlog arms the trigger again"
+        );
+    })
+}
+
+/// Replies with a canned assistant message, standing in for the curator model.
+struct ScriptedProvider {
+    reply: String,
+}
+
+#[async_trait]
+impl Provider for ScriptedProvider {
+    fn get_name(&self) -> &str {
+        "scripted-curator"
+    }
+
+    async fn stream(
+        &self,
+        _model_config: &ModelConfig,
+        _system: &str,
+        _messages: &[Message],
+        _tools: &[Tool],
+    ) -> Result<MessageStream, ProviderError> {
+        Ok(stream_from_single_message(
+            Message::assistant().with_text(self.reply.clone()),
+            ProviderUsage::new("scripted".to_string(), Usage::default()),
+        ))
+    }
+}
+
+/// End-to-end through the spawned body of the trigger: a well-formed curator
+/// reply writes facts and stamps the batch, a malformed one leaves the journal
+/// untouched so the entries replay on the next trigger.
+#[tokio::test]
+async fn run_curation_writes_facts_and_stamps_only_on_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let guard = env_lock::lock_env([
+        ("KAJI_PATH_ROOT", Some(tmp.path().to_str().unwrap())),
+        ("KAJI_MEMORY_DIR", None),
+        ("KAJI_MEMORY_CURATOR_MODEL", Some("main-model")),
+    ]);
+
+    let session = "run-curation-session";
+    let working_dir = tmp.path().join("workspace");
+    std::fs::create_dir_all(&working_dir).unwrap();
+    let model_config = ModelConfig::new("main-model");
+
+    let mut mem = SessionMemory::load(session);
+    for i in 0..CURATE_MIN_PENDING {
+        mem.ingest(&format!("journal entry number {i} about the gateway"));
+    }
+    drop(mem);
+
+    let prose = Arc::new(ScriptedProvider {
+        reply: "désolé, voici les faits en prose".to_string(),
+    }) as Arc<dyn Provider>;
+    run_curation(
+        prose,
+        "scripted-curator".to_string(),
+        model_config.clone(),
+        session.to_string(),
+        working_dir.clone(),
+    )
+    .await;
+
+    let facts = FactStore::new(project_facts_dir(&working_dir));
+    assert!(facts.list().is_empty(), "a failed run writes no fact");
+    assert_eq!(
+        SessionMemory::load(session).uncurated(50).len(),
+        CURATE_MIN_PENDING,
+        "a failed run leaves the whole batch pending for the next trigger"
+    );
+
+    let json = Arc::new(ScriptedProvider {
+        reply: r#"[{"action":"create","type":"decision","slug":"passerelle","description":"la passerelle écoute sur 8080","body":"le service tourne sur le port 8080"}]"#
+            .to_string(),
+    }) as Arc<dyn Provider>;
+    run_curation(
+        json,
+        "scripted-curator".to_string(),
+        model_config,
+        session.to_string(),
+        working_dir.clone(),
+    )
+    .await;
+
+    assert!(
+        facts.get(&FactType::Decision, "passerelle").is_some(),
+        "a successful run writes the curated fact"
+    );
+    assert!(
+        SessionMemory::load(session).uncurated(50).is_empty(),
+        "a successful run stamps the batch as curated"
+    );
+
+    drop(guard);
 }
 
 #[test]

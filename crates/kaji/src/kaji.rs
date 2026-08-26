@@ -14,14 +14,18 @@
 //!   prompt. Still only rendered on demand — callers decide when to inject.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kaji_core::facts::slugify;
 use kaji_core::memory::{Anchored, Entry, Memory, RecallHit, RecallResult};
+use kaji_providers::model::ModelConfig;
 
 pub use kaji_core::memory::Entry as MemoryEntry;
 
 use crate::config::paths::{find_git_root, Paths};
+use crate::providers::base::Provider;
 
 /// Rendered prefix for the memory block in a system prompt.
 const BLOCK_HEADER: &str = "## KAJI memory — recalled across sessions";
@@ -246,6 +250,110 @@ pub fn splice_memory_block(system_prompt: &str, session_id: &str, query: &str) -
         Some(block) => format!("{system_prompt}\n\n{block}"),
         None => system_prompt.to_string(),
     }
+}
+
+/// Uncurated journal entries a turn must have accumulated before a curation
+/// run is worth an LLM call.
+pub const CURATE_MIN_PENDING: usize = 5;
+
+/// Quiet period between two curation runs. A busy session keeps ingesting; the
+/// debounce keeps the background curator from firing on every turn.
+pub const CURATE_DEBOUNCE_SECS: u64 = 300;
+
+/// Wall-clock seconds of the last armed curation, process-wide. Both agent
+/// loops share it, so a single debounce governs whichever path runs the turn.
+static LAST_CURATION_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// True when the journal owes enough entries and the debounce has elapsed.
+///
+/// Arming is exclusive: the caller that observes the window open stamps it via
+/// compare-exchange, so concurrent turns produce a single curation run.
+pub fn curation_due(session_id: &str, now_secs: u64) -> bool {
+    let pending = SessionMemory::load(session_id)
+        .uncurated(CURATE_MIN_PENDING)
+        .len();
+    if pending < CURATE_MIN_PENDING {
+        return false;
+    }
+    let last = LAST_CURATION_SECS.load(Ordering::Acquire);
+    if now_secs.saturating_sub(last) < CURATE_DEBOUNCE_SECS {
+        return false;
+    }
+    LAST_CURATION_SECS
+        .compare_exchange(last, now_secs, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+/// Run one curation and report its outcome to the logs. Detached from the turn:
+/// a failure is reported, never propagated, and never stamps the journal.
+///
+/// [`CurationOutcome::failed`](crate::memory_curator::CurationOutcome::failed)
+/// is surfaced on its own — a run that wrote some facts and dropped others is a
+/// warning, not a success, because the batch stays pending and will be replayed.
+pub async fn run_curation(
+    provider: Arc<dyn Provider>,
+    provider_name: String,
+    model_config: ModelConfig,
+    session_id: String,
+    working_dir: PathBuf,
+) {
+    match crate::memory_curator::curate(
+        provider.as_ref(),
+        &provider_name,
+        &model_config,
+        &session_id,
+        &working_dir,
+    )
+    .await
+    {
+        Ok(outcome) if outcome.failed > 0 => tracing::warn!(
+            created = outcome.created,
+            updated = outcome.updated,
+            failed = outcome.failed,
+            "記 curation incomplete; the batch replays on the next trigger"
+        ),
+        Ok(outcome) if outcome.created + outcome.updated > 0 => tracing::info!(
+            created = outcome.created,
+            updated = outcome.updated,
+            failed = outcome.failed,
+            "記 {} faits mémorisés",
+            outcome.created + outcome.updated
+        ),
+        Ok(_) => {}
+        Err(err) => tracing::warn!("記 curation failed: {err}"),
+    }
+}
+
+/// End-of-turn curation trigger, called by both agent loops once the memory
+/// block has been spliced. Spawns [`run_curation`] when the journal is due;
+/// otherwise it costs one indexed read and returns.
+///
+/// Never blocks the turn and never touches the reply: the run is detached and
+/// its result only reaches the logs.
+pub fn maybe_spawn_curation(
+    provider: Arc<dyn Provider>,
+    provider_name: String,
+    model_config: ModelConfig,
+    session_id: String,
+    working_dir: PathBuf,
+) {
+    if !curation_due(&session_id, now_secs()) {
+        return;
+    }
+    tokio::spawn(run_curation(
+        provider,
+        provider_name,
+        model_config,
+        session_id,
+        working_dir,
+    ));
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
 }
 
 /// Extract the latest user instruction from a conversation — the natural query

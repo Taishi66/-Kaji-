@@ -406,6 +406,13 @@ impl Inference for InferenceRunner<'_> {
                 system_prompt =
                     crate::kaji::splice_memory_block(&system_prompt, &session.id, &query);
             }
+            crate::kaji::maybe_spawn_curation(
+                self.provider.clone(),
+                self.provider.get_name().to_string(),
+                self.model_config.clone(),
+                session.id.clone(),
+                session.working_dir.clone(),
+            );
             let (tools, toolshim_tools, system_prompt) =
                 crate::agents::reply_parts::prepare_tools_for_provider(
                     tools,

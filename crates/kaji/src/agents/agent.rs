@@ -1020,6 +1020,15 @@ impl Agent {
         if let Some(query) = query {
             system_prompt = crate::kaji::splice_memory_block(&system_prompt, session_id, &query);
         }
+        if let Ok(provider) = self.provider().await {
+            crate::kaji::maybe_spawn_curation(
+                provider.clone(),
+                provider.get_name().to_string(),
+                model_config.clone(),
+                session_id.to_string(),
+                working_dir.to_path_buf(),
+            );
+        }
 
         let kaji_mode = *self.current_kaji_mode.lock().await;
 
