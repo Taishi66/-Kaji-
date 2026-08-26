@@ -2,9 +2,12 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
+use kaji_core::facts::{slugify, CreatedBy, Fact, FactIndex, FactStore, FactType};
 
 use crate::context_mgmt::compact_messages;
 use crate::conversation::message::Message;
+use crate::kaji::{fact_index_path, project_facts_dir, user_facts_dir};
+use crate::session::redact_text;
 use crate::slash_commands::{recipe_slash_command, skill_slash_command};
 
 use super::Agent;
@@ -54,6 +57,10 @@ static COMMANDS: &[CommandDef] = &[
     CommandDef {
         name: "status",
         description: "Show session status: model, provider, mode, and token usage",
+    },
+    CommandDef {
+        name: "remember",
+        description: "Save a durable note to memory",
     },
 ];
 
@@ -119,6 +126,60 @@ pub fn command_starts_turn(message_text: &str) -> bool {
         && !is_clear_goal_param(parsed.params_str)
 }
 
+/// Longest description kept for a `/remember` fact. The description is the line
+/// rendered in the generated `MEMORY.md`; the body holds the note in full.
+const REMEMBER_DESCRIPTION_MAX_CHARS: usize = 120;
+
+/// Split an optional leading type keyword (`decision:`, `gotcha:`,
+/// `preference:`, `reference:`) off a `/remember` note. Without one the note is
+/// a preference, so it stays in the user scope: nothing lands in the repo
+/// without the user saying so.
+pub(crate) fn parse_remember_note(args: &str) -> (FactType, String) {
+    let note = args.trim();
+    if let Some((keyword, rest)) = note.split_once(':') {
+        if let Some(fact_type) = FactType::parse(&keyword.trim().to_lowercase()) {
+            return (fact_type, rest.trim().to_string());
+        }
+    }
+    (FactType::Preference, note.to_string())
+}
+
+fn is_project_scoped(fact_type: FactType) -> bool {
+    fact_type != FactType::Preference
+}
+
+/// Build the fact a `/remember` note writes. A project-scoped fact is redacted
+/// first, so neither its slug nor its description can carry a secret into the
+/// repo; a user-scoped one keeps the note verbatim.
+fn remembered_fact(fact_type: FactType, note: &str, session_id: &str, date: &str) -> Fact {
+    let body = if is_project_scoped(fact_type) {
+        redact_text(note).0
+    } else {
+        note.to_string()
+    };
+    let description: String = body
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(REMEMBER_DESCRIPTION_MAX_CHARS)
+        .collect();
+    let mut slug = slugify(&body);
+    if slug.is_empty() {
+        slug = slugify(&format!("note-{session_id}"));
+    }
+
+    Fact {
+        fact_type,
+        slug,
+        description,
+        date: date.to_string(),
+        session: session_id.to_string(),
+        created_by: CreatedBy::User,
+        body,
+    }
+}
+
 impl Agent {
     pub async fn execute_command(
         &self,
@@ -148,6 +209,7 @@ impl Agent {
             "status" => self.handle_status_command(session_id).await,
             "goal" => self.handle_goal_command(params_str).await,
             "grind" => self.handle_grind_command(params_str).await,
+            "remember" => self.handle_remember_command(params_str, session_id).await,
             _ => {
                 if let Some(message) = self
                     .handle_recipe_command(command, params_str, session_id)
@@ -526,6 +588,66 @@ impl Agent {
             "Grind goal set. The agent will keep working until max_turns is reached:\n\n> {goal}"
         ))))
     }
+
+    /// Write one durable fact straight to disk, spending no LLM token, then let
+    /// the usual trigger decide whether the pending journal is worth a curation
+    /// run. The reply stays out of the conversation: `/remember` costs the turn
+    /// nothing.
+    async fn handle_remember_command(
+        &self,
+        params_str: &str,
+        session_id: &str,
+    ) -> Result<Option<Message>> {
+        let (fact_type, note) = parse_remember_note(params_str);
+        if note.is_empty() {
+            return Ok(Some(user_only_assistant_text(
+                "Usage: /remember [decision:|gotcha:|preference:|reference:] <note>",
+            )));
+        }
+
+        let working_dir = match self
+            .config
+            .session_manager
+            .get_session(session_id, false)
+            .await
+        {
+            Ok(session) => session.working_dir,
+            Err(_) => std::env::current_dir()?,
+        };
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let fact = remembered_fact(fact_type, &note, session_id, &today);
+
+        let project = FactStore::new(project_facts_dir(&working_dir));
+        let user = FactStore::new(user_facts_dir());
+        let store = if is_project_scoped(fact_type) {
+            &project
+        } else {
+            &user
+        };
+        store.write(&fact)?;
+
+        let mut index = FactIndex::open(&fact_index_path(&working_dir))?;
+        index.rebuild_if_stale(&[("project", &project), ("user", &user)])?;
+
+        if let (Ok(provider), Ok(model_config)) = (
+            self.provider().await,
+            self.model_config_for_session(session_id).await,
+        ) {
+            crate::kaji::maybe_spawn_curation(
+                provider.clone(),
+                provider.get_name().to_string(),
+                model_config,
+                session_id.to_string(),
+                working_dir,
+            );
+        }
+
+        Ok(Some(user_only_assistant_text(format!(
+            "記 1 fait mémorisé : {}",
+            fact.file_name()
+        ))))
+    }
 }
 
 fn user_only_assistant_text(text: impl Into<String>) -> Message {
@@ -592,5 +714,83 @@ mod tests {
         assert!(list_commands()
             .iter()
             .any(|command| command.name == "status"));
+    }
+
+    #[test]
+    fn remember_is_registered_as_a_builtin_command() {
+        assert!(list_commands()
+            .iter()
+            .any(|command| command.name == "remember"));
+    }
+
+    #[test]
+    fn remember_note_parses_optional_type_prefix() {
+        assert!(matches!(
+            parse_remember_note("gotcha: rm est aliasé").0,
+            FactType::Gotcha
+        ));
+        assert!(matches!(
+            parse_remember_note("juste une note").0,
+            FactType::Preference
+        ));
+        assert_eq!(parse_remember_note("decision: choix A").1, "choix A");
+    }
+
+    #[test]
+    fn remember_note_keeps_a_colon_that_is_not_a_type() {
+        let (fact_type, note) = parse_remember_note("note: garder tel quel");
+        assert!(matches!(fact_type, FactType::Preference));
+        assert_eq!(note, "note: garder tel quel");
+    }
+
+    #[test]
+    fn remembered_fact_is_authored_by_the_user() {
+        let note = "prefer ripgrep over grep";
+        let fact = remembered_fact(FactType::Preference, note, "s-1", "2026-08-22");
+
+        assert_eq!(fact.created_by, CreatedBy::User);
+        assert_eq!(fact.fact_type, FactType::Preference);
+        assert_eq!(fact.session, "s-1");
+        assert_eq!(fact.date, "2026-08-22");
+        assert_eq!(fact.body, note);
+        assert_eq!(fact.description, note);
+        assert_eq!(fact.slug, "prefer-ripgrep-over-grep");
+    }
+
+    #[test]
+    fn remembered_fact_description_is_the_first_line_capped() {
+        let note = format!("{}\nseconde ligne", "a".repeat(200));
+        let fact = remembered_fact(FactType::Gotcha, &note, "s-1", "2026-08-22");
+
+        assert_eq!(fact.description.chars().count(), 120);
+        assert!(!fact.description.contains("seconde"));
+        assert!(fact.body.contains("seconde ligne"), "the body keeps it all");
+    }
+
+    #[test]
+    fn remembered_fact_falls_back_to_a_session_slug() {
+        let fact = remembered_fact(FactType::Reference, "«»", "sess-42", "2026-08-22");
+
+        assert_eq!(fact.slug, "note-sess-42");
+        assert!(kaji_core::facts::validate_slug(&fact.slug));
+    }
+
+    #[test]
+    fn remembered_fact_redacts_the_project_scope_only() {
+        let note = "le token est ghp_abcdefghijklmnopqrstuvwxyz1234567890";
+
+        let project = remembered_fact(FactType::Decision, note, "s-1", "2026-08-22");
+        assert!(!project
+            .body
+            .contains("ghp_abcdefghijklmnopqrstuvwxyz1234567890"));
+        assert!(!project
+            .description
+            .contains("ghp_abcdefghijklmnopqrstuvwxyz1234567890"));
+
+        let user = remembered_fact(FactType::Preference, note, "s-1", "2026-08-22");
+        assert_eq!(
+            user.body, note,
+            "a user-scoped fact keeps the note verbatim"
+        );
     }
 }
