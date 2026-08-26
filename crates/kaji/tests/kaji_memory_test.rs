@@ -1,4 +1,8 @@
 use async_trait::async_trait;
+use futures::StreamExt;
+use kaji::agents::{Agent, AgentConfig, KajiPlatform, SessionConfig};
+use kaji::config::permission::PermissionManager;
+use kaji::config::KajiMode;
 use kaji::conversation::message::Message;
 use kaji::kaji::{
     curation_due, fact_index_path, ingest_turn, latest_user_instruction,
@@ -6,13 +10,15 @@ use kaji::kaji::{
     user_facts_dir, SessionMemory, CURATE_DEBOUNCE_SECS, CURATE_MIN_PENDING,
 };
 use kaji::providers::base::{stream_from_single_message, MessageStream, Provider};
-use kaji_core::facts::{CreatedBy, Fact, FactStore, FactType};
+use kaji::session::session_manager::SessionType;
+use kaji::session::SessionManager;
+use kaji_core::facts::{CreatedBy, Fact, FactIndex, FactStore, FactType};
 use kaji_providers::conversation::token_usage::{ProviderUsage, Usage};
 use kaji_providers::errors::ProviderError;
 use kaji_providers::model::ModelConfig;
 use rmcp::model::Tool;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Temporarily point the memory data dir at a fresh temp root, serialized
 /// against the rest of the suite (env_lock keeps one process-wide mutex for
@@ -629,4 +635,189 @@ fn legacy_txt_migration_redacts_project_scope_and_spares_md_facts() {
         assert!(!facts_dir.join("MEMORY.md.legacy").exists());
         assert!(!facts_dir.join("decision-garde.md.legacy").exists());
     })
+}
+
+/// End-to-end over two sessions, disk only: "session 1" writes a curated fact
+/// and rebuilds the index, "session 2" does nothing but splice. No process
+/// state is shared between the halves — the fact travels through its md file
+/// and the derived index, which is the whole point of a portable memory.
+#[test]
+fn fact_written_in_session_one_is_recalled_in_session_two() {
+    with_scope_root(|root| {
+        let workspace = root.join("two-sessions");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let _cwd = Cwd::moved_to(&workspace);
+        let working_dir = std::env::current_dir().unwrap();
+
+        let mut fact = curated_fact(
+            FactType::Decision,
+            "choix-provider",
+            "choix du provider : le curateur tourne sur le modèle rapide",
+            "session 1 a tranché le choix du provider : la curation passe par le modèle rapide",
+        );
+        fact.session = "session-one".to_string();
+
+        let project = FactStore::new(project_facts_dir(&working_dir));
+        project.write(&fact).unwrap();
+        let user = FactStore::new(user_facts_dir());
+        FactIndex::open(&fact_index_path(&working_dir))
+            .unwrap()
+            .rebuild_if_stale(&[("project", &project), ("user", &user)])
+            .unwrap();
+
+        let recalled = splice_memory_block("SYS", "session-two", "choix provider");
+
+        assert!(recalled.starts_with("SYS"), "{recalled}");
+        assert!(
+            recalled.contains(
+                "[decision] choix du provider : le curateur tourne sur le modèle rapide \
+                 — session 1 a tranché"
+            ),
+            "session 2 recalls what session 1 left on disk:\n{recalled}"
+        );
+        assert!(
+            !recalled.contains("KAJI memory"),
+            "session 2 owns no journal entry: the recall is the curated fact alone:\n{recalled}"
+        );
+    })
+}
+
+/// Records the system prompt of every provider call, standing in for the model
+/// so a full turn can be driven on either agent loop.
+#[derive(Default)]
+struct RecordingProvider {
+    system_prompts: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl Provider for RecordingProvider {
+    fn get_name(&self) -> &str {
+        "recording"
+    }
+
+    async fn stream(
+        &self,
+        _model_config: &ModelConfig,
+        system: &str,
+        _messages: &[Message],
+        _tools: &[Tool],
+    ) -> Result<MessageStream, ProviderError> {
+        self.system_prompts.lock().unwrap().push(system.to_string());
+        Ok(stream_from_single_message(
+            Message::assistant().with_text("acquitté"),
+            ProviderUsage::new("recording".to_string(), Usage::default()),
+        ))
+    }
+}
+
+/// Marker of the memory splice inside a system prompt: everything from there on
+/// is what the two agent loops must agree on.
+const FACTS_HEADER: &str = "## Faits mémorisés";
+
+/// Run one full turn on the loop `state_machine` selects and return the memory
+/// block the provider saw, with the generated session id normalized so two runs
+/// can be compared byte for byte.
+async fn memory_block_seen_by_the_loop(state_machine: Option<&str>) -> String {
+    let tmp = tempfile::tempdir().unwrap();
+    let _guard = env_lock::lock_env([
+        ("KAJI_PATH_ROOT", Some(tmp.path().to_str().unwrap())),
+        ("KAJI_MEMORY_DIR", None),
+        ("KAJI_STATE_MACHINE", state_machine),
+    ]);
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let _cwd = Cwd::moved_to(&workspace);
+    let working_dir = std::env::current_dir().unwrap();
+
+    FactStore::new(project_facts_dir(&working_dir))
+        .write(&curated_fact(
+            FactType::Decision,
+            "cache-ttl",
+            "le cache expire au bout de 60s",
+            "le TTL du cache est fixé à 60 secondes",
+        ))
+        .unwrap();
+
+    let data_dir = tmp.path().join("agent");
+    let session_manager = Arc::new(SessionManager::new(data_dir.clone()));
+    let agent = Agent::with_config(AgentConfig::new(
+        session_manager.clone(),
+        Arc::new(PermissionManager::new(data_dir)),
+        None,
+        KajiMode::default(),
+        true,
+        KajiPlatform::KajiCli,
+    ));
+    let session = session_manager
+        .create_session(
+            working_dir,
+            "memory-parity".to_string(),
+            SessionType::Hidden,
+            KajiMode::default(),
+        )
+        .await
+        .unwrap();
+    let provider = Arc::new(RecordingProvider::default());
+    agent
+        .update_provider(
+            provider.clone(),
+            ModelConfig::new("mock-model"),
+            &session.id,
+        )
+        .await
+        .unwrap();
+
+    let stream = agent
+        .reply(
+            Message::user().with_text("combien de temps vit le cache ?"),
+            SessionConfig {
+                id: session.id.clone(),
+                schedule_id: None,
+                max_turns: Some(2),
+                retry_config: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::pin!(stream);
+    while stream.next().await.is_some() {}
+
+    let system = provider
+        .system_prompts
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("the turn must reach the provider");
+    let (_, block) = system.split_once(FACTS_HEADER).unwrap_or_else(|| {
+        let tail: String = system
+            .chars()
+            .skip(system.chars().count().saturating_sub(400))
+            .collect();
+        panic!("no memory block at the end of the system prompt:\n…{tail}")
+    });
+    format!("{FACTS_HEADER}{block}").replace(&session.id, "SESSION")
+}
+
+/// AGENTS.md parity (spec S6): the legacy loop and the state machine feed the
+/// provider the very same memory block for the same turn — same curated facts,
+/// same raw journal, same order.
+#[tokio::test]
+async fn both_agent_loops_splice_the_same_memory_block() {
+    let legacy = memory_block_seen_by_the_loop(None).await;
+    let state_machine = memory_block_seen_by_the_loop(Some("1")).await;
+
+    assert!(
+        legacy.contains("[decision] le cache expire au bout de 60s"),
+        "the curated fact must reach the provider:\n{legacy}"
+    );
+    assert!(
+        legacy.contains("KAJI memory") && legacy.contains("combien de temps vit le cache"),
+        "the raw journal must reach it too:\n{legacy}"
+    );
+    assert_eq!(
+        legacy, state_machine,
+        "both agent loops must splice the same memory block"
+    );
 }

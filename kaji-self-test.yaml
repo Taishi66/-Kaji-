@@ -15,6 +15,7 @@ activities:
   - Test delegate tool for task delegation (sync and async)
   - Test multi-turn thinking preservation for providers that reject replayed reasoning_content
   - Test error boundaries including nested delegation prevention
+  - Test the decisional memory round trip (remember, list curated facts, forget)
   - Generate comprehensive test report
 
 parameters:
@@ -22,7 +23,7 @@ parameters:
     input_type: string
     requirement: optional
     default: "all"
-    description: "Which test phases to run: all, basic, extensions, delegation, reasoning, advanced"
+    description: "Which test phases to run: all, basic, extensions, delegation, reasoning, advanced, memory"
 
   - key: test_depth
     input_type: string
@@ -103,6 +104,12 @@ instructions: |
   - Calculate success metrics
   - Document failures and issues
   - Generate recommendations
+
+  ### Phase 6 — Memory
+  Exercise the portable decisional memory, before Phase 5 so its outcome reaches the report:
+  - `/remember` writes a durable fact to disk, spending no model token
+  - `kaji memory list --curated` reads the facts back from both scopes
+  - Deleting the markdown file is the documented way to forget a fact
 
   ## Success Criteria
   - Phase success: ≥80% tests pass
@@ -415,6 +422,39 @@ prompt: |
   Log results to: {{ workspace_dir }}/phase4_advanced.md
   {% endif %}
 
+  {% if test_phases == "all" or "memory" in test_phases %}
+  ## 記 PHASE 6: Decisional Memory
+
+  Kaji keeps durable facts as markdown files (`<repo root>/.kaji/memory/<type>-<slug>.md` for the
+  project scope) and rebuilds its search index from them. Validate that round trip from the shell.
+
+  ### Write a fact
+  Slash commands are read off a user message, so drive one through a nested headless session:
+  ```
+  kaji run -t "/remember gotcha: self-test memory probe"
+  ```
+  **Expected**: the run prints `記 1 fait mémorisé : gotcha-self-test-memory-probe.md` and returns
+  without calling the model - `/remember` writes straight to disk.
+
+  ### Read it back
+  ```
+  kaji memory list --curated
+  ```
+  **Expected**: a `project` row for type `gotcha`, slug `self-test-memory-probe`.
+  A missing row is a FAILURE - document the full output.
+
+  ### Forget it (cleanup)
+  Removing the markdown file is the documented way to forget a fact; the index follows at the next
+  rebuild. Delete the file the write step named - under `<repo root>/.kaji/memory/` inside a git
+  checkout, under the kaji data dir otherwise (`find ~ -name 'gotcha-self-test-memory-probe.md'`
+  locates it), then confirm the row is gone:
+  ```
+  kaji memory list --curated
+  ```
+
+  Log results to: {{ workspace_dir }}/phase6_memory.md
+  {% endif %}
+
   ## 📊 PHASE 5: Final Report Generation
 
   Create TWO reports:
@@ -449,6 +489,7 @@ prompt: |
   • Delegate (async): [✓/✗]
   • Delegate cancellation: [✓/✗]
   • Nested delegation blocked: [✓/✗]
+  • Memory (remember → list curated → forget): [✓/✗]
 
   ⚠️ Issues Found:
   • [Issue 1 - brief description]
