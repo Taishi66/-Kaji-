@@ -778,7 +778,22 @@ pub enum MemoryCommand {
             default_value = "text"
         )]
         format: String,
+
+        /// List the curated facts instead of the raw journal
+        #[arg(
+            long = "curated",
+            help = "List curated facts from the project and user scopes",
+            conflicts_with = "raw"
+        )]
+        curated: bool,
+
+        /// List the raw journal, the default
+        #[arg(long = "raw", help = "List the raw memory journal (default)")]
+        raw: bool,
     },
+    /// Curate the pending journal entries into facts now
+    #[command(about = "Curate the pending journal entries into facts now")]
+    Curate,
     /// Remove entries from the shared memory store
     #[command(about = "Remove entries from the shared memory store")]
     Clear {
