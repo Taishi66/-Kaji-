@@ -1174,11 +1174,6 @@ fn configure_builtin_extension() -> anyhow::Result<()> {
             "Code editing and shell access",
         ),
         (
-            "memory",
-            "Memory",
-            "Tools to save and retrieve durable memories",
-        ),
-        (
             "tutorial",
             "Tutorial",
             "Access interactive tutorials and guides",

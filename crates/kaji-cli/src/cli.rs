@@ -10,7 +10,7 @@ use kaji::posthog::get_telemetry_choice;
 use kaji::recipe::Recipe;
 use kaji::source_roots::SourceRoot;
 use kaji_mcp::mcp_server_runner::{serve, McpCommand};
-use kaji_mcp::{AutoVisualiserRouter, ComputerControllerServer, MemoryServer, TutorialServer};
+use kaji_mcp::{AutoVisualiserRouter, ComputerControllerServer, TutorialServer};
 
 #[cfg(feature = "telemetry")]
 use crate::commands::configure::configure_telemetry_consent_dialog;
@@ -1464,7 +1464,6 @@ async fn handle_mcp_command(server: McpCommand) -> Result<()> {
     match server {
         McpCommand::AutoVisualiser => serve(AutoVisualiserRouter::new()).await?,
         McpCommand::ComputerController => serve(ComputerControllerServer::new()).await?,
-        McpCommand::Memory => serve(MemoryServer::new()).await?,
         McpCommand::Tutorial => serve(TutorialServer::new()).await?,
     }
     Ok(())

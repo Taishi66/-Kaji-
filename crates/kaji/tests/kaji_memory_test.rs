@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use kaji::conversation::message::Message;
 use kaji::kaji::{
-    curation_due, fact_index_path, ingest_turn, latest_user_instruction, project_facts_dir,
-    run_curation, splice_memory_block, user_facts_dir, SessionMemory, CURATE_DEBOUNCE_SECS,
-    CURATE_MIN_PENDING,
+    curation_due, fact_index_path, ingest_turn, latest_user_instruction,
+    migrate_legacy_txt_memory, project_facts_dir, run_curation, splice_memory_block,
+    user_facts_dir, SessionMemory, CURATE_DEBOUNCE_SECS, CURATE_MIN_PENDING,
 };
 use kaji::providers::base::{stream_from_single_message, MessageStream, Provider};
 use kaji_core::facts::{CreatedBy, Fact, FactStore, FactType};
@@ -522,5 +522,111 @@ fn splice_without_facts_behaves_like_before() {
             splice_memory_block(prompt, "some-session", "po dashboard"),
             format!("{prompt}\n\n{block}")
         );
+    })
+}
+
+/// One-shot import of the legacy MCP memory extension: each `.txt` category
+/// becomes a `reference` fact (project scope locally, user scope globally), the
+/// original is renamed `.txt.legacy`, and a second pass imports nothing.
+#[test]
+fn legacy_txt_categories_become_reference_facts_and_are_renamed() {
+    with_scope_root(|root| {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let local_dir = project_facts_dir(&repo);
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::write(local_dir.join("workflow.txt"), "# tag\ndata1\n\ndata2\n").unwrap();
+
+        let global_dir = kaji::config::paths::Paths::in_config_dir("memory");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(global_dir.join("prefs.txt"), "toujours répondre en français\n").unwrap();
+
+        migrate_legacy_txt_memory(&repo);
+
+        let project = FactStore::new(local_dir.clone());
+        let fact = project
+            .get(&FactType::Reference, "workflow")
+            .expect("catégorie locale importée");
+        assert_eq!(fact.created_by, CreatedBy::Curator);
+        assert!(
+            fact.body.contains("[tag] data1"),
+            "les tags sont rendus en préfixe de ligne : {}",
+            fact.body
+        );
+        assert!(fact.body.contains("data2"), "{}", fact.body);
+        assert!(
+            fact.description.contains("2 entrées"),
+            "{}",
+            fact.description
+        );
+
+        assert!(local_dir.join("workflow.txt.legacy").exists());
+        assert!(!local_dir.join("workflow.txt").exists());
+
+        let user = FactStore::new(user_facts_dir());
+        let global_fact = user
+            .get(&FactType::Reference, "prefs")
+            .expect("catégorie globale importée en scope user");
+        assert!(global_fact.body.contains("toujours répondre en français"));
+        assert!(global_dir.join("prefs.txt.legacy").exists());
+
+        let mut edited = fact;
+        edited.body = "édité après migration".to_string();
+        project.write(&edited).unwrap();
+
+        migrate_legacy_txt_memory(&repo);
+
+        assert_eq!(
+            project
+                .get(&FactType::Reference, "workflow")
+                .expect("fait toujours là")
+                .body,
+            "édité après migration",
+            "le second passage ignore les .txt.legacy"
+        );
+    })
+}
+
+/// The legacy extension wrote its `.txt` into the very dir the fact store owns:
+/// migration redacts what lands in the project scope and never touches the
+/// facts (`*.md`) or the generated index living next to them.
+#[test]
+fn legacy_txt_migration_redacts_project_scope_and_spares_md_facts() {
+    with_scope_root(|root| {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let facts_dir = project_facts_dir(&repo);
+        let store = FactStore::new(facts_dir.clone());
+        store
+            .write(&curated_fact(
+                FactType::Decision,
+                "garde",
+                "fait déjà curé",
+                "corps existant",
+            ))
+            .unwrap();
+        std::fs::write(
+            facts_dir.join("secrets.txt"),
+            "api_key: sk-123456789012345678\n",
+        )
+        .unwrap();
+
+        migrate_legacy_txt_memory(&repo);
+
+        let migrated = store
+            .get(&FactType::Reference, "secrets")
+            .expect("catégorie importée");
+        assert!(
+            !migrated.body.contains("sk-123456789012345678"),
+            "le secret est masqué avant d'atterrir dans le repo : {}",
+            migrated.body
+        );
+        assert!(
+            store.get(&FactType::Decision, "garde").is_some(),
+            "les faits md existants survivent"
+        );
+        assert!(facts_dir.join("MEMORY.md").exists());
+        assert!(!facts_dir.join("MEMORY.md.legacy").exists());
+        assert!(!facts_dir.join("decision-garde.md.legacy").exists());
     })
 }

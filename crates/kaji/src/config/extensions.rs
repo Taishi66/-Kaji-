@@ -483,13 +483,13 @@ extensions:
     #[test]
     fn test_get_extension_by_name_falls_back_to_available_builtin() {
         fn spawn_builtin(_: tokio::io::DuplexStream, _: tokio::io::DuplexStream) {}
-        crate::builtin_extension::register_builtin_extension("memory", spawn_builtin);
+        crate::builtin_extension::register_builtin_extension("tutorial", spawn_builtin);
 
-        let extension = get_extension_by_name("memory").unwrap();
+        let extension = get_extension_by_name("tutorial").unwrap();
 
         assert!(matches!(
             extension,
-            ExtensionConfig::Builtin { ref name, .. } if name == "memory"
+            ExtensionConfig::Builtin { ref name, .. } if name == "tutorial"
         ));
     }
 

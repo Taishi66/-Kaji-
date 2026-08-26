@@ -15,10 +15,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use kaji_core::facts::{slugify, FactIndex, FactStore};
+use kaji_core::facts::{slugify, CreatedBy, Fact, FactIndex, FactStore, FactType};
 use kaji_core::memory::{Anchored, Entry, Memory, RecallHit, RecallResult};
 use kaji_providers::model::ModelConfig;
 
@@ -26,6 +26,7 @@ pub use kaji_core::memory::Entry as MemoryEntry;
 
 use crate::config::paths::{find_git_root, Paths};
 use crate::providers::base::Provider;
+use crate::session::redact_text;
 
 /// Rendered prefix for the memory block in a system prompt.
 const BLOCK_HEADER: &str = "## KAJI memory — recalled across sessions";
@@ -249,6 +250,118 @@ fn migrate_legacy_sessions(dir: &Path, shared: &mut Memory) {
     }
 }
 
+/// Guards the legacy `.txt` import: one attempt per process, on first access.
+static LEGACY_TXT_MIGRATION: Once = Once::new();
+
+/// Dir the legacy memory extension used for its user-wide categories: the
+/// config dir, not the data dir the facts live in.
+fn legacy_global_txt_dir() -> PathBuf {
+    Paths::in_config_dir("memory")
+}
+
+/// Import the categories left by the legacy MCP memory extension. Each `*.txt`
+/// file becomes one `reference` fact — project scope for the repo-local dir
+/// (the very dir the fact store now owns), user scope for the global one — and
+/// the original is renamed `*.txt.legacy`, never deleted.
+///
+/// Idempotent by construction: a renamed file no longer matches the `*.txt`
+/// scan, so a second boot imports nothing. Facts (`*.md`) sharing the dir are
+/// out of the scan by the same filter.
+pub fn migrate_legacy_txt_memory(working_dir: &Path) {
+    let project_dir = project_facts_dir(working_dir);
+    let project = FactStore::new(project_dir.clone());
+    let working_dir_local = working_dir.join(".kaji").join("memory");
+
+    import_legacy_txt_dir(&project_dir, &project, true);
+    if working_dir_local != project_dir {
+        import_legacy_txt_dir(&working_dir_local, &project, true);
+    }
+    import_legacy_txt_dir(
+        &legacy_global_txt_dir(),
+        &FactStore::new(user_facts_dir()),
+        false,
+    );
+}
+
+/// Import every legacy category of `dir` into `store`. Errors are per-file:
+/// a category that can't be read or written is logged and left in place, so
+/// the next boot retries it.
+fn import_legacy_txt_dir(dir: &Path, store: &FactStore, redact: bool) {
+    let Ok(dir_entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    for dir_entry in dir_entries.flatten() {
+        let path = dir_entry.path();
+        let Some(category) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".txt"))
+        else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            tracing::warn!(file = %path.display(), "legacy memory category unreadable");
+            continue;
+        };
+
+        let records = parse_legacy_txt(&content);
+        if !records.is_empty() {
+            let body = records.join("\n");
+            let fact = Fact {
+                fact_type: FactType::Reference,
+                slug: slugify(category),
+                description: format!(
+                    "Importé de l'extension memory héritée ({} entrées)",
+                    records.len()
+                ),
+                date: today.clone(),
+                session: String::new(),
+                created_by: CreatedBy::Curator,
+                body: if redact { redact_text(&body).0 } else { body },
+            };
+            if let Err(err) = store.write(&fact) {
+                tracing::warn!(file = %path.display(), error = %err, "legacy memory import failed");
+                continue;
+            }
+        }
+        let _ = std::fs::rename(&path, path.with_extension("txt.legacy"));
+    }
+}
+
+/// Entries of a legacy category file: blocks separated by a blank line, each
+/// optionally opened by a `# tag1 tag2` line. Tags become a line prefix so they
+/// stay searchable in the fact body.
+fn parse_legacy_txt(content: &str) -> Vec<String> {
+    content
+        .split("\n\n")
+        .filter_map(|block| {
+            let mut lines = block.lines();
+            let first = lines.next()?;
+            let (tags, data) = match first.strip_prefix('#') {
+                Some(tags) => (
+                    tags.split_whitespace().collect::<Vec<_>>().join(" "),
+                    lines.collect::<Vec<_>>(),
+                ),
+                None => (
+                    String::new(),
+                    std::iter::once(first).chain(lines).collect::<Vec<_>>(),
+                ),
+            };
+            let text = data.join("\n");
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(if tags.is_empty() {
+                text.to_string()
+            } else {
+                format!("[{tags}] {text}")
+            })
+        })
+        .collect()
+}
+
 /// Splice the KAJI memory block into a system prompt for `session_id`, using
 /// `query` (usually the latest user instruction) as the recall query.
 ///
@@ -257,6 +370,7 @@ fn migrate_legacy_sessions(dir: &Path, shared: &mut Memory) {
 /// prompt unchanged when nothing relevant is stored.
 pub fn splice_memory_block(system_prompt: &str, session_id: &str, query: &str) -> String {
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    LEGACY_TXT_MIGRATION.call_once(|| migrate_legacy_txt_memory(&working_dir));
     let mem = SessionMemory::load(session_id);
     let mut parts = vec![system_prompt.to_string()];
     parts.extend(curated_facts_block(&working_dir, query, FACTS_TOP_K));
