@@ -145,6 +145,7 @@ impl Agent {
                     &system_prompt,
                     session_id,
                     &query,
+                    working_dir,
                 ))
                 .saturating_sub(counter.count_tokens(&system_prompt)),
             None => 0,

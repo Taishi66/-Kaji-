@@ -1018,7 +1018,8 @@ impl Agent {
         crate::kaji::ingest_turn(session_id, conversation.messages());
         let query = crate::kaji::latest_user_instruction(conversation.messages());
         if let Some(query) = query {
-            system_prompt = crate::kaji::splice_memory_block(&system_prompt, session_id, &query);
+            system_prompt =
+                crate::kaji::splice_memory_block(&system_prompt, session_id, &query, working_dir);
         }
         if let Ok(provider) = self.provider().await {
             crate::kaji::maybe_spawn_curation(

@@ -403,8 +403,12 @@ impl Inference for InferenceRunner<'_> {
             crate::kaji::ingest_turn(&session.id, fixed_conversation.messages());
             let query = crate::kaji::latest_user_instruction(fixed_conversation.messages());
             if let Some(query) = query {
-                system_prompt =
-                    crate::kaji::splice_memory_block(&system_prompt, &session.id, &query);
+                system_prompt = crate::kaji::splice_memory_block(
+                    &system_prompt,
+                    &session.id,
+                    &query,
+                    &session.working_dir,
+                );
             }
             crate::kaji::maybe_spawn_curation(
                 self.provider.clone(),

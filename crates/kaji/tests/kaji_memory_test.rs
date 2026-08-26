@@ -35,13 +35,14 @@ fn with_root(f: impl FnOnce()) {
 #[test]
 fn splice_memory_block_appends_recalled_facts() {
     with_root(|| {
+        let workspace = tempfile::tempdir().unwrap();
         {
             let mut mem = SessionMemory::load("splice-session");
             mem.remember("Onboarding lives on the PO dashboard", &["po"], None);
         }
         let prompt = "You are KAJI. You have standard PI.";
 
-        let spliced = splice_memory_block(prompt, "some-session", "po dashboard");
+        let spliced = splice_memory_block(prompt, "some-session", "po dashboard", workspace.path());
         assert!(
             spliced.contains("KAJI memory"),
             "any session recalls facts recorded by another session"
@@ -52,7 +53,8 @@ fn splice_memory_block_appends_recalled_facts() {
             "hit tagged with its source"
         );
 
-        let spliced = splice_memory_block(prompt, "splice-session", "po dashboard");
+        let spliced =
+            splice_memory_block(prompt, "splice-session", "po dashboard", workspace.path());
         assert!(spliced.contains("KAJI memory"));
         assert!(spliced.contains("Onboarding lives"));
     })
@@ -61,8 +63,14 @@ fn splice_memory_block_appends_recalled_facts() {
 #[test]
 fn no_relevant_facts_yields_unchanged_prompt() {
     with_root(|| {
+        let workspace = tempfile::tempdir().unwrap();
         let prompt = "You are KAJI.";
-        let spliced = splice_memory_block(prompt, "empty-session", "nothing about this");
+        let spliced = splice_memory_block(
+            prompt,
+            "empty-session",
+            "nothing about this",
+            workspace.path(),
+        );
         assert_eq!(spliced, prompt);
     })
 }
@@ -410,26 +418,6 @@ fn fact_index_path_stays_outside_the_repo() {
     })
 }
 
-/// Move the process into `dir` and back out on drop. `splice_memory_block`
-/// resolves the project fact scope from the current dir, so a test that wants
-/// its own scope has to move; the env lock held by the caller keeps the move
-/// invisible to the rest of the suite.
-struct Cwd(PathBuf);
-
-impl Cwd {
-    fn moved_to(dir: &Path) -> Cwd {
-        let previous = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir).unwrap();
-        Cwd(previous)
-    }
-}
-
-impl Drop for Cwd {
-    fn drop(&mut self) {
-        std::env::set_current_dir(&self.0).unwrap();
-    }
-}
-
 fn curated_fact(fact_type: FactType, slug: &str, description: &str, body: &str) -> Fact {
     Fact {
         fact_type,
@@ -448,10 +436,8 @@ fn curated_fact(fact_type: FactType, slug: &str, description: &str, body: &str) 
 #[test]
 fn splice_prepends_curated_facts_then_raw_journal() {
     with_scope_root(|root| {
-        let workspace = root.join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let _cwd = Cwd::moved_to(&workspace);
-        let working_dir = std::env::current_dir().unwrap();
+        let working_dir = root.join("workspace");
+        std::fs::create_dir_all(&working_dir).unwrap();
 
         FactStore::new(project_facts_dir(&working_dir))
             .write(&curated_fact(
@@ -476,7 +462,7 @@ fn splice_prepends_curated_facts_then_raw_journal() {
             &[Message::user().with_text("le cache doit être vidé à la main")],
         );
 
-        let out = splice_memory_block("SYSTEM", session, "cache ttl");
+        let out = splice_memory_block("SYSTEM", session, "cache ttl", &working_dir);
         assert!(out.starts_with("SYSTEM"), "system prompt stays first");
 
         let facts_at = out.find("## Faits mémorisés").expect("curated block");
@@ -506,13 +492,12 @@ fn splice_prepends_curated_facts_then_raw_journal() {
 #[test]
 fn splice_without_facts_behaves_like_before() {
     with_scope_root(|root| {
-        let workspace = root.join("factless");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let _cwd = Cwd::moved_to(&workspace);
+        let working_dir = root.join("factless");
+        std::fs::create_dir_all(&working_dir).unwrap();
 
         let prompt = "You are KAJI. You have standard PI.";
         assert_eq!(
-            splice_memory_block(prompt, "empty-session", "nothing about this"),
+            splice_memory_block(prompt, "empty-session", "nothing about this", &working_dir),
             prompt,
             "nothing stored leaves the prompt untouched"
         );
@@ -525,9 +510,126 @@ fn splice_without_facts_behaves_like_before() {
             .recall_prompt("po dashboard", 3)
             .expect("raw journal block");
         assert_eq!(
-            splice_memory_block(prompt, "some-session", "po dashboard"),
+            splice_memory_block(prompt, "some-session", "po dashboard", &working_dir),
             format!("{prompt}\n\n{block}")
         );
+    })
+}
+
+/// Move the process into `dir` and back out on drop, so a test can force the
+/// process cwd away from the session working dir.
+struct Cwd(PathBuf);
+
+impl Cwd {
+    fn moved_to(dir: &Path) -> Cwd {
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir).unwrap();
+        Cwd(previous)
+    }
+}
+
+impl Drop for Cwd {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.0).unwrap();
+    }
+}
+
+/// A resumed session keeps running from whatever dir the process was launched
+/// in, which may differ from the session's own working dir. Recall has to read
+/// the scope the curator wrote to — the session dir — or every project fact
+/// stays invisible for the rest of the session.
+#[test]
+fn splice_reads_the_session_working_dir_not_the_process_cwd() {
+    with_scope_root(|root| {
+        let session_dir = root.join("session-dir");
+        let process_cwd = root.join("process-cwd");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::create_dir_all(&process_cwd).unwrap();
+
+        FactStore::new(project_facts_dir(&session_dir))
+            .write(&curated_fact(
+                FactType::Decision,
+                "port-du-daemon",
+                "le daemon écoute sur le port 7823",
+                "le port 7823 est réservé au daemon local",
+            ))
+            .unwrap();
+
+        let _cwd = Cwd::moved_to(&process_cwd);
+        let out = splice_memory_block("SYSTEM", "resumed-session", "daemon port", &session_dir);
+
+        assert!(
+            out.contains("[decision] le daemon écoute sur le port 7823"),
+            "the fact curated for the session dir is recalled from another cwd:\n{out}"
+        );
+    })
+}
+
+/// The two locked recall constants: at most three facts per turn, each body cut
+/// at 300 chars on a char boundary.
+#[test]
+fn recall_caps_three_facts_and_truncates_long_bodies() {
+    with_scope_root(|root| {
+        let working_dir = root.join("capped");
+        std::fs::create_dir_all(&working_dir).unwrap();
+
+        let store = FactStore::new(project_facts_dir(&working_dir));
+        let body = "é".repeat(400);
+        for i in 0..5 {
+            store
+                .write(&curated_fact(
+                    FactType::Decision,
+                    &format!("cache-{i}"),
+                    &format!("décision cache {i}"),
+                    &body,
+                ))
+                .unwrap();
+        }
+
+        let out = splice_memory_block("SYSTEM", "capped-session", "cache", &working_dir);
+        assert_eq!(
+            out.matches("] décision cache ").count(),
+            3,
+            "recall stops at three facts:\n{out}"
+        );
+        assert!(out.contains(&"é".repeat(300)), "300 chars of body survive");
+        assert!(
+            !out.contains(&"é".repeat(301)),
+            "the body is cut at 300 chars:\n{out}"
+        );
+    })
+}
+
+/// Fail-open: an index that can't be opened drops the curated block and leaves
+/// the raw journal splice intact — a broken index never costs a turn.
+#[test]
+fn unopenable_index_drops_facts_and_keeps_the_journal() {
+    with_scope_root(|root| {
+        let working_dir = root.join("broken-index");
+        std::fs::create_dir_all(&working_dir).unwrap();
+
+        FactStore::new(project_facts_dir(&working_dir))
+            .write(&curated_fact(
+                FactType::Decision,
+                "cache-ttl",
+                "le cache expire au bout de 60s",
+                "le TTL du cache est fixé à 60 secondes",
+            ))
+            .unwrap();
+        std::fs::create_dir_all(fact_index_path(&working_dir)).unwrap();
+
+        let session = "broken-index-session";
+        ingest_turn(
+            session,
+            &[Message::user().with_text("le cache doit être vidé à la main")],
+        );
+
+        let out = splice_memory_block("SYSTEM", session, "cache ttl", &working_dir);
+        assert!(
+            !out.contains("## Faits mémorisés"),
+            "no curated block on a dead index:\n{out}"
+        );
+        assert!(out.contains("vidé à la main"), "raw journal still spliced");
     })
 }
 
@@ -644,10 +746,8 @@ fn legacy_txt_migration_redacts_project_scope_and_spares_md_facts() {
 #[test]
 fn fact_written_in_session_one_is_recalled_in_session_two() {
     with_scope_root(|root| {
-        let workspace = root.join("two-sessions");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let _cwd = Cwd::moved_to(&workspace);
-        let working_dir = std::env::current_dir().unwrap();
+        let working_dir = root.join("two-sessions");
+        std::fs::create_dir_all(&working_dir).unwrap();
 
         let mut fact = curated_fact(
             FactType::Decision,
@@ -665,7 +765,7 @@ fn fact_written_in_session_one_is_recalled_in_session_two() {
             .rebuild_if_stale(&[("project", &project), ("user", &user)])
             .unwrap();
 
-        let recalled = splice_memory_block("SYS", "session-two", "choix provider");
+        let recalled = splice_memory_block("SYS", "session-two", "choix provider", &working_dir);
 
         assert!(recalled.starts_with("SYS"), "{recalled}");
         assert!(

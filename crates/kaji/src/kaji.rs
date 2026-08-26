@@ -368,12 +368,21 @@ fn parse_legacy_txt(content: &str) -> Vec<String> {
 /// Shared by both agent-loop paths (legacy `prepare_reply_context` and the
 /// state machine's inference op) so the behavior stays in parity. Returns the
 /// prompt unchanged when nothing relevant is stored.
-pub fn splice_memory_block(system_prompt: &str, session_id: &str, query: &str) -> String {
-    let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    LEGACY_TXT_MIGRATION.call_once(|| migrate_legacy_txt_memory(&working_dir));
+///
+/// `working_dir` is the session's own dir, the same one the curator writes
+/// through — never `std::env::current_dir()`, which a resumed session may no
+/// longer be running from: reading a scope the writer never used would hide
+/// every project fact.
+pub fn splice_memory_block(
+    system_prompt: &str,
+    session_id: &str,
+    query: &str,
+    working_dir: &Path,
+) -> String {
+    LEGACY_TXT_MIGRATION.call_once(|| migrate_legacy_txt_memory(working_dir));
     let mem = SessionMemory::load(session_id);
     let mut parts = vec![system_prompt.to_string()];
-    parts.extend(curated_facts_block(&working_dir, query, FACTS_TOP_K));
+    parts.extend(curated_facts_block(working_dir, query, FACTS_TOP_K));
     parts.extend(mem.recall_prompt(query, 3));
     parts.join("\n\n")
 }
