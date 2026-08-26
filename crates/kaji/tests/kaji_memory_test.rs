@@ -6,11 +6,12 @@ use kaji::kaji::{
     CURATE_MIN_PENDING,
 };
 use kaji::providers::base::{stream_from_single_message, MessageStream, Provider};
-use kaji_core::facts::{FactStore, FactType};
+use kaji_core::facts::{CreatedBy, Fact, FactStore, FactType};
 use kaji_providers::conversation::token_usage::{ProviderUsage, Usage};
 use kaji_providers::errors::ProviderError;
 use kaji_providers::model::ModelConfig;
 use rmcp::model::Tool;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Temporarily point the memory data dir at a fresh temp root, serialized
@@ -399,6 +400,127 @@ fn fact_index_path_stays_outside_the_repo() {
             index,
             fact_index_path(&root.join("other")),
             "each working dir gets its own index"
+        );
+    })
+}
+
+/// Move the process into `dir` and back out on drop. `splice_memory_block`
+/// resolves the project fact scope from the current dir, so a test that wants
+/// its own scope has to move; the env lock held by the caller keeps the move
+/// invisible to the rest of the suite.
+struct Cwd(PathBuf);
+
+impl Cwd {
+    fn moved_to(dir: &Path) -> Cwd {
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir).unwrap();
+        Cwd(previous)
+    }
+}
+
+impl Drop for Cwd {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.0).unwrap();
+    }
+}
+
+fn curated_fact(fact_type: FactType, slug: &str, description: &str, body: &str) -> Fact {
+    Fact {
+        fact_type,
+        slug: slug.to_string(),
+        description: description.to_string(),
+        date: "2026-08-22".to_string(),
+        session: "curator-session".to_string(),
+        created_by: CreatedBy::Curator,
+        body: body.to_string(),
+    }
+}
+
+/// Curated facts from both scopes and a raw journal entry all matching the
+/// query: the facts lead the block, the raw journal follows, and the system
+/// prompt keeps its place at the top.
+#[test]
+fn splice_prepends_curated_facts_then_raw_journal() {
+    with_scope_root(|root| {
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let _cwd = Cwd::moved_to(&workspace);
+        let working_dir = std::env::current_dir().unwrap();
+
+        FactStore::new(project_facts_dir(&working_dir))
+            .write(&curated_fact(
+                FactType::Decision,
+                "cache-ttl",
+                "le cache expire au bout de 60s",
+                "le TTL du cache est fixé à 60 secondes",
+            ))
+            .unwrap();
+        FactStore::new(user_facts_dir())
+            .write(&curated_fact(
+                FactType::Preference,
+                "cache-warmup",
+                "préchauffer le cache au démarrage",
+                "toujours préchauffer le cache avant le premier appel",
+            ))
+            .unwrap();
+
+        let session = "splice-facts-session";
+        ingest_turn(
+            session,
+            &[Message::user().with_text("le cache doit être vidé à la main")],
+        );
+
+        let out = splice_memory_block("SYSTEM", session, "cache ttl");
+        assert!(out.starts_with("SYSTEM"), "system prompt stays first");
+
+        let facts_at = out.find("## Faits mémorisés").expect("curated block");
+        let journal_at = out.find("KAJI memory").expect("raw journal block");
+        assert!(
+            facts_at < journal_at,
+            "curated facts lead the block:\n{out}"
+        );
+
+        assert!(
+            out.contains("\n1. ["),
+            "the curated list is numbered from 1:\n{out}"
+        );
+        assert!(out.contains(
+            "[decision] le cache expire au bout de 60s — le TTL du cache est fixé à 60 secondes"
+        ));
+        assert!(
+            out.contains("[preference] préchauffer le cache au démarrage"),
+            "both scopes are merged into one ranking:\n{out}"
+        );
+        assert!(out.contains("vidé à la main"), "raw journal still spliced");
+    })
+}
+
+/// Non-regression: with no curated fact in scope the splice is byte-for-byte
+/// what `recall_prompt` alone produced before the facts block existed.
+#[test]
+fn splice_without_facts_behaves_like_before() {
+    with_scope_root(|root| {
+        let workspace = root.join("factless");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let _cwd = Cwd::moved_to(&workspace);
+
+        let prompt = "You are KAJI. You have standard PI.";
+        assert_eq!(
+            splice_memory_block(prompt, "empty-session", "nothing about this"),
+            prompt,
+            "nothing stored leaves the prompt untouched"
+        );
+
+        {
+            let mut mem = SessionMemory::load("splice-session");
+            mem.remember("Onboarding lives on the PO dashboard", &["po"], None);
+        }
+        let block = SessionMemory::load("some-session")
+            .recall_prompt("po dashboard", 3)
+            .expect("raw journal block");
+        assert_eq!(
+            splice_memory_block(prompt, "some-session", "po dashboard"),
+            format!("{prompt}\n\n{block}")
         );
     })
 }

@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use kaji_core::facts::slugify;
+use kaji_core::facts::{slugify, FactIndex, FactStore};
 use kaji_core::memory::{Anchored, Entry, Memory, RecallHit, RecallResult};
 use kaji_providers::model::ModelConfig;
 
@@ -29,6 +29,17 @@ use crate::providers::base::Provider;
 
 /// Rendered prefix for the memory block in a system prompt.
 const BLOCK_HEADER: &str = "## KAJI memory — recalled across sessions";
+
+/// Rendered prefix for the curated facts, spliced above the raw journal.
+const FACTS_HEADER: &str = "## Faits mémorisés";
+
+/// Curated facts injected per turn. Kept small on purpose: a fact is dense and
+/// competes with the raw journal for the same prompt budget.
+const FACTS_TOP_K: usize = 3;
+
+/// Longest fact body rendered in the block. Facts are meant to be read in full;
+/// the cap only guards against a curator writing an essay.
+const FACT_BODY_MAX_CHARS: usize = 300;
 
 /// Largest body stored as a memory fact. Payloads above this are kept in the
 /// conversation only, so recalling a giant message can't balloon every future
@@ -245,11 +256,54 @@ fn migrate_legacy_sessions(dir: &Path, shared: &mut Memory) {
 /// state machine's inference op) so the behavior stays in parity. Returns the
 /// prompt unchanged when nothing relevant is stored.
 pub fn splice_memory_block(system_prompt: &str, session_id: &str, query: &str) -> String {
+    let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mem = SessionMemory::load(session_id);
-    match mem.recall_prompt(query, 3) {
-        Some(block) => format!("{system_prompt}\n\n{block}"),
-        None => system_prompt.to_string(),
+    let mut parts = vec![system_prompt.to_string()];
+    parts.extend(curated_facts_block(&working_dir, query, FACTS_TOP_K));
+    parts.extend(mem.recall_prompt(query, 3));
+    parts.join("\n\n")
+}
+
+/// Top-k curated facts for `query`, both scopes merged into the same bm25
+/// ranking, rendered as a markdown block. `None` when nothing matches.
+///
+/// Recall must never break a turn: an unreadable index or a failed rebuild
+/// drops the block and lets the raw journal splice go through.
+fn curated_facts_block(working_dir: &Path, query: &str, k: usize) -> Option<String> {
+    let project = FactStore::new(project_facts_dir(working_dir));
+    let user = FactStore::new(user_facts_dir());
+    let mut index = FactIndex::open(&fact_index_path(working_dir)).ok()?;
+    index
+        .rebuild_if_stale(&[("project", &project), ("user", &user)])
+        .ok()?;
+
+    let hits = index.search(query, k);
+    if hits.is_empty() {
+        return None;
     }
+    let mut parts = vec![FACTS_HEADER.to_string()];
+    for (i, hit) in hits.iter().enumerate() {
+        parts.push(format!(
+            "{}. [{}] {} — {}",
+            i + 1,
+            fact_type_label(&hit.file_name),
+            hit.description,
+            truncate_chars(&hit.body, FACT_BODY_MAX_CHARS)
+        ));
+    }
+    Some(parts.join("\n"))
+}
+
+/// Fact type carried by a fact file name (`{type}-{slug}.md`).
+fn fact_type_label(file_name: &str) -> &str {
+    file_name
+        .split_once('-')
+        .map(|(fact_type, _)| fact_type)
+        .unwrap_or(file_name)
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
 }
 
 /// Uncurated journal entries a turn must have accumulated before a curation
