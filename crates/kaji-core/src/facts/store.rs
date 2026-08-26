@@ -79,10 +79,17 @@ fn render_memory_index(facts: &[Fact]) -> String {
         let file_name = fact.file_name();
         out.push_str(&format!(
             "- [{file_name}]({file_name}) — {}\n",
-            fact.description
+            flatten_lines(&fact.description)
         ));
     }
     out
+}
+
+/// One fact per line in the generated index: a description carrying a line break
+/// would otherwise forge extra entries, so the only renderer of stored text into
+/// `MEMORY.md` flattens them.
+fn flatten_lines(text: &str) -> String {
+    text.replace(['\n', '\r'], " ")
 }
 
 fn write_atomic(dir: &Path, file_name: &str, content: &[u8]) -> anyhow::Result<()> {

@@ -743,6 +743,43 @@ fn legacy_txt_migration_redacts_project_scope_and_spares_md_facts() {
     })
 }
 
+/// A `/remember` note and a legacy `.txt` category can land on the same slug.
+/// The user's own fact wins: the import is skipped, and the `.txt` is still
+/// renamed so its content stays recoverable next to the fact.
+#[test]
+fn legacy_txt_import_never_overwrites_a_user_fact() {
+    with_scope_root(|root| {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let facts_dir = project_facts_dir(&repo);
+        let store = FactStore::new(facts_dir.clone());
+
+        let mut mine = curated_fact(
+            FactType::Reference,
+            "workflow",
+            "ce que j'ai mémorisé moi-même",
+            "corps écrit par l'utilisateur",
+        );
+        mine.created_by = CreatedBy::User;
+        store.write(&mine).unwrap();
+
+        std::fs::write(facts_dir.join("workflow.txt"), "entrée héritée\n").unwrap();
+
+        migrate_legacy_txt_memory(&repo);
+
+        let kept = store
+            .get(&FactType::Reference, "workflow")
+            .expect("le fait de l'utilisateur reste en place");
+        assert_eq!(kept.created_by, CreatedBy::User);
+        assert_eq!(kept.body, "corps écrit par l'utilisateur");
+        assert!(
+            facts_dir.join("workflow.txt.legacy").exists(),
+            "le .txt est renommé : son contenu reste récupérable"
+        );
+        assert!(!facts_dir.join("workflow.txt").exists());
+    })
+}
+
 /// End-to-end over two sessions, disk only: "session 1" writes a curated fact
 /// and rebuilds the index, "session 2" does nothing but splice. No process
 /// state is shared between the halves — the fact travels through its md file
@@ -902,6 +939,79 @@ async fn memory_block_seen_by_the_loop(state_machine: Option<&str>) -> String {
         panic!("no memory block at the end of the system prompt:\n…{tail}")
     });
     format!("{FACTS_HEADER}{block}").replace(&session.id, "SESSION")
+}
+
+/// `/remember` is answered by the command layer on both loops, never by the
+/// model: under `KAJI_STATE_MACHINE=1` the note has to land on disk and the
+/// provider has to stay untouched, or the note is silently sent to the LLM as a
+/// plain prompt and nothing is memorized.
+#[tokio::test]
+async fn remember_writes_the_fact_without_reaching_the_provider_on_the_state_machine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _guard = env_lock::lock_env([
+        ("KAJI_PATH_ROOT", Some(tmp.path().to_str().unwrap())),
+        ("KAJI_MEMORY_DIR", None),
+        ("KAJI_STATE_MACHINE", Some("1")),
+    ]);
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let _cwd = Cwd::moved_to(&workspace);
+    let working_dir = std::env::current_dir().unwrap();
+
+    let data_dir = tmp.path().join("agent");
+    let session_manager = Arc::new(SessionManager::new(data_dir.clone()));
+    let agent = Agent::with_config(AgentConfig::new(
+        session_manager.clone(),
+        Arc::new(PermissionManager::new(data_dir)),
+        None,
+        KajiMode::default(),
+        true,
+        KajiPlatform::KajiCli,
+    ));
+    let session = session_manager
+        .create_session(
+            working_dir.clone(),
+            "remember-state-machine".to_string(),
+            SessionType::Hidden,
+            KajiMode::default(),
+        )
+        .await
+        .unwrap();
+    let provider = Arc::new(RecordingProvider::default());
+    agent
+        .update_provider(
+            provider.clone(),
+            ModelConfig::new("mock-model"),
+            &session.id,
+        )
+        .await
+        .unwrap();
+
+    let stream = agent
+        .reply(
+            Message::user().with_text("/remember decision: le cache expire au bout de 60s"),
+            SessionConfig {
+                id: session.id.clone(),
+                schedule_id: None,
+                max_turns: Some(2),
+                retry_config: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::pin!(stream);
+    while stream.next().await.is_some() {}
+
+    assert!(
+        provider.system_prompts.lock().unwrap().is_empty(),
+        "/remember costs the turn nothing: the provider must never be called"
+    );
+    let fact = FactStore::new(project_facts_dir(&working_dir))
+        .get(&FactType::Decision, "le-cache-expire-au-bout-de-60s")
+        .expect("the state machine writes the /remember note to disk");
+    assert_eq!(fact.created_by, CreatedBy::User);
+    assert_eq!(fact.session, session.id);
 }
 
 /// AGENTS.md parity (spec S6): the legacy loop and the state machine feed the

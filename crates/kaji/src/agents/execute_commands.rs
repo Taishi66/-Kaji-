@@ -598,13 +598,6 @@ impl Agent {
         params_str: &str,
         session_id: &str,
     ) -> Result<Option<Message>> {
-        let (fact_type, note) = parse_remember_note(params_str);
-        if note.is_empty() {
-            return Ok(Some(user_only_assistant_text(
-                "Usage: /remember [decision:|gotcha:|preference:|reference:] <note>",
-            )));
-        }
-
         let working_dir = match self
             .config
             .session_manager
@@ -615,38 +608,66 @@ impl Agent {
             Err(_) => std::env::current_dir()?,
         };
 
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let fact = remembered_fact(fact_type, &note, session_id, &today);
+        let fact = write_remembered_note(params_str, session_id, &working_dir)?;
 
-        let project = FactStore::new(project_facts_dir(&working_dir));
-        let user = FactStore::new(user_facts_dir());
-        let store = if is_project_scoped(fact_type) {
-            &project
-        } else {
-            &user
-        };
-        store.write(&fact)?;
-
-        let mut index = FactIndex::open(&fact_index_path(&working_dir))?;
-        index.rebuild_if_stale(&[("project", &project), ("user", &user)])?;
-
-        if let (Ok(provider), Ok(model_config)) = (
-            self.provider().await,
-            self.model_config_for_session(session_id).await,
-        ) {
-            crate::kaji::maybe_spawn_curation(
-                provider.clone(),
-                provider.get_name().to_string(),
-                model_config,
-                session_id.to_string(),
-                working_dir,
-            );
+        if fact.is_some() {
+            if let (Ok(provider), Ok(model_config)) = (
+                self.provider().await,
+                self.model_config_for_session(session_id).await,
+            ) {
+                crate::kaji::maybe_spawn_curation(
+                    provider.clone(),
+                    provider.get_name().to_string(),
+                    model_config,
+                    session_id.to_string(),
+                    working_dir,
+                );
+            }
         }
 
-        Ok(Some(user_only_assistant_text(format!(
-            "記 1 fait mémorisé : {}",
-            fact.file_name()
-        ))))
+        Ok(Some(remember_reply(fact.as_ref())))
+    }
+}
+
+/// Effectful core of `/remember`, shared by both agent loops: parse the note,
+/// write the fact into its scope and refresh the index. Returns `None` when the
+/// note is empty, which writes nothing.
+pub(crate) fn write_remembered_note(
+    params_str: &str,
+    session_id: &str,
+    working_dir: &Path,
+) -> Result<Option<Fact>> {
+    let (fact_type, note) = parse_remember_note(params_str);
+    if note.is_empty() {
+        return Ok(None);
+    }
+
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let fact = remembered_fact(fact_type, &note, session_id, &today);
+
+    let project = FactStore::new(project_facts_dir(working_dir));
+    let user = FactStore::new(user_facts_dir());
+    let store = if is_project_scoped(fact_type) {
+        &project
+    } else {
+        &user
+    };
+    store.write(&fact)?;
+
+    let mut index = FactIndex::open(&fact_index_path(working_dir))?;
+    index.rebuild_if_stale(&[("project", &project), ("user", &user)])?;
+
+    Ok(Some(fact))
+}
+
+pub(crate) fn remember_reply(fact: Option<&Fact>) -> Message {
+    match fact {
+        Some(fact) => {
+            user_only_assistant_text(format!("記 1 fait mémorisé : {}", fact.file_name()))
+        }
+        None => user_only_assistant_text(
+            "Usage: /remember [decision:|gotcha:|preference:|reference:] <note>",
+        ),
     }
 }
 

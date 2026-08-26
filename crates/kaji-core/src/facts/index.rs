@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension};
 
@@ -28,6 +28,11 @@ impl FactIndex {
                 .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
         }
         let conn = Connection::open(db_path)?;
+        // A concurrent session must not block a recall: WAL lets readers through
+        // during a rebuild, and the wait stays short because this open sits in
+        // the prompt hot path.
+        conn.busy_timeout(Duration::from_millis(250))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
         Ok(FactIndex { conn })
     }

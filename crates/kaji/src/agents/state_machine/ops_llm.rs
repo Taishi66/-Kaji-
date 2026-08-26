@@ -274,10 +274,24 @@ impl Operation for InferenceRunner<'_> {
         conversation: &Conversation,
         emit: &Emitter,
     ) -> Result<OperationResult> {
-        if command.command != "status" {
-            return not_applicable();
+        match command.command {
+            "status" => self.run_status_command(session, conversation, emit).await,
+            "remember" => {
+                self.run_remember_command(command.params_str, session, conversation, emit)
+                    .await
+            }
+            _ => not_applicable(),
         }
+    }
+}
 
+impl InferenceRunner<'_> {
+    async fn run_status_command(
+        &self,
+        session: &Session,
+        conversation: &Conversation,
+        emit: &Emitter,
+    ) -> Result<OperationResult> {
         let context_limit = self
             .provider
             .get_context_limit(&self.model_config)
@@ -308,26 +322,66 @@ impl Operation for InferenceRunner<'_> {
                 context_pct,
             ))
             .with_visibility(true, false);
-        let command_message = messages_since_kickoff(conversation)?
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow!("status command conversation has no kickoff message"))?;
-        let message_id = command_message
-            .id
-            .clone()
-            .ok_or_else(|| anyhow!("Persisted slash command message has no id"))?;
-        emit.message(command_message.with_visibility(true, false))
-            .await;
-        let response = emit.message(response).await;
-        yielded_with([
-            StateEffect::SetMessageVisibility {
-                message_id,
-                user_visible: true,
-                agent_visible: false,
-            },
-            response.into(),
-        ])
+        command_reply(response, conversation, emit).await
     }
+
+    /// `/remember` writes the note to disk and answers from the command layer,
+    /// so the turn never reaches the provider — the same contract as the legacy
+    /// loop's handler, curation trigger included.
+    async fn run_remember_command(
+        &self,
+        params_str: &str,
+        session: &Session,
+        conversation: &Conversation,
+        emit: &Emitter,
+    ) -> Result<OperationResult> {
+        let fact = crate::agents::execute_commands::write_remembered_note(
+            params_str,
+            &session.id,
+            &session.working_dir,
+        )?;
+
+        if fact.is_some() {
+            crate::kaji::maybe_spawn_curation(
+                self.provider.clone(),
+                self.provider.get_name().to_string(),
+                self.model_config.clone(),
+                session.id.clone(),
+                session.working_dir.clone(),
+            );
+        }
+
+        let response = crate::agents::execute_commands::remember_reply(fact.as_ref());
+        command_reply(response, conversation, emit).await
+    }
+}
+
+/// Persist a slash command and its answer as user-visible only, then hand the
+/// turn back to the client without ever reaching the provider.
+async fn command_reply(
+    response: Message,
+    conversation: &Conversation,
+    emit: &Emitter,
+) -> Result<OperationResult> {
+    let command_message = messages_since_kickoff(conversation)?
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("slash command conversation has no kickoff message"))?;
+    let message_id = command_message
+        .id
+        .clone()
+        .ok_or_else(|| anyhow!("Persisted slash command message has no id"))?;
+    emit.message(command_message.with_visibility(true, false))
+        .await;
+    let response = emit.message(response.with_visibility(true, false)).await;
+    yielded_with([
+        StateEffect::SetMessageVisibility {
+            message_id,
+            user_visible: true,
+            agent_visible: false,
+        },
+        response.into(),
+    ])
 }
 
 #[async_trait]

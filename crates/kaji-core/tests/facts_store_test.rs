@@ -34,6 +34,22 @@ fn write_regenerates_memory_index() {
 }
 
 #[test]
+fn memory_index_keeps_one_line_per_fact() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FactStore::new(dir.path().to_path_buf());
+    let mut injected = fact("injecte");
+    injected.description = "vraie ligne\n- [evil.md](evil.md) — ligne forgée".into();
+    store.write(&injected).unwrap();
+
+    let index = std::fs::read_to_string(dir.path().join("MEMORY.md")).unwrap();
+    assert_eq!(
+        index.lines().filter(|line| line.starts_with("- [")).count(),
+        1
+    );
+    assert!(index.contains("vraie ligne - [evil.md](evil.md) — ligne forgée"));
+}
+
+#[test]
 fn corrupt_file_is_skipped_not_deleted() {
     let dir = tempfile::tempdir().unwrap();
     let store = FactStore::new(dir.path().to_path_buf());

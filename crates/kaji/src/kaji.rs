@@ -320,7 +320,15 @@ fn import_legacy_txt_dir(dir: &Path, store: &FactStore, redact: bool) {
                 created_by: CreatedBy::Curator,
                 body: if redact { redact_text(&body).0 } else { body },
             };
-            if let Err(err) = store.write(&fact) {
+            let held_by_user = store
+                .get(&FactType::Reference, &fact.slug)
+                .is_some_and(|existing| existing.created_by == CreatedBy::User);
+            if held_by_user {
+                tracing::warn!(
+                    file = %path.display(),
+                    "legacy memory import skipped: the slug already holds a user fact"
+                );
+            } else if let Err(err) = store.write(&fact) {
                 tracing::warn!(file = %path.display(), error = %err, "legacy memory import failed");
                 continue;
             }
