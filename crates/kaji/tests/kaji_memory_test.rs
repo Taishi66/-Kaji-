@@ -5,9 +5,9 @@ use kaji::config::permission::PermissionManager;
 use kaji::config::KajiMode;
 use kaji::conversation::message::Message;
 use kaji::kaji::{
-    curation_due, fact_index_path, ingest_turn, latest_user_instruction,
-    migrate_legacy_txt_memory, project_facts_dir, run_curation, splice_memory_block,
-    user_facts_dir, SessionMemory, CURATE_DEBOUNCE_SECS, CURATE_MIN_PENDING,
+    curation_due, fact_index_path, ingest_turn, latest_user_instruction, migrate_legacy_txt_memory,
+    project_facts_dir, run_curation, splice_memory_block, user_facts_dir, SessionMemory,
+    CURATE_DEBOUNCE_SECS, CURATE_MIN_PENDING,
 };
 use kaji::providers::base::{stream_from_single_message, MessageStream, Provider};
 use kaji::session::session_manager::SessionType;
@@ -647,7 +647,11 @@ fn legacy_txt_categories_become_reference_facts_and_are_renamed() {
 
         let global_dir = kaji::config::paths::Paths::in_config_dir("memory");
         std::fs::create_dir_all(&global_dir).unwrap();
-        std::fs::write(global_dir.join("prefs.txt"), "toujours répondre en français\n").unwrap();
+        std::fs::write(
+            global_dir.join("prefs.txt"),
+            "toujours répondre en français\n",
+        )
+        .unwrap();
 
         migrate_legacy_txt_memory(&repo);
 
