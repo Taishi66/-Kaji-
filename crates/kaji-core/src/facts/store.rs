@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::NamedTempFile;
 
-use super::{Fact, FactType, validate_slug};
+use super::{validate_slug, Fact, FactType};
 
 pub struct FactStore {
     dir: PathBuf,

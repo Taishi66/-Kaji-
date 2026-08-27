@@ -1,4 +1,4 @@
-use kaji_core::facts::{CreatedBy, Fact, FactType, slugify, validate_slug};
+use kaji_core::facts::{slugify, validate_slug, CreatedBy, Fact, FactType};
 
 fn sample() -> Fact {
     Fact {

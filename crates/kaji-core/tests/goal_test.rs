@@ -1,6 +1,6 @@
 use kaji_core::goal::{
-    self, DEFAULT_MAX_ITERATIONS, GoalOutcome, GoalPhase, GoalState, GoalStep, MAX_FEEDBACK_CHARS,
-    Verdict,
+    self, GoalOutcome, GoalPhase, GoalState, GoalStep, Verdict, DEFAULT_MAX_ITERATIONS,
+    MAX_FEEDBACK_CHARS,
 };
 
 #[test]

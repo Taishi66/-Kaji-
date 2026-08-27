@@ -47,6 +47,9 @@ cargo fmt
 cargo clippy --all-targets -- -D warnings
 ```
 
+`rustfmt.toml` pins `style_edition = "2021"`. Never run `cargo fmt` while unrelated
+uncommitted files sit in the tree — format per file (`rustfmt <file>`) instead.
+
 ## Structure
 ```
 crates/
