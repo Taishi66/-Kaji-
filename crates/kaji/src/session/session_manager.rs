@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use tracing::{info, warn};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 16;
+pub const CURRENT_SCHEMA_VERSION: i32 = 17;
 pub const SESSIONS_FOLDER: &str = "sessions";
 pub const DB_NAME: &str = "sessions.db";
 const MILLISECOND_TIMESTAMP_THRESHOLD: i64 = 10_000_000_000;
@@ -94,6 +94,12 @@ pub struct Session {
     pub parent_session_id: Option<String>,
     #[serde(default)]
     pub last_message_snippet: Option<String>,
+    #[serde(default = "default_replayable")]
+    pub replayable: bool,
+}
+
+fn default_replayable() -> bool {
+    true
 }
 
 impl From<&Session> for TokenState {
@@ -773,7 +779,8 @@ impl SessionManager {
     }
 
     /// Prochain `turn_seq` pour la session : `MAX(turn_seq) + 1`, `1` si vide.
-    /// Lecture pure, aucun effet de bord.
+    /// Lecture pure, aucun effet de bord ; exécutée sous `BEGIN IMMEDIATE`
+    /// pour sérialiser les appels concurrents (voir `SessionStorage::next_turn_seq`).
     pub async fn next_turn_seq(&self, session_id: &str) -> Result<i64> {
         self.storage.next_turn_seq(session_id).await
     }
@@ -781,6 +788,24 @@ impl SessionManager {
     /// Tous les `session_events` de la session, ordonnés par `id` croissant.
     pub async fn events_for_session(&self, session_id: &str) -> Result<Vec<SessionEvent>> {
         self.storage.events_for_session(session_id).await
+    }
+
+    /// Tous les `session_events` de la session, ordonnés par `turn_seq` puis
+    /// `id` — l'ordre de rejeu exact consommé par le replay (Task 9).
+    pub async fn session_events(&self, session_id: &str) -> Result<Vec<SessionEvent>> {
+        self.storage.session_events(session_id).await
+    }
+
+    /// Journalise l'événement `log_meta` (une fois par session) — idempotent.
+    pub async fn append_log_meta_if_absent(&self, session_id: &str) -> Result<()> {
+        self.storage.append_log_meta_if_absent(session_id).await
+    }
+
+    /// Marque la session comme non rejouable exactement (`replayable = 0`).
+    /// Appelée quand une écriture du journal échoue d'une façon qui casse
+    /// l'invariant de rejeu — jamais pour faire échouer le tour en cours.
+    pub async fn mark_not_replayable(&self, session_id: &str) -> Result<()> {
+        self.storage.mark_not_replayable(session_id).await
     }
 
     /// `message_id` du dernier message persisté de la session, `None` si elle
@@ -878,6 +903,7 @@ impl Default for Session {
             project_id: None,
             parent_session_id: None,
             last_message_snippet: None,
+            replayable: true,
         }
     }
 }
@@ -997,6 +1023,7 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Session {
             project_id: row.try_get("project_id").ok().flatten(),
             parent_session_id: row.try_get("parent_session_id").ok().flatten(),
             last_message_snippet: None,
+            replayable: row.try_get("replayable").unwrap_or(true),
         })
     }
 }
@@ -1151,7 +1178,8 @@ impl SessionStorage {
                 kaji_mode TEXT NOT NULL DEFAULT 'auto',
                 archived_at TIMESTAMP,
                 project_id TEXT,
-                parent_session_id TEXT
+                parent_session_id TEXT,
+                replayable INTEGER NOT NULL DEFAULT 1
             )
         "#,
         )
@@ -1240,6 +1268,12 @@ impl SessionStorage {
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, turn_seq, id)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_turn_alloc \
+             ON session_events(session_id, turn_seq) WHERE kind = 'turn_start'",
         )
         .execute(&mut *tx)
         .await?;
@@ -1728,6 +1762,33 @@ impl SessionStorage {
                 .execute(&mut **tx)
                 .await?;
             }
+            17 => {
+                let has_replayable = sqlx::query_scalar::<_, i32>(
+                    "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'replayable'",
+                )
+                .fetch_one(&mut **tx)
+                .await?
+                    > 0;
+                if !has_replayable {
+                    sqlx::query(
+                        "ALTER TABLE sessions ADD COLUMN replayable INTEGER NOT NULL DEFAULT 1",
+                    )
+                    .execute(&mut **tx)
+                    .await?;
+                }
+
+                // Not `UNIQUE(session_id, turn_seq)`: a turn legitimately owns several
+                // rows (turn_start, message(s), checkpoint, turn_end) sharing one
+                // turn_seq. The invariant replay needs is narrower — at most one
+                // turn *claims* a given turn_seq — so the index is partial on the
+                // one kind that marks a claim.
+                sqlx::query(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_turn_alloc \
+                     ON session_events(session_id, turn_seq) WHERE kind = 'turn_start'",
+                )
+                .execute(&mut **tx)
+                .await?;
+            }
             _ => {
                 anyhow::bail!("Unknown migration version: {}", version);
             }
@@ -1794,7 +1855,7 @@ impl SessionStorage {
                accumulated_cost,
                schedule_id, recipe_json, user_recipe_values_json,
                provider_name, model_config_json, kaji_mode,
-               archived_at, project_id, parent_session_id
+               archived_at, project_id, parent_session_id, replayable
         FROM sessions
         WHERE id = ?
     "#,
@@ -2559,14 +2620,102 @@ impl SessionStorage {
         Ok(())
     }
 
+    // `BEGIN IMMEDIATE` serializes this read against every other writer
+    // transaction in the pool (SQLite grants only one RESERVED lock at a
+    // time), so two concurrent callers can no longer observe the same
+    // `MAX(turn_seq)` while both hold the lock. It does not by itself make
+    // turn allocation exact: the caller's `turn_start` insert happens in a
+    // separate transaction after this one commits, so a caller that stalls
+    // between the two can still lose a race to a caller that started later.
+    // `idx_session_events_turn_alloc` (migration 17) is what actually closes
+    // that residual window — see the report for the full analysis.
     async fn next_turn_seq(&self, session_id: &str) -> Result<i64> {
         let pool = self.pool().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
         let max_turn_seq: Option<i64> =
             sqlx::query_scalar("SELECT MAX(turn_seq) FROM session_events WHERE session_id = ?")
                 .bind(session_id)
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await?;
+        tx.commit().await?;
         Ok(max_turn_seq.map_or(1, |seq| seq + 1))
+    }
+
+    /// Journalise `log_meta` (kaji_version, schema_version, idgen_seed) une
+    /// seule fois par session, au turn_seq 1 — check-then-insert dans une
+    /// unique transaction `BEGIN IMMEDIATE` pour rester idempotent sous
+    /// appels concurrents.
+    #[allow(clippy::disallowed_methods)] // eventlog
+    async fn append_log_meta_if_absent(&self, session_id: &str) -> Result<()> {
+        let pool = self.pool().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM session_events WHERE session_id = ? AND kind = 'log_meta')",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if !exists {
+            let payload = serde_json::json!({
+                "kaji_version": env!("CARGO_PKG_VERSION"),
+                "schema_version": CURRENT_SCHEMA_VERSION,
+                "idgen_seed": session_id,
+            })
+            .to_string();
+
+            sqlx::query(
+                r#"
+                INSERT INTO session_events (session_id, turn_seq, ts_ms, kind, payload_json)
+                VALUES (?, 1, ?, 'log_meta', ?)
+                "#,
+            )
+            .bind(session_id)
+            .bind(Utc::now().timestamp_millis())
+            .bind(payload)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn mark_not_replayable(&self, session_id: &str) -> Result<()> {
+        let pool = self.pool().await?;
+        let result = sqlx::query("UPDATE sessions SET replayable = 0 WHERE id = ?")
+            .bind(session_id)
+            .execute(pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(anyhow::anyhow!("Session not found: {}", session_id));
+        }
+        Ok(())
+    }
+
+    /// Tous les `session_events` de la session, ordonnés par `turn_seq` puis
+    /// `id` — l'ordre de rejeu exact (distinct de `events_for_session`, qui
+    /// ordonne par `id` seul pour ses appelants existants).
+    async fn session_events(&self, session_id: &str) -> Result<Vec<SessionEvent>> {
+        let pool = self.pool().await?;
+        let rows = sqlx::query_as::<_, (i64, i64, i64, String, String)>(
+            "SELECT id, turn_seq, ts_ms, kind, payload_json FROM session_events WHERE session_id = ? ORDER BY turn_seq ASC, id ASC",
+        )
+        .bind(session_id)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, turn_seq, ts_ms, kind, payload_json)| SessionEvent {
+                id,
+                turn_seq,
+                ts_ms,
+                kind,
+                payload_json,
+            })
+            .collect())
     }
 
     async fn events_for_session(&self, session_id: &str) -> Result<Vec<SessionEvent>> {
