@@ -119,13 +119,6 @@ extensions:
     name: developer
     timeout: 300
     type: builtin
-  
-  memory:
-    bundled: true
-    enabled: true
-    name: memory
-    timeout: 300
-    type: builtin
 ```
 
 ## Extensions Configuration

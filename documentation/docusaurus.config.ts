@@ -74,11 +74,6 @@ const config: Config = {
             const contextEngineeringItems = [
               {
                 type: "doc" as const,
-                id: "mcp/memory-mcp",
-                label: "Memory Extension",
-              },
-              {
-                type: "doc" as const,
                 id: "tutorials/rpi",
                 label: "Research → Plan → Implement",
               },
@@ -333,10 +328,6 @@ const config: Config = {
           {
             from: "/docs/tutorials/knowledge-graph-mcp",
             to: "/docs/mcp/knowledge-graph-mcp",
-          },
-          {
-            from: "/docs/tutorials/memory-mcp",
-            to: "/docs/mcp/memory-mcp",
           },
           {
             from: "/docs/tutorials/nostrbook-mcp",

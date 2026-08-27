@@ -34,7 +34,7 @@ Consider enabling [Code Mode](/docs/guides/managing-tools/code-mode), an alterna
 :::
 
 ### Teach kaji your preferences
-Help kaji remember how you like to work by using [`.kajihints` or other context files](/docs/guides/context-engineering/using-kajihints) or [skills](/docs/guides/context-engineering/using-skills) for permanent project preferences and the [Memory extension](/docs/mcp/memory-mcp) for things you want kaji to dynamically recall later. Both can help save valuable context window space while keeping your preferences available.
+Help kaji remember how you like to work by using [`.kajihints` or other context files](/docs/guides/context-engineering/using-kajihints) or [skills](/docs/guides/context-engineering/using-skills) for permanent project preferences. This can help save valuable context window space while keeping your preferences available.
 
 ### Protect sensitive files
 Use [permission modes](/docs/guides/managing-tools/kaji-permissions) and [tool permissions](/docs/guides/managing-tools/tool-permissions) when working around files you do not want kaji to change.

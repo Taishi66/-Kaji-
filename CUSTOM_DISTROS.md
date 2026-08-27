@@ -346,7 +346,7 @@ ACP provides:
 
 ```bash
 # Run kaji as an ACP server on stdio
-kaji acp --with-builtin developer,memory
+kaji acp --with-builtin developer
 
 # Or programmatically
 cargo run -p kaji-cli -- acp --with-builtin developer

@@ -25,7 +25,7 @@ In a typical session, the interface spins up an instance of the agent, which the
 Extensions expose their functionality to kaji through tools. Tools are the functions that allow extensions to perform specific actions, such as running commands, or performing file operations. For example, the Google Drive extension includes a tool for searching documents. That tool is what gives kaji the ability to perform that action.
 
 
-kaji comes with a set of [built-in extensions](/docs/getting-started/using-extensions#built-in-extensions), each designed to enhance your interaction. These include tools for development, web scraping, automation, memory, and more. kaji also supports [connecting to external extensions](/docs/getting-started/using-extensions#adding-extensions) or [creating custom extensions](/docs/tutorials/custom-extensions) as MCP servers. 
+kaji comes with a set of [built-in extensions](/docs/getting-started/using-extensions#built-in-extensions), each designed to enhance your interaction. These include tools for development, web scraping, automation, and more. kaji also supports [connecting to external extensions](/docs/getting-started/using-extensions#adding-extensions) or [creating custom extensions](/docs/tutorials/custom-extensions) as MCP servers. 
 
 To learn more about the design and implementation of extensions and tools, refer to the [Extensions Design Guide](/docs/kaji-architecture/extensions-design#tools).
 

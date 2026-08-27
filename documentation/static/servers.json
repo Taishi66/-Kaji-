@@ -437,17 +437,6 @@
     ]
   },
   {
-    "id": "memory",
-    "name": "Memory",
-    "description": "Built-in memory system for persistent context and information storage",
-    "command": "",
-    "link": "https://github.com/aaif-goose/goose/tree/main/crates/goose-mcp/src/memory",
-    "installation_notes": "This is a built-in extension that comes with kaji. No installation required.",
-    "is_builtin": true,
-    "endorsed": true,
-    "environmentVariables": []
-  },
-  {
     "id": "mongodb",
     "name": "MongoDB",
     "description": "MongoDB database integration",

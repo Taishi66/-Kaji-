@@ -719,7 +719,7 @@ kaji serve
 kaji serve --host 0.0.0.0 --port 3284
 
 # Start with specific built-in extensions
-kaji serve --with-builtin developer,memory
+kaji serve --with-builtin developer
 ```
 
 :::warning
