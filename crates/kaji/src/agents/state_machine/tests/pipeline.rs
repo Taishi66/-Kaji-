@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use anyhow::Result;
 use rmcp::model::ElicitationAction;
@@ -658,22 +657,6 @@ pub(super) async fn test_pipeline_with_scheduler() -> Result<(
     Ok((pipeline, api, scheduler.expect("scheduler was requested")))
 }
 
-/// Point the KAJI memory data dir at a throwaway temp root once per test
-/// process, so the state-machine suite never reads or writes the real user
-/// store. The shared cross-session store makes this isolation mandatory:
-/// without it, facts recorded by a real session (or another test) leak into
-/// every pipeline's system prompt via `splice_memory_block`. All pipeline
-/// tests share the same throwaway store; SQLite serializes access and no
-/// assertion depends on memory being empty.
-fn isolate_memory_root() {
-    static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("tempdir for memory isolation");
-        std::env::set_var("KAJI_MEMORY_DIR", dir.path());
-        std::mem::forget(dir);
-    });
-}
-
 pub(super) async fn test_pipeline_with(
     features: ProviderFeatures,
 ) -> Result<(TestPipeline, Arc<DummyApi>)> {
@@ -689,7 +672,7 @@ async fn test_pipeline_with_components(
     Arc<DummyApi>,
     Option<Arc<crate::scheduler::Scheduler>>,
 )> {
-    isolate_memory_root();
+    crate::kaji::isolate_test_memory_dir();
     let api = Arc::new(DummyApi::start(features).await);
     let temp_dir = Arc::new(tempfile::tempdir()?);
     let session_manager = Arc::new(SessionManager::new(temp_dir.path().to_path_buf()));

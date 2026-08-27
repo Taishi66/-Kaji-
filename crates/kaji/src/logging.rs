@@ -216,6 +216,9 @@ mod tests {
 
     #[test]
     fn test_get_log_directory_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let _guard = env_lock::lock_env([("KAJI_PATH_ROOT", Some(root.path().to_str().unwrap()))]);
+
         // Test that multiple calls return the same result and don't fail
         let component = "debug";
 

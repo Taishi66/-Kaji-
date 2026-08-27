@@ -60,6 +60,26 @@ fn memory_dir() -> std::path::PathBuf {
     Paths::in_data_dir("kaji/memory")
 }
 
+/// Points `KAJI_MEMORY_DIR` at a throwaway root, once for the whole test
+/// binary, so no in-crate test ever reads or writes the real user store.
+/// Shared by every module that needs this isolation (`context_report`,
+/// the state-machine `pipeline` test harness, ...) so there is exactly one
+/// writer of the variable — `Once` serializes the racing callers itself, so
+/// this doesn't need (and must not take) `env_lock`: state-machine tests
+/// routinely build several independent pipelines per test via `let`
+/// shadowing, or already hold their own `env_lock` guard before reaching
+/// this call, and `env_lock`'s mutex isn't reentrant — holding it for a
+/// whole pipeline's lifetime self-deadlocks those callers.
+#[cfg(test)]
+pub(crate) fn isolate_test_memory_dir() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let dir = tempfile::tempdir().expect("tempdir for memory isolation");
+        std::env::set_var("KAJI_MEMORY_DIR", dir.path());
+        std::mem::forget(dir);
+    });
+}
+
 /// Directory holding the project-scoped facts for `working_dir`. Inside a git
 /// worktree the facts live in the repo (`.kaji/memory`) so they travel with it;
 /// outside one they fall back to a per-path dir under the memory dir.

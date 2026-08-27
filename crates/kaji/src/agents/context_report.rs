@@ -215,19 +215,7 @@ mod tests {
     use kaji_providers::conversation::token_usage::{ProviderUsage, Usage};
     use kaji_providers::errors::ProviderError;
     use kaji_providers::model::ModelConfig;
-    use std::sync::{Arc, OnceLock};
-
-    /// Point the KAJI memory dir at a throwaway root once per test process:
-    /// `context_report` splices the shared cross-session store into the prompt
-    /// exactly like a real turn, and must not read the user's own facts.
-    fn isolate_memory_root() {
-        static ONCE: OnceLock<()> = OnceLock::new();
-        ONCE.get_or_init(|| {
-            let dir = tempfile::tempdir().expect("tempdir for memory isolation");
-            std::env::set_var("KAJI_MEMORY_DIR", dir.path());
-            std::mem::forget(dir);
-        });
-    }
+    use std::sync::Arc;
 
     struct MockProvider;
 
@@ -286,7 +274,7 @@ mod tests {
 
     #[tokio::test]
     async fn context_report_sums_its_categories_over_a_live_session() -> Result<()> {
-        isolate_memory_root();
+        crate::kaji::isolate_test_memory_dir();
         let data_dir = tempfile::tempdir()?;
         let working_dir = tempfile::tempdir()?;
         let session_manager = Arc::new(SessionManager::new(data_dir.path().to_path_buf()));
@@ -357,7 +345,7 @@ mod tests {
     /// splitting the annotation step out can't silently disable it there.
     #[tokio::test]
     async fn context_report_leaves_the_permission_store_untouched_in_smart_approve() -> Result<()> {
-        isolate_memory_root();
+        crate::kaji::isolate_test_memory_dir();
         let data_dir = tempfile::tempdir()?;
         let working_dir = tempfile::tempdir()?;
         let session_manager = Arc::new(SessionManager::new(data_dir.path().to_path_buf()));
