@@ -239,6 +239,19 @@ async fn curate() -> Result<()> {
     .await?;
 
     println!("{}", curation_summary(&outcome));
+    curation_result(&outcome)
+}
+
+/// Convert a curation outcome into the command's exit signal: a run that
+/// dropped facts is partial, and scripts driving `kaji memory curate` need a
+/// non-zero exit to detect it, not just the printed line.
+fn curation_result(outcome: &CurationOutcome) -> Result<()> {
+    if outcome.failed > 0 {
+        anyhow::bail!(
+            "curation partielle : {} fait(s) en échec, le lot sera rejoué",
+            outcome.failed
+        );
+    }
     Ok(())
 }
 
@@ -487,6 +500,26 @@ mod tests {
             }),
             "記 1 faits mémorisés — 2 échoués, le lot sera rejoué"
         );
+    }
+
+    #[test]
+    fn curation_result_ok_when_nothing_failed() {
+        assert!(curation_result(&CurationOutcome {
+            created: 2,
+            updated: 1,
+            failed: 0
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn curation_result_errs_on_partial_run() {
+        assert!(curation_result(&CurationOutcome {
+            created: 1,
+            updated: 0,
+            failed: 2
+        })
+        .is_err());
     }
 
     #[test]
