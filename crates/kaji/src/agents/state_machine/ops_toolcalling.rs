@@ -23,6 +23,7 @@ use crate::conversation::message::{ActionRequiredData, Message, MessageContent, 
 use crate::conversation::Conversation;
 use crate::hints::load_hints::SubdirectoryHintTracker;
 use crate::hooks::{HookContext, HookDecision, HookEvent, HookManager};
+use crate::replay::record::TurnRecorder;
 use crate::session::{EnabledExtensionsState, ExtensionState, Session};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -84,6 +85,7 @@ pub struct ToolExecutionOperation<'a> {
     kaji_mode: &'a Mutex<KajiMode>,
     extension_manager: Arc<ExtensionManager>,
     hook_manager: HookManager,
+    turn_recorder: Option<Arc<TurnRecorder>>,
 }
 
 impl<'a> ToolExecutionOperation<'a> {
@@ -96,7 +98,17 @@ impl<'a> ToolExecutionOperation<'a> {
             kaji_mode,
             extension_manager,
             hook_manager,
+            turn_recorder: None,
         }
+    }
+
+    pub fn with_turn_recorder(mut self, turn_recorder: Option<Arc<TurnRecorder>>) -> Self {
+        self.turn_recorder = turn_recorder;
+        self
+    }
+
+    fn turn_recorder(&self) -> Option<Arc<TurnRecorder>> {
+        self.turn_recorder.clone()
     }
 
     async fn emit_with_matcher(
@@ -257,7 +269,8 @@ impl<'a> ToolExecutionOperation<'a> {
                 session.id.clone(),
                 Some(session.working_dir.clone()),
                 Some(request_id),
-            );
+            )
+            .with_turn_recorder(self.turn_recorder());
             let result = self
                 .extension_manager
                 .dispatch_tool_call(&context, tool_call.clone(), cancellation_token)

@@ -46,8 +46,11 @@ use crate::builtin_extension::get_builtin_extension;
 use crate::config::extensions::name_to_key;
 use crate::config::search_path::SearchPaths;
 use crate::config::{get_all_extensions, Config};
+use crate::conversation::message::ToolResponse;
+use crate::mcp_utils::ToolResult;
 use crate::oauth::{oauth_flow, KajiCredentialStore};
 use crate::prompt_template;
+use crate::replay::record::ToolCapture;
 use crate::subprocess::configure_subprocess;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ContentBlock, ErrorCode, ErrorData, GetPromptResult,
@@ -373,6 +376,54 @@ fn insert_trusted_tool_update_meta(
         Value::Object(trusted_meta),
     );
     result.meta = Some(MetaObject(meta_map));
+}
+
+/// The shape the replay reads a tool outcome back as: the correlation id the
+/// model was answered under, and the tool's own result.
+fn recorded_response(
+    capture: &ToolCapture,
+    tool_result: ToolResult<CallToolResult>,
+) -> ToolResponse {
+    ToolResponse {
+        id: capture.tool_call_id.clone(),
+        tool_result,
+        metadata: None,
+    }
+}
+
+async fn append_tool_result(capture: &ToolCapture, response: &ToolResponse) {
+    match serde_json::to_string(response) {
+        Ok(payload) => {
+            capture
+                .sink
+                .record_tool_result(capture.turn_seq, &capture.tool_call_id, &payload)
+                .await
+        }
+        Err(error) => warn!(
+            %error,
+            tool_call_id = %capture.tool_call_id,
+            "event log v2: tool_result non sérialisable"
+        ),
+    }
+}
+
+/// Records what the tool returns, once it returns. The capture sits inside the
+/// dispatched future so it sees the raw result, before the post-tool hooks and
+/// the large-response handler rewrite it for the model.
+fn capture_tool_result(capture: Option<ToolCapture>, mut result: ToolCallResult) -> ToolCallResult {
+    let Some(capture) = capture else {
+        return result;
+    };
+    let dispatched = result.result;
+    result.result = Box::new(
+        async move {
+            let response = recorded_response(&capture, dispatched.await);
+            append_tool_result(&capture, &response).await;
+            response.tool_result
+        }
+        .boxed(),
+    );
+    result
 }
 
 fn is_unprefixed_extension(config: &ExtensionConfig) -> bool {
@@ -1864,6 +1915,28 @@ impl ExtensionManager {
         tool_call: CallToolRequestParams,
         cancellation_token: CancellationToken,
     ) -> std::result::Result<ToolCallResult, ErrorData> {
+        let capture = ctx.tool_capture();
+        match self
+            .dispatch_tool_call_inner(ctx, tool_call, cancellation_token)
+            .await
+        {
+            Ok(result) => Ok(capture_tool_result(capture, result)),
+            Err(error) => {
+                if let Some(capture) = capture {
+                    let response = recorded_response(&capture, Err(error.clone()));
+                    append_tool_result(&capture, &response).await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn dispatch_tool_call_inner(
+        &self,
+        ctx: &super::tool_execution::ToolCallContext,
+        tool_call: CallToolRequestParams,
+        cancellation_token: CancellationToken,
+    ) -> std::result::Result<ToolCallResult, ErrorData> {
         let tool_name_str = tool_call.name.to_string();
         let resolved = self.resolve_tool(&ctx.session_id, &tool_name_str).await?;
 
@@ -2535,6 +2608,116 @@ mod tests {
                 .await;
 
         assert_eq!(methods, vec!["client/subscription"]);
+    }
+
+    async fn recording_context(
+        session_manager: &Arc<crate::session::SessionManager>,
+    ) -> (String, ToolCallContext) {
+        let session = session_manager
+            .create_session(
+                std::path::PathBuf::from("."),
+                "tool-result-capture".to_string(),
+                crate::session::session_manager::SessionType::Hidden,
+                crate::config::KajiMode::Auto,
+            )
+            .await
+            .unwrap();
+        let turn_seq = session_manager.next_turn_seq(&session.id).await.unwrap();
+        let recorder = Arc::new(crate::replay::record::TurnRecorder::new(
+            session_manager.clone(),
+            session.id.clone(),
+            turn_seq,
+        ));
+        let ctx = ToolCallContext::new(session.id.clone(), None, Some("call-1".to_string()))
+            .with_turn_recorder(Some(recorder));
+        (session.id, ctx)
+    }
+
+    async fn recorded_tool_results(
+        session_manager: &Arc<crate::session::SessionManager>,
+        session_id: &str,
+    ) -> Vec<Value> {
+        session_manager
+            .session_events(session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "tool_result")
+            .map(|event| serde_json::from_str(&event.payload_json).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_that_never_reaches_a_tool_still_records_what_the_model_sees() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let session_manager = Arc::new(crate::session::SessionManager::new(
+            temp_dir.path().join("sessions"),
+        ));
+        let (session_id, ctx) = recording_context(&session_manager).await;
+        let extension_manager =
+            ExtensionManager::new_without_provider(temp_dir.path().join("extensions"));
+
+        let dispatched = extension_manager
+            .dispatch_tool_call(
+                &ctx,
+                CallToolRequestParams::new("missing__tool".to_string()),
+                CancellationToken::default(),
+            )
+            .await;
+        assert!(dispatched.is_err(), "no extension claims the tool");
+
+        let recorded = recorded_tool_results(&session_manager, &session_id).await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0]["tool_call_id"], "call-1");
+        assert_eq!(recorded[0]["result"]["toolResult"]["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn a_tool_that_fails_is_recorded_as_the_error_it_returned() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let session_manager = Arc::new(crate::session::SessionManager::new(
+            temp_dir.path().join("sessions"),
+        ));
+        let (session_id, ctx) = recording_context(&session_manager).await;
+
+        let failed = capture_tool_result(
+            ctx.tool_capture(),
+            ToolCallResult::from(Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                "the tool blew up".to_string(),
+                None,
+            ))),
+        );
+        assert!(failed.result.await.is_err());
+
+        let recorded = recorded_tool_results(&session_manager, &session_id).await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0]["tool_call_id"], "call-1");
+        assert_eq!(recorded[0]["result"]["toolResult"]["status"], "error");
+        assert_eq!(
+            recorded[0]["result"]["toolResult"]["error"],
+            "-32603: the tool blew up"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_outside_a_recorded_turn_writes_nothing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let session_manager = Arc::new(crate::session::SessionManager::new(
+            temp_dir.path().join("sessions"),
+        ));
+        let (session_id, ctx) = recording_context(&session_manager).await;
+        let ctx = ctx.with_turn_recorder(None);
+
+        let dispatched = capture_tool_result(
+            ctx.tool_capture(),
+            ToolCallResult::from(Ok(CallToolResult::success(vec![]))),
+        );
+        assert!(dispatched.result.await.is_ok());
+
+        assert!(recorded_tool_results(&session_manager, &session_id)
+            .await
+            .is_empty());
     }
 
     #[tokio::test]

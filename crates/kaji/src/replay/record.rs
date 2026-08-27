@@ -165,6 +165,23 @@ impl TurnRecorder {
             next_call_idx: AtomicU32::new(0),
         }
     }
+
+    pub fn tool_capture(&self, tool_call_id: &str) -> ToolCapture {
+        ToolCapture {
+            sink: self.sink.clone(),
+            turn_seq: self.turn_seq,
+            tool_call_id: tool_call_id.to_string(),
+        }
+    }
+}
+
+/// Où et sous quelle clé écrire le `tool_result` d'un appel d'outil : le sink,
+/// le tour, et l'id de corrélation (`ToolResponse.id`) auquel le rejeu
+/// s'adressera.
+pub struct ToolCapture {
+    pub sink: RecordSink,
+    pub turn_seq: i64,
+    pub tool_call_id: String,
 }
 
 /// Réserve le prochain `call_idx` du tour et rend les deux paramètres de

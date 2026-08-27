@@ -9,10 +9,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::conversation::message::Message;
 use crate::mcp_utils::ToolResult;
 use crate::permission::grant_decision::apply_grant_decision;
+use crate::replay::record::{ToolCapture, TurnRecorder};
 use rmcp::model::{ContentBlock, ServerNotification};
 
 #[derive(Clone)]
@@ -38,6 +40,7 @@ pub struct ToolCallContext {
     pub working_dir: Option<PathBuf>,
     pub tool_call_request_id: Option<String>,
     notification_emitter: Option<ToolCallNotificationEmitter>,
+    turn_recorder: Option<Arc<TurnRecorder>>,
 }
 
 impl ToolCallContext {
@@ -51,6 +54,7 @@ impl ToolCallContext {
             working_dir,
             tool_call_request_id,
             notification_emitter: None,
+            turn_recorder: None,
         }
     }
 
@@ -68,6 +72,21 @@ impl ToolCallContext {
 
     pub(crate) fn notification_emitter(&self) -> Option<&ToolCallNotificationEmitter> {
         self.notification_emitter.as_ref()
+    }
+
+    pub(crate) fn with_turn_recorder(mut self, turn_recorder: Option<Arc<TurnRecorder>>) -> Self {
+        self.turn_recorder = turn_recorder;
+        self
+    }
+
+    /// Present only for a dispatch that both belongs to a recorded turn and
+    /// carries the correlation id the replay will address the result by.
+    pub(crate) fn tool_capture(&self) -> Option<ToolCapture> {
+        Some(
+            self.turn_recorder
+                .as_ref()?
+                .tool_capture(self.tool_call_request_id.as_deref()?),
+        )
     }
 }
 

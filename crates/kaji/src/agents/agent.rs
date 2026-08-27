@@ -1457,7 +1457,8 @@ impl Agent {
             session.id.clone(),
             Some(session.working_dir.clone()),
             Some(request_id.clone()),
-        );
+        )
+        .with_turn_recorder(self.turn_recorder());
 
         debug!("WAITING_TOOL_START: {}", tool_call.name);
         let result: ToolCallResult = if self.is_frontend_tool(&tool_call.name).await {
@@ -1947,11 +1948,14 @@ impl Agent {
             Arc::new(ProjectOperation),
             Arc::new(SkillOperation),
             Arc::new(RecipeOperation),
-            Arc::new(ToolExecutionOperation::new(
-                &self.current_kaji_mode,
-                self.extension_manager.clone(),
-                self.hook_manager.clone(),
-            )),
+            Arc::new(
+                ToolExecutionOperation::new(
+                    &self.current_kaji_mode,
+                    self.extension_manager.clone(),
+                    self.hook_manager.clone(),
+                )
+                .with_turn_recorder(self.turn_recorder()),
+            ),
             Arc::new(UnknownToolOperation),
             Arc::new(RetryOperation::new(
                 &self.goal,

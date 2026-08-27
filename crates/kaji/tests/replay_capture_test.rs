@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
-use kaji::agents::{Agent, AgentConfig, KajiPlatform, SessionConfig};
+use kaji::agents::{Agent, AgentConfig, ExtensionConfig, KajiPlatform, SessionConfig};
 use kaji::config::permission::PermissionManager;
 use kaji::config::KajiMode;
 use kaji::conversation::message::Message;
@@ -11,22 +11,27 @@ use kaji::session::SessionManager;
 use kaji_providers::conversation::token_usage::{ProviderUsage, Usage};
 use kaji_providers::errors::ProviderError;
 use kaji_providers::model::ModelConfig;
+use kaji_test_support::{McpFixture, FAKE_CODE};
 use rmcp::model::{CallToolRequestParams, Tool};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+const TOOL_REQUEST_ID: &str = "probe-1";
+
 /// Forces two provider calls inside a single turn: the first response asks for
-/// a tool nothing claims, so both loops answer it and run inference again.
+/// `tool`, so both loops answer it and run inference again.
 struct TwoCallProvider {
     calls: AtomicUsize,
+    tool: &'static str,
 }
 
 impl TwoCallProvider {
-    fn new() -> Self {
+    fn new(tool: &'static str) -> Self {
         Self {
             calls: AtomicUsize::new(0),
+            tool,
         }
     }
 }
@@ -44,7 +49,7 @@ impl Provider for TwoCallProvider {
         let usage = ProviderUsage::new("mock-model".to_string(), Usage::default());
         let message = if call == 0 {
             Message::assistant()
-                .with_tool_request("probe-1", Ok(CallToolRequestParams::new("missing__probe")))
+                .with_tool_request(TOOL_REQUEST_ID, Ok(CallToolRequestParams::new(self.tool)))
         } else {
             Message::assistant().with_text("done")
         };
@@ -57,6 +62,14 @@ impl Provider for TwoCallProvider {
 }
 
 async fn run_turn(state_machine: Option<&str>) -> Result<Vec<SessionEvent>> {
+    run_turn_with(state_machine, "missing__probe", None).await
+}
+
+async fn run_turn_with(
+    state_machine: Option<&str>,
+    tool: &'static str,
+    extension: Option<ExtensionConfig>,
+) -> Result<Vec<SessionEvent>> {
     let memory_dir = tempfile::tempdir()?;
     let _guard = env_lock::lock_env([
         ("KAJI_STATE_MACHINE", state_machine),
@@ -86,11 +99,14 @@ async fn run_turn(state_machine: Option<&str>) -> Result<Vec<SessionEvent>> {
         .await?;
     agent
         .update_provider(
-            Arc::new(TwoCallProvider::new()),
+            Arc::new(TwoCallProvider::new(tool)),
             ModelConfig::new("mock-model"),
             &session.id,
         )
         .await?;
+    if let Some(extension) = extension {
+        agent.add_extension(extension, &session.id).await?;
+    }
 
     let stream = agent
         .reply(
@@ -222,6 +238,67 @@ async fn assert_capture(state_machine: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// The id of the `toolResponse` the loop actually handed back to the model,
+/// read from the v1 `message` rows of the same log.
+fn tool_response_id_from_messages(events: &[SessionEvent]) -> Option<String> {
+    payloads(events, "message").into_iter().find_map(|message| {
+        message["content"].as_array()?.iter().find_map(|content| {
+            (content["type"] == "toolResponse")
+                .then(|| content["id"].as_str().map(str::to_string))
+                .flatten()
+        })
+    })
+}
+
+async fn assert_tool_capture(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let mcp = McpFixture::new().await;
+    let extension =
+        ExtensionConfig::streamable_http("mcp-fixture", &mcp.url, "MCP fixture", 30_u64);
+    let events = run_turn_with(state_machine, "mcp-fixture__get_code", Some(extension)).await?;
+    let kinds = kinds(&events);
+
+    let tool_results = payloads(&events, "tool_result");
+    assert_eq!(
+        tool_results.len(),
+        1,
+        "{label}: one tool_result per tool call: {kinds:?}"
+    );
+    let tool_result = &tool_results[0];
+
+    let answered = tool_response_id_from_messages(&events)
+        .unwrap_or_else(|| panic!("{label}: the turn carries a tool response: {kinds:?}"));
+    assert_eq!(
+        tool_result["tool_call_id"], answered,
+        "{label}: the recorded id is the one the model was answered with: {tool_result}"
+    );
+    assert_eq!(
+        tool_result["tool_call_id"], TOOL_REQUEST_ID,
+        "{label}: the recorded id is the provider's own request id: {tool_result}"
+    );
+
+    let requests = payloads(&events, "llm_request");
+    assert_eq!(
+        tool_result["turn_seq"], requests[0]["turn_seq"],
+        "{label}: the tool call belongs to the turn that asked for it: {tool_result}"
+    );
+
+    assert_eq!(
+        tool_result["result"]["id"], TOOL_REQUEST_ID,
+        "{label}: the result round-trips as a ToolResponse: {tool_result}"
+    );
+    assert_eq!(
+        tool_result["result"]["toolResult"]["status"], "success",
+        "{label}: the tool succeeded: {tool_result}"
+    );
+    assert_eq!(
+        tool_result["result"]["toolResult"]["value"]["content"][0]["text"], FAKE_CODE,
+        "{label}: the tool's own payload is recorded verbatim: {tool_result}"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn llm_calls_are_captured_on_the_legacy_loop() -> Result<()> {
     assert_capture(None).await
@@ -230,4 +307,14 @@ async fn llm_calls_are_captured_on_the_legacy_loop() -> Result<()> {
 #[tokio::test]
 async fn llm_calls_are_captured_on_the_state_machine_loop() -> Result<()> {
     assert_capture(Some("1")).await
+}
+
+#[tokio::test]
+async fn tool_results_are_captured_on_the_legacy_loop() -> Result<()> {
+    assert_tool_capture(None).await
+}
+
+#[tokio::test]
+async fn tool_results_are_captured_on_the_state_machine_loop() -> Result<()> {
+    assert_tool_capture(Some("1")).await
 }
