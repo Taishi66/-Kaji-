@@ -1036,8 +1036,14 @@ impl Agent {
         crate::kaji::ingest_turn(session_id, conversation.messages());
         let query = crate::kaji::latest_user_instruction(conversation.messages());
         if let Some(query) = query {
-            system_prompt =
+            let (spliced, memory_block) =
                 crate::kaji::splice_memory_block(&system_prompt, session_id, &query, working_dir);
+            system_prompt = spliced;
+            crate::replay::record::record_memory_block(
+                self.turn_recorder().as_ref(),
+                memory_block.as_deref(),
+            )
+            .await;
         }
         if let Ok(provider) = self.provider().await {
             crate::kaji::maybe_spawn_curation(
@@ -1928,12 +1934,15 @@ impl Agent {
             Arc::new(SteerOperation::new(steer_queue, self.hook_manager.clone())),
             Arc::new(MaxTurnsOperation::new(max_turns)),
             Arc::new(BangShellOperation::new()),
-            Arc::new(CompactionOperation::new(
-                provider.clone(),
-                model_config.clone(),
-                context_limit,
-                compaction_threshold,
-            )),
+            Arc::new(
+                CompactionOperation::new(
+                    provider.clone(),
+                    model_config.clone(),
+                    context_limit,
+                    compaction_threshold,
+                )
+                .with_turn_recorder(self.turn_recorder()),
+            ),
             Arc::new(ToolPairCompactionOperation::new(
                 provider.clone(),
                 model_config.clone(),
@@ -2343,6 +2352,16 @@ impl Agent {
             "kaji_mode": kaji_mode,
         })
         .to_string();
+        // The stamp every system prompt of this turn carries. `PromptManager`
+        // freezes it at construction, so the turn reads the clock once and the
+        // log carries that one value.
+        let turn_recorder = self.turn_recorder();
+        let clock_reads = vec![self
+            .prompt_manager
+            .lock()
+            .await
+            .current_date_timestamp()
+            .to_string()];
         let checkpoint_store = self.checkpoint_store.clone();
         // Skip the session lookup entirely when no store is wired — true for
         // every non-TUI `build_session` caller and most tests — rather than
@@ -2366,6 +2385,9 @@ impl Agent {
                 {
                     warn!(?error, "event log append failed for turn_start");
                 }
+
+                crate::replay::record::record_clock_reads(turn_recorder.as_ref(), &clock_reads)
+                    .await;
 
                 if let (Some(store), Some(_project)) = (checkpoint_store, checkpoint_project) {
                     Self::snapshot_checkpoint(&session_manager, store, &session_id, turn_seq)
@@ -2676,6 +2698,12 @@ impl Agent {
             let final_conversation = if !needs_auto_compact {
                 conversation
             } else {
+                crate::replay::record::record_condense_triggered(
+                    self.turn_recorder().as_ref(),
+                    Some("auto_compact_threshold"),
+                )
+                .await;
+
                 let config = Config::global();
                 let threshold = config
                     .get_param::<f64>("KAJI_AUTO_COMPACT_THRESHOLD")

@@ -15,6 +15,7 @@ use crate::context_mgmt::compact_messages;
 use crate::conversation::message::{Message, MessageErrorKind, SystemNotificationType};
 use crate::conversation::{Conversation, EffectiveRole};
 use crate::providers::base::Provider;
+use crate::replay::record::TurnRecorder;
 use crate::session::Session;
 use kaji_providers::model::ModelConfig;
 
@@ -49,6 +50,7 @@ pub struct CompactionOperation {
     context_limit: usize,
     threshold: f64,
     manages_own_context: bool,
+    turn_recorder: Option<Arc<TurnRecorder>>,
 }
 
 impl CompactionOperation {
@@ -65,7 +67,13 @@ impl CompactionOperation {
             context_limit,
             threshold,
             manages_own_context,
+            turn_recorder: None,
         }
+    }
+
+    pub fn with_turn_recorder(mut self, turn_recorder: Option<Arc<TurnRecorder>>) -> Self {
+        self.turn_recorder = turn_recorder;
+        self
     }
 
     fn over_threshold(&self, tokens: usize) -> bool {
@@ -253,6 +261,15 @@ impl Operation for CompactionOperation {
         } else {
             conversation
         };
+
+        // Only the threshold decision is journaled: the reactive branch follows
+        // a provider error the log already replays, so a replay reaches it on
+        // its own. Parity with `Agent::reply_impl`, which journals the same one.
+        crate::replay::record::record_condense_triggered(
+            self.turn_recorder.as_ref(),
+            (!reactive_context_error).then_some("auto_compact_threshold"),
+        )
+        .await;
 
         let threshold_percentage = (self.threshold * 100.0) as u32;
         emit.message(Message::assistant().with_system_notification(

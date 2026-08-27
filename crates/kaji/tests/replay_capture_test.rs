@@ -5,6 +5,8 @@ use kaji::agents::{Agent, AgentConfig, ExtensionConfig, KajiPlatform, SessionCon
 use kaji::config::permission::PermissionManager;
 use kaji::config::KajiMode;
 use kaji::conversation::message::Message;
+use kaji::conversation::Conversation;
+use kaji::kaji::{splice_memory_block, SessionMemory};
 use kaji::providers::base::{stream_from_single_message, MessageStream, Provider};
 use kaji::session::session_manager::{SessionEvent, SessionType};
 use kaji::session::SessionManager;
@@ -19,6 +21,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 const TOOL_REQUEST_ID: &str = "probe-1";
+
+/// Fact seeded in the cross-session store before the turn runs, and the user
+/// instruction that recalls it — the turn's system prompt then carries a real
+/// memory block instead of the empty one an isolated store would produce.
+const MEMORY_FACT: &str = "Onboarding lives on the PO dashboard";
+const MEMORY_QUERY: &str = "po dashboard onboarding";
 
 /// Forces two provider calls inside a single turn: the first response asks for
 /// `tool`, so both loops answer it and run inference again.
@@ -317,4 +325,351 @@ async fn tool_results_are_captured_on_the_legacy_loop() -> Result<()> {
 #[tokio::test]
 async fn tool_results_are_captured_on_the_state_machine_loop() -> Result<()> {
     assert_tool_capture(Some("1")).await
+}
+
+/// Answers every call with plain text: the compaction summary goes through the
+/// same provider, so a tool request would derail it.
+struct TextProvider;
+
+#[async_trait]
+impl Provider for TextProvider {
+    async fn stream(
+        &self,
+        _model_config: &ModelConfig,
+        _system_prompt: &str,
+        _messages: &[Message],
+        _tools: &[Tool],
+    ) -> Result<MessageStream, ProviderError> {
+        let usage = ProviderUsage::new(
+            "mock-model".to_string(),
+            Usage::new(Some(100), Some(100), Some(200)),
+        );
+        Ok(stream_from_single_message(
+            Message::assistant().with_text("mock summary"),
+            usage,
+        ))
+    }
+
+    fn get_name(&self) -> &str {
+        "text-mock"
+    }
+}
+
+fn agent_for(session_manager: &Arc<SessionManager>, config_dir: PathBuf) -> Agent {
+    Agent::with_config(AgentConfig::new(
+        Arc::clone(session_manager),
+        Arc::new(PermissionManager::new(config_dir)),
+        None,
+        KajiMode::Auto,
+        true,
+        KajiPlatform::KajiCli,
+    ))
+}
+
+async fn drain(
+    stream: impl futures::Stream<Item = Result<kaji::agents::AgentEvent>>,
+) -> Result<()> {
+    tokio::pin!(stream);
+    while let Some(event) = stream.next().await {
+        event?;
+    }
+    Ok(())
+}
+
+fn session_config(id: &str) -> SessionConfig {
+    SessionConfig {
+        id: id.to_string(),
+        schedule_id: None,
+        max_turns: Some(3),
+        retry_config: None,
+    }
+}
+
+/// One turn whose recall query matches a fact seeded before it runs. The
+/// splice's own contract — the second element is exactly the text appended to
+/// the prompt — is asserted here, where the seeded store is still mounted.
+async fn run_memory_turn(state_machine: Option<&str>) -> Result<Vec<SessionEvent>> {
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env_lock::lock_env([
+        ("KAJI_STATE_MACHINE", state_machine),
+        (
+            "KAJI_MEMORY_DIR",
+            Some(memory_dir.path().to_str().expect("utf8 temp path")),
+        ),
+    ]);
+
+    let mut seed = SessionMemory::load("seeding-session");
+    seed.remember(MEMORY_FACT, &["dashboard"], None);
+    drop(seed);
+
+    let temp_dir = tempfile::tempdir()?;
+    let working_dir = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&working_dir)?;
+    let session_manager = Arc::new(SessionManager::new(temp_dir.path().join("data")));
+    let agent = agent_for(&session_manager, temp_dir.path().join("config"));
+    let session = session_manager
+        .create_session(
+            working_dir.clone(),
+            "replay-memory-test".to_string(),
+            SessionType::Hidden,
+            KajiMode::Auto,
+        )
+        .await?;
+    agent
+        .update_provider(
+            Arc::new(TwoCallProvider::new("missing__probe")),
+            ModelConfig::new("mock-model"),
+            &session.id,
+        )
+        .await?;
+
+    drain(
+        agent
+            .reply(
+                Message::user().with_text(MEMORY_QUERY),
+                session_config(&session.id),
+                None,
+            )
+            .await?,
+    )
+    .await?;
+
+    let (prompt, block) = splice_memory_block("SYSTEM", &session.id, MEMORY_QUERY, &working_dir);
+    let block = block.expect("the seeded fact is recalled for this query");
+    assert_eq!(
+        prompt,
+        format!("SYSTEM\n\n{block}"),
+        "the returned block is exactly what the splice appended to the prompt"
+    );
+
+    session_manager.session_events(&session.id).await
+}
+
+async fn assert_memory_capture(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let events = run_memory_turn(state_machine).await?;
+    let kinds = kinds(&events);
+
+    let blocks = payloads(&events, "memory_block");
+    assert_eq!(
+        blocks.len(),
+        1,
+        "{label}: exactly one memory_block per turn, however many provider calls it makes: {kinds:?}"
+    );
+    let block = blocks[0]["block"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: the block is recorded as text: {:?}", blocks[0]));
+    assert!(
+        block.starts_with("## KAJI memory"),
+        "{label}: the block is the rendered recall, verbatim from its header on: {block}"
+    );
+    assert!(
+        block.contains(MEMORY_FACT),
+        "{label}: the recorded block carries the seeded fact: {block}"
+    );
+
+    let requests = payloads(&events, "llm_request");
+    assert_eq!(
+        blocks[0]["turn_seq"], requests[0]["turn_seq"],
+        "{label}: the block belongs to the turn that spliced it: {:?}",
+        blocks[0]
+    );
+
+    Ok(())
+}
+
+async fn assert_clock_capture(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let events = run_turn(state_machine).await?;
+    let kinds = kinds(&events);
+
+    let reads = payloads(&events, "clock_reads");
+    assert_eq!(
+        reads.len(),
+        1,
+        "{label}: exactly one clock_reads per turn: {kinds:?}"
+    );
+    let values = reads[0]["reads"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: reads is an ordered array: {:?}", reads[0]));
+    assert_eq!(
+        values.len(),
+        1,
+        "{label}: the turn reads the prompt clock once: {values:?}"
+    );
+    let served = values[0]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: a clock read is a string: {values:?}"));
+    assert!(
+        served.contains(":00 "),
+        "{label}: the recorded read is the hour-floored stamp the prompt carries: {served}"
+    );
+
+    let requests = payloads(&events, "llm_request");
+    assert_eq!(
+        reads[0]["turn_seq"], requests[0]["turn_seq"],
+        "{label}: the reads belong to the turn that served them: {:?}",
+        reads[0]
+    );
+
+    Ok(())
+}
+
+/// A turn started over the auto-compact threshold: the loop compacts before it
+/// infers, so the decision must be journaled.
+async fn run_compaction_turn(state_machine: Option<&str>) -> Result<Vec<SessionEvent>> {
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env_lock::lock_env([
+        ("KAJI_STATE_MACHINE", state_machine),
+        (
+            "KAJI_MEMORY_DIR",
+            Some(memory_dir.path().to_str().expect("utf8 temp path")),
+        ),
+        ("KAJI_AUTO_COMPACT_THRESHOLD", Some("0.5")),
+    ]);
+
+    let temp_dir = tempfile::tempdir()?;
+    let working_dir = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&working_dir)?;
+    let session_manager = Arc::new(SessionManager::new(temp_dir.path().join("data")));
+    let agent = agent_for(&session_manager, temp_dir.path().join("config"));
+    let session = session_manager
+        .create_session(
+            working_dir,
+            "replay-compaction-test".to_string(),
+            SessionType::Hidden,
+            KajiMode::Auto,
+        )
+        .await?;
+
+    let history = (0..4)
+        .flat_map(|i| {
+            [
+                Message::user().with_text(format!("question {i}")),
+                Message::assistant().with_text(format!("answer {i}")),
+            ]
+        })
+        .collect::<Vec<_>>();
+    session_manager
+        .replace_conversation(&session.id, &Conversation::new_unvalidated(history))
+        .await?;
+    session_manager
+        .update(&session.id)
+        .usage(Usage::new(Some(90_000), Some(10_000), Some(100_000)))
+        .accumulated_usage(Usage::new(Some(90_000), Some(10_000), Some(100_000)))
+        .apply()
+        .await?;
+
+    agent
+        .update_provider(
+            Arc::new(TextProvider),
+            ModelConfig::new("mock-model"),
+            &session.id,
+        )
+        .await?;
+
+    drain(
+        agent
+            .reply(
+                Message::user().with_text("keep going"),
+                session_config(&session.id),
+                None,
+            )
+            .await?,
+    )
+    .await?;
+
+    session_manager.session_events(&session.id).await
+}
+
+async fn assert_condense_capture(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let events = run_compaction_turn(state_machine).await?;
+    let kinds = kinds(&events);
+
+    assert!(
+        kinds.contains(&"history_replaced"),
+        "{label}: the turn really compacted, so the test is not vacuous: {kinds:?}"
+    );
+
+    let triggered = payloads(&events, "condense_triggered");
+    assert_eq!(
+        triggered.len(),
+        1,
+        "{label}: the compaction decision is journaled once: {kinds:?}"
+    );
+    assert_eq!(
+        triggered[0]["reason"], "auto_compact_threshold",
+        "{label}: the reason names what tripped the decision: {:?}",
+        triggered[0]
+    );
+
+    let turn_start = payloads(&events, "turn_start");
+    assert_eq!(turn_start.len(), 1, "{label}: one turn ran: {kinds:?}");
+    let condense_at = kinds
+        .iter()
+        .position(|kind| *kind == "condense_triggered")
+        .expect("condense_triggered present");
+    let turn_start_at = kinds
+        .iter()
+        .position(|kind| *kind == "turn_start")
+        .expect("turn_start present");
+    assert!(
+        turn_start_at < condense_at,
+        "{label}: the decision is journaled inside its own turn: {kinds:?}"
+    );
+
+    Ok(())
+}
+
+/// A turn under the threshold must not journal a decision it never took.
+async fn assert_no_condense_without_compaction(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let events = run_turn(state_machine).await?;
+    assert!(
+        payloads(&events, "condense_triggered").is_empty(),
+        "{label}: no compaction, no condense_triggered: {:?}",
+        kinds(&events)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn memory_block_is_captured_on_the_legacy_loop() -> Result<()> {
+    assert_memory_capture(None).await
+}
+
+#[tokio::test]
+async fn memory_block_is_captured_on_the_state_machine_loop() -> Result<()> {
+    assert_memory_capture(Some("1")).await
+}
+
+#[tokio::test]
+async fn clock_reads_are_captured_on_the_legacy_loop() -> Result<()> {
+    assert_clock_capture(None).await
+}
+
+#[tokio::test]
+async fn clock_reads_are_captured_on_the_state_machine_loop() -> Result<()> {
+    assert_clock_capture(Some("1")).await
+}
+
+#[tokio::test]
+async fn condense_is_captured_on_the_legacy_loop() -> Result<()> {
+    assert_condense_capture(None).await
+}
+
+#[tokio::test]
+async fn condense_is_captured_on_the_state_machine_loop() -> Result<()> {
+    assert_condense_capture(Some("1")).await
+}
+
+#[tokio::test]
+async fn a_quiet_turn_journals_no_condense_on_the_legacy_loop() -> Result<()> {
+    assert_no_condense_without_compaction(None).await
+}
+
+#[tokio::test]
+async fn a_quiet_turn_journals_no_condense_on_the_state_machine_loop() -> Result<()> {
+    assert_no_condense_without_compaction(Some("1")).await
 }

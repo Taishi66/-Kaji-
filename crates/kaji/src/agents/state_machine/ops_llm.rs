@@ -477,12 +477,18 @@ impl Inference for InferenceRunner<'_> {
             crate::kaji::ingest_turn(&session.id, fixed_conversation.messages());
             let query = crate::kaji::latest_user_instruction(fixed_conversation.messages());
             if let Some(query) = query {
-                system_prompt = crate::kaji::splice_memory_block(
+                let (spliced, memory_block) = crate::kaji::splice_memory_block(
                     &system_prompt,
                     &session.id,
                     &query,
                     &session.working_dir,
                 );
+                system_prompt = spliced;
+                crate::replay::record::record_memory_block(
+                    self.turn_recorder().as_ref(),
+                    memory_block.as_deref(),
+                )
+                .await;
             }
             crate::kaji::maybe_spawn_curation(
                 self.provider.clone(),

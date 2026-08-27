@@ -141,12 +141,15 @@ impl Agent {
         let (fixed_conversation, _) = crate::conversation::fix_conversation(conversation.clone());
         let memory = match crate::kaji::latest_user_instruction(fixed_conversation.messages()) {
             Some(query) => counter
-                .count_tokens(&crate::kaji::splice_memory_block(
-                    &system_prompt,
-                    session_id,
-                    &query,
-                    working_dir,
-                ))
+                .count_tokens(
+                    &crate::kaji::splice_memory_block(
+                        &system_prompt,
+                        session_id,
+                        &query,
+                        working_dir,
+                    )
+                    .0,
+                )
                 .saturating_sub(counter.count_tokens(&system_prompt)),
             None => 0,
         };

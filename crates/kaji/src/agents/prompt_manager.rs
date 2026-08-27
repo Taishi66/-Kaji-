@@ -249,6 +249,13 @@ impl PromptManager {
         }
     }
 
+    /// The clock value every system prompt this manager builds carries. Read
+    /// once per turn for the event log, so a replay serves the same stamp
+    /// instead of the wall clock it would read now.
+    pub fn current_date_timestamp(&self) -> &str {
+        &self.current_date_timestamp
+    }
+
     /// Add an additional instruction to the system prompt with a key
     /// Using the same key will replace the previous instruction
     pub fn add_system_prompt_extra(&mut self, key: String, instruction: String) {

@@ -397,6 +397,10 @@ fn parse_legacy_txt(content: &str) -> Vec<String> {
 /// state machine's inference op) so the behavior stays in parity. Returns the
 /// prompt unchanged when nothing relevant is stored.
 ///
+/// The second element is the block appended to the prompt, verbatim — the
+/// event log records it so a replay serves the same recall instead of running
+/// it again against a store that has moved on. `None` when nothing was spliced.
+///
 /// `working_dir` is the session's own dir, the same one the curator writes
 /// through — never `std::env::current_dir()`, which a resumed session may no
 /// longer be running from: reading a scope the writer never used would hide
@@ -406,13 +410,17 @@ pub fn splice_memory_block(
     session_id: &str,
     query: &str,
     working_dir: &Path,
-) -> String {
+) -> (String, Option<String>) {
     LEGACY_TXT_MIGRATION.call_once(|| migrate_legacy_txt_memory(working_dir));
     let mem = SessionMemory::load(session_id);
-    let mut parts = vec![system_prompt.to_string()];
+    let mut parts = Vec::new();
     parts.extend(curated_facts_block(working_dir, query, FACTS_TOP_K));
     parts.extend(mem.recall_prompt(query, 3));
-    parts.join("\n\n")
+    if parts.is_empty() {
+        return (system_prompt.to_string(), None);
+    }
+    let block = parts.join("\n\n");
+    (format!("{system_prompt}\n\n{block}"), Some(block))
 }
 
 /// Top-k curated facts for `query`, both scopes merged into the same bm25

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -155,6 +155,7 @@ pub struct TurnRecorder {
     sink: RecordSink,
     turn_seq: i64,
     next_call_idx: AtomicU32,
+    memory_block_recorded: AtomicBool,
 }
 
 impl TurnRecorder {
@@ -163,6 +164,7 @@ impl TurnRecorder {
             sink: RecordSink::new(session_manager, session_id),
             turn_seq,
             next_call_idx: AtomicU32::new(0),
+            memory_block_recorded: AtomicBool::new(false),
         }
     }
 
@@ -199,6 +201,45 @@ pub fn next_llm_call(
         Some(recorder.sink.clone()),
         Some((recorder.turn_seq, call_idx)),
     )
+}
+
+/// Records the memory block spliced into this turn's system prompt. Only the
+/// turn's first splice is journaled: the state-machine loop re-splices before
+/// every provider call of the turn, the legacy loop splices once, and the log
+/// carries one block per turn on both.
+pub async fn record_memory_block(recorder: Option<&Arc<TurnRecorder>>, block: Option<&str>) {
+    let (Some(recorder), Some(block)) = (recorder, block) else {
+        return;
+    };
+    if recorder.memory_block_recorded.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    recorder
+        .sink
+        .record_memory_block(recorder.turn_seq, block)
+        .await;
+}
+
+pub async fn record_clock_reads(recorder: Option<&Arc<TurnRecorder>>, reads: &[String]) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    recorder
+        .sink
+        .record_clock_reads(recorder.turn_seq, reads)
+        .await;
+}
+
+/// Records why this turn compacted. `None` is the ordinary case — the turn
+/// stayed under the threshold — and journals nothing.
+pub async fn record_condense_triggered(recorder: Option<&Arc<TurnRecorder>>, reason: Option<&str>) {
+    let (Some(recorder), Some(reason)) = (recorder, reason) else {
+        return;
+    };
+    recorder
+        .sink
+        .record_condense_triggered(recorder.turn_seq, reason)
+        .await;
 }
 
 #[cfg(test)]

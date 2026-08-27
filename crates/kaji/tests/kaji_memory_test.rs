@@ -42,7 +42,8 @@ fn splice_memory_block_appends_recalled_facts() {
         }
         let prompt = "You are KAJI. You have standard PI.";
 
-        let spliced = splice_memory_block(prompt, "some-session", "po dashboard", workspace.path());
+        let (spliced, _) =
+            splice_memory_block(prompt, "some-session", "po dashboard", workspace.path());
         assert!(
             spliced.contains("KAJI memory"),
             "any session recalls facts recorded by another session"
@@ -53,7 +54,7 @@ fn splice_memory_block_appends_recalled_facts() {
             "hit tagged with its source"
         );
 
-        let spliced =
+        let (spliced, _) =
             splice_memory_block(prompt, "splice-session", "po dashboard", workspace.path());
         assert!(spliced.contains("KAJI memory"));
         assert!(spliced.contains("Onboarding lives"));
@@ -65,7 +66,7 @@ fn no_relevant_facts_yields_unchanged_prompt() {
     with_root(|| {
         let workspace = tempfile::tempdir().unwrap();
         let prompt = "You are KAJI.";
-        let spliced = splice_memory_block(
+        let (spliced, _) = splice_memory_block(
             prompt,
             "empty-session",
             "nothing about this",
@@ -462,7 +463,7 @@ fn splice_prepends_curated_facts_then_raw_journal() {
             &[Message::user().with_text("le cache doit être vidé à la main")],
         );
 
-        let out = splice_memory_block("SYSTEM", session, "cache ttl", &working_dir);
+        let (out, _) = splice_memory_block("SYSTEM", session, "cache ttl", &working_dir);
         assert!(out.starts_with("SYSTEM"), "system prompt stays first");
 
         let facts_at = out.find("## Faits mémorisés").expect("curated block");
@@ -497,7 +498,7 @@ fn splice_without_facts_behaves_like_before() {
 
         let prompt = "You are KAJI. You have standard PI.";
         assert_eq!(
-            splice_memory_block(prompt, "empty-session", "nothing about this", &working_dir),
+            splice_memory_block(prompt, "empty-session", "nothing about this", &working_dir).0,
             prompt,
             "nothing stored leaves the prompt untouched"
         );
@@ -510,7 +511,7 @@ fn splice_without_facts_behaves_like_before() {
             .recall_prompt("po dashboard", 3)
             .expect("raw journal block");
         assert_eq!(
-            splice_memory_block(prompt, "some-session", "po dashboard", &working_dir),
+            splice_memory_block(prompt, "some-session", "po dashboard", &working_dir).0,
             format!("{prompt}\n\n{block}")
         );
     })
@@ -556,7 +557,8 @@ fn splice_reads_the_session_working_dir_not_the_process_cwd() {
             .unwrap();
 
         let _cwd = Cwd::moved_to(&process_cwd);
-        let out = splice_memory_block("SYSTEM", "resumed-session", "daemon port", &session_dir);
+        let (out, _) =
+            splice_memory_block("SYSTEM", "resumed-session", "daemon port", &session_dir);
 
         assert!(
             out.contains("[decision] le daemon écoute sur le port 7823"),
@@ -586,7 +588,7 @@ fn recall_caps_three_facts_and_truncates_long_bodies() {
                 .unwrap();
         }
 
-        let out = splice_memory_block("SYSTEM", "capped-session", "cache", &working_dir);
+        let (out, _) = splice_memory_block("SYSTEM", "capped-session", "cache", &working_dir);
         assert_eq!(
             out.matches("] décision cache ").count(),
             3,
@@ -624,7 +626,7 @@ fn unopenable_index_drops_facts_and_keeps_the_journal() {
             &[Message::user().with_text("le cache doit être vidé à la main")],
         );
 
-        let out = splice_memory_block("SYSTEM", session, "cache ttl", &working_dir);
+        let (out, _) = splice_memory_block("SYSTEM", session, "cache ttl", &working_dir);
         assert!(
             !out.contains("## Faits mémorisés"),
             "no curated block on a dead index:\n{out}"
@@ -806,7 +808,8 @@ fn fact_written_in_session_one_is_recalled_in_session_two() {
             .rebuild_if_stale(&[("project", &project), ("user", &user)])
             .unwrap();
 
-        let recalled = splice_memory_block("SYS", "session-two", "choix provider", &working_dir);
+        let (recalled, _) =
+            splice_memory_block("SYS", "session-two", "choix provider", &working_dir);
 
         assert!(recalled.starts_with("SYS"), "{recalled}");
         assert!(
