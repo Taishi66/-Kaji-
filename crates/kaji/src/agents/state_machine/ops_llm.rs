@@ -13,6 +13,7 @@ use crate::conversation::message::{InferenceMetadata, Message, MessageContent};
 use crate::conversation::{effective_role, Conversation, EffectiveRole};
 use crate::providers::base::{Provider, ProviderUsage};
 use crate::replay::idgen::{default_idgen, IdGen};
+use crate::replay::record::{next_llm_call, TurnRecorder};
 use crate::session::Session;
 use crate::tool_inspection::ToolInspectionManager;
 use anyhow::{anyhow, Result};
@@ -121,6 +122,7 @@ pub struct InferenceRunner<'a> {
     tool_inspection_manager: &'a ToolInspectionManager,
     frontend_instructions: &'a Mutex<Option<String>>,
     idgen: Arc<dyn IdGen>,
+    turn_recorder: Option<Arc<TurnRecorder>>,
 }
 
 /// The agent-visible conversation as the provider sees it: tool requests left
@@ -182,12 +184,22 @@ impl<'a> InferenceRunner<'a> {
             tool_inspection_manager,
             frontend_instructions,
             idgen: default_idgen(),
+            turn_recorder: None,
         }
     }
 
     pub fn with_idgen(mut self, idgen: Arc<dyn IdGen>) -> Self {
         self.idgen = idgen;
         self
+    }
+
+    pub fn with_turn_recorder(mut self, turn_recorder: Option<Arc<TurnRecorder>>) -> Self {
+        self.turn_recorder = turn_recorder;
+        self
+    }
+
+    fn turn_recorder(&self) -> Option<Arc<TurnRecorder>> {
+        self.turn_recorder.clone()
     }
 
     async fn error_outcome(&self, err: &ProviderError, emit: &Emitter) -> Vec<StateEffect> {
@@ -546,6 +558,7 @@ impl Inference for InferenceRunner<'_> {
             let mut usage_effects: Vec<StateEffect> =
                 turn_context.into_iter().map(StateEffect::from).collect();
 
+            let (record, call_ctx) = next_llm_call(self.turn_recorder().as_ref());
             let stream = crate::agents::reply_parts::stream_response_from_provider(
                 self.provider.clone(),
                 self.model_config.clone(),
@@ -555,6 +568,8 @@ impl Inference for InferenceRunner<'_> {
                 &tools,
                 &toolshim_tools,
                 self.idgen.clone(),
+                record.as_ref(),
+                call_ctx,
             )
             .await;
 

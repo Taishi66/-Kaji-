@@ -58,6 +58,7 @@ use crate::permission::PermissionConfirmation;
 use crate::providers::base::{PermissionRouting, Provider};
 use crate::recipe::{Author, Recipe, Response, Settings};
 use crate::replay::idgen::{default_idgen, IdGen};
+use crate::replay::record::{next_llm_call, TurnRecorder};
 use crate::scheduler_trait::SchedulerTrait;
 use crate::security::adversary_inspector::AdversaryInspector;
 use crate::security::egress_inspector::EgressInspector;
@@ -286,6 +287,12 @@ pub struct Agent {
     /// (true for its current callers); a future multi-session-per-`Agent`
     /// caller could race this alongside `current_turn_seq`.
     current_session_id: Mutex<Option<String>>,
+    /// Capture v2 du tour courant (`llm_request`/`llm_response`), créée par
+    /// `reply()` avec le `turn_seq` du tour et `None` quand le journal est
+    /// indisponible. Les deux boucles la lisent via `turn_recorder()` : le
+    /// compteur `call_idx` vit ici, pas dans les fichiers de boucle
+    /// (`docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`).
+    current_turn_recorder: std::sync::Mutex<Option<Arc<TurnRecorder>>>,
     /// Checkpoint store for automatic pre-turn snapshots
     /// (`docs/superpowers/specs/2026-08-12-checkpoints-design.md`). `None`
     /// when checkpointing isn't wired up for this `Agent` — most unit-test
@@ -548,6 +555,7 @@ impl Agent {
             steer_queues: Mutex::new(HashMap::new()),
             current_turn_seq: std::sync::atomic::AtomicI64::new(0),
             current_session_id: Mutex::new(None),
+            current_turn_recorder: std::sync::Mutex::new(None),
             checkpoint_store: None,
             checkpoint_disabled_reason: None,
             #[cfg(test)]
@@ -1967,7 +1975,8 @@ impl Agent {
                 &self.tool_inspection_manager,
                 &self.frontend_instructions,
             )
-            .with_idgen(self.idgen.clone()),
+            .with_idgen(self.idgen.clone())
+            .with_turn_recorder(self.turn_recorder()),
         );
         let mut command_handlers = operations.clone();
         command_handlers.push(inference.clone());
@@ -2111,6 +2120,13 @@ impl Agent {
                 None
             }
         }
+    }
+
+    /// Capture v2 du tour ouvert par le dernier `reply()`, telle que la boucle
+    /// legacy la consomme. La boucle state machine reçoit la même valeur au
+    /// montage de sa machine (`create_state_machine`).
+    pub(crate) fn turn_recorder(&self) -> Option<Arc<TurnRecorder>> {
+        self.current_turn_recorder.lock().unwrap().clone()
     }
 
     /// Gates whether the upcoming turn should be checkpointed: `None` skips
@@ -2301,6 +2317,13 @@ impl Agent {
         self.current_turn_seq
             .store(turn_seq.unwrap_or(-1), std::sync::atomic::Ordering::SeqCst);
         *self.current_session_id.lock().await = Some(session_id.clone());
+        *self.current_turn_recorder.lock().unwrap() = turn_seq.map(|turn_seq| {
+            Arc::new(TurnRecorder::new(
+                self.config.session_manager.clone(),
+                session_id.clone(),
+                turn_seq,
+            ))
+        });
 
         let events = self
             .reply_impl(user_message, session_config, cancel_token)
@@ -2329,6 +2352,10 @@ impl Agent {
 
         Ok(Box::pin(async_stream::try_stream! {
             if let Some(turn_seq) = turn_seq {
+                if let Err(error) = session_manager.append_log_meta_if_absent(&session_id).await {
+                    warn!(?error, "event log append failed for log_meta");
+                }
+
                 if let Err(error) = session_manager
                     .append_event(&session_id, turn_seq, "turn_start", &turn_start_payload)
                     .await
@@ -2956,6 +2983,7 @@ impl Agent {
                     break;
                 }
 
+                let (record, call_ctx) = next_llm_call(self.turn_recorder().as_ref());
                 let mut stream = crate::agents::reply_parts::stream_response_from_provider(
                     self.provider().await?,
                     model_config.clone(),
@@ -2965,6 +2993,8 @@ impl Agent {
                     &tools,
                     &toolshim_tools,
                     self.idgen.clone(),
+                    record.as_ref(),
+                    call_ctx,
                 ).await?;
                 last_assistant_text.clear();
 
@@ -5759,8 +5789,13 @@ echo start >> "$PLUGIN_ROOT/hook.log"
         let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
         assert_eq!(
             kinds.first(),
+            Some(&"log_meta"),
+            "log must open with the session's log_meta: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.get(1),
             Some(&"turn_start"),
-            "log must open with turn_start: {kinds:?}"
+            "the first turn must open right after log_meta: {kinds:?}"
         );
         assert_eq!(
             kinds.last(),
@@ -6018,8 +6053,10 @@ echo start >> "$PLUGIN_ROOT/hook.log"
         let state_machine_kinds = run_scenario(Some("1")).await?;
 
         // Both loops must open/close the turn identically...
-        assert_eq!(legacy_kinds.first(), Some(&"turn_start".to_string()));
-        assert_eq!(state_machine_kinds.first(), Some(&"turn_start".to_string()));
+        assert_eq!(legacy_kinds.first(), Some(&"log_meta".to_string()));
+        assert_eq!(state_machine_kinds.first(), Some(&"log_meta".to_string()));
+        assert_eq!(legacy_kinds.get(1), Some(&"turn_start".to_string()));
+        assert_eq!(state_machine_kinds.get(1), Some(&"turn_start".to_string()));
         assert_eq!(legacy_kinds.last(), Some(&"turn_end".to_string()));
         assert_eq!(state_machine_kinds.last(), Some(&"turn_end".to_string()));
 

@@ -25,6 +25,7 @@ use crate::providers::toolshim::{
 #[cfg(test)]
 use crate::replay::idgen::default_idgen;
 use crate::replay::idgen::IdGen;
+use crate::replay::record::RecordSink;
 use kaji_providers::conversation::token_usage::{CostSource, ProviderStats, ProviderUsage, Usage};
 use kaji_providers::model::ModelConfig;
 use rmcp::model::Tool;
@@ -408,6 +409,36 @@ pub(crate) fn provider_view_messages(
     (merged, stats)
 }
 
+async fn record_llm_chunks(
+    record: &Option<RecordSink>,
+    call_ctx: Option<(i64, u32)>,
+    chunks: &[Value],
+) {
+    let (Some(record), Some((turn_seq, call_idx))) = (record.as_ref(), call_ctx) else {
+        return;
+    };
+    let chunks_json = serde_json::to_string(chunks).unwrap_or_default();
+    record
+        .record_llm_response(turn_seq, call_idx, &chunks_json, "stop")
+        .await;
+}
+
+/// Un appel LLM qui échoue est journalisé comme réponse `error` : le replay
+/// strict s'arrête dessus plutôt que de servir un `llm_request` sans réponse.
+async fn record_llm_failure(
+    record: &Option<RecordSink>,
+    call_ctx: Option<(i64, u32)>,
+    error: &ProviderError,
+) {
+    let (Some(record), Some((turn_seq, call_idx))) = (record.as_ref(), call_ctx) else {
+        return;
+    };
+    let payload = json!({ "error": error.to_string() }).to_string();
+    record
+        .record_llm_response(turn_seq, call_idx, &payload, "error")
+        .await;
+}
+
 #[tracing::instrument(
     skip(
         provider,
@@ -417,7 +448,9 @@ pub(crate) fn provider_view_messages(
         messages,
         tools,
         toolshim_tools,
-        idgen
+        idgen,
+        record,
+        call_ctx
     ),
     fields(
         session.id = %session_id,
@@ -445,6 +478,8 @@ pub(crate) async fn stream_response_from_provider(
     tools: &[Tool],
     toolshim_tools: &[Tool],
     idgen: Arc<dyn IdGen>,
+    record: Option<&RecordSink>,
+    call_ctx: Option<(i64, u32)>,
 ) -> Result<MessageStream, ProviderError> {
     let config = model_config.clone();
 
@@ -485,6 +520,25 @@ pub(crate) async fn stream_response_from_provider(
     let model_config =
         model_config.with_default_thinking_effort(Config::global().get_kaji_thinking_effort());
     let request_started = std::time::Instant::now();
+
+    if let (Some(record), Some((turn_seq, call_idx))) = (record, call_ctx) {
+        let request_hash = crate::replay::hashing::request_hash(
+            system_prompt.as_str(),
+            messages_for_provider.messages(),
+            &tools,
+        );
+        record
+            .record_llm_request(
+                turn_seq,
+                call_idx,
+                &request_hash,
+                &model_config.model_name,
+                provider.get_name(),
+            )
+            .await;
+    }
+    let record = record.cloned();
+
     debug!("WAITING_LLM_STREAM_START");
     let stream_result = crate::session_context::with_session_id(
         Some(session_id.to_string()),
@@ -503,6 +557,7 @@ pub(crate) async fn stream_response_from_provider(
         Ok(s) => s,
         Err(e) => {
             let enhanced_error = enhance_model_error(e, &provider, config.toolshim).await;
+            record_llm_failure(&record, call_ctx, &enhanced_error).await;
             // Return a stream that immediately yields the error
             // This allows the error to be caught by existing error handling in agent.rs
             return Ok(Box::pin(try_stream! {
@@ -512,6 +567,7 @@ pub(crate) async fn stream_response_from_provider(
     };
 
     Ok(Box::pin(try_stream! {
+        let mut chunks: Vec<Value> = Vec::new();
         if config.toolshim {
             // Toolshim mode: accumulate the full response before processing
             // so that tool-use markers spanning multiple chunks are detected
@@ -521,7 +577,16 @@ pub(crate) async fn stream_response_from_provider(
             let mut first_content_at: Option<std::time::Instant> = None;
 
             while let Some(result) = stream.next().await {
-                let (msg_opt, usage_opt) = result?;
+                let (msg_opt, usage_opt) = match result {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        record_llm_failure(&record, call_ctx, &error).await;
+                        Err(error)?
+                    }
+                };
+                if record.is_some() {
+                    chunks.push(json!([&msg_opt, &usage_opt]));
+                }
 
                 if let Some(msg) = msg_opt {
                     if first_content_at.is_none() && message_has_timing_content(&msg) {
@@ -556,6 +621,7 @@ pub(crate) async fn stream_response_from_provider(
                 // Yield empty item so the agent loop can check cancellation
                 yield (None, None);
             }
+            record_llm_chunks(&record, call_ctx, &chunks).await;
 
             // The toolshim interpreter call below must not count toward elapsed time.
             if let Some(usage) = final_usage.as_mut() {
@@ -581,7 +647,16 @@ pub(crate) async fn stream_response_from_provider(
             let mut active_mergeable_assistant_id: Option<String> = None;
             let mut output_message: Option<Message> = None;
             while let Some(result) = stream.next().await {
-                let (message, mut usage) = result?;
+                let (message, mut usage) = match result {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        record_llm_failure(&record, call_ctx, &error).await;
+                        Err(error)?
+                    }
+                };
+                if record.is_some() {
+                    chunks.push(json!([&message, &usage]));
+                }
 
                 if first_content_at.is_none()
                     && message.as_ref().is_some_and(message_has_timing_content)
@@ -615,6 +690,7 @@ pub(crate) async fn stream_response_from_provider(
 
                 yield (message, usage);
             }
+            record_llm_chunks(&record, call_ctx, &chunks).await;
             if let Some(output_message) = output_message {
                 let output_messages = gen_ai_telemetry::output_message_json(&output_message);
                 span.record("gen_ai.output.messages", output_messages.as_str());
@@ -989,6 +1065,8 @@ mod tests {
             &[],
             &[],
             default_idgen(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1041,6 +1119,8 @@ mod tests {
             &[],
             &[],
             default_idgen(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1074,6 +1154,8 @@ mod tests {
             &[],
             &[],
             default_idgen(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1119,6 +1201,8 @@ mod tests {
             &[],
             &[],
             default_idgen(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1396,6 +1480,8 @@ mod tests {
             &[],
             &[],
             default_idgen(),
+            None,
+            None,
         )
         .await?;
 
@@ -1503,6 +1589,8 @@ mod tests {
             &[],
             &[],
             default_idgen(),
+            None,
+            None,
         )
         .await?;
 
@@ -1542,6 +1630,8 @@ mod tests {
             &[],
             &[],
             default_idgen(),
+            None,
+            None,
         )
         .await?;
 

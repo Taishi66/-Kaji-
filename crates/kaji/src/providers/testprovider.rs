@@ -75,7 +75,7 @@ impl TestProvider {
         Ok(())
     }
 
-    fn hash_input(messages: &[Message]) -> String {
+    pub(crate) fn hash_input(messages: &[Message]) -> String {
         use crate::conversation::message::MessageContent;
 
         // Strip internal metadata (e.g. tool_meta/_meta) from content before hashing.

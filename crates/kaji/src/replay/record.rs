@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -14,6 +15,7 @@ fn parse_or_wrap(raw: &str) -> Value {
 /// voir `docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`.
 /// Toutes les méthodes sont non-fatales : un échec d'écriture ne remonte
 /// jamais au tour en cours, il marque la session non rejouable.
+#[derive(Clone)]
 pub struct RecordSink {
     session_manager: Arc<SessionManager>,
     session_id: String,
@@ -144,6 +146,42 @@ impl RecordSink {
         )
         .await;
     }
+}
+
+/// Capture d'un tour : le sink, le `turn_seq` alloué par l'enveloppe
+/// `Agent::reply()` et le compteur d'appels LLM du tour. L'enveloppe en crée un
+/// par tour, donc le compteur repart de 0 à chaque tour par construction.
+pub struct TurnRecorder {
+    sink: RecordSink,
+    turn_seq: i64,
+    next_call_idx: AtomicU32,
+}
+
+impl TurnRecorder {
+    pub fn new(session_manager: Arc<SessionManager>, session_id: String, turn_seq: i64) -> Self {
+        Self {
+            sink: RecordSink::new(session_manager, session_id),
+            turn_seq,
+            next_call_idx: AtomicU32::new(0),
+        }
+    }
+}
+
+/// Réserve le prochain `call_idx` du tour et rend les deux paramètres de
+/// capture de `stream_response_from_provider`. Point unique partagé par les
+/// deux boucles : chacune n'en porte qu'un appel, aucune logique d'adressage
+/// n'est dupliquée dans les fichiers de boucle.
+pub fn next_llm_call(
+    recorder: Option<&Arc<TurnRecorder>>,
+) -> (Option<RecordSink>, Option<(i64, u32)>) {
+    let Some(recorder) = recorder else {
+        return (None, None);
+    };
+    let call_idx = recorder.next_call_idx.fetch_add(1, Ordering::SeqCst);
+    (
+        Some(recorder.sink.clone()),
+        Some((recorder.turn_seq, call_idx)),
+    )
 }
 
 #[cfg(test)]
