@@ -982,6 +982,7 @@ impl Message {
     }
 
     /// Create a new user message with the current timestamp
+    #[allow(clippy::disallowed_methods)] // ctor
     pub fn user() -> Self {
         Message {
             id: None,
@@ -993,6 +994,7 @@ impl Message {
     }
 
     /// Create a new assistant message with the current timestamp
+    #[allow(clippy::disallowed_methods)] // ctor
     pub fn assistant() -> Self {
         Message {
             id: None,

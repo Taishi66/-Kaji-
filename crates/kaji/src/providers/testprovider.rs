@@ -238,6 +238,7 @@ mod tests {
             "mock-testprovider"
         }
 
+        #[allow(clippy::disallowed_methods)] // stream
         async fn stream(
             &self,
             _model_config: &ModelConfig,

@@ -28,6 +28,7 @@ use crate::conversation::Conversation;
 use kaji_providers::conversation::token_usage::Usage;
 use kaji_providers::formats::openai_responses::{ResponseOutputItem, ResponsesApiResponse};
 
+#[allow(clippy::disallowed_methods)] // import
 pub fn convert(content: &str) -> Result<String> {
     let lines: Vec<Value> = content
         .lines()

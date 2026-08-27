@@ -310,6 +310,7 @@ impl KajiAcpAgent {
         })
     }
 
+    #[allow(clippy::disallowed_methods)] // schedule
     pub(super) async fn on_inspect_running_job(
         &self,
         req: InspectRunningJobRequest,

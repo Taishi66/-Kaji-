@@ -72,6 +72,7 @@ struct KimiToken {
 /// Normalize helper output into the on-disk `KimiToken` shape. When the helper
 /// returns `None` for `refresh_token` or `expires_at`, fall back to the prior
 /// refresh token (per RFC 6749 §6) and a default lifetime.
+#[allow(clippy::disallowed_methods)] // oauth
 fn tokens_to_kimi(tokens: DeviceFlowTokens, prior_refresh: Option<&str>) -> KimiToken {
     let refresh_token = tokens
         .refresh_token
@@ -251,6 +252,7 @@ impl KimiCodeProvider {
         Err(ProviderError::NotConfigured)
     }
 
+    #[allow(clippy::disallowed_methods)] // oauth
     async fn use_or_refresh(&self, mut token: KimiToken) -> Result<KimiToken, ProviderError> {
         let mut reloaded = false;
 
@@ -546,6 +548,7 @@ mod tests {
     // ── KimiToken serde ───────────────────────────────────────────────────────
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn kimi_token_roundtrip() {
         let token = KimiToken {
             access_token: "acc_test".to_string(),
@@ -623,6 +626,7 @@ mod tests {
     // ── Refresh / poll behavior ──────────────────────────────────────────────
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn use_or_refresh_returns_fresh_token_without_calling_endpoint() {
         let server = MockServer::start().await;
         // Refusing all requests proves no network call was made.
@@ -643,6 +647,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn use_or_refresh_falls_back_to_existing_token_when_refresh_fails() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -664,6 +669,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn use_or_refresh_preserves_transient_error_for_expired_token() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -688,6 +694,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn use_or_refresh_only_authenticates_for_invalid_grant() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -711,6 +718,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn use_or_refresh_does_not_authenticate_for_invalid_client() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -734,6 +742,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn use_or_refresh_does_not_authenticate_for_proxy_rejection() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -755,6 +764,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn use_or_refresh_returns_new_token_on_successful_refresh() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -781,6 +791,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn use_or_refresh_reloads_token_rotated_by_another_provider() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -825,6 +836,7 @@ mod tests {
     // integration — token cache, refresh-fallback when server omits refresh_token.
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn use_or_refresh_preserves_refresh_token_when_server_omits_it() {
         // RFC 6749 §6: if the refresh response omits `refresh_token`, the
         // client should keep reusing the prior one.
@@ -853,6 +865,7 @@ mod tests {
 
     // ── fetch_supported_models ────────────────────────────────────────────────
 
+    #[allow(clippy::disallowed_methods)] // test
     async fn seed_fresh_token(provider: &KimiCodeProvider) {
         *provider.cached_token.lock().await = Some(KimiToken {
             access_token: "fresh-access".to_string(),

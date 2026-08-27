@@ -338,6 +338,7 @@ pub fn format_tools(tools: &[Tool], _model_name: &str) -> anyhow::Result<Vec<Val
 
 /// Convert Databricks' API response to internal Message format
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::disallowed_methods)] // response
 pub fn response_to_message(response: &Value) -> anyhow::Result<Message> {
     let original = &response["choices"][0]["message"];
     let mut content = Vec::new();

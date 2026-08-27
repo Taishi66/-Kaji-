@@ -89,6 +89,7 @@ fn create_read_only_tool() -> Tool {
 }
 
 /// Builds the message to be sent to the LLM for detecting read-only operations.
+#[allow(clippy::disallowed_methods)] // permission
 fn create_check_messages(tool_requests: Vec<&ToolRequest>) -> Conversation {
     let requests: Vec<Value> = tool_requests
         .iter()
@@ -250,6 +251,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn judge_response_identifies_requests_instead_of_tool_names() {
         let response = Message::new(
             rmcp::model::Role::Assistant,

@@ -680,6 +680,7 @@ pub fn format_tools(tools: &[Tool]) -> anyhow::Result<Vec<Value>> {
 }
 
 /// Convert OpenAI's API response to internal Message format
+#[allow(clippy::disallowed_methods)] // response
 pub fn response_to_message(response: &Value) -> anyhow::Result<Message> {
     let output_token_limit_reached = response
         .pointer("/choices/0/finish_reason")
@@ -1095,6 +1096,7 @@ fn output_token_limit_marker(id: Option<String>) -> Message {
     message
 }
 
+#[allow(clippy::disallowed_methods)] // stream
 pub fn response_to_streaming_message<S>(
     mut stream: S,
 ) -> impl Stream<Item = anyhow::Result<(Option<Message>, Option<ProviderUsage>)>> + 'static

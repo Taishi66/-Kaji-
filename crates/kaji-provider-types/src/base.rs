@@ -348,6 +348,7 @@ pub fn model_info_for_provider_model(provider_name: &str, model_name: &str) -> M
 }
 
 /// Collect all chunks from a MessageStream into a single Message and ProviderUsage
+#[allow(clippy::disallowed_methods)] // fallback
 pub async fn collect_stream(
     mut stream: MessageStream,
 ) -> Result<(Message, ProviderUsage), ProviderError> {

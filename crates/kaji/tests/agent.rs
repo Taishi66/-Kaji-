@@ -946,6 +946,7 @@ mod tests {
         /// - All 10 summaries are present in the final conversation
         /// - The original tool pairs are marked invisible
         #[tokio::test]
+        #[allow(clippy::disallowed_methods)] // test
         async fn test_batch_summarization_preserves_all_summaries() -> Result<()> {
             // Set a low cutoff so we don't need hundreds of tool pairs.
             // cutoff=2 means we need >2+10=12 visible tool pairs to trigger.

@@ -135,6 +135,7 @@ impl AzureAuth {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // oauth
     async fn get_default_credential_token(&self) -> Result<AuthToken, AuthError> {
         // Try read lock first for better concurrency
         if let Some(cached) = self.cached_token.read().await.as_ref() {

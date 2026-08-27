@@ -366,6 +366,7 @@ impl CodexProvider {
     }
 
     /// Parse newline-delimited JSON response from Codex CLI
+    #[allow(clippy::disallowed_methods)] // response
     fn parse_response(&self, lines: &[String]) -> Result<(Message, Usage), ProviderError> {
         let mut all_text_content = Vec::new();
         let mut usage = Usage::default();
@@ -1162,6 +1163,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn test_session_description_generation() {
         let messages = vec![Message::new(
             Role::User,

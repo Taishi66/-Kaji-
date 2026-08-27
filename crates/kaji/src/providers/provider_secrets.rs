@@ -55,6 +55,7 @@ pub enum DeleteProviderSecretError {
     Other(#[from] anyhow::Error),
 }
 
+#[allow(clippy::disallowed_methods)] // secrets
 fn provider_secret_status(expires_at: Option<DateTime<Utc>>) -> ProviderSecretStatus {
     match expires_at {
         Some(expires_at) if expires_at <= Utc::now() => ProviderSecretStatus::Expired,
@@ -559,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn expiry_extraction_handles_nested_rfc3339_values() {
         let expires_at = Utc::now() + chrono::Duration::hours(1);
         let value = json!({
@@ -579,6 +581,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn expiry_extraction_ignores_refreshable_access_tokens() {
         let expires_at = Utc::now() - chrono::Duration::hours(1);
         let value = json!({

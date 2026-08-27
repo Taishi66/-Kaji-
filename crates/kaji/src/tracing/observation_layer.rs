@@ -136,6 +136,7 @@ impl ObservationLayer {
         );
     }
 
+    #[allow(clippy::disallowed_methods)] // trace
     pub async fn handle_span_close(&self, span_id: u64) {
         let observation_id = {
             let mut spans = self.span_tracker.lock().await;
@@ -157,6 +158,7 @@ impl ObservationLayer {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // trace
     pub async fn ensure_trace_id(&self) -> String {
         let mut spans = self.span_tracker.lock().await;
         if let Some(id) = spans.current_trace_id.clone() {
@@ -283,6 +285,7 @@ where
         metadata.target().starts_with("kaji::")
     }
 
+    #[allow(clippy::disallowed_methods)] // trace
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
         let span_id = id.into_u64();
 

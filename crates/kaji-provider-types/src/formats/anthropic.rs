@@ -791,6 +791,7 @@ pub fn create_request_for_model(
 }
 
 /// Process streaming response from Anthropic's API
+#[allow(clippy::disallowed_methods)] // stream
 pub fn response_to_streaming_message<S>(
     mut stream: S,
 ) -> impl futures::Stream<Item = anyhow::Result<(Option<Message>, Option<ProviderUsage>)>> + 'static

@@ -750,6 +750,7 @@ pub fn create_responses_request_for_model(
     Ok(payload)
 }
 
+#[allow(clippy::disallowed_methods)] // response
 pub fn responses_api_to_message(response: &ResponsesApiResponse) -> anyhow::Result<Message> {
     let mut content = Vec::new();
 
@@ -903,6 +904,7 @@ fn output_token_limit_marker(id: Option<String>) -> Message {
     message
 }
 
+#[allow(clippy::disallowed_methods)] // stream
 pub fn responses_api_to_streaming_message<S>(
     mut stream: S,
 ) -> impl Stream<Item = anyhow::Result<(Option<Message>, Option<ProviderUsage>)>> + 'static

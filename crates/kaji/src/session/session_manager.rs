@@ -533,6 +533,7 @@ impl SessionManager {
 
     /// Fenêtres d'usage pour `/cost` : session courante, dernières 5 h et
     /// derniers 7 j. Lecture pure, aucun effet de bord.
+    #[allow(clippy::disallowed_methods)] // usage
     pub async fn usage_windows(&self, session_id: &str) -> Result<UsageWindows> {
         let now = Utc::now().timestamp();
         let session_totals = self.get_session_usage_totals(session_id).await?;
@@ -1735,6 +1736,7 @@ impl SessionStorage {
         Ok(())
     }
 
+    #[allow(clippy::disallowed_methods)] // session
     async fn create_session(
         &self,
         working_dir: PathBuf,
@@ -2532,6 +2534,7 @@ impl SessionStorage {
         })
     }
 
+    #[allow(clippy::disallowed_methods)] // eventlog
     async fn append_event(
         &self,
         session_id: &str,
@@ -4196,6 +4199,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn test_concurrent_session_creation() {
         let temp_dir = TempDir::new().unwrap();
         let session_manager = Arc::new(SessionManager::new(temp_dir.path().to_path_buf()));
@@ -4285,6 +4289,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn test_export_import_roundtrip() {
         const DESCRIPTION: &str = "Original session";
         const USER_MESSAGE: &str = "test message";
@@ -4358,6 +4363,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn test_list_sessions_filters_by_type() {
         let temp_dir = TempDir::new().unwrap();
         let sm = SessionManager::new(temp_dir.path().to_path_buf());
@@ -4972,6 +4978,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn test_usage_windows_aggregates_session_5h_and_7d() {
         let temp_dir = TempDir::new().unwrap();
         let sm = SessionManager::new(temp_dir.path().to_path_buf());
@@ -5007,6 +5014,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn test_usage_since_returns_none_cost_when_no_row_has_one() {
         let temp_dir = TempDir::new().unwrap();
         let sm = SessionManager::new(temp_dir.path().to_path_buf());
@@ -5024,6 +5032,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn test_usage_since_empty_window_has_zero_tokens_and_no_cost() {
         let temp_dir = TempDir::new().unwrap();
         let sm = SessionManager::new(temp_dir.path().to_path_buf());

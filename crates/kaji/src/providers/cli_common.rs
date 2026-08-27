@@ -43,6 +43,7 @@ pub(crate) fn is_session_description_request(system: &str) -> bool {
     system.contains("four words or less") || system.contains("4 words or less")
 }
 
+#[allow(clippy::disallowed_methods)] // session
 pub(crate) fn generate_simple_session_description(
     model_name: &str,
     messages: &[Message],

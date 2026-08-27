@@ -18,6 +18,7 @@ use crate::conversation::message::Message;
 use crate::conversation::Conversation;
 use kaji_providers::conversation::token_usage::Usage;
 
+#[allow(clippy::disallowed_methods)] // import
 pub fn convert(content: &str) -> Result<String> {
     let mut lines = content.lines().filter(|l| !l.trim().is_empty());
 

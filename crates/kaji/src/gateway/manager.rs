@@ -310,6 +310,7 @@ impl GatewayManager {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // gateway
     pub async fn generate_pairing_code(&self, gateway_type: &str) -> anyhow::Result<(String, i64)> {
         let code = PairingStore::generate_code();
         let expires_at = chrono::Utc::now().timestamp() + 300;

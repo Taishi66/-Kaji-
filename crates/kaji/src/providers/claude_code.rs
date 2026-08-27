@@ -568,6 +568,7 @@ fn claude_mcp_config_json(extensions: &[ExtensionConfig]) -> Option<String> {
 
 /// Write the MCP config JSON to a temp file with restricted permissions
 /// so secrets (headers, env vars) are not leaked via process argv.
+#[allow(clippy::disallowed_methods)] // tempfile
 fn write_mcp_config_file(state_dir: &Path, json: &str) -> Result<NamedTempFile, anyhow::Error> {
     let dir = state_dir.join("claude-code");
     std::fs::create_dir_all(&dir)?;
@@ -711,6 +712,7 @@ impl Provider for ClaudeCodeProvider {
         false
     }
 
+    #[allow(clippy::disallowed_methods)] // stream
     async fn stream(
         &self,
         model_config: &ModelConfig,
@@ -1297,6 +1299,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn test_write_mcp_config_file() {
         let state_dir = tempdir().unwrap();
         let json = r#"{"mcpServers":{}}"#;

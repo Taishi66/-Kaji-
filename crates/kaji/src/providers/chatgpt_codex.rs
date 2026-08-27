@@ -770,6 +770,7 @@ async fn wait_for_oauth_code(rx: oneshot::Receiver<Result<String>>) -> Result<St
         .map_err(|e| anyhow!("OAuth callback error: {}", e))
 }
 
+#[allow(clippy::disallowed_methods)] // oauth
 async fn perform_oauth_flow(auth_state: &ChatGptCodexAuthState) -> Result<TokenData> {
     let _guard = auth_state.oauth_mutex.try_lock().map_err(|_| {
         anyhow!("Another OAuth flow is already in progress; please try again later")
@@ -829,6 +830,7 @@ impl ChatGptCodexAuthProvider {
         self.cache.clear();
     }
 
+    #[allow(clippy::disallowed_methods)] // oauth
     async fn get_valid_token(&self) -> Result<TokenData> {
         if let Some(mut token_data) = self.cache.load() {
             if token_data.expires_at > Utc::now() + chrono::Duration::seconds(60) {
@@ -1089,6 +1091,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[allow(clippy::disallowed_methods)] // test
     fn inventory_configured_uses_oauth_token_cache() {
         let root = tempfile::tempdir().unwrap();
         let root_path = root.path().to_string_lossy().to_string();
@@ -1112,6 +1115,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn token_cache_replaces_loose_file_with_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1385,6 +1389,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn test_parse_jwt_claims_verified_with_issuer() {
         let server = MockServer::start().await;
         let jwks_uri = format!("{}/jwks", server.uri());

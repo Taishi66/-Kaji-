@@ -210,6 +210,7 @@ impl Provider for GeminiCliProvider {
             .collect())
     }
 
+    #[allow(clippy::disallowed_methods)] // stream
     async fn stream(
         &self,
         model_config: &ModelConfig,

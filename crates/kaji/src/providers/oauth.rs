@@ -66,6 +66,7 @@ impl TokenCache {
         Self { cache_path }
     }
 
+    #[allow(clippy::disallowed_methods)] // oauth
     fn load_token(&self) -> Option<TokenData> {
         if let Ok(contents) = fs::read_to_string(&self.cache_path) {
             if let Ok(token_data) = serde_json::from_str::<TokenData>(&contents) {
@@ -173,6 +174,7 @@ impl OAuthFlow {
     ///
     /// # Error
     /// Returns an error if the required access_token is missing from the response.
+    #[allow(clippy::disallowed_methods)] // oauth
     fn extract_token_data(
         &self,
         token_response: &Value,
@@ -382,6 +384,7 @@ impl OAuthFlow {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // oauth
 pub(crate) async fn get_oauth_token_async(
     host: &str,
     client_id: &str,
@@ -503,6 +506,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn test_token_cache() -> Result<()> {
         let cache = TokenCache::new(
             "https://example.com",

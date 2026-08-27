@@ -605,6 +605,7 @@ async fn perform_device_code_flow() -> Result<TokenData> {
     Ok(token_data_from_response(tokens))
 }
 
+#[allow(clippy::disallowed_methods)] // oauth
 fn token_data_from_response(tokens: TokenResponse) -> TokenData {
     let expires_at = Utc::now() + chrono::Duration::seconds(tokens.expires_in.unwrap_or(3600));
     TokenData {
@@ -629,6 +630,7 @@ impl XaiOAuthAuthProvider {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // oauth
     async fn get_valid_token(&self) -> Result<TokenData, ProviderError> {
         if let Some(mut token_data) = self.cache.load() {
             if token_data.expires_at
@@ -972,6 +974,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn token_cache_replaces_loose_file_with_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;
 

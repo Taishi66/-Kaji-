@@ -15,6 +15,7 @@ use crate::conversation::message::Message;
 use crate::conversation::Conversation;
 use kaji_providers::conversation::token_usage::Usage;
 
+#[allow(clippy::disallowed_methods)] // import
 pub fn convert(content: &str) -> Result<String> {
     let lines: Vec<Value> = content
         .lines()
@@ -148,6 +149,7 @@ pub fn convert(content: &str) -> Result<String> {
     serde_json::to_string_pretty(&session_json).map_err(Into::into)
 }
 
+#[allow(clippy::disallowed_methods)] // import
 fn convert_user_message(line: &Value, timestamp: Option<DateTime<Utc>>) -> Option<Message> {
     let content = line.get("message")?.get("content")?;
     let created = timestamp
@@ -213,6 +215,7 @@ fn convert_user_message(line: &Value, timestamp: Option<DateTime<Utc>>) -> Optio
     Some(msg)
 }
 
+#[allow(clippy::disallowed_methods)] // import
 fn convert_assistant_message(line: &Value, timestamp: Option<DateTime<Utc>>) -> Option<Message> {
     let content = line.get("message")?.get("content")?.as_array()?;
     let created = timestamp

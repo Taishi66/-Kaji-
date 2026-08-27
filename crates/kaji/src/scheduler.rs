@@ -297,6 +297,7 @@ impl Scheduler {
         Ok(arc_self)
     }
 
+    #[allow(clippy::disallowed_methods)] // scheduler
     fn create_cron_task(&self, job: ScheduledJob) -> Result<Job, SchedulerError> {
         let job_for_task = job.clone();
         let jobs_arc = self.jobs.clone();
@@ -789,6 +790,7 @@ impl Scheduler {
         Ok(schedule_sessions)
     }
 
+    #[allow(clippy::disallowed_methods)] // scheduler
     pub async fn run_now(&self, sched_id: &str) -> Result<String, SchedulerError> {
         let job_to_run = {
             let mut jobs_guard = self.jobs.lock().await;
@@ -1582,6 +1584,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn test_kill_running_job_clears_state_and_persists() {
         let temp_dir = tempdir().unwrap();
         let storage_path = temp_dir.path().join("schedule.json");
@@ -1639,6 +1642,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn test_load_jobs_from_storage_clears_stale_running_state() {
         let temp_dir = tempdir().unwrap();
         let storage_path = temp_dir.path().join("schedule.json");

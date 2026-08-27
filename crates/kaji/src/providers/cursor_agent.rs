@@ -192,6 +192,7 @@ impl CursorAgentProvider {
     }
 
     /// Parse the JSON response from cursor-agent CLI
+    #[allow(clippy::disallowed_methods)] // response
     fn parse_cursor_agent_response(
         &self,
         lines: &[String],

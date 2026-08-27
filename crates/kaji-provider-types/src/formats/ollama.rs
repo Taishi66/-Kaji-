@@ -84,6 +84,7 @@ pub fn parse_xml_tool_calls(content: &str) -> (Option<String>, Vec<MessageConten
 ///
 /// This wraps the standard OpenAI response parsing and adds XML fallback for models
 /// like Qwen3-coder that output XML tool calls when given many tools.
+#[allow(clippy::disallowed_methods)] // response
 pub fn response_to_message(response: &Value) -> anyhow::Result<Message> {
     let message = openai::response_to_message(response)?;
 
@@ -157,6 +158,7 @@ fn is_text_only_message(message: &Message) -> bool {
 /// the tool calls.
 ///
 /// This approach avoids exposing any internal types from openai.rs.
+#[allow(clippy::disallowed_methods)] // stream
 pub fn response_to_streaming_message_ollama<S>(
     stream: S,
 ) -> impl Stream<Item = anyhow::Result<(Option<Message>, Option<ProviderUsage>)>> + 'static

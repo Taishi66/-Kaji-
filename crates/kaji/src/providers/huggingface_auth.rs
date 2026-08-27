@@ -42,6 +42,7 @@ pub struct HuggingFaceTokenData {
 }
 
 impl HuggingFaceTokenData {
+    #[allow(clippy::disallowed_methods)] // oauth
     pub fn is_expired(&self) -> bool {
         self.expires_at
             .is_some_and(|expires_at| expires_at <= Utc::now())
@@ -278,6 +279,7 @@ fn token_data_from_response(response: TokenResponse) -> HuggingFaceTokenData {
     token_data_from_response_with_refresh_fallback(response, None)
 }
 
+#[allow(clippy::disallowed_methods)] // oauth
 fn token_data_from_response_with_refresh_fallback(
     response: TokenResponse,
     refresh_token_fallback: Option<String>,
@@ -641,6 +643,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn token_data_from_response_stores_expires_in_as_expires_at() {
         let token_data = token_data_from_response(TokenResponse {
             access_token: "token".to_string(),
@@ -654,6 +657,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn expired_oauth_token_refreshes_with_cached_refresh_token() {
         let dir = TempDir::new().unwrap();
         let path = token_path(&dir);
@@ -695,6 +699,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn usable_oauth_token_skips_expired_token() {
         with_token_path(|path| {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -714,6 +719,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn usable_oauth_token_returns_unexpired_token() {
         with_token_path(|path| {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -736,6 +742,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn has_usable_or_refreshable_oauth_token_accepts_unexpired_token() {
         with_token_path(|path| {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -755,6 +762,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn has_usable_or_refreshable_oauth_token_accepts_expired_refreshable_token() {
         with_token_path(|path| {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -774,6 +782,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn has_usable_or_refreshable_oauth_token_rejects_expired_unrefreshable_token() {
         with_token_path(|path| {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

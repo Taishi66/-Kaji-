@@ -371,6 +371,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn retry_after_future_http_date_parsed() {
         // A future HTTP-date should produce a positive duration up to the cap.
         let target = chrono::Utc::now() + chrono::Duration::seconds(45);
@@ -385,6 +386,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn retry_after_parses_rfc850_http_date() {
         // RFC 7231 recipients must accept the obsolete RFC 850 date syntax.
         // Build a future date in that form and assert it round-trips.
@@ -399,6 +401,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn retry_after_parses_asctime_http_date() {
         // The third HTTP-date form RFC 7231 requires recipients to accept.
         // asctime has no timezone marker; we interpret it as GMT.

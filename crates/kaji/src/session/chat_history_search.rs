@@ -298,6 +298,7 @@ impl<'a> ChatHistorySearch<'a> {
         Ok(session_totals)
     }
 
+    #[allow(clippy::disallowed_methods)] // search
     fn convert_to_results(
         &self,
         session_messages: HashMap<String, SessionMessageGroup>,
@@ -381,6 +382,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn search_projects_audience_before_matching_and_limiting() {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)

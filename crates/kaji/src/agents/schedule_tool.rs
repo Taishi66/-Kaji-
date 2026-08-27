@@ -383,6 +383,7 @@ impl ScheduleTool {
     }
 
     /// Get information about a running job
+    #[allow(clippy::disallowed_methods)] // schedule
     async fn handle_inspect_job(
         &self,
         scheduler: Arc<dyn SchedulerTrait>,

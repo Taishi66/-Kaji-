@@ -268,6 +268,7 @@ impl AdversaryInspector {
         "(unknown)".to_string()
     }
 
+    #[allow(clippy::disallowed_methods)] // adversary
     async fn consult_llm(
         &self,
         session_id: &str,
@@ -643,6 +644,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn test_extract_original_task() {
         let messages = vec![
             Message::new(
@@ -661,6 +663,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn test_extract_recent_user_messages() {
         let messages = vec![
             Message::new(

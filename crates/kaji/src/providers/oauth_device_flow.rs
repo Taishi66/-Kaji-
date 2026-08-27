@@ -192,6 +192,7 @@ pub async fn run_device_flow(
 }
 
 /// Exchange a refresh token for a new access token (RFC 6749 §6).
+#[allow(clippy::disallowed_methods)] // oauth
 pub async fn refresh_device_flow_token(
     client: &Client,
     cfg: &DeviceFlowConfig<'_>,
@@ -259,6 +260,7 @@ enum TokenPollOutcome {
     Failed(String),
 }
 
+#[allow(clippy::disallowed_methods)] // oauth
 async fn parse_token_response(response: reqwest::Response) -> Result<TokenPollOutcome> {
     let status = response.status();
     let bytes = response

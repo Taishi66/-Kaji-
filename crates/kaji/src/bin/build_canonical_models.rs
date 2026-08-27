@@ -83,6 +83,7 @@ struct MappingReport {
 }
 
 impl MappingReport {
+    #[allow(clippy::disallowed_methods)] // report
     fn new() -> Self {
         Self {
             timestamp: chrono::Utc::now().to_rfc3339(),

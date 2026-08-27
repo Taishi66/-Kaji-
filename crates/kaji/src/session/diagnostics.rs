@@ -120,6 +120,7 @@ impl SystemInfo {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // diagnostics
     pub fn to_text(&self) -> String {
         format!(
             "App Version: {}\n\
@@ -294,6 +295,7 @@ fn was_truncated(content: &str) -> bool {
     content.contains("... (") && content.contains(" bytes omitted) ...")
 }
 
+#[allow(clippy::disallowed_methods)] // diagnostics
 pub async fn generate_diagnostics(
     session_manager: &SessionManager,
     session_id: &str,

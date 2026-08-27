@@ -670,6 +670,7 @@ impl Drop for ServerHandleGuard {
 // Full OAuth + setup flow
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::disallowed_methods)] // oauth
 async fn perform_oauth_flow(auth_state: &GeminiOAuthAuthState) -> Result<SetupData> {
     let _guard = auth_state.oauth_mutex.try_lock().map_err(|_| {
         anyhow!("Another OAuth flow is already in progress; please try again later")
@@ -743,6 +744,7 @@ impl GeminiOAuthTokenProvider {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // oauth
     async fn get_valid_setup(&self) -> Result<SetupData> {
         if let Some(mut data) = self.cache.load() {
             // Token still fresh (with 60s buffer)
@@ -1105,6 +1107,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[allow(clippy::disallowed_methods)] // test
     fn test_token_cache_roundtrip() {
         let root = tempfile::tempdir().unwrap();
         let root_path = root.path().to_string_lossy().to_string();
@@ -1134,6 +1137,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn token_cache_replaces_loose_file_with_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;
 

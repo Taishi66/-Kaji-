@@ -141,6 +141,7 @@ impl SchedulerTrait for FixtureScheduler {
         self.job_mut(id, |job| job.paused = false).await
     }
 
+    #[allow(clippy::disallowed_methods)] // test-fixture
     async fn run_now(&self, id: &str) -> Result<String, SchedulerError> {
         self.job_mut(id, |job| {
             job.last_run = Some(Utc::now());

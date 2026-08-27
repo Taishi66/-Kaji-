@@ -288,6 +288,7 @@ impl GithubCopilotProvider {
             .map_err(|e| e.into())
     }
 
+    #[allow(clippy::disallowed_methods)] // oauth
     async fn get_api_info(&self) -> Result<(String, String), ProviderError> {
         let guard = self.mu.lock().await;
 
@@ -736,6 +737,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn disk_cache_saves_owner_only_file() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -771,6 +773,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
     async fn get_api_info_uses_valid_cache_without_github_token() {
         let directory = tempfile::tempdir().unwrap();
         let cache = DiskCache {

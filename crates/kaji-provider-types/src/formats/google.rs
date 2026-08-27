@@ -369,6 +369,7 @@ fn process_response_part_impl(
     }
 }
 
+#[allow(clippy::disallowed_methods)] // response
 pub fn response_to_message(response: Value) -> Result<Message> {
     let role = Role::Assistant;
     let created = chrono::Utc::now().timestamp();
@@ -428,6 +429,7 @@ pub fn get_usage(data: &Value) -> Result<Usage> {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // stream
 pub fn response_to_streaming_message<S>(
     mut stream: S,
 ) -> impl futures::Stream<Item = anyhow::Result<(Option<Message>, Option<ProviderUsage>)>> + 'static

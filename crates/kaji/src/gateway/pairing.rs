@@ -117,6 +117,7 @@ impl PairingStore {
         Self::save_pending_codes(&codes)
     }
 
+    #[allow(clippy::disallowed_methods)] // gateway
     pub async fn consume_pending_code(&self, code: &str) -> anyhow::Result<Option<String>> {
         let mut codes = Self::load_pending_codes();
         let pos = codes.iter().position(|c| c.code == code);

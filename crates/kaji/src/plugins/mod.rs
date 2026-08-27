@@ -81,6 +81,7 @@ struct InstallMetadata {
     last_update_check: Option<DateTime<Utc>>,
 }
 
+#[allow(clippy::disallowed_methods)] // plugins
 pub fn installed_plugin_skill_dirs() -> Vec<PathBuf> {
     let plugins_dir = plugin_install_dir();
     for update in auto_update_plugins_at_root(Utc::now(), &plugins_dir) {
@@ -125,6 +126,7 @@ pub fn install_plugin_with_options(
     install_plugin_with_options_at_root(source, options, &plugin_install_dir())
 }
 
+#[allow(clippy::disallowed_methods)] // plugins
 fn install_plugin_with_options_at_root(
     source: &str,
     options: PluginInstallOptions,
@@ -147,10 +149,12 @@ fn install_plugin_with_options_at_root(
     )
 }
 
+#[allow(clippy::disallowed_methods)] // plugins
 pub fn update_plugin(name: &str) -> Result<PluginInstall> {
     update_plugin_at_root(Utc::now(), &plugin_install_dir(), name)
 }
 
+#[allow(clippy::disallowed_methods)] // plugins
 pub fn auto_update_plugins() -> Vec<PluginAutoUpdateResult> {
     auto_update_plugins_at_root(Utc::now(), &plugin_install_dir())
 }
@@ -409,6 +413,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn updates_git_backed_plugin() {
         let install_root = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
@@ -440,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn auto_update_plugins_updates_enabled_plugins() {
         let install_root = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
@@ -474,6 +480,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn auto_update_plugins_skips_recently_checked_plugins() {
         let install_root = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
@@ -505,6 +512,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn update_rejects_non_git_backed_plugin() {
         let install_root = tempfile::tempdir().unwrap();
         let plugin_dir = install_root.path().join("test-plugin");

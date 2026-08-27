@@ -291,6 +291,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[allow(clippy::disallowed_methods)] // test
     fn gemini_oauth_inventory_configured_uses_token_cache() {
         let root = tempfile::tempdir().unwrap();
         let root_path = root.path().to_string_lossy().to_string();
@@ -324,6 +325,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[allow(clippy::disallowed_methods)] // test
     fn kimi_code_inventory_configured_uses_token_cache() {
         let root = tempfile::tempdir().unwrap();
         let root_path = root.path().to_string_lossy().to_string();

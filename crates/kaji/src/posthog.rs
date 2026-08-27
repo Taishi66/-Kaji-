@@ -69,6 +69,7 @@ struct CaptureEvent {
     timestamp: Option<String>,
 }
 
+#[allow(clippy::disallowed_methods)] // telemetry
 async fn posthog_capture(
     event_name: &str,
     distinct_id: &str,
@@ -396,6 +397,7 @@ async fn send_custom_slash_command_event(installation: &InstallationData) -> Res
     .await
 }
 
+#[allow(clippy::disallowed_methods)] // telemetry
 async fn send_session_event(installation: &InstallationData) -> Result<(), String> {
     let mut props = HashMap::new();
 

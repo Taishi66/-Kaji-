@@ -1,5 +1,6 @@
 #[cfg(test)]
 use chrono::DateTime;
+#[cfg(test)]
 use chrono::Utc;
 use indexmap::IndexMap;
 use serde::Serialize;
@@ -9,6 +10,7 @@ use std::collections::HashMap;
 use crate::agents::{extension::ExtensionInfo, moim};
 use crate::hints::load_hints::build_gitignore;
 use crate::hints::{get_context_filenames, SubdirectoryHintTracker};
+use crate::replay::clock::{PromptClock, RealClock};
 use crate::{
     config::{Config, KajiMode},
     prompt_template,
@@ -223,12 +225,16 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
 
 impl PromptManager {
     pub fn new() -> Self {
+        Self::new_with_clock(&RealClock)
+    }
+
+    pub fn new_with_clock(clock: &dyn PromptClock) -> Self {
         PromptManager {
             system_prompt_override: None,
             system_prompt_extras: IndexMap::new(),
             // Use the fixed current date time so that prompt cache can be used.
             // Filtering to an hour to balance user time accuracy and multi session prompt cache hits.
-            current_date_timestamp: Utc::now().format("%Y-%m-%d %H:00 %:z").to_string(),
+            current_date_timestamp: clock.prompt_timestamp(),
             subdirectory_hint_tracker: SubdirectoryHintTracker::new(),
         }
     }

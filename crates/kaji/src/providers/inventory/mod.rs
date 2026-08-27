@@ -445,6 +445,7 @@ impl ProviderInventoryService {
         Ok(())
     }
 
+    #[allow(clippy::disallowed_methods)] // inventory
     pub(crate) async fn store_refreshed_models_for_identity(
         &self,
         identity: &InventoryIdentity,
@@ -531,6 +532,7 @@ impl ProviderInventoryService {
         Ok(())
     }
 
+    #[allow(clippy::disallowed_methods)] // inventory
     pub(crate) async fn store_refresh_error_for_identity(
         &self,
         identity: &InventoryIdentity,
@@ -691,6 +693,7 @@ impl ProviderInventoryService {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // inventory
     pub fn is_stale(entry: &ProviderInventoryEntry) -> bool {
         let Some(last_updated_at) = entry.last_updated_at else {
             return false;
@@ -733,6 +736,7 @@ impl ProviderInventoryService {
             .ok_or_else(|| anyhow::anyhow!("Unknown provider: {}", provider_id))
     }
 
+    #[allow(clippy::disallowed_methods)] // inventory
     async fn mark_refresh_started(&self, identity: &InventoryIdentity) -> Result<()> {
         let existing = self.read_snapshot(identity).await?;
 
@@ -1314,6 +1318,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn inventory_uses_configured_models_before_first_successful_refresh() {
         let configured_models = [ModelInfo::new("claude-sonnet-4-5", 0)];
         let snapshot = InventorySnapshot {
@@ -1331,6 +1336,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn inventory_preserves_empty_models_after_successful_refresh() {
         let configured_models = [ModelInfo::new("claude-sonnet-4-5", 0)];
         let snapshot = InventorySnapshot {
@@ -1347,6 +1353,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test
     fn inventory_ignores_stale_snapshots_for_static_providers() {
         let configured_models = [ModelInfo::new("gpt-5.6", 0)];
         let snapshot = InventorySnapshot {

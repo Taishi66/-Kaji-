@@ -27,6 +27,7 @@ async fn latest_session_id(session_manager: &SessionManager) -> Result<Option<St
 /// Build a redacted diagnostics bundle for bug reports. Uses the given session
 /// (or the most recent one) for the full report; falls back to a summary-only
 /// report when no session exists.
+#[allow(clippy::disallowed_methods)] // report
 pub async fn generate_rage_bundle(
     session_manager: &SessionManager,
     session_id: Option<String>,

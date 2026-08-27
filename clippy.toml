@@ -2,4 +2,5 @@ too-many-lines-threshold = 200
 
 disallowed-methods = [
     { path = "uuid::Uuid::new_v4", reason = "boucle agent : passer par kaji::replay::idgen::IdGen (replay exact)" },
+    { path = "chrono::Utc::now", reason = "boucle agent : passer par kaji::replay::clock::PromptClock (replay exact)" },
 ]

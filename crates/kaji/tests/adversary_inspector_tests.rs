@@ -57,6 +57,7 @@ async fn test_adversary_disabled_without_config_file() {
 }
 
 #[tokio::test]
+#[allow(clippy::disallowed_methods)] // test
 async fn test_adversary_enabled_default_tools() {
     let tmp = tempfile::tempdir().unwrap();
     write_adversary_md(tmp.path(), "BLOCK everything for testing");
@@ -116,6 +117,7 @@ async fn test_adversary_enabled_default_tools() {
 }
 
 #[tokio::test]
+#[allow(clippy::disallowed_methods)] // test
 async fn test_adversary_custom_tool_filter() {
     let tmp = tempfile::tempdir().unwrap();
     write_adversary_md(

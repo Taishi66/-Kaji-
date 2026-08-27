@@ -250,6 +250,7 @@ impl KajiAcpAgent {
         Ok(EmptyResponse {})
     }
 
+    #[allow(clippy::disallowed_methods)] // session
     pub(super) async fn on_archive_session(
         &self,
         req: ArchiveSessionRequest,

@@ -100,6 +100,7 @@ impl GatewayHandler {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // gateway
     pub async fn handle_message(&self, message: IncomingMessage) -> anyhow::Result<()> {
         let pairing = self.pairing_store.get(&message.user).await?;
 
@@ -244,6 +245,7 @@ impl GatewayHandler {
         Ok(None)
     }
 
+    #[allow(clippy::disallowed_methods)] // gateway
     async fn complete_pairing(&self, user: &PlatformUser) -> anyhow::Result<()> {
         let working_dir = gateway_working_dir(&user.platform, &user.user_id);
         std::fs::create_dir_all(&working_dir)?;

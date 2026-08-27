@@ -76,6 +76,7 @@ impl ToolPermissionStore {
         Ok(())
     }
 
+    #[allow(clippy::disallowed_methods)] // permission
     pub fn check_permission(&self, tool_request: &ToolRequest) -> Option<bool> {
         let context_hash = self.hash_tool_context(tool_request);
         let tool_call = tool_request.tool_call.as_ref().unwrap();
@@ -89,6 +90,7 @@ impl ToolPermissionStore {
         })
     }
 
+    #[allow(clippy::disallowed_methods)] // permission
     pub fn record_permission(
         &mut self,
         tool_request: &ToolRequest,
@@ -126,6 +128,7 @@ impl ToolPermissionStore {
         hasher.finalize().to_hex().to_string()
     }
 
+    #[allow(clippy::disallowed_methods)] // permission
     pub fn cleanup_expired(&mut self) -> anyhow::Result<()> {
         let now = Utc::now().timestamp();
         let mut changed = false;
