@@ -12,6 +12,7 @@ use crate::config::KajiMode;
 use crate::conversation::message::{InferenceMetadata, Message, MessageContent};
 use crate::conversation::{effective_role, Conversation, EffectiveRole};
 use crate::providers::base::{Provider, ProviderUsage};
+use crate::replay::idgen::{default_idgen, IdGen};
 use crate::session::Session;
 use crate::tool_inspection::ToolInspectionManager;
 use anyhow::{anyhow, Result};
@@ -119,6 +120,7 @@ pub struct InferenceRunner<'a> {
     prompt_manager: &'a Mutex<PromptManager>,
     tool_inspection_manager: &'a ToolInspectionManager,
     frontend_instructions: &'a Mutex<Option<String>>,
+    idgen: Arc<dyn IdGen>,
 }
 
 /// The agent-visible conversation as the provider sees it: tool requests left
@@ -179,7 +181,13 @@ impl<'a> InferenceRunner<'a> {
             prompt_manager,
             tool_inspection_manager,
             frontend_instructions,
+            idgen: default_idgen(),
         }
+    }
+
+    pub fn with_idgen(mut self, idgen: Arc<dyn IdGen>) -> Self {
+        self.idgen = idgen;
+        self
     }
 
     async fn error_outcome(&self, err: &ProviderError, emit: &Emitter) -> Vec<StateEffect> {
@@ -546,6 +554,7 @@ impl Inference for InferenceRunner<'_> {
                 conversation_for_provider.messages(),
                 &tools,
                 &toolshim_tools,
+                self.idgen.clone(),
             )
             .await;
 

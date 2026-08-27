@@ -258,6 +258,7 @@ impl TelegramGateway {
 
         let ext = Self::voice_file_extension(mime_type);
 
+        #[allow(clippy::disallowed_methods)]
         let filename = format!("voice_{}.{ext}", uuid::Uuid::new_v4());
         let path = dir.join(filename);
         std::fs::write(&path, bytes)?;

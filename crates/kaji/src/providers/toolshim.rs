@@ -438,6 +438,7 @@ fn append_tool_calls_to_message(
 ) -> Message {
     for tool_call in tool_calls {
         if tool_call.name != "noop" {
+            #[allow(clippy::disallowed_methods)]
             let id = Uuid::new_v4().to_string();
             message = message.with_tool_request(id, Ok(tool_call));
         }

@@ -203,6 +203,7 @@ impl KimiCodeProvider {
             }
             tracing::warn!("kimicode device_id at {:?} is invalid; regenerating", path);
         }
+        #[allow(clippy::disallowed_methods)]
         let id = Uuid::new_v4().to_string().replace('-', "");
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -525,6 +526,7 @@ mod tests {
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[allow(clippy::disallowed_methods)]
     fn test_provider(server_uri: &str, device_id: &str) -> KimiCodeProvider {
         KimiCodeProvider {
             client: Client::new(),

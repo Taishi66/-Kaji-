@@ -163,6 +163,7 @@ impl ObservationLayer {
             return id;
         }
 
+        #[allow(clippy::disallowed_methods)]
         let trace_id = Uuid::new_v4().to_string();
         spans.current_trace_id = Some(trace_id.clone());
 
@@ -293,6 +294,7 @@ where
         let mut visitor = JsonVisitor::new();
         attrs.record(&mut visitor);
 
+        #[allow(clippy::disallowed_methods)]
         let span_data = SpanData {
             observation_id: Uuid::new_v4().to_string(),
             name: attrs.metadata().name().to_string(),
@@ -460,6 +462,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::disallowed_methods)]
     fn create_test_span_data() -> SpanData {
         SpanData {
             observation_id: Uuid::new_v4().to_string(),

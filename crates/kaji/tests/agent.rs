@@ -1294,6 +1294,7 @@ mod tests {
                         Ok(Box::pin(stream))
                     }
                     1 => {
+                        #[allow(clippy::disallowed_methods)]
                         let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
                         let tokens = vec!["Hello", " world", ", how", " are", " you?"];
                         let stream = futures::stream::iter(tokens.into_iter().enumerate().map(
@@ -1309,6 +1310,7 @@ mod tests {
                     }
                     _ => {
                         let cancel = self.cancel_token.clone();
+                        #[allow(clippy::disallowed_methods)]
                         let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
                         let tokens = vec!["This ", "should ", "be ", "cancelled ", "soon."];
                         let stream = futures::stream::iter(tokens.into_iter().enumerate().map(

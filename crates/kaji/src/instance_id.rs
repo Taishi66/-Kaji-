@@ -19,6 +19,7 @@ fn load_or_create() -> String {
         }
     }
 
+    #[allow(clippy::disallowed_methods)]
     let id = Uuid::new_v4().to_string();
 
     if let Some(parent) = path.parent() {

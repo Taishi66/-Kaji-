@@ -842,6 +842,7 @@ impl Provider for BedrockProvider {
             // single message — mirrors the Anthropic provider, which stamps
             // the API-provided message id on every chunk. Bedrock's
             // MessageStart event carries no id, so generate one.
+            #[allow(clippy::disallowed_methods)]
             let message_id = format!("msg_{}", uuid::Uuid::new_v4());
             let mut full_text = String::new();
             let mut final_usage: Option<ProviderUsage> = None;

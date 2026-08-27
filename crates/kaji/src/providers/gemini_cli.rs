@@ -232,6 +232,7 @@ impl Provider for GeminiCliProvider {
         } = self.spawn_command(system, messages, &model_config.model_name)?;
         let session_id_lock = Arc::clone(&self.cli_session_id);
         let model_name = model_config.model_name.clone();
+        #[allow(clippy::disallowed_methods)]
         let message_id = uuid::Uuid::new_v4().to_string();
 
         let stderr = child.stderr.take();

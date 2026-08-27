@@ -428,6 +428,7 @@ impl AcpProvider {
     }
 }
 
+#[allow(clippy::disallowed_methods)]
 fn fresh_text_run() -> (String, i64) {
     (
         uuid::Uuid::new_v4().to_string(),

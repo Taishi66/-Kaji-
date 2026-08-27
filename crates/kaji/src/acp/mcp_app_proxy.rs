@@ -279,6 +279,7 @@ async fn store_guest_html(
             .into_response();
     }
 
+    #[allow(clippy::disallowed_methods)]
     let nonce = Uuid::new_v4().to_string();
     let csp = body.csp.unwrap_or_default();
     let guest_url = format!("{}/mcp-app-guest?nonce={}", state.guest_base_url, nonce);

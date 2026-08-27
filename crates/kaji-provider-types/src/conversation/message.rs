@@ -1008,6 +1008,7 @@ impl Message {
         self
     }
 
+    #[allow(clippy::disallowed_methods)]
     pub fn with_generated_id(self) -> Self {
         self.with_id(format!("msg_{}", Uuid::new_v4()))
     }

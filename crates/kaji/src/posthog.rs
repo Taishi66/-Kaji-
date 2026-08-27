@@ -110,6 +110,7 @@ struct InstallationData {
 }
 
 impl Default for InstallationData {
+    #[allow(clippy::disallowed_methods)]
     fn default() -> Self {
         Self {
             installation_id: Uuid::new_v4().to_string(),

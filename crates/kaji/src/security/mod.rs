@@ -175,6 +175,7 @@ impl SecurityManager {
 
                 if analysis_result.is_malicious {
                     let above_threshold = analysis_result.confidence > config_threshold;
+                    #[allow(clippy::disallowed_methods)]
                     let finding_id = format!("SEC-{}", Uuid::new_v4().simple());
 
                     let tool_call_json =

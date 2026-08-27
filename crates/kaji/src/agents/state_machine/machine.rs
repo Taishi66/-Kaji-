@@ -12,6 +12,7 @@ use crate::agents::AgentEvent;
 use crate::conversation::message::Message;
 use crate::conversation::Conversation;
 use crate::hooks::{HookContext, HookEvent, HookManager};
+use crate::replay::idgen::{default_idgen, IdGen};
 use crate::session::{Session, SessionManager};
 
 pub enum Step<'a> {
@@ -32,6 +33,7 @@ pub struct StateMachine<'a> {
     steps: Vec<Step<'a>>,
     cancel: CancellationToken,
     hook_manager: HookManager,
+    idgen: Arc<dyn IdGen>,
 }
 
 impl<'a> StateMachine<'a> {
@@ -40,11 +42,17 @@ impl<'a> StateMachine<'a> {
             steps,
             cancel,
             hook_manager: HookManager::default(),
+            idgen: default_idgen(),
         }
     }
 
     pub fn with_hook_manager(mut self, hook_manager: HookManager) -> Self {
         self.hook_manager = hook_manager;
+        self
+    }
+
+    pub fn with_idgen(mut self, idgen: Arc<dyn IdGen>) -> Self {
+        self.idgen = idgen;
         self
     }
 
@@ -142,7 +150,7 @@ impl<'a> StateMachine<'a> {
                 OperationResult::Applied(mut result) => {
                     // `step` and `apply` are separate entry points; a caller that
                     // drives steps itself still gets effects it can persist.
-                    result.ensure_message_ids();
+                    result.ensure_message_ids(&self.idgen);
                     if cancelled {
                         result.yield_to_client = true;
                     }
@@ -162,7 +170,7 @@ impl<'a> StateMachine<'a> {
         result: &mut StepResult,
         emit: &Emitter,
     ) -> Result<()> {
-        result.ensure_message_ids();
+        result.ensure_message_ids(&self.idgen);
         usage::enrich(session, &mut result.effects);
 
         for effect in &result.effects {

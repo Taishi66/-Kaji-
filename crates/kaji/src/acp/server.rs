@@ -1755,6 +1755,7 @@ impl KajiAcpAgent {
         // The ACP session_id IS the thread ID.
         let session_id = args.session_id.0.to_string();
 
+        #[allow(clippy::disallowed_methods)]
         let run_id = format!("run_{}", Uuid::new_v4());
         let cancel_token = CancellationToken::new();
         self.start_active_run(&session_id, run_id.clone(), cancel_token.clone())
@@ -1979,6 +1980,7 @@ impl KajiAcpAgent {
                 .data("prompt must contain steerable content"));
         }
 
+        #[allow(clippy::disallowed_methods)]
         let message_id = format!("steer_{}", Uuid::new_v4());
         let message = message.with_id(message_id.clone());
         agent.steer(&req.session_id, message).await;

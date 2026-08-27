@@ -55,6 +55,7 @@ pub fn parse_xml_tool_calls(content: &str) -> (Option<String>, Vec<MessageConten
             arguments.insert(param_name, serde_json::Value::String(param_value));
         }
 
+        #[allow(clippy::disallowed_methods)]
         let id = Uuid::new_v4().to_string();
 
         if is_valid_function_name(&function_name) {

@@ -327,6 +327,7 @@ fn process_response_part_impl(
         );
         None
     } else if let Some(function_call) = part.get("functionCall") {
+        #[allow(clippy::disallowed_methods)]
         let id = function_call
             .get("id")
             .and_then(Value::as_str)
@@ -439,6 +440,7 @@ where
     try_stream! {
         let mut final_usage: Option<ProviderUsage> = None;
         let mut last_signature: Option<String> = None;
+        #[allow(clippy::disallowed_methods)]
         let stream_id = Uuid::new_v4().to_string();
         let mut incomplete_data: Option<String> = None;
 

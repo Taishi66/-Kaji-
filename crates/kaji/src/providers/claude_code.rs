@@ -737,6 +737,7 @@ impl Provider for ClaudeCodeProvider {
         let blocks = self.last_user_content_blocks(messages);
         let ndjson_line = build_stream_json_input(&blocks, &session_id);
         let model_name = model_config.model_name.clone();
+        #[allow(clippy::disallowed_methods)]
         let mut current_text_message_id = uuid::Uuid::new_v4().to_string();
         let pending_confirmations = Arc::clone(&self.pending_confirmations);
 
@@ -945,7 +946,10 @@ impl Provider for ClaudeCodeProvider {
                                             request_id.clone(), tool_name, input.clone(), None,
                                         );
                                         yield (Some(action_msg), None);
-                                        current_text_message_id = uuid::Uuid::new_v4().to_string();
+                                        #[allow(clippy::disallowed_methods)]
+                                        {
+                                            current_text_message_id = uuid::Uuid::new_v4().to_string();
+                                        }
 
                                         let confirmation = rx.await.unwrap_or(PermissionConfirmation {
                                             principal_type: PrincipalType::Tool,

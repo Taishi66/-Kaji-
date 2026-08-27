@@ -132,6 +132,7 @@ impl LangfuseBatchManager {
 }
 
 impl BatchManager for LangfuseBatchManager {
+    #[allow(clippy::disallowed_methods)]
     fn add_event(&mut self, event_type: &str, body: Value) {
         self.batch.push(json!({
             "id": Uuid::new_v4().to_string(),

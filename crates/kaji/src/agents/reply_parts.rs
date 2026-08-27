@@ -22,6 +22,9 @@ use crate::providers::toolshim::{
     augment_message_with_selected_tool_interpreter, convert_tool_messages_to_text,
     modify_system_prompt_for_tool_json, sanitize_residual_markers,
 };
+#[cfg(test)]
+use crate::replay::idgen::default_idgen;
+use crate::replay::idgen::IdGen;
 use kaji_providers::conversation::token_usage::{CostSource, ProviderStats, ProviderUsage, Usage};
 use kaji_providers::model::ModelConfig;
 use rmcp::model::Tool;
@@ -406,7 +409,16 @@ pub(crate) fn provider_view_messages(
 }
 
 #[tracing::instrument(
-    skip(provider, model_config, session_id, system_prompt, messages, tools, toolshim_tools),
+    skip(
+        provider,
+        model_config,
+        session_id,
+        system_prompt,
+        messages,
+        tools,
+        toolshim_tools,
+        idgen
+    ),
     fields(
         session.id = %session_id,
         gen_ai.conversation.id = %session_id,
@@ -423,6 +435,7 @@ pub(crate) fn provider_view_messages(
         gen_ai.output.messages = tracing::field::Empty,
     )
 )]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_response_from_provider(
     provider: Arc<dyn Provider>,
     model_config: ModelConfig,
@@ -431,6 +444,7 @@ pub(crate) async fn stream_response_from_provider(
     messages: &[Message],
     tools: &[Tool],
     toolshim_tools: &[Tool],
+    idgen: Arc<dyn IdGen>,
 ) -> Result<MessageStream, ProviderError> {
     let config = model_config.clone();
 
@@ -590,7 +604,7 @@ pub(crate) async fn stream_response_from_provider(
                         message
                     } else if is_mergeable_assistant_chunk(&message) {
                         let id = active_mergeable_assistant_id
-                            .get_or_insert_with(|| format!("msg_{}", uuid::Uuid::new_v4()))
+                            .get_or_insert_with(|| idgen.next_message_id())
                             .clone();
                         message.with_id(id)
                     } else {
@@ -974,6 +988,7 @@ mod tests {
             &messages,
             &[],
             &[],
+            default_idgen(),
         )
         .await
         .unwrap();
@@ -1025,6 +1040,7 @@ mod tests {
             &messages,
             &[],
             &[],
+            default_idgen(),
         )
         .await
         .unwrap();
@@ -1057,6 +1073,7 @@ mod tests {
             &messages,
             &[],
             &[],
+            default_idgen(),
         )
         .await
         .unwrap();
@@ -1101,6 +1118,7 @@ mod tests {
             &messages,
             &[],
             &[],
+            default_idgen(),
         )
         .await
         .unwrap();
@@ -1377,6 +1395,7 @@ mod tests {
             &[Message::user().with_text("hi")],
             &[],
             &[],
+            default_idgen(),
         )
         .await?;
 
@@ -1483,6 +1502,7 @@ mod tests {
             &[Message::user().with_text("hi")],
             &[],
             &[],
+            default_idgen(),
         )
         .await?;
 
@@ -1521,6 +1541,7 @@ mod tests {
             &[Message::user().with_text("hi")],
             &[],
             &[],
+            default_idgen(),
         )
         .await?;
 

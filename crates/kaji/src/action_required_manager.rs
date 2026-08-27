@@ -65,6 +65,7 @@ impl ActionRequiredManager {
         schema: Value,
         timeout_duration: Duration,
     ) -> Result<ElicitationOutcome> {
+        #[allow(clippy::disallowed_methods)]
         let id = Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let pending_request = PendingRequest {

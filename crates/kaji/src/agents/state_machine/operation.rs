@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -10,6 +11,7 @@ use crate::conversation::message::{Message, MessageContent, MessageErrorKind};
 use crate::conversation::{effective_role, Conversation, EffectiveRole};
 use crate::providers::base::ProviderUsage;
 use crate::recipe::Recipe;
+use crate::replay::idgen::IdGen;
 use crate::session::{ExtensionData, Session};
 use rmcp::model::Tool;
 
@@ -169,9 +171,9 @@ pub struct StepResult {
 }
 
 impl StepResult {
-    pub(super) fn ensure_message_ids(&mut self) {
+    pub(super) fn ensure_message_ids(&mut self, idgen: &Arc<dyn IdGen>) {
         for effect in &mut self.effects {
-            effect.ensure_message_ids();
+            effect.ensure_message_ids(idgen);
         }
     }
 }
@@ -227,7 +229,7 @@ pub enum StateEffect {
 }
 
 impl StateEffect {
-    pub(super) fn ensure_message_ids(&mut self) {
+    pub(super) fn ensure_message_ids(&mut self, idgen: &Arc<dyn IdGen>) {
         let messages = match self {
             StateEffect::AppendMessage(message) => std::slice::from_mut(message),
             StateEffect::ReplaceConversation { conversation, .. } => {
@@ -237,7 +239,7 @@ impl StateEffect {
         };
         for message in messages {
             if message.id.is_none() {
-                message.id = Some(format!("msg_{}", uuid::Uuid::new_v4()));
+                message.id = Some(idgen.next_message_id());
             }
         }
     }

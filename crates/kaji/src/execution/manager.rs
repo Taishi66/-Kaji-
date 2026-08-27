@@ -444,7 +444,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = create_test_manager(&temp_dir).await;
 
+        #[allow(clippy::disallowed_methods)]
         let session1 = uuid::Uuid::new_v4().to_string();
+        #[allow(clippy::disallowed_methods)]
         let session2 = uuid::Uuid::new_v4().to_string();
 
         let agent1 = manager.get_or_create_agent(session1.clone()).await.unwrap();

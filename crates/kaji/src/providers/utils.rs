@@ -245,6 +245,7 @@ impl RequestLogger for RequestLog {
         let logs_dir = Paths::in_state_dir("logs");
         fs_err::create_dir_all(&logs_dir)?;
 
+        #[allow(clippy::disallowed_methods)]
         let request_id = Uuid::new_v4();
         let temp_name = format!("llm_request.{request_id}.jsonl");
         let temp_path = logs_dir.join(PathBuf::from(temp_name));

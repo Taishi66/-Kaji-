@@ -194,6 +194,7 @@ impl ScheduleTool {
             .map_err(|error| recipe_file_error(&error.to_string()))?;
 
         // Generate unique job ID
+        #[allow(clippy::disallowed_methods)]
         let job_id = format!("agent_created_{}", uuid::Uuid::new_v4());
 
         let recipe_base_dir = canonical_recipe_path

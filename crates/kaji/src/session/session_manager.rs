@@ -2024,6 +2024,7 @@ impl SessionStorage {
                 .await?;
         let created = message.created.max(latest.unwrap_or(message.created));
 
+        #[allow(clippy::disallowed_methods)]
         let message_id = message
             .id
             .clone()
@@ -2068,6 +2069,7 @@ impl SessionStorage {
         for message in conversation.messages() {
             let metadata_json = serde_json::to_string(&message.metadata)?;
 
+            #[allow(clippy::disallowed_methods)]
             let message_id = message
                 .id
                 .clone()

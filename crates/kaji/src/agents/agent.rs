@@ -57,6 +57,7 @@ use crate::permission::permission_judge::PermissionCheckResult;
 use crate::permission::PermissionConfirmation;
 use crate::providers::base::{PermissionRouting, Provider};
 use crate::recipe::{Author, Recipe, Response, Settings};
+use crate::replay::idgen::{default_idgen, IdGen};
 use crate::scheduler_trait::SchedulerTrait;
 use crate::security::adversary_inspector::AdversaryInspector;
 use crate::security::egress_inspector::EgressInspector;
@@ -265,6 +266,7 @@ pub struct Agent {
     pub(super) tool_result_rx: ToolResultReceiver,
 
     pub(super) retry_manager: RetryManager,
+    pub(super) idgen: Arc<dyn IdGen>,
     pub(super) tool_inspection_manager: ToolInspectionManager,
     pub(super) hook_manager: crate::hooks::HookManager,
     #[cfg(test)]
@@ -528,6 +530,7 @@ impl Agent {
             tool_result_tx: tool_tx,
             tool_result_rx: Arc::new(Mutex::new(tool_rx)),
             retry_manager: RetryManager::new(),
+            idgen: default_idgen(),
             tool_inspection_manager: Self::create_tool_inspection_manager(
                 permission_manager,
                 provider.clone(),
@@ -550,6 +553,13 @@ impl Agent {
             #[cfg(test)]
             checkpoint_project_override: None,
         }
+    }
+
+    /// Swaps in a deterministic `IdGen` for exact replay (see
+    /// `crate::replay::idgen`). Production `Agent`s otherwise generate
+    /// random message ids via `default_idgen()`.
+    pub fn set_idgen(&mut self, idgen: Arc<dyn IdGen>) {
+        self.idgen = idgen;
     }
 
     /// Emit a lifecycle hook event with no extra context. Useful for events
@@ -1947,15 +1957,18 @@ impl Agent {
             )),
             Arc::new(ExitOnErrorOperation),
         ];
-        let inference = Arc::new(InferenceRunner::new(
-            provider,
-            model_config,
-            self.extension_manager.clone(),
-            &self.current_kaji_mode,
-            &self.prompt_manager,
-            &self.tool_inspection_manager,
-            &self.frontend_instructions,
-        ));
+        let inference = Arc::new(
+            InferenceRunner::new(
+                provider,
+                model_config,
+                self.extension_manager.clone(),
+                &self.current_kaji_mode,
+                &self.prompt_manager,
+                &self.tool_inspection_manager,
+                &self.frontend_instructions,
+            )
+            .with_idgen(self.idgen.clone()),
+        );
         let mut command_handlers = operations.clone();
         command_handlers.push(inference.clone());
         let command_operation: Arc<dyn Operation + '_> =
@@ -1970,7 +1983,9 @@ impl Agent {
             .chain(std::iter::once(Step::Inference(inference)))
             .collect();
 
-        StateMachine::new(steps, cancel).with_hook_manager(self.hook_manager.clone())
+        StateMachine::new(steps, cancel)
+            .with_hook_manager(self.hook_manager.clone())
+            .with_idgen(self.idgen.clone())
     }
 
     pub(crate) async fn reply_with_state_machine(
@@ -2949,6 +2964,7 @@ impl Agent {
                     conversation.messages(),
                     &tools,
                     &toolshim_tools,
+                    self.idgen.clone(),
                 ).await?;
                 last_assistant_text.clear();
 
