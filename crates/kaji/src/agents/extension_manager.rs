@@ -1066,10 +1066,25 @@ impl ExtensionManager {
                 } else {
                     // Builtin MCP server extension
                     let timeout_secs = resolve_timeout(timeout);
-                    let extension_fn =
-                        get_builtin_extension(normalized_name.as_str()).ok_or_else(|| {
-                            ExtensionError::ConfigError(format!("Unknown extension: {}", name))
-                        })?;
+                    let Some(extension_fn) = get_builtin_extension(normalized_name.as_str()) else {
+                        if normalized_name == "memory" {
+                            // Removed in 09f524863: the legacy MCP memory extension was
+                            // replaced by the fact store, and existing categories were
+                            // migrated to .kaji/memory facts on first boot. A stale
+                            // config entry from before the upgrade must not stop kaji.
+                            tracing::warn!(
+                                extension = %name,
+                                "'memory' builtin extension was removed; its data was \
+                                 migrated to .kaji/memory facts, skipping this stale \
+                                 config entry"
+                            );
+                            return Ok(());
+                        }
+                        return Err(ExtensionError::ConfigError(format!(
+                            "Unknown extension: {}",
+                            name
+                        )));
+                    };
 
                     if let Some(container) = container {
                         let container_id = container.id();
@@ -3299,6 +3314,37 @@ mod tests {
             em.extensions.lock().await.len(),
             1,
             "old extension must be preserved when replacement client creation fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_extension_skips_stale_memory_entry_without_error() {
+        // The legacy MCP memory extension (removed in 09f524863) is no longer a
+        // registered builtin. A pre-existing user config that still lists it must
+        // not fail kaji's boot: add_extension skips the entry and returns Ok.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let em = Arc::new(ExtensionManager::new_without_provider(
+            temp_dir.path().to_path_buf(),
+        ));
+
+        let config = ExtensionConfig::Builtin {
+            name: "memory".to_string(),
+            description: "memory description".to_string(),
+            display_name: Some("Memory".to_string()),
+            timeout: None,
+            bundled: None,
+            available_tools: Vec::new(),
+        };
+
+        let result = em.add_extension(config, None, None, None).await;
+        assert!(
+            result.is_ok(),
+            "stale 'memory' builtin entry must not error: {result:?}"
+        );
+        assert_eq!(
+            em.extensions.lock().await.len(),
+            0,
+            "stale 'memory' entry must not be registered as a live extension"
         );
     }
 
