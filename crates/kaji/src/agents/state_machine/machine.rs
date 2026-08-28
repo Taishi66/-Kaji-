@@ -34,6 +34,7 @@ pub struct StateMachine<'a> {
     cancel: CancellationToken,
     hook_manager: HookManager,
     idgen: Arc<dyn IdGen>,
+    replay: bool,
 }
 
 impl<'a> StateMachine<'a> {
@@ -43,6 +44,7 @@ impl<'a> StateMachine<'a> {
             cancel,
             hook_manager: HookManager::default(),
             idgen: default_idgen(),
+            replay: false,
         }
     }
 
@@ -53,6 +55,13 @@ impl<'a> StateMachine<'a> {
 
     pub fn with_idgen(mut self, idgen: Arc<dyn IdGen>) -> Self {
         self.idgen = idgen;
+        self
+    }
+
+    /// Le pendant boucle SM de `Agent::is_replay()`, transmis à `usage::record`
+    /// pour que le tour rejoué ne facture rien.
+    pub fn with_replay(mut self, replay: bool) -> Self {
+        self.replay = replay;
         self
     }
 
@@ -183,7 +192,7 @@ impl<'a> StateMachine<'a> {
                     usage: replacement_usage,
                 } => {
                     if let Some(usage) = replacement_usage {
-                        usage::record(session_manager, session, usage, true).await?;
+                        usage::record(session_manager, session, usage, true, self.replay).await?;
                     }
                     session_manager
                         .replace_conversation(&session.id, conversation)
@@ -230,7 +239,7 @@ impl<'a> StateMachine<'a> {
                         .await?;
                 }
                 StateEffect::RecordUsage(usage) => {
-                    usage::record(session_manager, session, usage, false).await?;
+                    usage::record(session_manager, session, usage, false, self.replay).await?;
                 }
             }
         }

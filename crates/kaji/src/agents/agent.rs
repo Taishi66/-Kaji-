@@ -58,6 +58,7 @@ use crate::permission::PermissionConfirmation;
 use crate::providers::base::{PermissionRouting, Provider};
 use crate::recipe::{Author, Recipe, Response, Settings};
 use crate::replay::idgen::{default_idgen, IdGen};
+use crate::replay::mode::ReplayMode;
 use crate::replay::record::{next_llm_call, TurnRecorder};
 use crate::scheduler_trait::SchedulerTrait;
 use crate::security::adversary_inspector::AdversaryInspector;
@@ -307,6 +308,12 @@ pub struct Agent {
     /// `None` covers both "checkpointing works" and "nothing tried to wire
     /// it" — the TUI only surfaces a reason it actually has.
     checkpoint_disabled_reason: Option<&'static str>,
+    /// Mode replay du tour courant, `None` en exécution normale. Sa seule
+    /// présence rend l'enveloppe et les deux boucles hermétiques : rien
+    /// n'est journalisé, capturé, ingéré en mémoire P1, facturé ni
+    /// snapshotté (`is_replay`, spec
+    /// `docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`, S3).
+    replay_mode: Option<ReplayMode>,
     /// Test-only override of the directory `checkpoint_project` resolves —
     /// lets tests inject a project path without a real session lookup or
     /// mutating the real process `current_dir` (unsafe to do per-test under
@@ -558,6 +565,7 @@ impl Agent {
             current_turn_recorder: std::sync::Mutex::new(None),
             checkpoint_store: None,
             checkpoint_disabled_reason: None,
+            replay_mode: None,
             #[cfg(test)]
             checkpoint_project_override: None,
         }
@@ -568,6 +576,19 @@ impl Agent {
     /// random message ids via `default_idgen()`.
     pub fn set_idgen(&mut self, idgen: Arc<dyn IdGen>) {
         self.idgen = idgen;
+    }
+
+    /// Bascule cet `Agent` en replay : à partir de là ses tours relisent une
+    /// trace au lieu d'en produire une. Irréversible par construction — un
+    /// `Agent` de replay est monté pour ça et jeté ensuite.
+    pub fn set_replay_mode(&mut self, replay_mode: ReplayMode) {
+        self.replay_mode = Some(replay_mode);
+    }
+
+    /// Le tour courant rejoue-t-il une trace ? Unique lecture du mode : les
+    /// gates de l'enveloppe et des deux boucles passent toutes par ici.
+    pub(crate) fn is_replay(&self) -> bool {
+        self.replay_mode.is_some()
     }
 
     /// Emit a lifecycle hook event with no extra context. Useful for events
@@ -1033,7 +1054,9 @@ impl Agent {
         // KAJI : splice recalled inter-session facts into the system prompt
         // (zero-token, anchored context). Both agent-loop paths do this so the
         // memory behavior stays in parity.
-        crate::kaji::ingest_turn(session_id, conversation.messages());
+        if !self.is_replay() {
+            crate::kaji::ingest_turn(session_id, conversation.messages());
+        }
         let query = crate::kaji::latest_user_instruction(conversation.messages());
         if let Some(query) = query {
             let (spliced, memory_block) =
@@ -1045,14 +1068,16 @@ impl Agent {
             )
             .await;
         }
-        if let Ok(provider) = self.provider().await {
-            crate::kaji::maybe_spawn_curation(
-                provider.clone(),
-                provider.get_name().to_string(),
-                model_config.clone(),
-                session_id.to_string(),
-                working_dir.to_path_buf(),
-            );
+        if !self.is_replay() {
+            if let Ok(provider) = self.provider().await {
+                crate::kaji::maybe_spawn_curation(
+                    provider.clone(),
+                    provider.get_name().to_string(),
+                    model_config.clone(),
+                    session_id.to_string(),
+                    working_dir.to_path_buf(),
+                );
+            }
         }
 
         let kaji_mode = *self.current_kaji_mode.lock().await;
@@ -1846,6 +1871,9 @@ impl Agent {
     /// `ToolConfirmationRouter` at this layer without plumbing it in from
     /// `tool_execution.rs`, out of scope here. Never fails the confirmation.
     async fn log_approval_event(&self, request_id: &str, confirmation: &PermissionConfirmation) {
+        if self.is_replay() {
+            return;
+        }
         let Some(session_id) = self.current_session_id.lock().await.clone() else {
             warn!(
                 %request_id,
@@ -1989,7 +2017,8 @@ impl Agent {
                 &self.frontend_instructions,
             )
             .with_idgen(self.idgen.clone())
-            .with_turn_recorder(self.turn_recorder()),
+            .with_turn_recorder(self.turn_recorder())
+            .with_replay(self.is_replay()),
         );
         let mut command_handlers = operations.clone();
         command_handlers.push(inference.clone());
@@ -2008,6 +2037,7 @@ impl Agent {
         StateMachine::new(steps, cancel)
             .with_hook_manager(self.hook_manager.clone())
             .with_idgen(self.idgen.clone())
+            .with_replay(self.is_replay())
     }
 
     pub(crate) async fn reply_with_state_machine(
@@ -2330,7 +2360,14 @@ impl Agent {
         self.current_turn_seq
             .store(turn_seq.unwrap_or(-1), std::sync::atomic::Ordering::SeqCst);
         *self.current_session_id.lock().await = Some(session_id.clone());
-        *self.current_turn_recorder.lock().unwrap() = turn_seq.map(|turn_seq| {
+        // Le tour rejoué relit ce journal, il ne l'écrit pas : `journal_seq`
+        // porte le `turn_seq` tant qu'on enregistre et vaut `None` en replay.
+        // Capture v2 et appends de l'enveloppe y sont déjà conditionnés, donc
+        // ce seul point ferme l'ensemble — aucun site d'écriture ne peut être
+        // oublié (spec docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md,
+        // S3 « hermétique par construction »).
+        let journal_seq = turn_seq.filter(|_| !self.is_replay());
+        *self.current_turn_recorder.lock().unwrap() = journal_seq.map(|turn_seq| {
             Arc::new(TurnRecorder::new(
                 self.config.session_manager.clone(),
                 session_id.clone(),
@@ -2374,7 +2411,7 @@ impl Agent {
         };
 
         Ok(Box::pin(async_stream::try_stream! {
-            if let Some(turn_seq) = turn_seq {
+            if let Some(turn_seq) = journal_seq {
                 if let Err(error) = session_manager.append_log_meta_if_absent(&session_id).await {
                     warn!(?error, "event log append failed for log_meta");
                 }
@@ -2399,7 +2436,7 @@ impl Agent {
             loop {
                 match events.next().await {
                     Some(Ok(event)) => {
-                        if let Some(turn_seq) = turn_seq {
+                        if let Some(turn_seq) = journal_seq {
                             let kind = agent_event_kind(&event);
                             let payload = agent_event_payload(&event);
                             if let Err(error) = session_manager
@@ -2418,7 +2455,7 @@ impl Agent {
                         // polled again). Log turn_end before propagating so
                         // `last_turn_is_interrupted` doesn't mistake an errored turn for
                         // a crashed/killed one.
-                        if let (Some(turn_seq), Err(error)) = (turn_seq, &err) {
+                        if let (Some(turn_seq), Err(error)) = (journal_seq, &err) {
                             let payload = turn_end_error_payload(error);
                             if let Err(append_error) = session_manager
                                 .append_event(&session_id, turn_seq, "turn_end", &payload)
@@ -2433,7 +2470,7 @@ impl Agent {
                         // Only reached on a clean end of the underlying stream. A dropped
                         // stream (crash/kill/cancel) skips this — that absence is exactly
                         // the "turn interrupted" signal `last_turn_is_interrupted` detects.
-                        if let Some(turn_seq) = turn_seq {
+                        if let Some(turn_seq) = journal_seq {
                             if let Err(error) = session_manager
                                 .append_event(&session_id, turn_seq, "turn_end", "{}")
                                 .await

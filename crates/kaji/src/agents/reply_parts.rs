@@ -877,15 +877,17 @@ impl Agent {
             None => usage.usage,
         };
 
-        manager
-            .record_usage_metrics(
-                session_id,
-                schedule_id,
-                current_usage,
-                &usage.model,
-                &ledger,
-            )
-            .await?;
+        if !self.is_replay() {
+            manager
+                .record_usage_metrics(
+                    session_id,
+                    schedule_id,
+                    current_usage,
+                    &usage.model,
+                    &ledger,
+                )
+                .await?;
+        }
 
         Ok(enriched)
     }

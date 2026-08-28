@@ -123,6 +123,7 @@ pub struct InferenceRunner<'a> {
     frontend_instructions: &'a Mutex<Option<String>>,
     idgen: Arc<dyn IdGen>,
     turn_recorder: Option<Arc<TurnRecorder>>,
+    replay: bool,
 }
 
 /// The agent-visible conversation as the provider sees it: tool requests left
@@ -185,6 +186,7 @@ impl<'a> InferenceRunner<'a> {
             frontend_instructions,
             idgen: default_idgen(),
             turn_recorder: None,
+            replay: false,
         }
     }
 
@@ -195,6 +197,14 @@ impl<'a> InferenceRunner<'a> {
 
     pub fn with_turn_recorder(mut self, turn_recorder: Option<Arc<TurnRecorder>>) -> Self {
         self.turn_recorder = turn_recorder;
+        self
+    }
+
+    /// Le pendant boucle SM de `Agent::is_replay()` : un tour rejoué ne
+    /// nourrit ni la mémoire P1 ni le curateur (spec
+    /// `docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`, S3).
+    pub fn with_replay(mut self, replay: bool) -> Self {
+        self.replay = replay;
         self
     }
 
@@ -474,7 +484,9 @@ impl Inference for InferenceRunner<'_> {
             let mut system_prompt = system_prompt;
             let (fixed_conversation, _) =
                 crate::conversation::fix_conversation(conversation.clone());
-            crate::kaji::ingest_turn(&session.id, fixed_conversation.messages());
+            if !self.replay {
+                crate::kaji::ingest_turn(&session.id, fixed_conversation.messages());
+            }
             let query = crate::kaji::latest_user_instruction(fixed_conversation.messages());
             if let Some(query) = query {
                 let (spliced, memory_block) = crate::kaji::splice_memory_block(
@@ -490,13 +502,15 @@ impl Inference for InferenceRunner<'_> {
                 )
                 .await;
             }
-            crate::kaji::maybe_spawn_curation(
-                self.provider.clone(),
-                self.provider.get_name().to_string(),
-                self.model_config.clone(),
-                session.id.clone(),
-                session.working_dir.clone(),
-            );
+            if !self.replay {
+                crate::kaji::maybe_spawn_curation(
+                    self.provider.clone(),
+                    self.provider.get_name().to_string(),
+                    self.model_config.clone(),
+                    session.id.clone(),
+                    session.working_dir.clone(),
+                );
+            }
             let (tools, toolshim_tools, system_prompt) =
                 crate::agents::reply_parts::prepare_tools_for_provider(
                     tools,

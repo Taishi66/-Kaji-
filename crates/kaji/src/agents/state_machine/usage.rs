@@ -60,12 +60,20 @@ pub(super) fn enrich(session: &Session, effects: &mut [StateEffect]) {
     }
 }
 
+/// `replay` vrai ⇒ le tour rejoue une trace : rien n'est facturé, l'usage
+/// ledger de la session source reste tel qu'il a été enregistré (spec
+/// `docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`, S3).
+/// Pendant boucle SM du gate de `Agent::update_session_metrics`.
 pub(super) async fn record(
     session_manager: &SessionManager,
     session: &Session,
     usage: &ProviderUsage,
     replaces_conversation: bool,
+    replay: bool,
 ) -> Result<()> {
+    if replay {
+        return Ok(());
+    }
     let ledger = MessageUsage::from_provider_usage(usage, replaces_conversation);
     session_manager
         .record_usage_metrics(
