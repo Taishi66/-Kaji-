@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::conversation::message::Message;
 use crate::mcp_utils::ToolResult;
 use crate::permission::grant_decision::apply_grant_decision;
+use crate::replay::cursor::EventCursor;
 use crate::replay::record::{ToolCapture, TurnRecorder};
 use rmcp::model::{ContentBlock, ServerNotification};
 
@@ -41,6 +42,7 @@ pub struct ToolCallContext {
     pub tool_call_request_id: Option<String>,
     notification_emitter: Option<ToolCallNotificationEmitter>,
     turn_recorder: Option<Arc<TurnRecorder>>,
+    replay_cursor: Option<Arc<EventCursor>>,
 }
 
 impl ToolCallContext {
@@ -55,6 +57,7 @@ impl ToolCallContext {
             tool_call_request_id,
             notification_emitter: None,
             turn_recorder: None,
+            replay_cursor: None,
         }
     }
 
@@ -77,6 +80,17 @@ impl ToolCallContext {
     pub(crate) fn with_turn_recorder(mut self, turn_recorder: Option<Arc<TurnRecorder>>) -> Self {
         self.turn_recorder = turn_recorder;
         self
+    }
+
+    /// Branche le journal d'un tour rejoué : sa présence seule fait servir le
+    /// `tool_result` enregistré au lieu d'exécuter l'outil.
+    pub(crate) fn with_replay_cursor(mut self, replay_cursor: Option<Arc<EventCursor>>) -> Self {
+        self.replay_cursor = replay_cursor;
+        self
+    }
+
+    pub(crate) fn replay_cursor(&self) -> Option<&Arc<EventCursor>> {
+        self.replay_cursor.as_ref()
     }
 
     /// Present only for a dispatch that both belongs to a recorded turn and

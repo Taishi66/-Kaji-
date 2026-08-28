@@ -39,6 +39,12 @@ impl ReplayPosition {
         self.next_call_idx.store(0, Ordering::SeqCst);
     }
 
+    /// Le tour ouvert. Les intercepteurs du rejeu (bloc mémoire, horloge,
+    /// compaction, approbations) s'adressent au journal par ce tour-là.
+    pub fn turn(&self) -> i64 {
+        self.turn_seq.load(Ordering::SeqCst)
+    }
+
     fn next_call(&self) -> (i64, u32) {
         (
             self.turn_seq.load(Ordering::SeqCst),

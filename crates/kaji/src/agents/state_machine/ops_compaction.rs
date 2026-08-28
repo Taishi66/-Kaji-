@@ -51,6 +51,7 @@ pub struct CompactionOperation {
     threshold: f64,
     manages_own_context: bool,
     turn_recorder: Option<Arc<TurnRecorder>>,
+    replay_source: Option<crate::replay::source::ReplaySource>,
 }
 
 impl CompactionOperation {
@@ -68,11 +69,20 @@ impl CompactionOperation {
             threshold,
             manages_own_context,
             turn_recorder: None,
+            replay_source: None,
         }
     }
 
     pub fn with_turn_recorder(mut self, turn_recorder: Option<Arc<TurnRecorder>>) -> Self {
         self.turn_recorder = turn_recorder;
+        self
+    }
+
+    pub fn with_replay_source(
+        mut self,
+        replay_source: Option<crate::replay::source::ReplaySource>,
+    ) -> Self {
+        self.replay_source = replay_source;
         self
     }
 
@@ -243,9 +253,15 @@ impl Operation for CompactionOperation {
             if last_effective_role(messages)? != EffectiveRole::User {
                 return not_applicable();
             }
-            match session.usage.total_tokens {
-                Some(tokens) if tokens > 0 && self.over_threshold(tokens as usize) => {}
-                _ => return not_applicable(),
+            let over_threshold = matches!(
+                session.usage.total_tokens,
+                Some(tokens) if tokens > 0 && self.over_threshold(tokens as usize)
+            );
+            if !crate::replay::source::condense_decision(
+                self.replay_source.as_ref(),
+                over_threshold,
+            ) {
+                return not_applicable();
             }
         }
 

@@ -423,6 +423,36 @@ pub fn splice_memory_block(
     (format!("{system_prompt}\n\n{block}"), Some(block))
 }
 
+/// Le bloc mémoire du tour, appliqué au prompt système : recalculé et
+/// journalisé à l'enregistrement, resservi depuis le journal au rejeu.
+///
+/// Point unique partagé par les deux boucles — chacune n'en porte qu'un appel,
+/// donc ni le splice, ni la capture, ni la bascule de rejeu ne peuvent diverger
+/// entre elles (spec
+/// `docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`, S3).
+pub async fn apply_memory_block(
+    system_prompt: String,
+    messages: &[crate::conversation::message::Message],
+    session_id: &str,
+    working_dir: &Path,
+    recorder: Option<&Arc<crate::replay::record::TurnRecorder>>,
+    replay: Option<&crate::replay::source::ReplaySource>,
+) -> String {
+    if let Some(replay) = replay {
+        return match replay.memory_block() {
+            Some(block) => format!("{system_prompt}\n\n{block}"),
+            None => system_prompt,
+        };
+    }
+
+    let Some(query) = latest_user_instruction(messages) else {
+        return system_prompt;
+    };
+    let (spliced, block) = splice_memory_block(&system_prompt, session_id, &query, working_dir);
+    crate::replay::record::record_memory_block(recorder, block.as_deref()).await;
+    spliced
+}
+
 /// Top-k curated facts for `query`, both scopes merged into the same bm25
 /// ranking, rendered as a markdown block. `None` when nothing matches.
 ///

@@ -50,6 +50,7 @@ use crate::conversation::message::ToolResponse;
 use crate::mcp_utils::ToolResult;
 use crate::oauth::{oauth_flow, KajiCredentialStore};
 use crate::prompt_template;
+use crate::replay::cursor::EventCursor;
 use crate::replay::record::ToolCapture;
 use crate::subprocess::configure_subprocess;
 use rmcp::model::{
@@ -389,6 +390,40 @@ fn recorded_response(
         tool_result,
         metadata: None,
     }
+}
+
+/// Le résultat d'un appel d'outil rejoué : celui du journal, adressé par
+/// `tool_call_id`. Un tour rejoué n'exécute jamais d'outil — clé absente, id
+/// absent ou payload illisible ⇒ refus nommé, jamais une exécution de
+/// rattrapage ni une valeur voisine (spec
+/// `docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`, S3).
+fn replayed_tool_result(
+    cursor: &EventCursor,
+    tool_call_id: Option<&str>,
+) -> std::result::Result<ToolCallResult, ErrorData> {
+    let Some(tool_call_id) = tool_call_id else {
+        return Err(ErrorData::new(
+            ErrorCode::INVALID_REQUEST,
+            "replay: appel d'outil sans tool_call_id — rien à adresser dans le journal".to_string(),
+            None,
+        ));
+    };
+    let Some(recorded) = cursor.tool_results.get(tool_call_id) else {
+        warn!(%tool_call_id, "replay: tool_result absent du journal");
+        return Err(ErrorData::new(
+            ErrorCode::INTERNAL_ERROR,
+            format!("replay: tool_result absent pour {tool_call_id} — log tronqué ou divergent"),
+            None,
+        ));
+    };
+    let response: ToolResponse = serde_json::from_str(recorded).map_err(|error| {
+        ErrorData::new(
+            ErrorCode::INTERNAL_ERROR,
+            format!("replay: tool_result illisible pour {tool_call_id} — {error}"),
+            None,
+        )
+    })?;
+    Ok(ToolCallResult::from(response.tool_result))
 }
 
 async fn append_tool_result(capture: &ToolCapture, response: &ToolResponse) {
@@ -1915,6 +1950,9 @@ impl ExtensionManager {
         tool_call: CallToolRequestParams,
         cancellation_token: CancellationToken,
     ) -> std::result::Result<ToolCallResult, ErrorData> {
+        if let Some(cursor) = ctx.replay_cursor() {
+            return replayed_tool_result(cursor, ctx.tool_call_request_id.as_deref());
+        }
         let capture = ctx.tool_capture();
         match self
             .dispatch_tool_call_inner(ctx, tool_call, cancellation_token)

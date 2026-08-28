@@ -256,6 +256,14 @@ impl PromptManager {
         &self.current_date_timestamp
     }
 
+    /// Rebase le tampon d'horloge sur `clock`. Le rejeu y branche une
+    /// `FixedClock` sur la lecture enregistrée du tour, sans reconstruire le
+    /// manager : ses extras (recette, hints de sous-répertoires) appartiennent
+    /// à la session, pas au tour.
+    pub fn set_clock(&mut self, clock: &dyn PromptClock) {
+        self.current_date_timestamp = clock.prompt_timestamp();
+    }
+
     /// Add an additional instruction to the system prompt with a key
     /// Using the same key will replace the previous instruction
     pub fn add_system_prompt_extra(&mut self, key: String, instruction: String) {

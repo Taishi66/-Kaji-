@@ -5,3 +5,4 @@ pub mod idgen;
 pub mod mode;
 pub mod provider;
 pub mod record;
+pub mod source;

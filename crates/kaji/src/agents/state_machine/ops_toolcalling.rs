@@ -23,7 +23,9 @@ use crate::conversation::message::{ActionRequiredData, Message, MessageContent, 
 use crate::conversation::Conversation;
 use crate::hints::load_hints::SubdirectoryHintTracker;
 use crate::hooks::{HookContext, HookDecision, HookEvent, HookManager};
+use crate::replay::cursor::EventCursor;
 use crate::replay::record::TurnRecorder;
+use crate::replay::source::ReplaySource;
 use crate::session::{EnabledExtensionsState, ExtensionState, Session};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -86,6 +88,7 @@ pub struct ToolExecutionOperation<'a> {
     extension_manager: Arc<ExtensionManager>,
     hook_manager: HookManager,
     turn_recorder: Option<Arc<TurnRecorder>>,
+    replay_source: Option<ReplaySource>,
 }
 
 impl<'a> ToolExecutionOperation<'a> {
@@ -99,6 +102,7 @@ impl<'a> ToolExecutionOperation<'a> {
             extension_manager,
             hook_manager,
             turn_recorder: None,
+            replay_source: None,
         }
     }
 
@@ -107,8 +111,17 @@ impl<'a> ToolExecutionOperation<'a> {
         self
     }
 
+    pub fn with_replay_source(mut self, replay_source: Option<ReplaySource>) -> Self {
+        self.replay_source = replay_source;
+        self
+    }
+
     fn turn_recorder(&self) -> Option<Arc<TurnRecorder>> {
         self.turn_recorder.clone()
+    }
+
+    fn replay_cursor(&self) -> Option<Arc<EventCursor>> {
+        Some(self.replay_source.as_ref()?.cursor())
     }
 
     async fn emit_with_matcher(
@@ -270,7 +283,8 @@ impl<'a> ToolExecutionOperation<'a> {
                 Some(session.working_dir.clone()),
                 Some(request_id),
             )
-            .with_turn_recorder(self.turn_recorder());
+            .with_turn_recorder(self.turn_recorder())
+            .with_replay_cursor(self.replay_cursor());
             let result = self
                 .extension_manager
                 .dispatch_tool_call(&context, tool_call.clone(), cancellation_token)

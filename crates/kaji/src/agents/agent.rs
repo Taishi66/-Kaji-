@@ -60,6 +60,7 @@ use crate::recipe::{Author, Recipe, Response, Settings};
 use crate::replay::idgen::{default_idgen, IdGen};
 use crate::replay::mode::ReplayMode;
 use crate::replay::record::{next_llm_call, TurnRecorder};
+use crate::replay::source::ReplaySource;
 use crate::scheduler_trait::SchedulerTrait;
 use crate::security::adversary_inspector::AdversaryInspector;
 use crate::security::egress_inspector::EgressInspector;
@@ -314,6 +315,10 @@ pub struct Agent {
     /// snapshotté (`is_replay`, spec
     /// `docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`, S3).
     replay_mode: Option<ReplayMode>,
+    /// Le journal que le tour rejoué relit, ouvert sur le tour courant.
+    /// `replay_mode` interdit d'écrire, `replay_source` dit quoi servir :
+    /// résultats d'outils, bloc mémoire, horloge, compaction, approbations.
+    replay_source: Option<ReplaySource>,
     /// Test-only override of the directory `checkpoint_project` resolves —
     /// lets tests inject a project path without a real session lookup or
     /// mutating the real process `current_dir` (unsafe to do per-test under
@@ -566,6 +571,7 @@ impl Agent {
             checkpoint_store: None,
             checkpoint_disabled_reason: None,
             replay_mode: None,
+            replay_source: None,
             #[cfg(test)]
             checkpoint_project_override: None,
         }
@@ -583,6 +589,25 @@ impl Agent {
     /// `Agent` de replay est monté pour ça et jeté ensuite.
     pub fn set_replay_mode(&mut self, replay_mode: ReplayMode) {
         self.replay_mode = Some(replay_mode);
+    }
+
+    /// Branche le journal que les tours rejoués liront. Le routeur de
+    /// confirmation le reçoit du même coup : en rejeu, aucune approbation
+    /// n'est jamais redemandée à l'utilisateur.
+    pub fn set_replay_source(&mut self, replay_source: ReplaySource) {
+        self.tool_confirmation_router
+            .set_replay_source(replay_source.clone());
+        self.replay_source = Some(replay_source);
+    }
+
+    /// Le journal du tour rejoué, ouvert sur le tour courant. `None` en
+    /// exécution normale — les intercepteurs retombent alors sur le vivant.
+    pub(crate) fn replay_source(&self) -> Option<ReplaySource> {
+        self.replay_source.clone()
+    }
+
+    pub(crate) fn replay_cursor(&self) -> Option<Arc<crate::replay::cursor::EventCursor>> {
+        Some(self.replay_source.as_ref()?.cursor())
     }
 
     /// Le tour courant rejoue-t-il une trace ? Unique lecture du mode : les
@@ -1057,17 +1082,15 @@ impl Agent {
         if !self.is_replay() {
             crate::kaji::ingest_turn(session_id, conversation.messages());
         }
-        let query = crate::kaji::latest_user_instruction(conversation.messages());
-        if let Some(query) = query {
-            let (spliced, memory_block) =
-                crate::kaji::splice_memory_block(&system_prompt, session_id, &query, working_dir);
-            system_prompt = spliced;
-            crate::replay::record::record_memory_block(
-                self.turn_recorder().as_ref(),
-                memory_block.as_deref(),
-            )
-            .await;
-        }
+        system_prompt = crate::kaji::apply_memory_block(
+            system_prompt,
+            conversation.messages(),
+            session_id,
+            working_dir,
+            self.turn_recorder().as_ref(),
+            self.replay_source().as_ref(),
+        )
+        .await;
         if !self.is_replay() {
             if let Ok(provider) = self.provider().await {
                 crate::kaji::maybe_spawn_curation(
@@ -1489,7 +1512,8 @@ impl Agent {
             Some(session.working_dir.clone()),
             Some(request_id.clone()),
         )
-        .with_turn_recorder(self.turn_recorder());
+        .with_turn_recorder(self.turn_recorder())
+        .with_replay_cursor(self.replay_cursor());
 
         debug!("WAITING_TOOL_START: {}", tool_call.name);
         let result: ToolCallResult = if self.is_frontend_tool(&tool_call.name).await {
@@ -1969,7 +1993,8 @@ impl Agent {
                     context_limit,
                     compaction_threshold,
                 )
-                .with_turn_recorder(self.turn_recorder()),
+                .with_turn_recorder(self.turn_recorder())
+                .with_replay_source(self.replay_source()),
             ),
             Arc::new(ToolPairCompactionOperation::new(
                 provider.clone(),
@@ -1977,10 +2002,10 @@ impl Agent {
                 tool_call_cutoff,
                 tool_pair_compaction_enabled,
             )),
-            Arc::new(ToolApprovalOperation::new(
-                &self.current_kaji_mode,
-                &self.tool_inspection_manager,
-            )),
+            Arc::new(
+                ToolApprovalOperation::new(&self.current_kaji_mode, &self.tool_inspection_manager)
+                    .with_replay_source(self.replay_source()),
+            ),
             Arc::new(DoctorOperation),
             Arc::new(ProjectOperation),
             Arc::new(SkillOperation),
@@ -1991,7 +2016,8 @@ impl Agent {
                     self.extension_manager.clone(),
                     self.hook_manager.clone(),
                 )
-                .with_turn_recorder(self.turn_recorder()),
+                .with_turn_recorder(self.turn_recorder())
+                .with_replay_source(self.replay_source()),
             ),
             Arc::new(UnknownToolOperation),
             Arc::new(RetryOperation::new(
@@ -2018,7 +2044,8 @@ impl Agent {
             )
             .with_idgen(self.idgen.clone())
             .with_turn_recorder(self.turn_recorder())
-            .with_replay(self.is_replay()),
+            .with_replay(self.is_replay())
+            .with_replay_source(self.replay_source()),
         );
         let mut command_handlers = operations.clone();
         command_handlers.push(inference.clone());
@@ -2367,6 +2394,14 @@ impl Agent {
         // oublié (spec docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md,
         // S3 « hermétique par construction »).
         let journal_seq = turn_seq.filter(|_| !self.is_replay());
+        // Même point unique pour l'horloge : le tour rejoué porte l'estampille
+        // enregistrée dans son prompt système, au lieu de relire le mur.
+        if let Some(read) = self.replay_source().and_then(|source| source.clock_read()) {
+            self.prompt_manager
+                .lock()
+                .await
+                .set_clock(&crate::replay::clock::FixedClock::new(read));
+        }
         *self.current_turn_recorder.lock().unwrap() = journal_seq.map(|turn_seq| {
             Arc::new(TurnRecorder::new(
                 self.config.session_manager.clone(),
@@ -2723,6 +2758,10 @@ impl Agent {
             &session,
         )
         .await?;
+        let needs_auto_compact = crate::replay::source::condense_decision(
+            self.replay_source().as_ref(),
+            needs_auto_compact,
+        );
 
         let conversation_to_compact = conversation.clone();
         let reply_span = tracing::Span::current();

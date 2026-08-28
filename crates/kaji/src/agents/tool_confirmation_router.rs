@@ -3,21 +3,44 @@ use std::collections::HashMap;
 use tokio::sync::{oneshot, Mutex};
 use tracing::warn;
 
+use crate::permission::permission_confirmation::PrincipalType;
 use crate::permission::PermissionConfirmation;
+use crate::replay::source::ReplaySource;
 
 pub struct ToolConfirmationRouter {
     pending: Mutex<HashMap<String, oneshot::Sender<PermissionConfirmation>>>,
+    replay: std::sync::Mutex<Option<ReplaySource>>,
 }
 
 impl ToolConfirmationRouter {
     pub fn new() -> Self {
         Self {
             pending: Mutex::new(HashMap::new()),
+            replay: std::sync::Mutex::new(None),
         }
+    }
+
+    /// En rejeu le routeur répond lui-même, depuis les rows `approval` du
+    /// journal : aucune demande ne part vers l'utilisateur, et un appel dont
+    /// le journal ne montre aucune approbation est refusé.
+    pub(crate) fn set_replay_source(&self, replay_source: ReplaySource) {
+        *self.replay.lock().unwrap() = Some(replay_source);
+    }
+
+    fn replayed_confirmation(&self, request_id: &str) -> Option<PermissionConfirmation> {
+        let permission = self.replay.lock().unwrap().as_ref()?.approval(request_id);
+        Some(PermissionConfirmation {
+            principal_type: PrincipalType::Tool,
+            permission,
+        })
     }
 
     pub async fn register(&self, request_id: String) -> oneshot::Receiver<PermissionConfirmation> {
         let (tx, rx) = oneshot::channel();
+        if let Some(confirmation) = self.replayed_confirmation(&request_id) {
+            let _ = tx.send(confirmation);
+            return rx;
+        }
         let mut pending = self.pending.lock().await;
         pending.retain(|_, sender| !sender.is_closed());
         pending.insert(request_id, tx);

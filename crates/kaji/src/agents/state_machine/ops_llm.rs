@@ -14,6 +14,7 @@ use crate::conversation::{effective_role, Conversation, EffectiveRole};
 use crate::providers::base::{Provider, ProviderUsage};
 use crate::replay::idgen::{default_idgen, IdGen};
 use crate::replay::record::{next_llm_call, TurnRecorder};
+use crate::replay::source::ReplaySource;
 use crate::session::Session;
 use crate::tool_inspection::ToolInspectionManager;
 use anyhow::{anyhow, Result};
@@ -124,6 +125,7 @@ pub struct InferenceRunner<'a> {
     idgen: Arc<dyn IdGen>,
     turn_recorder: Option<Arc<TurnRecorder>>,
     replay: bool,
+    replay_source: Option<ReplaySource>,
 }
 
 /// The agent-visible conversation as the provider sees it: tool requests left
@@ -187,6 +189,7 @@ impl<'a> InferenceRunner<'a> {
             idgen: default_idgen(),
             turn_recorder: None,
             replay: false,
+            replay_source: None,
         }
     }
 
@@ -205,6 +208,12 @@ impl<'a> InferenceRunner<'a> {
     /// `docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`, S3).
     pub fn with_replay(mut self, replay: bool) -> Self {
         self.replay = replay;
+        self
+    }
+
+    /// Le journal que le tour rejoué relit. `None` en exécution normale.
+    pub fn with_replay_source(mut self, replay_source: Option<ReplaySource>) -> Self {
+        self.replay_source = replay_source;
         self
     }
 
@@ -487,21 +496,15 @@ impl Inference for InferenceRunner<'_> {
             if !self.replay {
                 crate::kaji::ingest_turn(&session.id, fixed_conversation.messages());
             }
-            let query = crate::kaji::latest_user_instruction(fixed_conversation.messages());
-            if let Some(query) = query {
-                let (spliced, memory_block) = crate::kaji::splice_memory_block(
-                    &system_prompt,
-                    &session.id,
-                    &query,
-                    &session.working_dir,
-                );
-                system_prompt = spliced;
-                crate::replay::record::record_memory_block(
-                    self.turn_recorder().as_ref(),
-                    memory_block.as_deref(),
-                )
-                .await;
-            }
+            system_prompt = crate::kaji::apply_memory_block(
+                system_prompt,
+                fixed_conversation.messages(),
+                &session.id,
+                &session.working_dir,
+                self.turn_recorder().as_ref(),
+                self.replay_source.as_ref(),
+            )
+            .await;
             if !self.replay {
                 crate::kaji::maybe_spawn_curation(
                     self.provider.clone(),

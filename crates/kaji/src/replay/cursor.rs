@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::permission::Permission;
 use crate::session::session_manager::SessionEvent;
 use crate::session::SessionManager;
 
@@ -59,6 +60,11 @@ pub struct EventCursor {
     pub memory_blocks: HashMap<i64, String>,
     pub clock_reads: HashMap<i64, Vec<String>>,
     pub condense_turns: HashSet<i64>,
+    /// Les décisions d'approbation v1 du journal, par `(turn_seq, request_id)`,
+    /// réduites à ce que le rejeu en fait : l'outil a-t-il eu le droit de
+    /// tourner. Rejouées telles quelles, jamais redemandées à l'utilisateur
+    /// (spec S4).
+    pub approvals: HashMap<(i64, String), bool>,
 }
 
 fn payload(event: &SessionEvent) -> Option<Value> {
@@ -109,6 +115,7 @@ impl EventCursor {
             memory_blocks: HashMap::new(),
             clock_reads: HashMap::new(),
             condense_turns: HashSet::new(),
+            approvals: HashMap::new(),
         };
 
         // Les deux moitiés d'un échange arrivent dans des events séparés :
@@ -181,6 +188,24 @@ impl EventCursor {
                 }
                 "condense_triggered" => {
                     cursor.condense_turns.insert(turn_seq(event, &payload));
+                }
+                "approval" => {
+                    let (Some(request_id), Some(permission)) = (
+                        payload.get("request_id").and_then(Value::as_str),
+                        payload
+                            .get("permission")
+                            .and_then(|permission| {
+                                serde_json::from_value::<Permission>(permission.clone()).ok()
+                            })
+                            .as_ref()
+                            .map(Permission::allows_execution),
+                    ) else {
+                        continue;
+                    };
+                    cursor.approvals.insert(
+                        (turn_seq(event, &payload), request_id.to_string()),
+                        permission,
+                    );
                 }
                 _ => {}
             }

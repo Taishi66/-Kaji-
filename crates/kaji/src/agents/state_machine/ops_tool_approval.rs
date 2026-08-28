@@ -26,6 +26,7 @@ pub const TOOL_EXECUTABLE_KEY: &str = "kaji.executable";
 pub struct ToolApprovalOperation<'a> {
     kaji_mode: &'a Mutex<KajiMode>,
     tool_inspection_manager: &'a ToolInspectionManager,
+    replay_source: Option<crate::replay::source::ReplaySource>,
 }
 
 impl<'a> ToolApprovalOperation<'a> {
@@ -36,7 +37,18 @@ impl<'a> ToolApprovalOperation<'a> {
         Self {
             kaji_mode,
             tool_inspection_manager,
+            replay_source: None,
         }
+    }
+
+    /// En rejeu, la réponse d'approbation vient du journal : la boucle machine
+    /// à états n'attend jamais un client pour la lui donner.
+    pub fn with_replay_source(
+        mut self,
+        replay_source: Option<crate::replay::source::ReplaySource>,
+    ) -> Self {
+        self.replay_source = replay_source;
+        self
     }
 }
 
@@ -133,6 +145,13 @@ impl Operation for ToolApprovalOperation<'_> {
                     .user_only();
                 let action_required = emit.message(action_required).await;
                 effects.push(action_required.into());
+
+                if let Some(answer) = crate::replay::source::replayed_confirmation(
+                    self.replay_source.as_ref(),
+                    &request.id,
+                ) {
+                    effects.push(emit.message(answer).await.into());
+                }
 
                 if let Some(finding_id) =
                     get_security_finding_id_from_results(&request.id, &inspection_results)
