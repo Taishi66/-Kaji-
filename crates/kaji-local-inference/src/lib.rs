@@ -856,6 +856,7 @@ impl Provider for LocalInferenceProvider {
                     }
                 };
 
+                #[allow(clippy::disallowed_methods)] // provider local, hors boucle agent
                 let message_id = Uuid::new_v4().to_string();
 
                 let request = backend::LocalGenerationRequest {

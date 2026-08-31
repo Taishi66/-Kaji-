@@ -313,6 +313,7 @@ fn send_emulator_action(
             Ok(false)
         }
         EmulatorAction::ShellCommand(command) => {
+            #[allow(clippy::disallowed_methods)] // provider local, hors boucle agent
             let tool_id = Uuid::new_v4().to_string();
             let mut args = serde_json::Map::new();
             args.insert("command".to_string(), json!(command));
@@ -328,6 +329,7 @@ fn send_emulator_action(
             Ok(true)
         }
         EmulatorAction::ExecuteCode(code) => {
+            #[allow(clippy::disallowed_methods)] // provider local, hors boucle agent
             let tool_id = Uuid::new_v4().to_string();
             let wrapped = if code.contains("async function run()") {
                 code.clone()

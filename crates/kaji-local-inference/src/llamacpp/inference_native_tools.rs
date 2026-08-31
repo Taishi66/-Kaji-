@@ -204,6 +204,7 @@ pub(super) fn generate_with_native_tools(
             ));
         }
         contents.extend(tool_call_contents);
+        #[allow(clippy::disallowed_methods)] // provider local, hors boucle agent
         let mut msg = Message::new(
             rmcp::model::Role::Assistant,
             chrono::Utc::now().timestamp(),
@@ -264,6 +265,7 @@ fn extract_oai_tool_call_contents(deltas: &[Value]) -> Vec<MessageContent> {
                 return None;
             }
 
+            #[allow(clippy::disallowed_methods)] // provider local, hors boucle agent
             let id = if id.is_empty() {
                 Uuid::new_v4().to_string()
             } else {

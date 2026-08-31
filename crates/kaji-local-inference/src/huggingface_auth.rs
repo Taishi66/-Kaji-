@@ -23,6 +23,7 @@ pub struct HuggingFaceTokenData {
 }
 
 impl HuggingFaceTokenData {
+    #[allow(clippy::disallowed_methods)] // expiration OAuth, hors boucle agent
     pub fn is_expired(&self) -> bool {
         self.expires_at
             .is_some_and(|expires_at| expires_at <= Utc::now())
