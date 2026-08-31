@@ -10,7 +10,7 @@
 //! (`docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`, S3).
 
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use kaji_providers::conversation::token_usage::ProviderUsage;
@@ -53,9 +53,40 @@ impl ReplayPosition {
     }
 }
 
+/// Un appel dont la requête rejouée ne correspond pas à celle enregistrée, et
+/// que le mode lenient a servi quand même.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Divergence {
+    pub turn_seq: i64,
+    pub call_idx: u32,
+    pub recorded_hash: String,
+    pub replayed_hash: String,
+}
+
+/// Les divergences tolérées par le mode lenient, partagées avec l'appelant :
+/// sans elles, `--lenient` servirait une réponse enregistrée sur une requête
+/// différente sans que rien ne le signale hors du log fichier.
+#[derive(Debug, Default)]
+pub struct DivergenceLog {
+    entries: Mutex<Vec<Divergence>>,
+}
+
+impl DivergenceLog {
+    fn record(&self, divergence: Divergence) {
+        self.entries.lock().unwrap().push(divergence);
+    }
+
+    /// Les divergences accumulées depuis le dernier appel — l'appelant les
+    /// rend au fil des tours plutôt qu'en un bloc final.
+    pub fn drain(&self) -> Vec<Divergence> {
+        std::mem::take(&mut *self.entries.lock().unwrap())
+    }
+}
+
 pub struct ReplayProvider {
     cursor: Arc<EventCursor>,
     position: Arc<ReplayPosition>,
+    divergences: Arc<DivergenceLog>,
     lenient: bool,
 }
 
@@ -64,6 +95,7 @@ impl ReplayProvider {
         Self {
             cursor,
             position: Arc::new(ReplayPosition::default()),
+            divergences: Arc::new(DivergenceLog::default()),
             lenient,
         }
     }
@@ -71,6 +103,11 @@ impl ReplayProvider {
     /// Le curseur de position à ouvrir sur chaque tour rejoué.
     pub fn position(&self) -> Arc<ReplayPosition> {
         Arc::clone(&self.position)
+    }
+
+    /// Les divergences tolérées, à rendre visibles par l'appelant.
+    pub fn divergences(&self) -> Arc<DivergenceLog> {
+        Arc::clone(&self.divergences)
     }
 }
 
@@ -114,6 +151,12 @@ impl Provider for ReplayProvider {
                 replayed = %replayed_hash,
                 "replay lenient: requête divergente, réponse enregistrée servie quand même"
             );
+            self.divergences.record(Divergence {
+                turn_seq,
+                call_idx,
+                recorded_hash: exchange.request_hash.clone(),
+                replayed_hash,
+            });
         }
 
         if exchange.finish != "stop" {
@@ -138,5 +181,76 @@ impl Provider for ReplayProvider {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Box::pin(futures::stream::iter(chunks.into_iter().map(Ok))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::replay::cursor::{LlmExchange, LogMeta};
+
+    fn cursor_recording(request_hash: &str) -> Arc<EventCursor> {
+        Arc::new(EventCursor {
+            log_meta: LogMeta {
+                kaji_version: "test".to_string(),
+                schema_version: 2,
+                idgen_seed: "seed".to_string(),
+            },
+            llm_responses: HashMap::from([(
+                (1, 0),
+                LlmExchange {
+                    request_hash: request_hash.to_string(),
+                    chunks: vec![json!([null, null])],
+                    finish: "stop".to_string(),
+                },
+            )]),
+            tool_results: HashMap::new(),
+            memory_blocks: HashMap::new(),
+            clock_reads: HashMap::new(),
+            condense_turns: HashSet::new(),
+            approvals: HashMap::new(),
+        })
+    }
+
+    async fn replay_first_call(provider: &ReplayProvider) {
+        provider.position().begin_turn(1);
+        let _stream = provider
+            .stream(&ModelConfig::new("kaji-replay"), "system", &[], &[])
+            .await
+            .expect("le rejeu sert la réponse enregistrée");
+    }
+
+    #[tokio::test]
+    async fn lenient_exposes_the_divergence_it_tolerates() {
+        let provider = ReplayProvider::new(cursor_recording("hash-enregistré"), true);
+        let divergences = provider.divergences();
+
+        replay_first_call(&provider).await;
+
+        let tolerated = divergences.drain();
+        assert_eq!(tolerated.len(), 1, "{tolerated:?}");
+        assert_eq!(tolerated[0].turn_seq, 1);
+        assert_eq!(tolerated[0].call_idx, 0);
+        assert_eq!(tolerated[0].recorded_hash, "hash-enregistré");
+        assert_eq!(tolerated[0].replayed_hash, request_hash("system", &[], &[]));
+        assert!(
+            divergences.drain().is_empty(),
+            "drain rend ce qui s'est accumulé depuis le dernier appel"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_faithful_request_records_no_divergence() {
+        let provider =
+            ReplayProvider::new(cursor_recording(&request_hash("system", &[], &[])), true);
+        let divergences = provider.divergences();
+
+        replay_first_call(&provider).await;
+
+        assert!(divergences.drain().is_empty());
     }
 }

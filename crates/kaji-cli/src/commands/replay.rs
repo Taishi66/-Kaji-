@@ -3,18 +3,20 @@
 //! agent réelle tourne, ses entrées non-déterministes sont servies par
 //! `ReplayProvider`/`ReplaySource` (`docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`, S3).
 //!
-//! Codes de sortie : `0` rejeu complet sans divergence, `2` divergence
-//! rencontrée pendant un tour (hash de requête, clé absente, chunk illisible
-//! — strict ou lenient), `3` journal tronqué au chargement (dernier tour sans
-//! `turn_end`, sans `--until` suffisamment bas pour l'éviter), `4` session non
-//! disponible pour le rejeu (pré-v2 ou purgée). Une session introuvable, ou
-//! toute autre erreur inattendue, remonte via `anyhow` — code `1` par le
-//! traitement par défaut de `main`.
+//! Codes de sortie : `0` rejeu mené à son terme — y compris avec des
+//! divergences tolérées par `--lenient`, signalées tour par tour et comptées
+//! en fin de rejeu, le mode existant justement pour les auditer ; `2`
+//! divergence fatale pendant un tour (hash de requête en strict, clé absente
+//! ou chunk illisible dans les deux modes), `3` journal tronqué au chargement
+//! (dernier tour sans `turn_end`, sans `--until` suffisamment bas pour
+//! l'éviter), `4` session non disponible pour le rejeu (pré-v2 ou purgée).
+//! Une session introuvable, ou toute autre erreur inattendue, remonte via
+//! `anyhow` — code `1` par le traitement par défaut de `main`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Context, Result};
 use futures::StreamExt;
 use kaji::agents::{Agent, AgentEvent, SessionConfig};
 use kaji::config::Config;
@@ -46,7 +48,7 @@ pub async fn handle_replay_subcommand(
     let source = session_manager
         .get_session(&session_id, false)
         .await
-        .map_err(|_| anyhow!("session « {session_id} » introuvable"))?;
+        .with_context(|| format!("chargement de la session « {session_id} »"))?;
 
     let cursor = match EventCursor::load_until(&session_manager, &session_id, until).await {
         Ok(cursor) => cursor,
@@ -61,8 +63,11 @@ pub async fn handle_replay_subcommand(
     };
 
     let events = session_manager.session_events(&session_id).await?;
-    let turns = turns_to_replay(&events, until);
-    if turns.is_empty() {
+    let plan = replay_plan(&events, until);
+    if !plan
+        .iter()
+        .any(|(_, planned)| matches!(planned, PlannedTurn::Replay(_)))
+    {
         println!("kaji replay : aucun tour à rejouer dans « {session_id} »");
         return Ok(());
     }
@@ -84,6 +89,7 @@ pub async fn handle_replay_subcommand(
     let cursor = Arc::new(cursor);
     let provider = ReplayProvider::new(Arc::clone(&cursor), lenient);
     let position = provider.position();
+    let divergences = provider.divergences();
 
     let mut replay_mode = ReplayMode::new(session_id.clone());
     replay_mode.lenient = lenient;
@@ -108,11 +114,29 @@ pub async fn handle_replay_subcommand(
         derived.id
     );
 
-    let replayed_turns = turns.len();
-    for (turn_seq, user_message) in turns {
+    let mut replayed = 0;
+    let mut skipped = 0;
+    let mut tolerated = 0;
+    for (turn_seq, planned) in plan {
+        let PlannedTurn::Replay(user_message) = planned else {
+            skipped += 1;
+            println!("[tour {turn_seq}] aucun message user enregistré — tour sauté");
+            continue;
+        };
+
         position.begin_turn(turn_seq);
-        match replay_turn(&agent, &derived.id, turn_seq, user_message).await {
+        let outcome = replay_turn(&agent, &derived.id, turn_seq, user_message).await;
+        for divergence in divergences.drain() {
+            tolerated += 1;
+            println!(
+                "[tour {turn_seq}] divergence tolérée (appel {}) — requête enregistrée {}, rejouée {}",
+                divergence.call_idx, divergence.recorded_hash, divergence.replayed_hash
+            );
+        }
+
+        match outcome {
             Ok(lines) => {
+                replayed += 1;
                 for line in lines {
                     println!("{line}");
                 }
@@ -124,8 +148,30 @@ pub async fn handle_replay_subcommand(
         }
     }
 
-    println!("kaji replay : {replayed_turns} tour(s) rejoué(s) sans divergence");
+    println!(
+        "kaji replay : {}",
+        replay_summary(replayed, skipped, tolerated)
+    );
     Ok(())
+}
+
+/// La ligne de fin de rejeu. Elle ne promet la fidélité que lorsque aucune
+/// divergence n'a été tolérée, et compte à part les tours que le journal n'a
+/// pas de quoi rejouer — sinon « N tour(s) rejoué(s) » ne serait vérifiable
+/// contre rien.
+fn replay_summary(replayed: usize, skipped: usize, divergences: usize) -> String {
+    let mut summary = format!("{replayed} tour(s) rejoué(s)");
+    if divergences == 0 {
+        summary.push_str(" sans divergence");
+    } else {
+        summary.push_str(&format!(", {divergences} divergence(s) tolérée(s)"));
+    }
+    if skipped > 0 {
+        summary.push_str(&format!(
+            ", {skipped} tour(s) sauté(s) faute de message user enregistré"
+        ));
+    }
+    summary
 }
 
 /// Rejoue un tour jusqu'à son terme et rend chaque message produit sous forme
@@ -256,10 +302,38 @@ pub fn user_turns(events: &[SessionEvent]) -> Vec<(i64, Message)> {
     turns
 }
 
-fn turns_to_replay(events: &[SessionEvent], until: Option<i64>) -> Vec<(i64, Message)> {
-    user_turns(events)
+/// Ce que le rejeu fait d'un tour du journal.
+enum PlannedTurn {
+    Replay(Message),
+    Skipped,
+}
+
+/// Le plan de rejeu : chaque tour ouvert dans le journal, borné par `until`,
+/// avec le message qui le rejouera quand il y en a un. Un tour peut n'avoir
+/// aucune row `message` — une réponse d'élicitation ou un message non
+/// agent-visible laisse `turn_start`/`turn_end` derrière lui sans que la
+/// boucle ait émis le moindre `AgentEvent::Message` (`agents/agent.rs`,
+/// retours en stream vide de `reply_impl`). Ces tours-là sont marqués sautés
+/// plutôt qu'écartés en silence : rien ne les rejoue, mais l'opérateur voit
+/// que le journal en portait un de plus que ce qui a été rejoué.
+fn replay_plan(events: &[SessionEvent], until: Option<i64>) -> Vec<(i64, PlannedTurn)> {
+    let mut messages: HashMap<i64, Message> = user_turns(events).into_iter().collect();
+    let mut turn_seqs: Vec<i64> = events
+        .iter()
+        .filter(|event| event.kind == "turn_start")
+        .map(|event| event.turn_seq)
+        .chain(messages.keys().copied())
+        .filter(|turn_seq| until.is_none_or(|until| *turn_seq <= until))
+        .collect();
+    turn_seqs.sort_unstable();
+    turn_seqs.dedup();
+
+    turn_seqs
         .into_iter()
-        .filter(|(turn_seq, _)| until.is_none_or(|until| *turn_seq <= until))
+        .map(|turn_seq| match messages.remove(&turn_seq) {
+            Some(message) => (turn_seq, PlannedTurn::Replay(message)),
+            None => (turn_seq, PlannedTurn::Skipped),
+        })
         .collect()
 }
 
@@ -388,6 +462,13 @@ mod tests {
         assert_eq!(turns[0].0, 1);
     }
 
+    fn planned_turns(events: &[SessionEvent], until: Option<i64>) -> Vec<(i64, bool)> {
+        replay_plan(events, until)
+            .iter()
+            .map(|(turn_seq, planned)| (*turn_seq, matches!(planned, PlannedTurn::Replay(_))))
+            .collect()
+    }
+
     #[test]
     fn until_bounds_which_turns_are_replayed() {
         let events = vec![
@@ -397,19 +478,60 @@ mod tests {
         ];
 
         assert_eq!(
-            turns_to_replay(&events, None)
-                .iter()
-                .map(|(t, _)| *t)
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3]
+            planned_turns(&events, None),
+            vec![(1, true), (2, true), (3, true)]
+        );
+        assert_eq!(planned_turns(&events, Some(2)), vec![(1, true), (2, true)]);
+        assert!(planned_turns(&events, Some(0)).is_empty());
+    }
+
+    #[test]
+    fn a_turn_without_a_user_message_is_planned_as_skipped() {
+        let events = vec![
+            event(1, "turn_start", "{}"),
+            event(1, "message", &user_message_payload("tour 1")),
+            event(1, "turn_end", "{}"),
+            event(2, "turn_start", "{}"),
+            event(2, "clock_reads", "{}"),
+            event(2, "turn_end", "{}"),
+            event(3, "turn_start", "{}"),
+            event(3, "message", &user_message_payload("tour 3")),
+            event(3, "turn_end", "{}"),
+        ];
+
+        assert_eq!(
+            planned_turns(&events, None),
+            vec![(1, true), (2, false), (3, true)],
+            "un tour ouvert sans message user est signalé, pas effacé du plan"
         );
         assert_eq!(
-            turns_to_replay(&events, Some(2))
-                .iter()
-                .map(|(t, _)| *t)
-                .collect::<Vec<_>>(),
-            vec![1, 2]
+            planned_turns(&events, Some(2)),
+            vec![(1, true), (2, false)],
+            "--until borne aussi les tours sautés"
         );
-        assert!(turns_to_replay(&events, Some(0)).is_empty());
+    }
+
+    #[test]
+    fn the_summary_counts_tolerated_divergences_instead_of_claiming_fidelity() {
+        let summary = replay_summary(3, 0, 2);
+        assert!(summary.contains('3'), "{summary}");
+        assert!(summary.contains('2'), "{summary}");
+        assert!(
+            !summary.contains("sans divergence"),
+            "{summary}: le rejeu a divergé"
+        );
+    }
+
+    #[test]
+    fn the_summary_claims_fidelity_only_without_divergence() {
+        let summary = replay_summary(3, 0, 0);
+        assert!(summary.contains("sans divergence"), "{summary}");
+    }
+
+    #[test]
+    fn the_summary_distinguishes_replayed_from_skipped_turns() {
+        let summary = replay_summary(2, 1, 0);
+        assert!(summary.contains("2 tour(s) rejoué(s)"), "{summary}");
+        assert!(summary.contains("1 tour(s) sauté(s)"), "{summary}");
     }
 }
