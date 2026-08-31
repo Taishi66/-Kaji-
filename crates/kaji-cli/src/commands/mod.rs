@@ -5,6 +5,7 @@ pub mod info;
 pub mod memory;
 pub mod plugin;
 pub mod recipe;
+pub mod replay;
 pub mod review;
 pub mod schedule;
 pub mod session;

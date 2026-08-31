@@ -18,6 +18,7 @@ use crate::commands::configure::handle_configure;
 use crate::commands::info::handle_info;
 use crate::commands::plugin::{handle_plugin_install, handle_plugin_update};
 use crate::commands::recipe::{handle_deeplink, handle_list, handle_open, handle_validate};
+use crate::commands::replay::handle_replay_subcommand;
 use crate::commands::term::{
     handle_term_info, handle_term_init, handle_term_log, handle_term_run, Shell,
 };
@@ -1074,6 +1075,19 @@ enum Command {
         command: MemoryCommand,
     },
 
+    /// Rejoue exactement une session enregistrée (event log v2)
+    #[command(about = "Replay a recorded session exactly from its event log")]
+    Replay {
+        /// Session à rejouer
+        session_id: String,
+        /// S'arrêter après le tour N
+        #[arg(long)]
+        until: Option<i64>,
+        /// Continuer sur divergence (signalée) au lieu d'échouer
+        #[arg(long)]
+        lenient: bool,
+    },
+
     /// Manage plugins
     #[command(about = "Manage plugins")]
     Plugin {
@@ -1445,6 +1459,7 @@ fn get_command_name(command: &Option<Command>) -> &'static str {
         Some(Command::Recipe { .. }) => "recipe",
         Some(Command::Skills { .. }) => "skills",
         Some(Command::Memory { .. }) => "memory",
+        Some(Command::Replay { .. }) => "replay",
         Some(Command::Plugin { .. }) => "plugin",
         Some(Command::Term { .. }) => "term",
         #[cfg(feature = "tui")]
@@ -2438,6 +2453,11 @@ pub async fn cli() -> anyhow::Result<()> {
         Some(Command::Recipe { command }) => handle_recipe_subcommand(command),
         Some(Command::Skills { command }) => handle_skills_subcommand(command).await,
         Some(Command::Memory { command }) => handle_memory_subcommand(command).await,
+        Some(Command::Replay {
+            session_id,
+            until,
+            lenient,
+        }) => handle_replay_subcommand(session_id, until, lenient).await,
         Some(Command::Plugin { command }) => handle_plugin_subcommand(command),
         Some(Command::Term { command }) => handle_term_subcommand(command).await,
         #[cfg(feature = "tui")]

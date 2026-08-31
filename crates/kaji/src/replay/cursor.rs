@@ -84,7 +84,23 @@ fn call_key(event: &SessionEvent, payload: &Value) -> Option<(i64, u32)> {
 }
 
 impl EventCursor {
+    /// Comme [`Self::load_until`], sans borne : une troncature de fin de
+    /// journal est toujours refusée.
     pub async fn load(session_manager: &SessionManager, session_id: &str) -> Result<Self> {
+        Self::load_until(session_manager, session_id, None).await
+    }
+
+    /// Charge le journal, en tolérant une troncature de fin de journal quand
+    /// elle se situe strictement après `until_turn` : le tour interrompu
+    /// n'est de toute façon jamais rejoué si l'appelant borne le rejeu à un
+    /// tour antérieur (CLI `kaji replay --until`, message d'erreur de
+    /// `TruncatedAt` — S3 « replay jusqu'au tour N-1 possible »).
+    /// `until_turn: None` refuse toute troncature, comme `load`.
+    pub async fn load_until(
+        session_manager: &SessionManager,
+        session_id: &str,
+        until_turn: Option<i64>,
+    ) -> Result<Self> {
         let events = session_manager.session_events(session_id).await?;
 
         let log_meta = events
@@ -105,7 +121,10 @@ impl EventCursor {
         }
 
         if let Some(interrupted) = session_manager.last_turn_is_interrupted(session_id).await? {
-            return Err(ReplayUnavailable::TruncatedAt(interrupted.turn_seq).into());
+            let tolerated = until_turn.is_some_and(|until| until < interrupted.turn_seq);
+            if !tolerated {
+                return Err(ReplayUnavailable::TruncatedAt(interrupted.turn_seq).into());
+            }
         }
 
         let mut cursor = Self {
