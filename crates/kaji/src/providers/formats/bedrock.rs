@@ -469,6 +469,7 @@ pub fn from_bedrock_message(message: &bedrock::Message) -> Result<Message> {
         .filter(|block| !matches!(block, bedrock::ContentBlock::CachePoint(_)))
         .map(from_bedrock_content_block)
         .collect::<Result<Vec<_>>>()?;
+    #[allow(clippy::disallowed_methods)] // horodatage provider, remplacé par ReplayProvider au rejeu
     let created = Utc::now().timestamp();
 
     Ok(Message::new(role, created, content))

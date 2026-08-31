@@ -228,6 +228,7 @@ impl SageMakerTgiProvider {
         // Strip any HTML tags that might have been generated
         let clean_text = self.strip_html_tags(generated_text);
 
+        #[allow(clippy::disallowed_methods)] // horodatage provider, remplacé par ReplayProvider au rejeu
         Ok(Message::new(
             Role::Assistant,
             Utc::now().timestamp(),

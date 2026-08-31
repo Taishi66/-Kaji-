@@ -234,6 +234,7 @@ pub async fn handle_term_log(command: String) -> Result<()> {
         )
     })?;
 
+    #[allow(clippy::disallowed_methods)] // horodatage de saisie terminal, préservé tel quel dans le log au rejeu
     let message = Message::new(
         Role::User,
         chrono::Utc::now().timestamp_millis(),
