@@ -615,6 +615,7 @@ pub fn from_bedrock_json(document: &Document) -> Result<Value> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test
 mod tests {
     use super::*;
     use anyhow::Result;
