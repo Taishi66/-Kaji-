@@ -1076,7 +1076,14 @@ enum Command {
     },
 
     /// Rejoue exactement une session enregistrée (event log v2)
-    #[command(about = "Replay a recorded session exactly from its event log")]
+    #[command(
+        about = "Replay a recorded session exactly from its event log",
+        long_about = "Replay a recorded session exactly from its event log.\n\n\
+                      Replay payloads (LLM calls, tool results, memory block, clock reads) are \
+                      kept for KAJI_REPLAY_RETENTION_DAYS days (default 30) and purged at \
+                      startup; a purged session is no longer replayable. Set it to 0 to purge \
+                      everything on the next start, or to a negative value to never purge."
+    )]
     Replay {
         /// Session à rejouer
         session_id: String,

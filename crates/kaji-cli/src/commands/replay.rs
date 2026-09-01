@@ -19,12 +19,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use kaji::agents::{Agent, AgentEvent, SessionConfig};
-use kaji::config::Config;
 use kaji::conversation::message::Message;
 use kaji::replay::cursor::{EventCursor, ReplayUnavailable};
 use kaji::replay::idgen::SessionIdGen;
 use kaji::replay::mode::ReplayMode;
 use kaji::replay::provider::ReplayProvider;
+use kaji::replay::retention::retention_days;
 use kaji::replay::source::ReplaySource;
 use kaji::session::session_manager::{SessionEvent, SessionType};
 use kaji_providers::model::ModelConfig;
@@ -34,7 +34,6 @@ const EXIT_DIVERGENCE: i32 = 2;
 const EXIT_TRUNCATED: i32 = 3;
 const EXIT_UNAVAILABLE: i32 = 4;
 
-const DEFAULT_RETENTION_DAYS: i64 = 30;
 const TRANSCRIPT_MAX_CHARS: usize = 200;
 
 pub async fn handle_replay_subcommand(
@@ -236,12 +235,6 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
         truncated.push('…');
         truncated
     }
-}
-
-fn retention_days() -> i64 {
-    Config::global()
-        .get_param::<i64>("KAJI_REPLAY_RETENTION_DAYS")
-        .unwrap_or(DEFAULT_RETENTION_DAYS)
 }
 
 /// Traduit un refus de rejeu en message humain et code de sortie dédié.

@@ -808,6 +808,15 @@ impl SessionManager {
         self.storage.mark_not_replayable(session_id).await
     }
 
+    /// Efface les payloads de rejeu (`replay::retention::PURGEABLE_KINDS`)
+    /// plus vieux que `retention_days` jours et marque non rejouables les
+    /// sessions ainsi amputées ; retourne le nombre d'events effacés. `0`
+    /// purge tout, une valeur négative ne purge rien. Appelée au démarrage du
+    /// stockage avec `KAJI_REPLAY_RETENTION_DAYS`.
+    pub async fn purge_replay_payloads(&self, retention_days: i64) -> Result<u64> {
+        self.storage.purge_replay_payloads(retention_days).await
+    }
+
     /// `message_id` du dernier message persisté de la session, `None` si elle
     /// n'en a encore aucun. Frontière stockée dans le payload de l'event
     /// `checkpoint` (`docs/superpowers/specs/2026-08-12-checkpoints-design.md`):
@@ -1109,6 +1118,11 @@ impl SessionStorage {
                     if let Err(e) = Self::import_legacy(&self.pool, &self.session_dir).await {
                         warn!("Failed to import some legacy sessions: {}", e);
                     }
+                }
+
+                let retention_days = crate::replay::retention::retention_days();
+                if let Err(e) = Self::run_payload_retention(&self.pool, retention_days).await {
+                    warn!("Failed to purge expired replay payloads: {}", e);
                 }
                 Ok::<(), anyhow::Error>(())
             })
@@ -2680,6 +2694,40 @@ impl SessionStorage {
 
         tx.commit().await?;
         Ok(())
+    }
+
+    async fn purge_replay_payloads(&self, retention_days: i64) -> Result<u64> {
+        let pool = self.pool().await?;
+        Self::run_payload_retention(pool, retention_days).await
+    }
+
+    /// Le marquage précède la suppression : les sessions à démarquer se lisent
+    /// dans les lignes que la suppression fait disparaître.
+    async fn run_payload_retention(pool: &Pool<Sqlite>, retention_days: i64) -> Result<u64> {
+        let Some(cutoff_ms) = crate::replay::retention::cutoff_ms(retention_days) else {
+            return Ok(0);
+        };
+
+        let kinds = crate::replay::retention::PURGEABLE_KINDS
+            .map(|kind| format!("'{kind}'"))
+            .join(", ");
+        let expired = format!("FROM session_events WHERE kind IN ({kinds}) AND ts_ms < ?");
+
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query(&format!(
+            "UPDATE sessions SET replayable = 0 WHERE id IN (SELECT DISTINCT session_id {expired})"
+        ))
+        .bind(cutoff_ms)
+        .execute(&mut *tx)
+        .await?;
+        let purged = sqlx::query(&format!("DELETE {expired}"))
+            .bind(cutoff_ms)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+
+        Ok(purged)
     }
 
     async fn mark_not_replayable(&self, session_id: &str) -> Result<()> {
