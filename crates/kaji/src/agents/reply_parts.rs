@@ -201,8 +201,9 @@ impl Agent {
     /// Assembles what the next request would carry, then applies the
     /// SmartApprove tool annotations — which demote write-annotated tools to
     /// `ask_before` and rewrite `permission.yaml`. That write belongs to the
-    /// send path only: read-only callers must use
-    /// [`Agent::assemble_tools_and_prompt`] instead.
+    /// send path of a live turn only: read-only callers must use
+    /// [`Agent::assemble_tools_and_prompt`] instead, and a replayed turn takes
+    /// the same pure path — it must not touch the user's `permission.yaml`.
     pub async fn prepare_tools_and_prompt(
         &self,
         session_id: &str,
@@ -212,7 +213,7 @@ impl Agent {
             .assemble_tools_and_prompt(session_id, working_dir)
             .await?;
 
-        if *self.current_kaji_mode.lock().await == KajiMode::SmartApprove {
+        if !self.is_replay() && *self.current_kaji_mode.lock().await == KajiMode::SmartApprove {
             // Toolshim routes the same tools through `toolshim_tools` instead,
             // so exactly one of these two lists is ever non-empty.
             self.tool_inspection_manager.apply_tool_annotations(&tools);

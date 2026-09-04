@@ -470,7 +470,10 @@ impl Inference for InferenceRunner<'_> {
             let code_execution_mode = false;
 
             let kaji_mode = *self.kaji_mode.lock().await;
-            if kaji_mode == KajiMode::SmartApprove {
+            // Un tour rejoué assemble sans effet de bord : la rétrogradation
+            // SmartApprove réécrit `permission.yaml`, l'environnement de
+            // l'utilisateur.
+            if kaji_mode == KajiMode::SmartApprove && !self.replay {
                 self.tool_inspection_manager
                     .apply_tool_annotations(&input.tools);
             }

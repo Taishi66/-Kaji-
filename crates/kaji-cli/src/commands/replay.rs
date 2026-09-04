@@ -90,7 +90,7 @@ pub async fn handle_replay_subcommand(
     let position = provider.position();
     let divergences = provider.divergences();
 
-    let mut replay_mode = ReplayMode::new(session_id.clone());
+    let mut replay_mode = ReplayMode::new(session_id.clone(), source.kaji_mode);
     replay_mode.lenient = lenient;
     replay_mode.until_turn = until;
 

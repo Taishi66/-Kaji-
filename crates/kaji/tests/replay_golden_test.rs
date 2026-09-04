@@ -540,7 +540,7 @@ async fn replay_once_with(fixture: &Fixture, label: &str, lenient: bool) -> Resu
 
     let mut agent = new_agent(&fixture.session_manager, &fixture.data_dir);
     agent.set_idgen(Arc::new(SessionIdGen::new(&cursor.log_meta.idgen_seed)));
-    agent.set_replay_mode(ReplayMode::new(fixture.session_id.clone()));
+    agent.set_replay_mode(ReplayMode::new(fixture.session_id.clone(), KajiMode::Auto));
     agent.set_replay_source(ReplaySource::new(
         Arc::clone(&cursor),
         Arc::clone(&position),

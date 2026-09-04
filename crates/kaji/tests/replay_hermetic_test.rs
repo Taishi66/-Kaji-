@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
-use kaji::agents::{Agent, AgentConfig, KajiPlatform, SessionConfig};
+use kaji::agents::{Agent, AgentConfig, ExtensionConfig, KajiPlatform, SessionConfig};
 use kaji::config::permission::PermissionManager;
 use kaji::config::KajiMode;
 use kaji::conversation::message::Message;
@@ -13,7 +13,8 @@ use kaji::session::SessionManager;
 use kaji_providers::conversation::token_usage::{ProviderUsage, Usage};
 use kaji_providers::errors::ProviderError;
 use kaji_providers::model::ModelConfig;
-use rmcp::model::{CallToolRequestParams, Tool};
+use rmcp::model::{CallToolRequestParams, Tool, ToolAnnotations};
+use serde_json::Map;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -211,7 +212,7 @@ async fn assert_hermetic(state_machine: Option<&str>) -> Result<()> {
         before.memory
     );
 
-    agent.set_replay_mode(ReplayMode::new(session.id.clone()));
+    agent.set_replay_mode(ReplayMode::new(session.id.clone(), KajiMode::Auto));
     drain(
         agent
             .reply(
@@ -227,6 +228,135 @@ async fn assert_hermetic(state_machine: Option<&str>) -> Result<()> {
     assert_eq!(
         before, after,
         "{label}: a replayed turn writes nothing — log, checkpoints, ledger and memory journal are untouched"
+    );
+
+    Ok(())
+}
+
+/// Un outil annoté en écriture : c'est lui que SmartApprove rétrograde en
+/// `ask_before`, en réécrivant `permission.yaml`.
+const WRITE_TOOL: &str = "hermetic-frontend__write_thing";
+
+fn write_annotated_extension() -> ExtensionConfig {
+    let tool = Tool::new(WRITE_TOOL.to_string(), "writes something", Map::new())
+        .annotate(ToolAnnotations::new().read_only(false));
+    ExtensionConfig::Frontend {
+        name: "hermetic-frontend".to_string(),
+        description: "frontend fixture".to_string(),
+        tools: vec![tool],
+        instructions: None,
+        bundled: None,
+        available_tools: Vec::new(),
+    }
+}
+
+/// Le mode de la session enregistrée, pas celui de la machine de rejeu : le
+/// prompt système en dépend (`is_autonomous`, branche `Chat`) donc la requête
+/// hachée aussi. Et l'assemblage d'un tour rejoué doit être **pur** — le
+/// SmartApprove d'aujourd'hui ne doit pas réécrire le `permission.yaml` de
+/// l'utilisateur pendant un rejeu.
+#[tokio::test]
+async fn replay_restores_the_recorded_mode_and_assembles_without_writing_permissions() -> Result<()>
+{
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env_lock::lock_env([
+        ("KAJI_STATE_MACHINE", None),
+        (
+            "KAJI_MEMORY_DIR",
+            Some(memory_dir.path().to_str().expect("utf8 temp path")),
+        ),
+    ]);
+
+    let temp_dir = tempfile::tempdir()?;
+    let working_dir = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&working_dir)?;
+    let config_dir = temp_dir.path().join("config");
+    let permissions = Arc::new(PermissionManager::new(config_dir.clone()));
+    let session_manager = Arc::new(SessionManager::new(temp_dir.path().join("data")));
+
+    let build = |mode: KajiMode| {
+        Agent::with_config(AgentConfig::new(
+            Arc::clone(&session_manager),
+            Arc::clone(&permissions),
+            None,
+            mode,
+            true,
+            KajiPlatform::KajiCli,
+        ))
+    };
+
+    let session = session_manager
+        .create_session(
+            working_dir.clone(),
+            "replay-mode-test".to_string(),
+            SessionType::Hidden,
+            KajiMode::SmartApprove,
+        )
+        .await?;
+
+    // Contrôle : hors rejeu, SmartApprove rétrograde bien l'outil et persiste —
+    // sans quoi l'assertion de pureté ci-dessous ne prouverait rien.
+    let live = build(KajiMode::SmartApprove);
+    live.update_provider(
+        Arc::new(TwoCallProvider {
+            calls: AtomicUsize::new(0),
+        }),
+        ModelConfig::new("mock-model"),
+        &session.id,
+    )
+    .await?;
+    live.add_extension(write_annotated_extension(), &session.id)
+        .await?;
+    live.prepare_tools_and_prompt(&session.id, &working_dir)
+        .await?;
+    assert!(
+        permissions
+            .get_smart_approve_permission(WRITE_TOOL)
+            .is_some(),
+        "le contrôle vivant réécrit bien les permissions"
+    );
+    assert!(config_dir.join("permission.yaml").exists());
+
+    std::fs::remove_file(config_dir.join("permission.yaml"))?;
+    let fresh = Arc::new(PermissionManager::new(config_dir.clone()));
+    let mut replayed = Agent::with_config(AgentConfig::new(
+        Arc::clone(&session_manager),
+        Arc::clone(&fresh),
+        None,
+        KajiMode::Auto,
+        true,
+        KajiPlatform::KajiCli,
+    ));
+    replayed
+        .update_provider(
+            Arc::new(TwoCallProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            ModelConfig::new("mock-model"),
+            &session.id,
+        )
+        .await?;
+    replayed
+        .add_extension(write_annotated_extension(), &session.id)
+        .await?;
+    replayed.set_replay_mode(ReplayMode::new(session.id.clone(), KajiMode::SmartApprove));
+
+    assert_eq!(
+        replayed.kaji_mode().await,
+        KajiMode::SmartApprove,
+        "le rejeu prend le mode de la session enregistrée, pas celui de la machine"
+    );
+
+    replayed
+        .prepare_tools_and_prompt(&session.id, &working_dir)
+        .await?;
+    assert!(
+        fresh.get_smart_approve_permission(WRITE_TOOL).is_none(),
+        "un assemblage rejoué est pur : il ne rétrograde aucun outil"
+    );
+    assert!(
+        !config_dir.join("permission.yaml").exists(),
+        "un rejeu ne réécrit pas le permission.yaml de l'utilisateur"
     );
 
     Ok(())

@@ -612,7 +612,13 @@ impl Agent {
     /// Bascule cet `Agent` en replay : à partir de là ses tours relisent une
     /// trace au lieu d'en produire une. Irréversible par construction — un
     /// `Agent` de replay est monté pour ça et jeté ensuite.
+    /// Le mode de la session enregistrée remplace celui de la machine : le
+    /// prompt système en dépend, donc la requête hachée. `Agent::new()` prend le
+    /// mode de la config globale, et le rejeu court-circuite
+    /// `recreate_provider_for_session`, seul autre site qui recopiait le mode
+    /// d'une session.
     pub fn set_replay_mode(&mut self, replay_mode: ReplayMode) {
+        *self.current_kaji_mode.get_mut() = replay_mode.kaji_mode;
         self.replay_mode = Some(replay_mode);
         self.tool_inspection_manager.drop_inspectors_for_replay();
     }
@@ -5888,7 +5894,10 @@ echo start >> "$PLUGIN_ROOT/hook.log"
     #[tokio::test]
     async fn replay_drops_the_inspectors_a_recorded_session_cannot_reproduce() -> Result<()> {
         let mut agent = Agent::new();
-        agent.set_replay_mode(ReplayMode::new("recorded-session".to_string()));
+        agent.set_replay_mode(ReplayMode::new(
+            "recorded-session".to_string(),
+            KajiMode::Auto,
+        ));
 
         let inspector_names = agent.tool_inspection_manager.inspector_names();
         assert!(
