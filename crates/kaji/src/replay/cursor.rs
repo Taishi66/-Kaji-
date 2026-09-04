@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use kaji_providers::errors::ProviderError;
 use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -52,6 +53,10 @@ pub struct LlmExchange {
     pub request_hash: String,
     pub chunks: Vec<Value>,
     pub finish: String,
+    /// La variante d'erreur exacte, quand l'appel a échoué à l'enregistrement.
+    /// Absente d'un journal antérieur au champ `error_kind` : le rejeu retombe
+    /// alors sur une erreur d'exécution, comme avant.
+    pub error: Option<ProviderError>,
 }
 
 /// Le journal v2 d'une session, prêt à être interrogé par clé.
@@ -208,6 +213,9 @@ impl EventCursor {
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_string(),
+                            error: payload.get("error_kind").and_then(|kind| {
+                                serde_json::from_value::<ProviderError>(kind.clone()).ok()
+                            }),
                         },
                     );
                 }

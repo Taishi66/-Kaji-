@@ -21,7 +21,7 @@ use tracing::warn;
 
 use crate::conversation::message::Message;
 use crate::providers::base::{MessageStream, Provider};
-use crate::replay::cursor::EventCursor;
+use crate::replay::cursor::{EventCursor, LlmExchange};
 use crate::replay::hashing::request_hash;
 
 /// Où en est le rejeu dans le journal. Miroir exact du compteur de capture
@@ -88,6 +88,23 @@ impl DivergenceLog {
     pub fn drain(&self) -> Vec<Divergence> {
         std::mem::take(&mut *self.entries.lock().unwrap())
     }
+}
+
+/// L'erreur à rendre pour un appel que l'enregistrement a terminé autrement que
+/// sur `stop`. La variante enregistrée est rendue telle quelle : les deux
+/// boucles branchent dessus — compaction de secours sur
+/// `ContextLengthExceeded`, notification sur `CreditsExhausted`, message
+/// d'erreur sinon — et un rejeu qui rendrait toujours `ExecutionError` prendrait
+/// un autre bras sans que le hash soit jamais atteint, donc sans divergence
+/// signalée.
+fn recorded_failure(exchange: &LlmExchange, turn_seq: i64, call_idx: u32) -> ProviderError {
+    exchange.error.clone().unwrap_or_else(|| {
+        ProviderError::ExecutionError(format!(
+            "replay: l'appel du tour {turn_seq}, appel {call_idx} s'est terminé sur \
+             « {} » à l'enregistrement",
+            exchange.finish
+        ))
+    })
 }
 
 pub struct ReplayProvider {
@@ -187,11 +204,7 @@ impl Provider for ReplayProvider {
         }
 
         if exchange.finish != "stop" {
-            return Err(ProviderError::ExecutionError(format!(
-                "replay: l'appel du tour {turn_seq}, appel {call_idx} s'est terminé sur \
-                 « {} » à l'enregistrement",
-                exchange.finish
-            )));
+            return Err(recorded_failure(exchange, turn_seq, call_idx));
         }
 
         let chunks = exchange
@@ -233,6 +246,7 @@ mod tests {
                     request_hash: request_hash.to_string(),
                     chunks: vec![json!([null, null])],
                     finish: "stop".to_string(),
+                    error: None,
                 },
             )]),
             tool_results: HashMap::new(),

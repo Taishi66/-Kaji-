@@ -1,11 +1,15 @@
 use reqwest::StatusCode;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
 
 use crate::conversation::message::MessageErrorKind;
 use crate::request_log::LogError;
 
-#[derive(Error, Debug, Clone, PartialEq)]
+/// `Serialize`/`Deserialize` : le journal du replay écrit la variante exacte
+/// d'un appel provider qui a échoué, pour que le rejeu prenne le même bras de
+/// `match` que l'enregistrement (`replay::provider`).
+#[derive(Error, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProviderError {
     #[error("Provider is not configured")]
     NotConfigured,

@@ -537,6 +537,73 @@ async fn a_purged_session_is_refused() -> Result<()> {
     Ok(())
 }
 
+/// Un appel qui a échoué à l'enregistrement doit échouer **de la même
+/// variante** au rejeu : la boucle choisit son bras de `match` dessus
+/// (compaction de secours sur `ContextLengthExceeded`, notification sur
+/// `CreditsExhausted`, message d'erreur sinon). Sans la variante, le tour se
+/// rejoue par un autre bras et `kaji replay` sort en « sans divergence » sur un
+/// tour qui n'a pas été rejoué.
+#[tokio::test]
+async fn a_recorded_provider_error_is_replayed_as_its_own_variant() -> Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let session_manager = Arc::new(SessionManager::new(data_dir.path().join("data")));
+    let session = session_manager
+        .create_session(
+            PathBuf::from("."),
+            "provider-error".to_string(),
+            SessionType::Hidden,
+            KajiMode::Auto,
+        )
+        .await?;
+    session_manager
+        .append_log_meta_if_absent(&session.id)
+        .await?;
+
+    let recorded = [
+        ProviderError::ContextLengthExceeded("prompt trop long".to_string()),
+        ProviderError::CreditsExhausted {
+            details: "plus de crédit".to_string(),
+            top_up_url: Some("https://example.invalid/top-up".to_string()),
+        },
+        ProviderError::RateLimitExceeded {
+            details: "trop vite".to_string(),
+            retry_delay: Some(std::time::Duration::from_secs(3)),
+        },
+    ];
+
+    let sink = RecordSink::new(Arc::clone(&session_manager), session.id.clone());
+    for (call_idx, error) in recorded.iter().enumerate() {
+        let call_idx = call_idx as u32;
+        sink.record_llm_request(
+            7,
+            call_idx,
+            &kaji::replay::hashing::request_hash("system", &[], &[]),
+            "mock-model",
+            "mock",
+        )
+        .await;
+        sink.record_llm_error(7, call_idx, error).await;
+    }
+
+    let cursor = Arc::new(EventCursor::load(&session_manager, &session.id).await?);
+    let provider = ReplayProvider::new(cursor, false);
+    provider.position().begin_turn(7);
+
+    for expected in &recorded {
+        let replayed = provider
+            .stream(&ModelConfig::new("kaji-replay"), "system", &[], &[])
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("un appel enregistré en erreur ne peut pas rendre un flux"));
+        assert_eq!(
+            &replayed, expected,
+            "le rejeu rend la variante enregistrée, pas un ExecutionError générique"
+        );
+    }
+
+    Ok(())
+}
+
 /// `condense_triggered` n'est émis que par un tour qui compacte : il est indexé
 /// depuis le sink de capture plutôt que par une fixture de compaction complète.
 #[tokio::test]

@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use kaji_providers::errors::ProviderError;
 use serde_json::{json, Value};
 use tracing::warn;
 
@@ -96,6 +97,27 @@ impl RecordSink {
                 "call_idx": call_idx,
                 "chunks": parse_or_wrap(chunks_json),
                 "finish": finish,
+            }),
+        )
+        .await;
+    }
+
+    /// Un appel provider qui a échoué, journalisé sous le même kind que les
+    /// autres avec `finish: "error"`. `error_kind` porte la variante exacte :
+    /// les deux boucles choisissent leur bras de `match` dessus — compaction de
+    /// secours sur `ContextLengthExceeded`, notification sur `CreditsExhausted`,
+    /// message d'erreur sinon — et le rejeu doit prendre le même.
+    pub async fn record_llm_error(&self, turn_seq: i64, call_idx: u32, error: &ProviderError) {
+        self.append(
+            turn_seq,
+            "llm_response",
+            json!({
+                "turn_seq": turn_seq,
+                "call_idx": call_idx,
+                "chunks": Vec::<Value>::new(),
+                "finish": "error",
+                "error": error.to_string(),
+                "error_kind": error,
             }),
         )
         .await;

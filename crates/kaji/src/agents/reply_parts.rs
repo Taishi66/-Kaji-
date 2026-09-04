@@ -454,8 +454,9 @@ async fn record_llm_chunks(
         .await;
 }
 
-/// Un appel LLM qui échoue est journalisé comme réponse `error` : le replay
-/// strict s'arrête dessus plutôt que de servir un `llm_request` sans réponse.
+/// Un appel LLM qui échoue est journalisé comme réponse `error`, variante
+/// comprise : le rejeu la reconstruit pour prendre le même bras de `match` que
+/// l'enregistrement, au lieu de retomber sur le bras générique.
 async fn record_llm_failure(
     record: &Option<RecordSink>,
     call_ctx: Option<(i64, u32)>,
@@ -464,10 +465,7 @@ async fn record_llm_failure(
     let (Some(record), Some((turn_seq, call_idx))) = (record.as_ref(), call_ctx) else {
         return;
     };
-    let payload = json!({ "error": error.to_string() }).to_string();
-    record
-        .record_llm_response(turn_seq, call_idx, &payload, "error")
-        .await;
+    record.record_llm_error(turn_seq, call_idx, error).await;
 }
 
 #[tracing::instrument(
