@@ -48,6 +48,11 @@ pub struct ToolManifest {
     /// `prompt_parts` avant la capture.
     #[serde(default)]
     pub frontend_instructions: Option<String>,
+    /// Le bloc de hints du working dir (`AGENTS.md`, `.kajihints`, …) assemblé
+    /// au moment de l'appel. Les deux boucles le relisent du disque à chaque
+    /// build : un `git pull` entre l'enregistrement et le rejeu le change.
+    #[serde(default)]
+    pub hints: Option<String>,
 }
 
 /// Le manifeste du tour : servi depuis le journal en rejeu, journalisé sinon.

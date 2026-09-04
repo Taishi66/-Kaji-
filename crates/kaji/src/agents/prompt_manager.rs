@@ -21,6 +21,20 @@ use std::path::Path;
 const MAX_EXTENSIONS: usize = 5;
 const MAX_TOOLS: usize = 50;
 
+/// Les fichiers de hints du working dir (`AGENTS.md`, `.kajihints`, …) assemblés
+/// en un bloc. C'est de l'état externe qui entre dans la requête hachée et que
+/// rien ne reconstruit plus tard : un `git pull` entre l'enregistrement et le
+/// rejeu le change. Les deux boucles le journalisent donc dans le manifeste du
+/// tour et le resservent de là (spec S1).
+pub fn hints_block(working_dir: &Path) -> Option<String> {
+    let hints = crate::hints::load_hint_files_with_fallback(
+        working_dir,
+        &get_context_filenames(),
+        &build_gitignore(working_dir),
+    );
+    (!hints.is_empty()).then_some(hints)
+}
+
 pub struct PromptManager {
     system_prompt_override: Option<String>,
     system_prompt_extras: IndexMap<String, String>,
@@ -110,18 +124,15 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
         self
     }
 
-    pub fn with_hints(mut self, working_dir: &Path) -> Self {
-        let hints_filenames = get_context_filenames();
-        let ignore_patterns = build_gitignore(working_dir);
+    pub fn with_hints(self, working_dir: &Path) -> Self {
+        self.with_hints_block(hints_block(working_dir))
+    }
 
-        let hints = crate::hints::load_hint_files_with_fallback(
-            working_dir,
-            &hints_filenames,
-            &ignore_patterns,
-        );
-
-        if !hints.is_empty() {
-            self.hints = Some(hints);
+    /// Le bloc de hints déjà assemblé, plutôt que relu du disque : le rejeu le
+    /// sert depuis le journal, où l'enregistrement l'a mis (`ToolManifest`).
+    pub fn with_hints_block(mut self, hints: Option<String>) -> Self {
+        if hints.is_some() {
+            self.hints = hints;
         }
         self
     }
@@ -297,11 +308,12 @@ impl PromptManager {
         working_dir: &Path,
         prompt_parts: Vec<(String, String)>,
         kaji_mode: KajiMode,
+        hints: Option<String>,
     ) -> String {
         self.load_subdirectory_hints(working_dir);
         self.builder()
             .with_prompt_extras(prompt_parts)
-            .with_hints(working_dir)
+            .with_hints_block(hints)
             .with_kaji_mode(kaji_mode)
             .without_extensions()
             .build()
@@ -412,6 +424,7 @@ mod tests {
                 "# Extensions\n\n## developer".to_string(),
             )],
             KajiMode::Auto,
+            None,
         );
 
         assert!(prompt.contains("## developer"));

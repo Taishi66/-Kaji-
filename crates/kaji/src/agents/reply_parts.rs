@@ -260,6 +260,7 @@ impl Agent {
                 tool_count,
                 code_execution_active,
                 frontend_instructions: self.frontend_instructions.lock().await.clone(),
+                hints: crate::agents::prompt_manager::hints_block(working_dir),
                 ..ToolManifest::default()
             },
         )
@@ -271,6 +272,7 @@ impl Agent {
             tool_count,
             code_execution_active,
             frontend_instructions,
+            hints,
             ..
         } = manifest;
 
@@ -285,7 +287,7 @@ impl Agent {
             .with_frontend_instructions(frontend_instructions)
             .with_extension_and_tool_counts(extension_count, tool_count)
             .with_code_execution_mode(code_execution_active)
-            .with_hints(working_dir)
+            .with_hints_block(hints)
             .with_kaji_mode(kaji_mode)
             .build();
 

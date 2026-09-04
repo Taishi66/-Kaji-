@@ -61,6 +61,12 @@ const PROBE_PAYLOAD: &str = "golden-payload-42";
 /// seul le journal peut les rendre au rejeu.
 const FRONTEND_INSTRUCTIONS: &str = "golden frontend instructions marker";
 
+/// Le fichier de hints du working dir, écrit avant l'enregistrement puis
+/// réécrit après pour prouver que le rejeu ne relit pas le disque.
+const AGENTS_MD: &str = "AGENTS.md";
+const RECORDED_HINT: &str = "golden hint as recorded";
+const EDITED_HINT: &str = "golden hint edited after the recording";
+
 /// Les faits mémoire de l'enregistrement, et celui qu'on ajoute *après* pour
 /// prouver que le rejeu ne consulte pas le magasin vivant.
 const SEEDED_FACTS: [(&str, &str); 2] = [
@@ -359,6 +365,7 @@ async fn record_fixture(probe: &ProbeFixture) -> Result<Fixture> {
     let data_dir = tempfile::tempdir()?;
     let working_dir = data_dir.path().join("workspace");
     std::fs::create_dir_all(&working_dir)?;
+    std::fs::write(working_dir.join(AGENTS_MD), RECORDED_HINT)?;
 
     let session_manager = Arc::new(SessionManager::new(data_dir.path().join("data")));
     let agent = new_agent(&session_manager, &data_dir);
@@ -858,6 +865,55 @@ async fn the_turn_context_comes_from_the_log_on_the_legacy_loop() -> Result<()> 
 #[tokio::test]
 async fn the_turn_context_comes_from_the_log_on_the_state_machine_loop() -> Result<()> {
     assert_the_turn_context_comes_from_the_log(Some("1")).await
+}
+
+/// Les hints du working dir (`AGENTS.md`, `.kajihints`) entrent dans le prompt
+/// système, donc dans la requête hachée, et ils sont lus du disque à chaque
+/// build. Le cas d'usage n°1 du replay — `kaji replay <session d'hier>` après un
+/// `git pull` qui a touché `AGENTS.md` — les fait donc diverger au tour 1 s'ils
+/// ne viennent pas du journal.
+async fn assert_edited_hints_do_not_move_the_replay(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env(state_machine, &memory_dir);
+
+    let probe = ProbeFixture::new().await;
+    let fixture = record_fixture(&probe).await?;
+    let before = replay_once(&fixture, &label).await?;
+    assert!(
+        before
+            .prompts
+            .iter()
+            .all(|prompt| prompt.contains(RECORDED_HINT)),
+        "{label}: le hint enregistré est bien dans le prompt, sinon le test ne prouve rien"
+    );
+
+    std::fs::write(fixture.working_dir.join(AGENTS_MD), EDITED_HINT)?;
+
+    let after = replay_once(&fixture, &label).await?;
+    assert_eq!(
+        before.transcript.rendered(),
+        after.transcript.rendered(),
+        "{label}: un hint réécrit après l'enregistrement ne déplace pas le rejeu"
+    );
+    assert!(
+        after
+            .prompts
+            .iter()
+            .all(|prompt| prompt.contains(RECORDED_HINT) && !prompt.contains(EDITED_HINT)),
+        "{label}: le rejeu sert le bloc de hints du journal, pas celui du disque"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn edited_hints_do_not_move_the_replay_on_the_legacy_loop() -> Result<()> {
+    assert_edited_hints_do_not_move_the_replay(None).await
+}
+
+#[tokio::test]
+async fn edited_hints_do_not_move_the_replay_on_the_state_machine_loop() -> Result<()> {
+    assert_edited_hints_do_not_move_the_replay(Some("1")).await
 }
 
 /// Les instructions frontend entrent dans le prompt système, donc dans la

@@ -489,15 +489,18 @@ impl Inference for InferenceRunner<'_> {
                 ToolManifest {
                     tools,
                     prompt_parts: input.prompt_parts,
+                    hints: crate::agents::prompt_manager::hints_block(&session.working_dir),
                     ..ToolManifest::default()
                 },
             )
             .await;
-            let (tools, prompt_parts) = (manifest.tools, manifest.prompt_parts);
+            let (tools, prompt_parts, hints) =
+                (manifest.tools, manifest.prompt_parts, manifest.hints);
             let system_prompt = self.prompt_manager.lock().await.build_system_prompt(
                 &session.working_dir,
                 prompt_parts,
                 kaji_mode,
+                hints,
             );
             // KAJI : splice recalled inter-session facts (parity with the legacy
             // `prepare_reply_context` path, which reads memory off the repaired
