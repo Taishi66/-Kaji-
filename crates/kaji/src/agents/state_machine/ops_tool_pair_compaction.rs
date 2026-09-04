@@ -78,7 +78,12 @@ impl Operation for ToolPairCompactionOperation {
             .flat_map(|message| &message.content)
             .filter(|content| matches!(content, MessageContent::ToolRequest(_)))
             .count();
-        let tool_ids = tool_ids_to_summarize(conversation, self.cutoff, protected);
+        let tool_ids = tool_ids_to_summarize(
+            conversation,
+            self.cutoff,
+            protected,
+            self.replay_source.as_ref(),
+        );
         if tool_ids.is_empty() {
             return not_applicable();
         }

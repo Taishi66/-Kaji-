@@ -102,6 +102,15 @@ impl ReplaySource {
             .cloned()
     }
 
+    /// Vrai quand le journal porte un résumé pour cette paire au tour rejoué.
+    /// C'est cette présence, et non le seuil recalculé sur la machine de rejeu,
+    /// qui décide qu'une paire est remplacée par son résumé (spec S3).
+    pub fn has_tool_pair_summary(&self, tool_call_id: &str) -> bool {
+        self.cursor
+            .tool_pair_summaries
+            .contains_key(&(self.turn(), tool_call_id.to_string()))
+    }
+
     pub fn condensed(&self) -> bool {
         self.cursor.condense_turns.contains(&self.turn())
     }

@@ -2011,7 +2011,8 @@ impl Agent {
             .unwrap_or_else(|_| {
                 crate::context_mgmt::compute_tool_call_cutoff(context_limit, compaction_threshold)
             });
-        let tool_pair_compaction_enabled = crate::context_mgmt::tool_pair_summarization_enabled()
+        let tool_pair_compaction_enabled = (crate::context_mgmt::tool_pair_summarization_enabled()
+            || self.is_replay())
             && !provider.manages_own_context();
 
         let operations: Vec<Arc<dyn Operation + '_>> = vec![

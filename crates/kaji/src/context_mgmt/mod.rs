@@ -570,25 +570,47 @@ pub fn compute_tool_call_cutoff(context_limit: usize, compaction_threshold: f64)
     (3 * effective_limit / 20_000).clamp(10, 500)
 }
 
+fn agent_visible_tool_call_ids(conversation: &Conversation) -> Vec<String> {
+    conversation
+        .messages()
+        .iter()
+        .filter(|message| message.is_agent_visible())
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            MessageContent::ToolRequest(request) => Some(request.id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Les paires d'outils que ce tour remplace par un résumé.
+///
+/// Hors rejeu, le seuil décide : le plus vieux lot part dès que les paires
+/// éligibles dépassent `cutoff + TOOLCALL_SUMMARIZATION_BATCH_SIZE`. Au rejeu,
+/// c'est le journal qui commande, comme pour la compaction
+/// (`source::condense_decision`) : le `cutoff` dérive du `context_limit` de la
+/// machine qui rejoue, jamais de celle qui a enregistré, et la mutation est de
+/// la conversation persistée — la reproduire à l'identique est la condition
+/// pour que le tour suivant retrouve son hash (spec S3).
+///
+/// Le lot candidat reste celui que la conversation désigne, et le journal ne
+/// fait qu'y trancher : c'est ce qui préserve le découpage en lots successifs
+/// d'un même tour côté machine à états, chaque lot ne voyant que les paires
+/// encore agent-visibles.
 pub fn tool_ids_to_summarize(
     conversation: &Conversation,
     cutoff: usize,
     protect_last_n: usize,
+    replay: Option<&crate::replay::source::ReplaySource>,
 ) -> Vec<String> {
-    let messages = conversation.messages();
+    let tool_call_ids = agent_visible_tool_call_ids(conversation);
 
-    let mut tool_call_ids: Vec<String> = Vec::new();
-
-    for msg in messages.iter() {
-        if !msg.is_agent_visible() {
-            continue;
-        }
-
-        for content in &msg.content {
-            if let MessageContent::ToolRequest(req) = content {
-                tool_call_ids.push(req.id.clone());
-            }
-        }
+    if let Some(source) = replay {
+        return tool_call_ids
+            .into_iter()
+            .take(TOOLCALL_SUMMARIZATION_BATCH_SIZE)
+            .filter(|tool_call_id| source.has_tool_pair_summary(tool_call_id))
+            .collect();
     }
 
     // Never summarize the last N tool calls (current turn)
@@ -719,11 +741,16 @@ pub fn maybe_summarize_tool_pairs(
     recorder: Option<Arc<crate::replay::record::TurnRecorder>>,
     replay: Option<crate::replay::source::ReplaySource>,
 ) -> Option<JoinHandle<Vec<(Message, String)>>> {
-    if !tool_pair_summarization_enabled() || provider.manages_own_context() {
+    // Le drapeau appartient à la machine, pas à l'enregistrement : au rejeu,
+    // c'est la présence d'une ligne `tool_pair_summary` qui commande, sinon une
+    // session enregistrée avec le résumé actif deviendrait irrejouable sur une
+    // machine qui l'a désactivé.
+    let replaying = replay.is_some();
+    if (!replaying && !tool_pair_summarization_enabled()) || provider.manages_own_context() {
         return None;
     }
 
-    let tool_ids = tool_ids_to_summarize(&conversation, cutoff, protect_last_n);
+    let tool_ids = tool_ids_to_summarize(&conversation, cutoff, protect_last_n, replay.as_ref());
     if tool_ids.is_empty() {
         return None;
     }
@@ -1482,7 +1509,7 @@ mod tests {
             ));
         }
         let conversation = Conversation::new_unvalidated(messages);
-        let result = tool_ids_to_summarize(&conversation, 5, 0);
+        let result = tool_ids_to_summarize(&conversation, 5, 0, None);
         assert!(result.is_empty(), "Exactly cutoff+batch should not trigger");
 
         // 16 tool calls: now exceeds cutoff+10, should return a batch of 10
@@ -1496,7 +1523,7 @@ mod tests {
             ));
         }
         let conversation = Conversation::new_unvalidated(messages);
-        let result = tool_ids_to_summarize(&conversation, 5, 0);
+        let result = tool_ids_to_summarize(&conversation, 5, 0, None);
         assert_eq!(result.len(), TOOLCALL_SUMMARIZATION_BATCH_SIZE);
         assert_eq!(result[0], "call0");
         assert_eq!(result[9], "call9");
@@ -1517,19 +1544,121 @@ mod tests {
         let conversation = Conversation::new_unvalidated(messages);
 
         // No protection: 20 eligible, 20 > 12 → batch of 10
-        let result = tool_ids_to_summarize(&conversation, 2, 0);
+        let result = tool_ids_to_summarize(&conversation, 2, 0, None);
         assert_eq!(result.len(), TOOLCALL_SUMMARIZATION_BATCH_SIZE);
 
         // Protect last 8: 12 eligible, 12 <= 12 → nothing
-        let result = tool_ids_to_summarize(&conversation, 2, 8);
+        let result = tool_ids_to_summarize(&conversation, 2, 8, None);
         assert!(
             result.is_empty(),
             "Should not summarize when protected count leaves eligible <= cutoff + batch"
         );
 
         // Protect last 7: 13 eligible, 13 > 12 → batch of 10
-        let result = tool_ids_to_summarize(&conversation, 2, 7);
+        let result = tool_ids_to_summarize(&conversation, 2, 7, None);
         assert_eq!(result.len(), TOOLCALL_SUMMARIZATION_BATCH_SIZE);
         assert_eq!(result[0], "call0");
+    }
+
+    fn seeded_conversation(pairs: usize) -> Conversation {
+        let mut messages = vec![Message::user().with_text("hello")];
+        for i in 0..pairs {
+            messages.extend(create_tool_pair(
+                &format!("call{i}"),
+                &format!("resp{i}"),
+                "read_file",
+                "content",
+            ));
+        }
+        Conversation::new_unvalidated(messages)
+    }
+
+    /// Un journal qui a résumé `summarized` au tour 1, et rien au tour 2.
+    fn replay_cursor(summarized: &[&str]) -> crate::replay::cursor::EventCursor {
+        crate::replay::cursor::EventCursor {
+            log_meta: crate::replay::cursor::LogMeta {
+                kaji_version: "test".to_string(),
+                schema_version: 17,
+                idgen_seed: "seed".to_string(),
+            },
+            llm_responses: std::collections::HashMap::new(),
+            tool_results: std::collections::HashMap::new(),
+            memory_blocks: std::collections::HashMap::new(),
+            turn_contexts: std::collections::HashMap::new(),
+            tool_manifests: std::collections::HashMap::new(),
+            clock_reads: std::collections::HashMap::new(),
+            condense_turns: std::collections::HashSet::new(),
+            condense_summaries: std::collections::HashMap::new(),
+            tool_pair_summaries: summarized
+                .iter()
+                .map(|tool_call_id| {
+                    (
+                        (1, (*tool_call_id).to_string()),
+                        Message::user().with_text(format!("résumé de {tool_call_id}")),
+                    )
+                })
+                .collect(),
+            approvals: std::collections::HashMap::new(),
+        }
+    }
+
+    fn replay_source_on_turn(
+        summarized: &[&str],
+        turn: i64,
+    ) -> crate::replay::source::ReplaySource {
+        let position = Arc::new(crate::replay::provider::ReplayPosition::default());
+        position.begin_turn(turn);
+        crate::replay::source::ReplaySource::new(Arc::new(replay_cursor(summarized)), position)
+    }
+
+    /// Le seuil de résumé dérive du `context_limit` de la machine — celle qui
+    /// rejoue n'est pas celle qui a enregistré. Au rejeu, c'est donc le journal
+    /// qui commande : les paires qu'il nomme sont résumées quel que soit le
+    /// `cutoff` local, et celles qu'il ne nomme pas ne le sont jamais.
+    #[test]
+    fn a_replayed_turn_summarizes_the_pairs_the_log_names_whatever_the_local_cutoff() {
+        let conversation = seeded_conversation(20);
+        let recorded: Vec<String> = (0..TOOLCALL_SUMMARIZATION_BATCH_SIZE)
+            .map(|i| format!("call{i}"))
+            .collect();
+        let recorded_ids: Vec<&str> = recorded.iter().map(String::as_str).collect();
+        let source = replay_source_on_turn(&recorded_ids, 1);
+
+        // Sens dangereux : la machine de rejeu a un `cutoff` plus haut que celui
+        // de l'enregistrement — sans le journal, elle ne reproduirait pas la
+        // mutation et le tour suivant divergerait.
+        assert_eq!(
+            tool_ids_to_summarize(&conversation, 10_000, 0, Some(&source)),
+            recorded,
+            "un lot résumé à l'enregistrement est reproduit malgré un cutoff local qui ne le déclencherait pas"
+        );
+
+        // Sens bénin : `cutoff` plus bas. Le journal borne quand même le lot.
+        assert_eq!(
+            tool_ids_to_summarize(&conversation, 0, 0, Some(&source)),
+            recorded,
+            "un cutoff local plus bas ne fait pas résumer plus que le journal"
+        );
+
+        // Un tour que l'enregistrement n'a pas résumé ne mute rien au rejeu.
+        let untouched_turn = replay_source_on_turn(&recorded_ids, 2);
+        assert!(
+            tool_ids_to_summarize(&conversation, 0, 0, Some(&untouched_turn)).is_empty(),
+            "un tour sans ligne tool_pair_summary ne résume rien, quel que soit le cutoff local"
+        );
+    }
+
+    /// Le journal ne nomme qu'une partie du lot (une paire dont le résumé a
+    /// échoué à l'enregistrement) : le rejeu reproduit exactement ce sous-
+    /// ensemble, dans l'ordre de la conversation.
+    #[test]
+    fn a_replayed_turn_reproduces_only_the_pairs_the_log_carries() {
+        let conversation = seeded_conversation(20);
+        let source = replay_source_on_turn(&["call0", "call3"], 1);
+
+        assert_eq!(
+            tool_ids_to_summarize(&conversation, 0, 0, Some(&source)),
+            vec!["call0".to_string(), "call3".to_string()]
+        );
     }
 }
