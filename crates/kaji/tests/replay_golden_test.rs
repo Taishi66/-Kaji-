@@ -56,6 +56,11 @@ const TOOL_REQUEST_ID: &str = "golden-probe-1";
 const TOOL_REQUEST_ID_2: &str = "golden-probe-2";
 const PROBE_PAYLOAD: &str = "golden-payload-42";
 
+/// Les instructions d'une extension frontend. Elles entrent dans le prompt
+/// système à l'enregistrement ; `kaji replay` ne charge aucune extension, donc
+/// seul le journal peut les rendre au rejeu.
+const FRONTEND_INSTRUCTIONS: &str = "golden frontend instructions marker";
+
 /// Les faits mémoire de l'enregistrement, et celui qu'on ajoute *après* pour
 /// prouver que le rejeu ne consulte pas le magasin vivant.
 const SEEDED_FACTS: [(&str, &str); 2] = [
@@ -372,6 +377,19 @@ async fn record_fixture(probe: &ProbeFixture) -> Result<Fixture> {
     agent
         .add_extension(
             ExtensionConfig::streamable_http("probe", &probe.url, "instrumented probe", 30_u64),
+            &session.id,
+        )
+        .await?;
+    agent
+        .add_extension(
+            ExtensionConfig::Frontend {
+                name: "golden-frontend".to_string(),
+                description: "frontend fixture".to_string(),
+                tools: Vec::new(),
+                instructions: Some(FRONTEND_INSTRUCTIONS.to_string()),
+                bundled: None,
+                available_tools: Vec::new(),
+            },
             &session.id,
         )
         .await?;
@@ -840,6 +858,44 @@ async fn the_turn_context_comes_from_the_log_on_the_legacy_loop() -> Result<()> 
 #[tokio::test]
 async fn the_turn_context_comes_from_the_log_on_the_state_machine_loop() -> Result<()> {
     assert_the_turn_context_comes_from_the_log(Some("1")).await
+}
+
+/// Les instructions frontend entrent dans le prompt système, donc dans la
+/// requête hachée. `kaji replay` ne charge aucune extension : elles ne peuvent
+/// venir que du journal. La boucle legacy les lisait vivantes au moment du
+/// build, hors manifeste.
+async fn assert_the_frontend_instructions_come_from_the_log(
+    state_machine: Option<&str>,
+) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env(state_machine, &memory_dir);
+
+    let probe = ProbeFixture::new().await;
+    let fixture = record_fixture(&probe).await?;
+
+    let prompts = replay_once(&fixture, &label).await?.prompts;
+    assert!(
+        !prompts.is_empty(),
+        "{label}: le rejeu a présenté des prompts au provider"
+    );
+    assert!(
+        prompts
+            .iter()
+            .all(|prompt| prompt.contains(FRONTEND_INSTRUCTIONS)),
+        "{label}: le rejeu, sans extension chargée, sert les instructions frontend du journal"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_frontend_instructions_come_from_the_log_on_the_legacy_loop() -> Result<()> {
+    assert_the_frontend_instructions_come_from_the_log(None).await
+}
+
+#[tokio::test]
+async fn the_frontend_instructions_come_from_the_log_on_the_state_machine_loop() -> Result<()> {
+    assert_the_frontend_instructions_come_from_the_log(Some("1")).await
 }
 
 #[tokio::test]

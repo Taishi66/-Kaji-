@@ -37,6 +37,17 @@ pub struct ToolManifest {
     pub extension_count: usize,
     #[serde(default)]
     pub tool_count: usize,
+    /// Vrai quand l'extension code-execution était active. La boucle legacy
+    /// pousse ce drapeau dans le prompt système (`with_code_execution_mode`)
+    /// sans qu'il transparaisse dans la liste d'outils ; la machine à états ne
+    /// s'en sert que pour préparer les outils, dont la sortie est déjà là.
+    #[serde(default)]
+    pub code_execution_active: bool,
+    /// Les instructions des extensions frontend, que la boucle legacy lit
+    /// vivantes au moment du build. La machine à états les pousse dans
+    /// `prompt_parts` avant la capture.
+    #[serde(default)]
+    pub frontend_instructions: Option<String>,
 }
 
 /// Le manifeste du tour : servi depuis le journal en rejeu, journalisé sinon.

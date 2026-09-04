@@ -258,6 +258,8 @@ impl Agent {
                 extensions: extensions_info,
                 extension_count,
                 tool_count,
+                code_execution_active,
+                frontend_instructions: self.frontend_instructions.lock().await.clone(),
                 ..ToolManifest::default()
             },
         )
@@ -267,6 +269,8 @@ impl Agent {
             extensions: extensions_info,
             extension_count,
             tool_count,
+            code_execution_active,
+            frontend_instructions,
             ..
         } = manifest;
 
@@ -278,7 +282,7 @@ impl Agent {
         let system_prompt = prompt_manager
             .builder()
             .with_extensions(extensions_info.into_iter())
-            .with_frontend_instructions(self.frontend_instructions.lock().await.clone())
+            .with_frontend_instructions(frontend_instructions)
             .with_extension_and_tool_counts(extension_count, tool_count)
             .with_code_execution_mode(code_execution_active)
             .with_hints(working_dir)
