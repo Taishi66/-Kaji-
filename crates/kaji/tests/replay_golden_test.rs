@@ -214,6 +214,11 @@ struct Fixture {
     session_manager: Arc<SessionManager>,
     session_id: String,
     events: Vec<SessionEvent>,
+    /// Ce que l'enregistrement lui-même a rendu, tour par tour : la référence
+    /// contre laquelle le rejeu se compare (spec S1 — les ids du journal sont
+    /// ceux que le rejeu redérive, pas seulement ceux qu'il reproduit d'un
+    /// rejeu à l'autre).
+    transcript: Transcript,
 }
 
 /// Une ligne de transcription : le tour du journal, la nature du contenu, la
@@ -366,8 +371,12 @@ async fn record_fixture(probe: &ProbeFixture) -> Result<Fixture> {
         )
         .await?;
 
-    for query in QUERIES {
-        drain(&agent, &session.id, Message::user().with_text(query)).await?;
+    let mut transcript = Transcript::default();
+    for (index, query) in QUERIES.iter().enumerate() {
+        let turn_seq = index as i64 + 1;
+        for message in drain(&agent, &session.id, Message::user().with_text(*query)).await? {
+            transcript.push(turn_seq, &message);
+        }
     }
 
     let events = session_manager.session_events(&session.id).await?;
@@ -377,6 +386,7 @@ async fn record_fixture(probe: &ProbeFixture) -> Result<Fixture> {
         session_manager,
         session_id: session.id,
         events,
+        transcript,
     })
 }
 
@@ -601,6 +611,16 @@ async fn assert_two_replays_agree(state_machine: Option<&str>) -> Result<()> {
     assert_eq!(
         first.message_ids, second.message_ids,
         "{label}: l'IdGen seedé redonne les mêmes ids de messages"
+    );
+    assert_eq!(
+        fixture.transcript.message_ids, first.message_ids,
+        "{label}: les ids du rejeu sont ceux de l'enregistrement — sinon une \
+         transcription rejouée ne se recoupe pas avec le journal source (spec S1)"
+    );
+    assert_eq!(
+        fixture.transcript.rendered(),
+        first.rendered(),
+        "{label}: le rejeu rend la transcription de l'enregistrement"
     );
     assert!(
         first.message_ids.iter().all(|id| !id.is_empty()),

@@ -2434,6 +2434,19 @@ impl Agent {
                 turn_seq,
             ))
         });
+        // Les ids de message du tour, à l'enregistrement comme au rejeu.
+        // L'enregistrement les dérive de sa propre session ; le rejeu tourne
+        // dans une session dérivée mais sous la graine du journal source
+        // (`log_meta.idgen_seed`, imposée par `set_idgen`) et sous le tour
+        // qu'il rejoue — sans quoi le journal porterait des ids que le rejeu
+        // ne peut pas redonner (spec S1).
+        self.idgen.begin_turn(
+            &session_id,
+            self.replay_source()
+                .map(|source| source.turn())
+                .or(turn_seq)
+                .unwrap_or(-1),
+        );
 
         // Le message qui ouvre le tour. Hors chemin des slash-commands la
         // boucle ne le rend jamais en `AgentEvent`, donc le journal ne le
