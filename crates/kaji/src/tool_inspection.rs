@@ -49,6 +49,14 @@ pub trait ToolInspector: Send + Sync {
         true
     }
 
+    /// Whether a replayed turn may run this inspector. `false` for an inspector
+    /// whose verdict comes from live machine state or a live LLM call: the
+    /// replay machine is not the recording machine, and the journal carries the
+    /// recorded verdict rather than the means to recompute it.
+    fn runs_under_replay(&self) -> bool {
+        true
+    }
+
     /// Allow downcasting to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -116,6 +124,14 @@ impl ToolInspectionManager {
         }
 
         Ok(all_results)
+    }
+
+    /// Drops the inspectors a replayed turn must not run. Called once when the
+    /// agent enters replay, so both loops — which share this manager — see the
+    /// same inspector list.
+    pub fn drop_inspectors_for_replay(&mut self) {
+        self.inspectors
+            .retain(|inspector| inspector.runs_under_replay());
     }
 
     /// Get list of registered inspector names

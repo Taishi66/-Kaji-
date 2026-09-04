@@ -614,6 +614,7 @@ impl Agent {
     /// `Agent` de replay est monté pour ça et jeté ensuite.
     pub fn set_replay_mode(&mut self, replay_mode: ReplayMode) {
         self.replay_mode = Some(replay_mode);
+        self.tool_inspection_manager.drop_inspectors_for_replay();
     }
 
     /// Branche le journal que les tours rejoués liront. Le routeur de
@@ -5874,6 +5875,29 @@ echo start >> "$PLUGIN_ROOT/hook.log"
         assert!(
             inspector_names.contains(&"adversary"),
             "Tool inspection manager should contain adversary inspector"
+        );
+
+        Ok(())
+    }
+
+    /// L'inspecteur adversaire s'active sur `~/.config/kaji/adversary.md` —
+    /// l'état de la **machine de rejeu**, pas de la session enregistrée — et sa
+    /// décision vient d'un appel LLM vivant que le journal ne porte pas. Un
+    /// rejeu ne doit donc jamais l'exécuter, exactement comme le nommage de
+    /// session.
+    #[tokio::test]
+    async fn replay_drops_the_inspectors_a_recorded_session_cannot_reproduce() -> Result<()> {
+        let mut agent = Agent::new();
+        agent.set_replay_mode(ReplayMode::new("recorded-session".to_string()));
+
+        let inspector_names = agent.tool_inspection_manager.inspector_names();
+        assert!(
+            !inspector_names.contains(&"adversary"),
+            "un rejeu n'exécute pas l'inspecteur adversaire : {inspector_names:?}"
+        );
+        assert!(
+            inspector_names.contains(&"permission") && inspector_names.contains(&"security"),
+            "les inspecteurs déterministes restent en place : {inspector_names:?}"
         );
 
         Ok(())

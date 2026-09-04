@@ -386,6 +386,12 @@ impl ToolInspector for AdversaryInspector {
         self.get_config().is_some()
     }
 
+    /// Activé par `~/.config/kaji/adversary.md` — l'état de la machine — et
+    /// tranché par un appel LLM vivant que le journal ne porte pas.
+    fn runs_under_replay(&self) -> bool {
+        false
+    }
+
     async fn inspect(
         &self,
         session_id: &str,
