@@ -27,7 +27,7 @@ use kaji::replay::idgen::SessionIdGen;
 use kaji::replay::mode::ReplayMode;
 use kaji::replay::provider::ReplayProvider;
 use kaji::replay::source::ReplaySource;
-use kaji::session::session_manager::{SessionEvent, SessionType};
+use kaji::session::session_manager::{SessionEvent, SessionType, DB_NAME, SESSIONS_FOLDER};
 use kaji::session::SessionManager;
 use kaji_providers::conversation::token_usage::{ProviderUsage, Usage};
 use kaji_providers::errors::ProviderError;
@@ -68,12 +68,12 @@ const QUERIES: [&str; 3] = [
     "wrap up the dashboard review",
 ];
 
-/// Sous le seuil `MIN_CONTEXT_FOR_MOIM` (32 k, `agents/moim.rs`), donc aucun
-/// bloc `turn-context` n'est ajouté au tour. Ce bloc porte l'horodatage
-/// `chrono::Local::now()` arrondi à la minute, que le journal ne capture pas :
-/// le laisser rendrait le hash de requête dépendant de la minute où le rejeu
-/// tourne — un test doré intermittent, donc inutile.
-const CONTEXT_LIMIT: usize = 20_000;
+/// Au-dessus du seuil `MIN_CONTEXT_FOR_MOIM` (32 k, `agents/moim.rs`), donc
+/// chaque tour porte son bloc `turn-context`. Ce bloc entre dans la requête
+/// hachée alors qu'il est fait d'état vivant — horloge à la minute, usage
+/// cumulé de la session, budget de tours : le rejeu ne peut le retrouver que
+/// s'il est journalisé. C'est la limite d'un modèle réel, et le doré la prend.
+const CONTEXT_LIMIT: usize = 120_000;
 
 /// Le rejeu doré est strict : une requête reconstruite qui ne retrouve pas son
 /// hash enregistré arrête le tour.
@@ -181,6 +181,7 @@ impl Provider for FixtureProvider {
 struct SpyProvider {
     inner: ReplayProvider,
     prompts: Arc<Mutex<Vec<String>>>,
+    messages: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -193,6 +194,10 @@ impl Provider for SpyProvider {
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
         self.prompts.lock().unwrap().push(system.to_string());
+        self.messages
+            .lock()
+            .unwrap()
+            .push(messages.iter().map(Message::as_concat_text).collect());
         self.inner
             .stream(model_config, system, messages, tools)
             .await
@@ -375,6 +380,25 @@ async fn record_fixture(probe: &ProbeFixture) -> Result<Fixture> {
     })
 }
 
+/// Les blocs `turn-context` que l'enregistrement a posés dans la conversation.
+async fn recorded_turn_context_blocks(fixture: &Fixture) -> Result<Vec<String>> {
+    let session = fixture
+        .session_manager
+        .get_session(&fixture.session_id, true)
+        .await?;
+    Ok(session
+        .conversation
+        .map(|conversation| {
+            conversation
+                .messages()
+                .iter()
+                .filter(|message| message.is_turn_context())
+                .map(Message::as_concat_text)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Le message qui a ouvert chaque tour, tel qu'enregistré — même extraction
 /// que celle du CLI `kaji replay` (`commands/replay.rs`, `user_turns`).
 fn recorded_turns(events: &[SessionEvent]) -> Vec<(i64, Message)> {
@@ -414,15 +438,20 @@ fn v2_shape(events: &[SessionEvent]) -> Vec<String> {
             let key = match event.kind.as_str() {
                 "llm_request" | "llm_response" => format!("call_idx={}", payload["call_idx"]),
                 "tool_result" => format!("tool_call_id={}", payload["tool_call_id"]),
-                "memory_block" | "clock_reads" | "condense_triggered" | "tool_manifest" => {
-                    "-".to_string()
-                }
+                "memory_block" | "turn_context" | "clock_reads" | "condense_triggered"
+                | "tool_manifest" | "condense_summary" => "-".to_string(),
                 _ => return None,
             };
             Some(format!("turn={} {} {key}", event.turn_seq, event.kind))
         })
         .collect();
     shape.sort();
+    // Les kinds d'assemblage (`memory_block`, `turn_context`) sont adressés par
+    // appel : la machine à états réassemble avant chaque appel du tour quand la
+    // boucle legacy n'assemble qu'une fois. La multiplicité n'est donc pas une
+    // propriété du format — la présence l'est, et c'est ce qui doit être à
+    // parité.
+    shape.dedup();
     shape
 }
 
@@ -432,14 +461,25 @@ fn v2_shape(events: &[SessionEvent]) -> Vec<String> {
 /// `kaji replay`. La liste d'outils et les fragments de prompt qui en dérivent
 /// viennent du journal (`tool_manifest`), pas d'un serveur MCP relancé.
 async fn replay_once(fixture: &Fixture, label: &str) -> Result<(Transcript, Vec<String>)> {
+    let (transcript, prompts, _) = replay_once_with(fixture, label, LENIENT).await?;
+    Ok((transcript, prompts))
+}
+
+async fn replay_once_with(
+    fixture: &Fixture,
+    label: &str,
+    lenient: bool,
+) -> Result<(Transcript, Vec<String>, Vec<String>)> {
     let cursor = Arc::new(EventCursor::load(&fixture.session_manager, &fixture.session_id).await?);
-    let provider = ReplayProvider::new(Arc::clone(&cursor), LENIENT);
+    let provider = ReplayProvider::new(Arc::clone(&cursor), lenient);
     let position = provider.position();
     let divergences = provider.divergences();
     let prompts = Arc::new(Mutex::new(Vec::new()));
+    let seen_messages = Arc::new(Mutex::new(Vec::new()));
     let spy = Arc::new(SpyProvider {
         inner: provider,
         prompts: Arc::clone(&prompts),
+        messages: Arc::clone(&seen_messages),
     });
 
     let derived = fixture
@@ -480,13 +520,22 @@ async fn replay_once(fixture: &Fixture, label: &str) -> Result<(Transcript, Vec<
         executions_before,
         "{label}: le rejeu n'exécute jamais l'outil"
     );
+    // Les deux boucles rattrapent les erreurs du provider et les rendent en
+    // message : sans ce contrôle, un rejeu entièrement divergent produirait
+    // deux transcriptions identiques et le doré ne verrait rien.
     assert!(
-        divergences.drain().is_empty(),
+        lenient || !transcript.rendered().contains("replay:"),
+        "{label}: aucun tour n'a échoué faute de journal : {}",
+        transcript.rendered()
+    );
+    assert!(
+        lenient || divergences.drain().is_empty(),
         "{label}: un rejeu strict ne tolère aucune divergence"
     );
 
     let prompts = prompts.lock().unwrap().clone();
-    Ok((transcript, prompts))
+    let seen_messages = seen_messages.lock().unwrap().clone();
+    Ok((transcript, prompts, seen_messages))
 }
 
 /// Une session de trois tours, rejouée deux fois, rend deux fois la même
@@ -520,6 +569,21 @@ async fn assert_two_replays_agree(state_machine: Option<&str>) -> Result<()> {
             .any(|manifest| manifest.tools.iter().any(|tool| tool.name == TOOL)),
         "{label}: l'outil de l'extension est journalisé — sans quoi le rejeu sans extension \
          ne prouverait rien"
+    );
+
+    let recorded_blocks = recorded_turn_context_blocks(&fixture).await?;
+    assert!(
+        !recorded_blocks.is_empty(),
+        "{label}: au-dessus du seuil moim, chaque tour porte son bloc turn-context"
+    );
+    assert!(
+        recorded_blocks.iter().all(|block| cursor
+            .turn_contexts
+            .values()
+            .any(|journaled| journaled == block)),
+        "{label}: chaque bloc turn-context de l'enregistrement est journalisé, \
+         adressé par (tour, appel) : {recorded_blocks:?} vs {:?}",
+        cursor.turn_contexts
     );
 
     let (first, _) = replay_once(&fixture, &label).await?;
@@ -626,6 +690,80 @@ async fn assert_a_late_memory_fact_does_not_move_the_replay(
     );
 
     Ok(())
+}
+
+/// Le bloc `turn-context` sert d'où il est lu : on réécrit celui du premier
+/// appel dans le journal, et le rejeu doit présenter ce texte-là au provider.
+/// Une recomposition rendrait le bloc vivant, sans la marque. Le rejeu tourne
+/// en lenient : le journal a été volontairement désaccordé de son hash.
+const REWRITTEN_BLOCK: &str = "<turn-context>bloc réécrit dans le journal</turn-context>";
+
+async fn assert_the_turn_context_comes_from_the_log(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env(state_machine, &memory_dir);
+
+    let probe = ProbeFixture::new().await;
+    let fixture = record_fixture(&probe).await?;
+    rewrite_first_turn_context(&fixture).await?;
+
+    let (_, _, seen_messages) = replay_once_with(&fixture, &label, true).await?;
+
+    assert!(
+        seen_messages
+            .iter()
+            .any(|messages| messages.contains(REWRITTEN_BLOCK)),
+        "{label}: le rejeu a servi le bloc du journal, pas un bloc recomposé : {seen_messages:?}"
+    );
+    Ok(())
+}
+
+/// Remplace le bloc journalisé du tout premier appel par une marque
+/// reconnaissable, sans passer par la boucle.
+async fn rewrite_first_turn_context(fixture: &Fixture) -> Result<()> {
+    let db_path = fixture
+        .data_dir
+        .path()
+        .join("data")
+        .join(SESSIONS_FOLDER)
+        .join(DB_NAME);
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(db_path)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
+    )
+    .await?;
+    let payload = serde_json::json!({
+        "turn_seq": 1,
+        "call_idx": 0,
+        "block": REWRITTEN_BLOCK,
+    })
+    .to_string();
+    let updated = sqlx::query(
+        "UPDATE session_events SET payload_json = ? \
+         WHERE session_id = ? AND kind = 'turn_context' AND turn_seq = 1",
+    )
+    .bind(&payload)
+    .bind(&fixture.session_id)
+    .execute(&pool)
+    .await?
+    .rows_affected();
+    pool.close().await;
+    assert!(
+        updated > 0,
+        "le journal porte un bloc turn-context à réécrire — sinon le test ne prouve rien"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_turn_context_comes_from_the_log_on_the_legacy_loop() -> Result<()> {
+    assert_the_turn_context_comes_from_the_log(None).await
+}
+
+#[tokio::test]
+async fn the_turn_context_comes_from_the_log_on_the_state_machine_loop() -> Result<()> {
+    assert_the_turn_context_comes_from_the_log(Some("1")).await
 }
 
 #[tokio::test]

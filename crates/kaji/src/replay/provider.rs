@@ -45,6 +45,13 @@ impl ReplayPosition {
         self.turn_seq.load(Ordering::SeqCst)
     }
 
+    /// L'appel LLM sur le point d'être servi, sans le consommer : ce que la
+    /// boucle assemble avant `stream` appartient à cet appel-là. Miroir de
+    /// `TurnRecorder::current_call_idx` côté enregistrement.
+    pub fn call(&self) -> u32 {
+        self.next_call_idx.load(Ordering::SeqCst)
+    }
+
     fn next_call(&self) -> (i64, u32) {
         (
             self.turn_seq.load(Ordering::SeqCst),
@@ -230,6 +237,7 @@ mod tests {
             )]),
             tool_results: HashMap::new(),
             memory_blocks: HashMap::new(),
+            turn_contexts: HashMap::new(),
             tool_manifests: HashMap::new(),
             clock_reads: HashMap::new(),
             condense_turns: HashSet::new(),

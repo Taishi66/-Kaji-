@@ -579,12 +579,17 @@ impl Inference for InferenceRunner<'_> {
                 .rev()
                 .find(|message| message.is_turn_context())
                 .map(Message::as_concat_text);
-            let turn_context = crate::agents::moim::turn_context_event(
-                &session.working_dir,
-                Some(context_limit),
-                input.moim_parts,
-                turn_start,
+            let turn_context = crate::agents::moim::journaled_turn_context(
+                self.turn_recorder().as_ref(),
+                self.replay_source.as_ref(),
+                crate::agents::moim::turn_context_event(
+                    &session.working_dir,
+                    Some(context_limit),
+                    input.moim_parts,
+                    turn_start,
+                ),
             )
+            .await
             .filter(|event| Some(event.as_concat_text()) != last_turn_context);
             if let Some(event) = &turn_context {
                 messages_for_provider.push(event.clone());

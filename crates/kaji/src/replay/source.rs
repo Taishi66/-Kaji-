@@ -41,7 +41,24 @@ impl ReplaySource {
     /// Le bloc mémoire enregistré pour ce tour. Absent ⇒ pas de bloc, comme à
     /// l'enregistrement : le splice réel n'est jamais rejoué.
     pub fn memory_block(&self) -> Option<String> {
-        self.cursor.memory_blocks.get(&self.turn()).cloned()
+        crate::replay::cursor::per_call(
+            &self.cursor.memory_blocks,
+            self.turn(),
+            self.position.call(),
+        )
+        .cloned()
+    }
+
+    /// Le bloc `turn-context` enregistré pour l'appel que la boucle assemble.
+    /// Absent ⇒ pas de bloc, comme un modèle sous le seuil
+    /// `MIN_CONTEXT_FOR_MOIM`.
+    pub fn turn_context(&self) -> Option<String> {
+        crate::replay::cursor::per_call(
+            &self.cursor.turn_contexts,
+            self.turn(),
+            self.position.call(),
+        )
+        .cloned()
     }
 
     /// L'environnement d'extensions enregistré pour ce tour : outils envoyés
@@ -138,7 +155,11 @@ mod tests {
             },
             llm_responses: HashMap::new(),
             tool_results: HashMap::new(),
-            memory_blocks: HashMap::from([(2, "bloc du tour 2".to_string())]),
+            memory_blocks: HashMap::from([((2, 0), "bloc du tour 2".to_string())]),
+            turn_contexts: HashMap::from([(
+                (2, 0),
+                "<turn-context>tour 2</turn-context>".to_string(),
+            )]),
             tool_manifests: HashMap::new(),
             clock_reads: HashMap::from([(2, vec!["2026-08-27 09:00 +00:00".to_string()])]),
             condense_turns: HashSet::from([3]),
@@ -158,12 +179,17 @@ mod tests {
         let source = open(cursor(), 2);
         assert_eq!(source.memory_block().as_deref(), Some("bloc du tour 2"));
         assert_eq!(
+            source.turn_context().as_deref(),
+            Some("<turn-context>tour 2</turn-context>")
+        );
+        assert_eq!(
             source.clock_read().as_deref(),
             Some("2026-08-27 09:00 +00:00")
         );
 
         let other_turn = open(cursor(), 5);
         assert_eq!(other_turn.memory_block(), None);
+        assert_eq!(other_turn.turn_context(), None);
         assert_eq!(other_turn.clock_read(), None);
     }
 

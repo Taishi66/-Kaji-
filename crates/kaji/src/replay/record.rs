@@ -14,7 +14,7 @@ fn parse_or_wrap(raw: &str) -> Value {
 
 /// Écrit les kinds v2 de l'event log (`llm_request`, `llm_response`,
 /// `tool_result`, `memory_block`, `tool_manifest`, `clock_reads`,
-/// `condense_triggered`, `condense_summary`) —
+/// `condense_triggered`, `condense_summary`, `turn_context`) —
 /// voir `docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`.
 /// Toutes les méthodes sont non-fatales : un échec d'écriture ne remonte
 /// jamais au tour en cours, il marque la session non rejouable.
@@ -114,12 +114,13 @@ impl RecordSink {
         .await;
     }
 
-    pub async fn record_memory_block(&self, turn_seq: i64, block: &str) {
+    pub async fn record_memory_block(&self, turn_seq: i64, call_idx: u32, block: &str) {
         self.append(
             turn_seq,
             "memory_block",
             json!({
                 "turn_seq": turn_seq,
+                "call_idx": call_idx,
                 "block": block,
             }),
         )
@@ -141,6 +142,19 @@ impl RecordSink {
             json!({
                 "turn_seq": turn_seq,
                 "reads": reads,
+            }),
+        )
+        .await;
+    }
+
+    pub async fn record_turn_context(&self, turn_seq: i64, call_idx: u32, block: &str) {
+        self.append(
+            turn_seq,
+            "turn_context",
+            json!({
+                "turn_seq": turn_seq,
+                "call_idx": call_idx,
+                "block": block,
             }),
         )
         .await;
@@ -178,7 +192,6 @@ pub struct TurnRecorder {
     sink: RecordSink,
     turn_seq: i64,
     next_call_idx: AtomicU32,
-    memory_block_recorded: AtomicBool,
     tool_manifest_recorded: AtomicBool,
 }
 
@@ -188,9 +201,14 @@ impl TurnRecorder {
             sink: RecordSink::new(session_manager, session_id),
             turn_seq,
             next_call_idx: AtomicU32::new(0),
-            memory_block_recorded: AtomicBool::new(false),
             tool_manifest_recorded: AtomicBool::new(false),
         }
+    }
+
+    /// L'appel LLM que la boucle est en train d'assembler, sans le réserver :
+    /// `next_llm_call` le consommera juste après.
+    fn current_call_idx(&self) -> u32 {
+        self.next_call_idx.load(Ordering::SeqCst)
     }
 
     pub fn tool_capture(&self, tool_call_id: &str) -> ToolCapture {
@@ -228,20 +246,17 @@ pub fn next_llm_call(
     )
 }
 
-/// Records the memory block spliced into this turn's system prompt. Only the
-/// turn's first splice is journaled: the state-machine loop re-splices before
-/// every provider call of the turn, the legacy loop splices once, and the log
-/// carries one block per turn on both.
+/// Records the memory block spliced into the system prompt of the call the
+/// loop is assembling. Keyed by `(turn_seq, call_idx)`: the state-machine loop
+/// re-splices before every provider call of the turn, on a conversation that
+/// has grown since the last one, so the recall can differ from call to call.
 pub async fn record_memory_block(recorder: Option<&Arc<TurnRecorder>>, block: Option<&str>) {
     let (Some(recorder), Some(block)) = (recorder, block) else {
         return;
     };
-    if recorder.memory_block_recorded.swap(true, Ordering::SeqCst) {
-        return;
-    }
     recorder
         .sink
-        .record_memory_block(recorder.turn_seq, block)
+        .record_memory_block(recorder.turn_seq, recorder.current_call_idx(), block)
         .await;
 }
 
@@ -274,6 +289,21 @@ pub async fn record_condense_summary(recorder: Option<&Arc<TurnRecorder>>, summa
     recorder
         .sink
         .record_condense_summary(recorder.turn_seq, summary)
+        .await;
+}
+
+/// Records the turn-context block that goes in front of the call the loop is
+/// assembling. Keyed by `(turn_seq, call_idx)` like the LLM exchange it
+/// belongs to: the state-machine loop recomposes before every provider call of
+/// the turn and the block moves with the turn budget, so one block per turn
+/// would not be enough to replay the turn's later calls.
+pub async fn record_turn_context(recorder: Option<&Arc<TurnRecorder>>, block: Option<String>) {
+    let (Some(recorder), Some(block)) = (recorder, block) else {
+        return;
+    };
+    recorder
+        .sink
+        .record_turn_context(recorder.turn_seq, recorder.current_call_idx(), &block)
         .await;
 }
 

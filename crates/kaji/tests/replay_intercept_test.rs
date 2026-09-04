@@ -488,7 +488,7 @@ async fn assert_memory_and_clock_come_from_the_log(state_machine: Option<&str>) 
     sqlx::query(
         "UPDATE session_events SET payload_json = ? WHERE session_id = ? AND kind = 'memory_block'",
     )
-    .bind(json!({ "turn_seq": turn, "block": REPLAYED_BLOCK }).to_string())
+    .bind(json!({ "turn_seq": turn, "call_idx": 0, "block": REPLAYED_BLOCK }).to_string())
     .bind(&fixture.session_id)
     .execute(&pool)
     .await?;

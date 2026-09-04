@@ -1,7 +1,10 @@
 use crate::agents::extension_manager::ExtensionManager;
 use crate::conversation::message::{Message, MessageMetadata};
 use crate::conversation::{CURRENT_TIME_TAG, TURN_CONTEXT_TAG, WORKING_DIRECTORY_TAG};
+use crate::replay::record::{record_turn_context, TurnRecorder};
+use crate::replay::source::ReplaySource;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const MIN_CONTEXT_FOR_MOIM: usize = 32_000;
 
@@ -131,11 +134,34 @@ pub(crate) fn turn_context_event(
         return None;
     }
 
-    Some(
-        Message::user()
-            .with_text(compose_moim(working_dir, parts, turn_start))
-            .with_metadata(MessageMetadata::agent_only().with_turn_context()),
-    )
+    Some(turn_context_from_block(compose_moim(
+        working_dir,
+        parts,
+        turn_start,
+    )))
+}
+
+fn turn_context_from_block(block: String) -> Message {
+    Message::user()
+        .with_text(block)
+        .with_metadata(MessageMetadata::agent_only().with_turn_context())
+}
+
+/// Le bloc turn-context du tour, journalisé à l'enregistrement et resservi tel
+/// quel au rejeu. Il entre dans la requête hachée alors qu'il est composé
+/// d'état vivant — horloge à la minute, usage cumulé de la session, budget de
+/// tours, parts d'extensions — dont rien n'est reconstructible plus tard : la
+/// règle d'extension de la spec S1 lui impose donc son kind et son service.
+pub(crate) async fn journaled_turn_context(
+    recorder: Option<&Arc<TurnRecorder>>,
+    replay: Option<&ReplaySource>,
+    live: Option<Message>,
+) -> Option<Message> {
+    if let Some(replay) = replay {
+        return replay.turn_context().map(turn_context_from_block);
+    }
+    record_turn_context(recorder, live.as_ref().map(Message::as_concat_text)).await;
+    live
 }
 
 fn should_skip_moim(context_limit: Option<usize>) -> bool {

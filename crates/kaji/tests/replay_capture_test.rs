@@ -16,6 +16,7 @@ use kaji_providers::model::ModelConfig;
 use kaji_test_support::{McpFixture, FAKE_CODE};
 use rmcp::model::{CallToolRequestParams, Tool};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -451,10 +452,18 @@ async fn assert_memory_capture(state_machine: Option<&str>) -> Result<()> {
     let kinds = kinds(&events);
 
     let blocks = payloads(&events, "memory_block");
+    assert!(
+        !blocks.is_empty(),
+        "{label}: the splice is journaled: {kinds:?}"
+    );
+    let keys: HashSet<(i64, u64)> = blocks
+        .iter()
+        .filter_map(|block| Some((block["turn_seq"].as_i64()?, block["call_idx"].as_u64()?)))
+        .collect();
     assert_eq!(
+        keys.len(),
         blocks.len(),
-        1,
-        "{label}: exactly one memory_block per turn, however many provider calls it makes: {kinds:?}"
+        "{label}: each splice is addressed by the call it fed, never positionally: {blocks:?}"
     );
     let block = blocks[0]["block"]
         .as_str()

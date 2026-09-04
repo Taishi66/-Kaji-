@@ -299,8 +299,8 @@ async fn assert_cursor_indexes_every_kind(state_machine: Option<&str>) -> Result
     let turns: Vec<i64> = positions.iter().map(|(turn, _)| *turn).collect();
     let block = cursor
         .memory_blocks
-        .get(&turns[0])
-        .unwrap_or_else(|| panic!("{label}: memory block indexed by turn: {turns:?}"));
+        .get(&(turns[0], 0))
+        .unwrap_or_else(|| panic!("{label}: memory block indexed by (turn, appel): {turns:?}"));
     assert!(
         block.contains(MEMORY_FACT),
         "{label}: the recorded block carries the seeded fact: {block}"

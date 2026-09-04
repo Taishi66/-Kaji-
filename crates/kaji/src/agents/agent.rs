@@ -3010,13 +3010,19 @@ impl Agent {
                 super::moim::compute_compaction_info(&session_config.id, &self.extension_manager)
                     .await;
 
-            if let Some(turn_context) = super::moim::turn_context_message(
+            let composed_turn_context = super::moim::turn_context_message(
                 &session_config.id,
                 &self.extension_manager,
                 turns_taken,
                 max_turns,
                 turn_start,
                 turn_start_compaction_info,
+            )
+            .await;
+            if let Some(turn_context) = super::moim::journaled_turn_context(
+                self.turn_recorder().as_ref(),
+                self.replay_source().as_ref(),
+                composed_turn_context,
             )
             .await
             {

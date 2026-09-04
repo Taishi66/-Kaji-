@@ -5,8 +5,8 @@
 //! remplacements d'historique, `log_meta`, `condense_triggered` — est
 //! l'historique de la session : permanente, et petite. Les payloads du rejeu
 //! — requêtes et réponses LLM, résultats d'outils, bloc mémoire, manifeste
-//! d'outils, lectures d'horloge — ne servent qu'à rejouer ce tour à
-//! l'identique ; ce sont eux
+//! d'outils, bloc turn-context, résumé de compaction, lectures d'horloge — ne
+//! servent qu'à rejouer ce tour à l'identique ; ce sont eux
 //! qui pèsent, et eux seuls que la rétention efface.
 //!
 //! `KAJI_REPLAY_RETENTION_DAYS` règle la fenêtre, en jours : `30` par défaut,
@@ -23,12 +23,13 @@ pub const RETENTION_DAYS_KEY: &str = "KAJI_REPLAY_RETENTION_DAYS";
 
 /// Les kinds effacés par la rétention. Tout kind absent de cette liste est
 /// permanent — la purge ne le voit jamais.
-pub const PURGEABLE_KINDS: [&str; 7] = [
+pub const PURGEABLE_KINDS: [&str; 8] = [
     "llm_request",
     "llm_response",
     "tool_result",
     "memory_block",
     "tool_manifest",
+    "turn_context",
     "condense_summary",
     "clock_reads",
 ];

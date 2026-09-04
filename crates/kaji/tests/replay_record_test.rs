@@ -68,11 +68,12 @@ async fn llm_response_payload_embeds_chunks_as_json() {
 async fn memory_block_payload_keeps_block_verbatim() {
     let (_tmp, mgr, session) = temp_session().await;
     let sink = RecordSink::new(mgr.clone(), session.id.clone());
-    sink.record_memory_block(1, "# facts\n- foo").await;
+    sink.record_memory_block(1, 2, "# facts\n- foo").await;
     let events = mgr.session_events(&session.id).await.unwrap();
     let ev = events.iter().find(|e| e.kind == "memory_block").unwrap();
     let payload: serde_json::Value = serde_json::from_str(&ev.payload_json).unwrap();
     assert_eq!(payload["turn_seq"], 1);
+    assert_eq!(payload["call_idx"], 2);
     assert_eq!(payload["block"], "# facts\n- foo");
 }
 

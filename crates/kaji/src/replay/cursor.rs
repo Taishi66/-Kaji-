@@ -59,7 +59,14 @@ pub struct EventCursor {
     pub log_meta: LogMeta,
     pub llm_responses: HashMap<(i64, u32), LlmExchange>,
     pub tool_results: HashMap<String, String>,
-    pub memory_blocks: HashMap<i64, String>,
+    /// Le bloc mémoire splicé dans le prompt système, par appel : la machine à
+    /// états resplice avant chaque appel du tour, la boucle legacy une fois par
+    /// tour (cf. [`per_call`]).
+    pub memory_blocks: HashMap<(i64, u32), String>,
+    /// Le bloc `turn-context` (`agents::moim`) de chaque appel : composé d'état
+    /// vivant, il entre pourtant dans la requête hachée, et il bouge d'un appel
+    /// à l'autre du même tour quand le budget de tours avance.
+    pub turn_contexts: HashMap<(i64, u32), String>,
     /// L'environnement d'extensions de chaque tour : outils et fragments de
     /// prompt système qui en dérivent (`replay::manifest`).
     pub tool_manifests: HashMap<i64, ToolManifest>,
@@ -74,6 +81,22 @@ pub struct EventCursor {
     /// tourner. Rejouées telles quelles, jamais redemandées à l'utilisateur
     /// (spec S4).
     pub approvals: HashMap<(i64, String), bool>,
+}
+
+/// Ce qu'un appel retrouve dans un index adressé par `(turn_seq, call_idx)` :
+/// l'entrée de cet appel, ou à défaut la plus récente qui le précède dans le
+/// tour. Les deux boucles n'assemblent pas au même rythme — la legacy compose
+/// le bloc mémoire et le bloc turn-context une fois par tour, la machine à
+/// états avant chaque appel — et chacune doit retrouver ce qu'elle avait sous
+/// les yeux au moment de l'appel.
+pub fn per_call(
+    index: &HashMap<(i64, u32), String>,
+    turn_seq: i64,
+    call_idx: u32,
+) -> Option<&String> {
+    (0..=call_idx)
+        .rev()
+        .find_map(|candidate| index.get(&(turn_seq, candidate)))
 }
 
 fn payload(event: &SessionEvent) -> Option<Value> {
@@ -141,6 +164,7 @@ impl EventCursor {
             llm_responses: HashMap::new(),
             tool_results: HashMap::new(),
             memory_blocks: HashMap::new(),
+            turn_contexts: HashMap::new(),
             tool_manifests: HashMap::new(),
             clock_reads: HashMap::new(),
             condense_turns: HashSet::new(),
@@ -200,11 +224,22 @@ impl EventCursor {
                         .insert(id.to_string(), result.to_string());
                 }
                 "memory_block" => {
-                    if let Some(block) = payload.get("block").and_then(Value::as_str) {
-                        cursor
-                            .memory_blocks
-                            .insert(turn_seq(event, &payload), block.to_string());
-                    }
+                    let (Some(key), Some(block)) = (
+                        call_key(event, &payload),
+                        payload.get("block").and_then(Value::as_str),
+                    ) else {
+                        continue;
+                    };
+                    cursor.memory_blocks.insert(key, block.to_string());
+                }
+                "turn_context" => {
+                    let (Some(key), Some(block)) = (
+                        call_key(event, &payload),
+                        payload.get("block").and_then(Value::as_str),
+                    ) else {
+                        continue;
+                    };
+                    cursor.turn_contexts.insert(key, block.to_string());
                 }
                 "tool_manifest" => {
                     if let Ok(manifest) = serde_json::from_value::<ToolManifest>(payload.clone()) {
