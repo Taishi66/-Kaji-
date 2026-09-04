@@ -177,7 +177,7 @@ fn message_has_timing_content(message: &Message) -> bool {
 /// Nomme un message anonyme avec l'`IdGen` du tour — jamais un UUID libre :
 /// deux rejeux d'un même journal doivent donner les mêmes ids
 /// (`crate::replay::idgen`).
-fn named_by(message: Message, idgen: &Arc<dyn IdGen>) -> Message {
+pub(super) fn named_by(message: Message, idgen: &Arc<dyn IdGen>) -> Message {
     match message.id {
         Some(_) => message,
         None => message.with_id(idgen.next_message_id()),

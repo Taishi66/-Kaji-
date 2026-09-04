@@ -1010,17 +1010,13 @@ impl Message {
         self
     }
 
+    /// Un id tiré du hasard. Hors de la boucle agent seulement : un message
+    /// nommé ainsi pendant un tour rendrait deux rejeux du même journal
+    /// différents, donc `clippy.toml` interdit cette méthode et chaque
+    /// exception porte sa justification (`kaji::replay::idgen`).
     #[allow(clippy::disallowed_methods)]
     pub fn with_generated_id(self) -> Self {
         self.with_id(format!("msg_{}", Uuid::new_v4()))
-    }
-
-    pub fn with_generated_id_if_missing(self) -> Self {
-        if self.id.is_some() {
-            self
-        } else {
-            self.with_generated_id()
-        }
     }
 
     /// Add any MessageContent to the message

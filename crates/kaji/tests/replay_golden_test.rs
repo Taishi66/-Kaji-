@@ -50,6 +50,10 @@ use tokio::task::JoinHandle;
 
 const TOOL: &str = "probe__get_code";
 const TOOL_REQUEST_ID: &str = "golden-probe-1";
+/// Deux appels d'outil dans une même réponse : le second n'est pas porté par le
+/// message de la réponse, et la boucle legacy lui fabrique son propre message.
+/// Un seul appel par tour ne passerait jamais par ce chemin-là.
+const TOOL_REQUEST_ID_2: &str = "golden-probe-2";
 const PROBE_PAYLOAD: &str = "golden-payload-42";
 
 /// Les faits mémoire de l'enregistrement, et celui qu'on ajoute *après* pour
@@ -168,6 +172,7 @@ impl Provider for FixtureProvider {
         } else {
             Message::assistant()
                 .with_tool_request(TOOL_REQUEST_ID, Ok(CallToolRequestParams::new(TOOL)))
+                .with_tool_request(TOOL_REQUEST_ID_2, Ok(CallToolRequestParams::new(TOOL)))
         };
         Ok(stream_from_single_message(message, usage))
     }
@@ -470,16 +475,22 @@ fn v2_shape(events: &[SessionEvent]) -> Vec<String> {
 /// et mode branchés — et **aucune extension rechargée**, exactement comme
 /// `kaji replay`. La liste d'outils et les fragments de prompt qui en dérivent
 /// viennent du journal (`tool_manifest`), pas d'un serveur MCP relancé.
-async fn replay_once(fixture: &Fixture, label: &str) -> Result<(Transcript, Vec<String>)> {
-    let (transcript, prompts, _) = replay_once_with(fixture, label, LENIENT).await?;
-    Ok((transcript, prompts))
+/// Ce qu'un rejeu laisse derrière lui : la transcription qu'il a rendue, les
+/// prompts et messages présentés au provider, et les ids de la conversation
+/// persistée — c'est là qu'atterrissent les messages que la boucle n'émet pas
+/// (le porteur des appels d'outil surnuméraires, par exemple).
+struct Replayed {
+    transcript: Transcript,
+    prompts: Vec<String>,
+    seen_messages: Vec<String>,
+    conversation_ids: Vec<String>,
 }
 
-async fn replay_once_with(
-    fixture: &Fixture,
-    label: &str,
-    lenient: bool,
-) -> Result<(Transcript, Vec<String>, Vec<String>)> {
+async fn replay_once(fixture: &Fixture, label: &str) -> Result<Replayed> {
+    replay_once_with(fixture, label, LENIENT).await
+}
+
+async fn replay_once_with(fixture: &Fixture, label: &str, lenient: bool) -> Result<Replayed> {
     let cursor = Arc::new(EventCursor::load(&fixture.session_manager, &fixture.session_id).await?);
     let provider = ReplayProvider::new(Arc::clone(&cursor), lenient);
     let position = provider.position();
@@ -545,7 +556,31 @@ async fn replay_once_with(
 
     let prompts = prompts.lock().unwrap().clone();
     let seen_messages = seen_messages.lock().unwrap().clone();
-    Ok((transcript, prompts, seen_messages))
+    let conversation_ids = conversation_ids(&fixture.session_manager, &derived.id).await?;
+    Ok(Replayed {
+        transcript,
+        prompts,
+        seen_messages,
+        conversation_ids,
+    })
+}
+
+/// Les ids des messages de la conversation persistée, dans l'ordre.
+async fn conversation_ids(
+    session_manager: &Arc<SessionManager>,
+    session_id: &str,
+) -> Result<Vec<String>> {
+    let session = session_manager.get_session(session_id, true).await?;
+    Ok(session
+        .conversation
+        .map(|conversation| {
+            conversation
+                .messages()
+                .iter()
+                .map(|message| message.id.clone().unwrap_or_default())
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// Une session de trois tours, rejouée deux fois, rend deux fois la même
@@ -565,8 +600,9 @@ async fn assert_two_replays_agree(state_machine: Option<&str>) -> Result<()> {
         "{label}: les trois tours sont enregistrés"
     );
     assert!(
-        cursor.tool_results.contains_key(TOOL_REQUEST_ID),
-        "{label}: l'appel d'outil du premier tour est journalisé"
+        cursor.tool_results.contains_key(TOOL_REQUEST_ID)
+            && cursor.tool_results.contains_key(TOOL_REQUEST_ID_2),
+        "{label}: les deux appels d'outil du premier tour sont journalisés"
     );
     assert!(
         !cursor.memory_blocks.is_empty(),
@@ -596,40 +632,57 @@ async fn assert_two_replays_agree(state_machine: Option<&str>) -> Result<()> {
         cursor.turn_contexts
     );
 
-    let (first, _) = replay_once(&fixture, &label).await?;
-    let (second, _) = replay_once(&fixture, &label).await?;
+    let first = replay_once(&fixture, &label).await?;
+    let second = replay_once(&fixture, &label).await?;
 
     assert!(
-        !first.lines.is_empty(),
+        !first.transcript.lines.is_empty(),
         "{label}: le rejeu a produit une transcription"
     );
     assert_eq!(
-        first.rendered(),
-        second.rendered(),
+        first.transcript.rendered(),
+        second.transcript.rendered(),
         "{label}: deux rejeux du même journal rendent la même transcription"
     );
     assert_eq!(
-        first.message_ids, second.message_ids,
+        first.transcript.message_ids, second.transcript.message_ids,
         "{label}: l'IdGen seedé redonne les mêmes ids de messages"
     );
     assert_eq!(
-        fixture.transcript.message_ids, first.message_ids,
+        fixture.transcript.message_ids, first.transcript.message_ids,
         "{label}: les ids du rejeu sont ceux de l'enregistrement — sinon une \
          transcription rejouée ne se recoupe pas avec le journal source (spec S1)"
     );
     assert_eq!(
         fixture.transcript.rendered(),
-        first.rendered(),
+        first.transcript.rendered(),
         "{label}: le rejeu rend la transcription de l'enregistrement"
     );
     assert!(
-        first.message_ids.iter().all(|id| !id.is_empty()),
+        first.transcript.message_ids.iter().all(|id| !id.is_empty()),
         "{label}: chaque message rejoué porte un id : {:?}",
-        first.message_ids
+        first.transcript.message_ids
     );
     assert!(
-        first.rendered().contains(PROBE_PAYLOAD),
+        first.transcript.rendered().contains(PROBE_PAYLOAD),
         "{label}: le résultat d'outil servi par le journal est dans la transcription"
+    );
+
+    let recorded_conversation =
+        conversation_ids(&fixture.session_manager, &fixture.session_id).await?;
+    assert!(
+        !recorded_conversation.is_empty(),
+        "{label}: l'enregistrement a persisté une conversation"
+    );
+    assert_eq!(
+        recorded_conversation, first.conversation_ids,
+        "{label}: la conversation rejouée porte les ids de l'enregistrement — c'est là \
+         qu'atterrissent les messages que la boucle n'émet pas, dont le porteur du second \
+         appel d'outil"
+    );
+    assert_eq!(
+        first.conversation_ids, second.conversation_ids,
+        "{label}: deux rejeux nomment la conversation de la même façon"
     );
 
     Ok(())
@@ -679,7 +732,7 @@ async fn assert_a_late_memory_fact_does_not_move_the_replay(
 
     let probe = ProbeFixture::new().await;
     let fixture = record_fixture(&probe).await?;
-    let (before, _) = replay_once(&fixture, &label).await?;
+    let before = replay_once(&fixture, &label).await?.transcript;
 
     let mut memory = SessionMemory::load("golden-late-session");
     memory.remember(LATE_FACT, &["po", "dashboard", "onboarding"], None);
@@ -693,7 +746,8 @@ async fn assert_a_late_memory_fact_does_not_move_the_replay(
     );
     drop(fresh_recall);
 
-    let (after, prompts) = replay_once(&fixture, &label).await?;
+    let replayed = replay_once(&fixture, &label).await?;
+    let (after, prompts) = (replayed.transcript, replayed.prompts);
 
     assert_eq!(
         before.rendered(),
@@ -727,7 +781,9 @@ async fn assert_the_turn_context_comes_from_the_log(state_machine: Option<&str>)
     let fixture = record_fixture(&probe).await?;
     rewrite_first_turn_context(&fixture).await?;
 
-    let (_, _, seen_messages) = replay_once_with(&fixture, &label, true).await?;
+    let seen_messages = replay_once_with(&fixture, &label, true)
+        .await?
+        .seen_messages;
 
     assert!(
         seen_messages

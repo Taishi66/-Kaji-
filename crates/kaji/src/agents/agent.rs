@@ -25,6 +25,7 @@ use crate::agents::extension_manager::{
 use crate::agents::final_output_tool::{FINAL_OUTPUT_CONTINUATION_MESSAGE, FINAL_OUTPUT_TOOL_NAME};
 use crate::agents::platform_extensions::MANAGE_EXTENSIONS_TOOL_NAME_COMPLETE;
 use crate::agents::prompt_manager::PromptManager;
+use crate::agents::reply_parts::named_by;
 use crate::agents::retry::{RetryManager, RetryResult};
 use crate::agents::state_machine::{
     BangShellOperation, CompactionOperation, DoctorOperation, Emitter, ExitOnErrorOperation,
@@ -439,8 +440,12 @@ fn truncate_query_preview(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn push_message_with_id(messages: &mut Conversation, message: Message) -> Message {
-    let message = message.with_generated_id_if_missing();
+fn push_message_with_id(
+    messages: &mut Conversation,
+    message: Message,
+    idgen: &Arc<dyn IdGen>,
+) -> Message {
+    let message = named_by(message, idgen);
     messages.push(message.clone());
     message
 }
@@ -449,8 +454,9 @@ async fn persist_message_with_id(
     session_manager: &SessionManager,
     session_id: &str,
     message: Message,
+    idgen: &Arc<dyn IdGen>,
 ) -> Result<Message> {
-    let message = message.with_generated_id_if_missing();
+    let message = named_by(message, idgen);
     session_manager.add_message(session_id, &message).await?;
     Ok(message)
 }
@@ -460,8 +466,9 @@ async fn persist_and_push_message_with_id(
     session_id: &str,
     conversation: &mut Conversation,
     message: Message,
+    idgen: &Arc<dyn IdGen>,
 ) -> Result<Message> {
-    let message = persist_message_with_id(session_manager, session_id, message).await?;
+    let message = persist_message_with_id(session_manager, session_id, message, idgen).await?;
     conversation.push(message.clone());
     Ok(message)
 }
@@ -2454,7 +2461,15 @@ impl Agent {
         // redérouler le tour (`kaji replay`, `user_turns`). Il est nommé ici,
         // avant d'être sérialisé : le journal porte son id, et l'enveloppe
         // reconnaît la seconde émission du chemin des slash-commands.
-        let user_message = user_message.with_generated_id_if_missing();
+        //
+        // Le tour consomme toujours son premier id, servi ou non : au rejeu le
+        // message d'ouverture revient du journal avec le sien, et sauter la
+        // consommation décalerait d'un rang tous les ids du tour.
+        let opening_id = self.idgen.next_message_id();
+        let user_message = match user_message.id {
+            Some(_) => user_message,
+            None => user_message.with_id(opening_id),
+        };
         let opening_message_id = user_message.id.clone();
         let opening_message = journal_seq.map(|_| serialize_event_payload(&user_message));
 
@@ -2709,7 +2724,7 @@ impl Agent {
                 if response.role == rmcp::model::Role::Assistant
                     && crate::agents::execute_commands::command_starts_turn(&message_text) =>
             {
-                let response = response.with_generated_id_if_missing();
+                let response = named_by(response, &self.idgen);
 
                 // Setting a goal/grind should immediately start a turn so the
                 // agent begins pursuing it, rather than waiting for the next
@@ -2746,7 +2761,7 @@ impl Agent {
                 ];
             }
             Ok(Some(response)) if response.role == rmcp::model::Role::Assistant => {
-                let response = response.with_generated_id_if_missing();
+                let response = named_by(response, &self.idgen);
 
                 session_manager
                     .add_message(
@@ -3061,6 +3076,7 @@ impl Agent {
                     &session_config.id,
                     &mut conversation,
                     turn_context,
+                    &self.idgen,
                 )
                 .await?;
             }
@@ -3093,6 +3109,7 @@ impl Agent {
                             &session_config.id,
                             &mut conversation,
                             message,
+                            &self.idgen,
                         )
                         .await?;
                         yield AgentEvent::Message(message);
@@ -3105,9 +3122,7 @@ impl Agent {
                 };
                 if let Some(output) = final_output {
                     last_assistant_text = output.clone();
-                    let message = Message::assistant()
-                        .with_text(output)
-                        .with_generated_id_if_missing();
+                    let message = named_by(Message::assistant().with_text(output), &self.idgen);
                     yield AgentEvent::Message(message.clone());
                     session_manager.add_message(&session_config.id, &message).await?;
                     conversation.push(message);
@@ -3127,6 +3142,7 @@ impl Agent {
                                     &session_manager,
                                     &session_config.id,
                                     stop_hook_block_cap_warning(&plugin, stop_hook_block_cap),
+                                    &self.idgen,
                                 )
                                 .await?;
                                 yield AgentEvent::Message(message);
@@ -3138,6 +3154,7 @@ impl Agent {
                                 &session_config.id,
                                 &mut conversation,
                                 stop_hook_denial_context_message(&plugin, &reason),
+                                &self.idgen,
                             )
                             .await?;
                             yield AgentEvent::Message(stop_hook_denial_notification(&plugin));
@@ -3426,7 +3443,7 @@ impl Agent {
                                                     Some((request_id, item)) => {
                                                         match item {
                                                             ToolStreamItem::ActionRequired(msg) => {
-                                                                let msg = msg.with_generated_id_if_missing();
+                                                                let msg = named_by(msg, &self.idgen);
                                                                 if let Err(e) = session_manager.add_message(&session_config.id, &msg).await {
                                                                     warn!("Failed to save elicitation message to session: {}", e);
                                                                 }
@@ -3618,7 +3635,8 @@ impl Agent {
                                         if carrier_tool_call_id == Some(request.id.as_str()) {
                                             Message::assistant().with_id(response_message_id)
                                         } else {
-                                            Message::assistant().with_generated_id()
+                                            Message::assistant()
+                                                .with_id(self.idgen.next_message_id())
                                         };
 
                                     for thinking in &response_thinking {
@@ -3651,12 +3669,17 @@ impl Agent {
                                     let final_response = match &request.tool_call {
                                         Ok(_) => request_to_response_map
                                             .remove(&request.id)
-                                            .unwrap_or_else(|| Message::user().with_generated_id()),
+                                            .unwrap_or_else(|| {
+                                                Message::user().with_id(self.idgen.next_message_id())
+                                            }),
                                         Err(error) => {
                                             error!("Tool call could not be parsed: {error}");
                                             let mut response = request_to_response_map
                                                 .remove(&request.id)
-                                                .unwrap_or_else(|| Message::user().with_generated_id());
+                                                .unwrap_or_else(|| {
+                                                    Message::user()
+                                                        .with_id(self.idgen.next_message_id())
+                                                });
                                             // Only feed the parse error back if this id isn't
                                             // already answered. In Chat mode the skip branch above
                                             // already added a tool response for it; adding another
@@ -3854,6 +3877,7 @@ impl Agent {
                             let message = push_message_with_id(
                                 &mut messages_to_add,
                                 Message::user().with_text(FINAL_OUTPUT_CONTINUATION_MESSAGE),
+                                &self.idgen,
                             );
                             yield AgentEvent::Message(message);
                         }
@@ -3875,7 +3899,7 @@ impl Agent {
                             );
                             let message = Message::user().with_text(&nudge)
                                 .with_visibility(false, true);
-                            push_message_with_id(&mut messages_to_add, message);
+                            push_message_with_id(&mut messages_to_add, message, &self.idgen);
                             yield AgentEvent::Message(
                                 Message::assistant().with_system_notification(
                                     SystemNotificationType::InlineMessage,
@@ -3893,7 +3917,7 @@ impl Agent {
                             );
                             let message = Message::user().with_text(&nudge)
                                 .with_visibility(false, true);
-                            push_message_with_id(&mut messages_to_add, message);
+                            push_message_with_id(&mut messages_to_add, message, &self.idgen);
                             yield AgentEvent::Message(
                                 Message::assistant().with_system_notification(
                                     SystemNotificationType::InlineMessage,
@@ -3936,6 +3960,7 @@ impl Agent {
                                         let message = push_message_with_id(
                                             &mut messages_to_add,
                                             Message::assistant().with_text(EMPTY_TURN_MESSAGE),
+                                            &self.idgen,
                                         );
                                         yield AgentEvent::Message(message);
                                         exit_chat = true;
@@ -3945,7 +3970,8 @@ impl Agent {
                                     // Surface and persist the failure message
                                     // through the normal path so recipes don't
                                     // exit silently when retries are exhausted.
-                                    let message = push_message_with_id(&mut messages_to_add, message);
+                                    let message =
+                                        push_message_with_id(&mut messages_to_add, message, &self.idgen);
                                     last_assistant_text = message.as_concat_text();
                                     yield AgentEvent::Message(message);
                                     exit_chat = true;
@@ -4010,6 +4036,7 @@ impl Agent {
                     let message = push_message_with_id(
                         &mut messages_to_add,
                         Message::assistant().with_text(output),
+                        &self.idgen,
                     );
                     yield AgentEvent::Message(message);
                 }
@@ -4059,6 +4086,7 @@ impl Agent {
                                     &session_manager,
                                     &session_config.id,
                                     stop_hook_block_cap_warning(&plugin, stop_hook_block_cap),
+                                    &self.idgen,
                                 )
                                 .await?;
                                 yield AgentEvent::Message(message);
@@ -4070,6 +4098,7 @@ impl Agent {
                                 &session_config.id,
                                 &mut conversation,
                                 stop_hook_denial_context_message(&plugin, &reason),
+                                &self.idgen,
                             )
                             .await?;
                             yield AgentEvent::Message(stop_hook_denial_notification(&plugin));

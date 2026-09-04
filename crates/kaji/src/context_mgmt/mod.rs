@@ -683,6 +683,10 @@ pub async fn summarize_tool_call(
     response.created = matching_messages.last().unwrap().created;
     response.metadata = MessageMetadata::agent_only();
 
+    // Le résumé de paires d'outils est désactivé en rejeu (`ReplayMode`) : il
+    // ne consomme donc jamais l'`IdGen` du tour, et le faire ici décalerait les
+    // ids de l'enregistrement par rapport à ceux du rejeu.
+    #[allow(clippy::disallowed_methods)]
     Ok(response.with_generated_id())
 }
 

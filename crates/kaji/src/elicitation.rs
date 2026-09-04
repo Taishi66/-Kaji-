@@ -25,6 +25,9 @@ fn generated_elicitation_response_message(
     elicitation_id: &str,
     response: &ElicitationOutcome,
 ) -> Message {
+    // Réponse d'élicitation : une entrée utilisateur, pas un message que la
+    // boucle fabrique — le rejeu la reçoit du journal avec son id.
+    #[allow(clippy::disallowed_methods)]
     Message::user()
         .with_generated_id()
         .with_content(MessageContent::action_required_elicitation_response(

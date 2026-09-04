@@ -220,6 +220,9 @@ where
 
                 yield (Some(msg), last_usage);
             } else {
+                // Côté formateur de provider : au rejeu c'est `ReplayProvider`
+                // qui sert, et l'id enregistré revient avec le chunk.
+                #[allow(clippy::disallowed_methods)]
                 let msg = Message::new(
                     Role::Assistant,
                     chrono::Utc::now().timestamp(),

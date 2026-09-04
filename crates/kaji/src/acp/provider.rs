@@ -627,6 +627,9 @@ impl Provider for AcpProvider {
                             // modes a tool_request WAS emitted, so pair it with an error
                             // tool_response so downstream consumers see the rejection.
                             if reject_all_tools {
+                                // Côté provider : au rejeu c'est `ReplayProvider` qui
+                                // sert, et l'id enregistré revient avec le chunk.
+                                #[allow(clippy::disallowed_methods)]
                                 let message = Message::assistant()
                                     .with_text("Tool call was denied.")
                                     .with_generated_id();

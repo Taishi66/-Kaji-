@@ -582,6 +582,9 @@ impl TestPipeline {
                                     ElicitationAction::Cancel => ElicitationOutcome::Cancel,
                                     _ => ElicitationOutcome::Cancel,
                                 };
+                                // Harnais de test qui joue l'utilisateur, hors
+                                // boucle : cet id ne vient d'aucun IdGen.
+                                #[allow(clippy::disallowed_methods)]
                                 let response = Message::user()
                                     .with_generated_id()
                                     .with_content(

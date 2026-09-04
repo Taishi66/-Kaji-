@@ -989,6 +989,9 @@ mod tests {
                 .add_message(&session.id, &initial_msg)
                 .await?;
 
+            // Conversation posée avant le tour, hors de toute boucle : ces ids ne
+            // passent par aucun IdGen et ne sont jamais rejoués.
+            #[allow(clippy::disallowed_methods)]
             for i in 0..13 {
                 let call_id = format!("precall_{}", i);
                 let mut req_msg = Message::assistant()
