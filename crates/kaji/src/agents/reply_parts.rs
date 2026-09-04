@@ -210,7 +210,7 @@ impl Agent {
         working_dir: &std::path::Path,
     ) -> Result<(Vec<Tool>, Vec<Tool>, String, ModelConfig)> {
         let (tools, toolshim_tools, system_prompt, model_config) = self
-            .assemble_tools_and_prompt(session_id, working_dir)
+            .assemble_tools_and_prompt_recording(session_id, working_dir, self.turn_recorder())
             .await?;
 
         if !self.is_replay() && *self.current_kaji_mode.lock().await == KajiMode::SmartApprove {
@@ -232,6 +232,20 @@ impl Agent {
         session_id: &str,
         working_dir: &std::path::Path,
     ) -> Result<(Vec<Tool>, Vec<Tool>, String, ModelConfig)> {
+        self.assemble_tools_and_prompt_recording(session_id, working_dir, None)
+            .await
+    }
+
+    /// L'assemblage, avec le `TurnRecorder` sous lequel journaliser le
+    /// manifeste. Seul le chemin d'envoi d'un tour vivant en fournit un : un
+    /// lecteur hors tour (`/context` entre deux tours) écrirait sinon une ligne
+    /// `tool_manifest` sous un index d'appel qu'aucun appel n'a utilisé.
+    async fn assemble_tools_and_prompt_recording(
+        &self,
+        session_id: &str,
+        working_dir: &std::path::Path,
+        recorder: Option<Arc<crate::replay::record::TurnRecorder>>,
+    ) -> Result<(Vec<Tool>, Vec<Tool>, String, ModelConfig)> {
         let tools = self.list_tools(session_id, None).await;
 
         #[cfg(feature = "code-mode")]
@@ -251,30 +265,36 @@ impl Agent {
             .await;
         let (extension_count, tool_count) = self.total_extension_and_tool_counts(session_id).await;
 
+        // Les hints des sous-répertoires visités pendant le tour sont des
+        // fichiers du disque au même titre que le bloc du working dir : le tour
+        // les journalise dans son manifeste et les relit de là au rejeu, au lieu
+        // de laisser le tracker du `PromptManager` réinjecter ceux d'aujourd'hui.
+        let subdirectory_hints = self.prompt_manager.lock().await.subdirectory_hints();
+
         let manifest = crate::replay::manifest::turn_tool_manifest(
-            self.turn_recorder().as_ref(),
+            recorder.as_ref(),
             self.replay_source().as_ref(),
             ToolManifest {
                 tools,
+                prompt_parts: subdirectory_hints,
                 extensions: extensions_info,
                 extension_count,
                 tool_count,
                 code_execution_active,
                 frontend_instructions: self.frontend_instructions.lock().await.clone(),
                 hints: crate::agents::prompt_manager::hints_block(working_dir),
-                ..ToolManifest::default()
             },
         )
         .await;
         let ToolManifest {
             tools,
+            prompt_parts,
             extensions: extensions_info,
             extension_count,
             tool_count,
             code_execution_active,
             frontend_instructions,
             hints,
-            ..
         } = manifest;
 
         let model_config = self.model_config_for_session(session_id).await?;
@@ -290,6 +310,8 @@ impl Agent {
             .with_code_execution_mode(code_execution_active)
             .with_hints_block(hints)
             .with_kaji_mode(kaji_mode)
+            .without_subdirectory_hints()
+            .with_prompt_extras(prompt_parts)
             .build();
 
         let (tools, toolshim_tools, system_prompt) =

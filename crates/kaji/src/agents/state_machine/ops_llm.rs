@@ -499,12 +499,11 @@ impl Inference for InferenceRunner<'_> {
             .await;
             let (tools, prompt_parts, hints) =
                 (manifest.tools, manifest.prompt_parts, manifest.hints);
-            let system_prompt = self.prompt_manager.lock().await.build_system_prompt(
-                &session.working_dir,
-                prompt_parts,
-                kaji_mode,
-                hints,
-            );
+            let system_prompt = self
+                .prompt_manager
+                .lock()
+                .await
+                .build_system_prompt(prompt_parts, kaji_mode, hints);
             // KAJI : splice recalled inter-session facts (parity with the legacy
             // `prepare_reply_context` path, which reads memory off the repaired
             // conversation — merged user messages change the recall query).

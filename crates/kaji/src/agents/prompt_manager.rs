@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use crate::agents::{extension::ExtensionInfo, moim};
 use crate::hints::load_hints::build_gitignore;
+use crate::hints::load_hints::SUBDIRECTORY_HINT_PREFIX;
 use crate::hints::{get_context_filenames, SubdirectoryHintTracker};
 use crate::replay::clock::{PromptClock, RealClock};
 use crate::{
@@ -76,6 +77,7 @@ pub struct SystemPromptBuilder<'a, M> {
     hints: Option<String>,
     code_execution_mode: bool,
     include_extensions: bool,
+    include_subdirectory_hints: bool,
     kaji_mode: Option<KajiMode>,
 }
 
@@ -131,9 +133,16 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
     /// Le bloc de hints déjà assemblé, plutôt que relu du disque : le rejeu le
     /// sert depuis le journal, où l'enregistrement l'a mis (`ToolManifest`).
     pub fn with_hints_block(mut self, hints: Option<String>) -> Self {
-        if hints.is_some() {
-            self.hints = hints;
-        }
+        self.hints = hints;
+        self
+    }
+
+    /// Écarte du prompt les hints de sous-répertoires accumulés par le tracker
+    /// du `PromptManager`. Ils viennent du disque, donc du monde d'aujourd'hui :
+    /// l'assemblage les prend du manifeste du tour (`prompt_parts`), qu'il
+    /// journalise à l'enregistrement et relit au rejeu.
+    pub fn without_subdirectory_hints(mut self) -> Self {
+        self.include_subdirectory_hints = false;
         self
     }
 
@@ -201,7 +210,15 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
             "You are a general-purpose AI agent called kaji, created by isha_atari".to_string()
         });
 
-        let mut system_prompt_extras = self.manager.system_prompt_extras.clone();
+        let mut system_prompt_extras: IndexMap<String, String> = self
+            .manager
+            .system_prompt_extras
+            .iter()
+            .filter(|(key, _)| {
+                self.include_subdirectory_hints || !key.starts_with(SUBDIRECTORY_HINT_PREFIX)
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
         system_prompt_extras.extend(self.prompt_extras);
 
         // Add hints if provided
@@ -303,19 +320,29 @@ impl PromptManager {
         has_new
     }
 
+    /// Les hints de sous-répertoires que le tracker a chargés, dans l'ordre où
+    /// ils entrent dans le prompt. C'est ce que l'assemblage journalise dans le
+    /// manifeste du tour pour pouvoir le resservir au rejeu.
+    pub fn subdirectory_hints(&self) -> Vec<(String, String)> {
+        self.system_prompt_extras
+            .iter()
+            .filter(|(key, _)| key.starts_with(SUBDIRECTORY_HINT_PREFIX))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
     pub fn build_system_prompt(
-        &mut self,
-        working_dir: &Path,
+        &self,
         prompt_parts: Vec<(String, String)>,
         kaji_mode: KajiMode,
         hints: Option<String>,
     ) -> String {
-        self.load_subdirectory_hints(working_dir);
         self.builder()
             .with_prompt_extras(prompt_parts)
             .with_hints_block(hints)
             .with_kaji_mode(kaji_mode)
             .without_extensions()
+            .without_subdirectory_hints()
             .build()
     }
 
@@ -340,6 +367,7 @@ impl PromptManager {
             hints: None,
             code_execution_mode: false,
             include_extensions: true,
+            include_subdirectory_hints: true,
             kaji_mode: None,
         }
     }
@@ -414,11 +442,9 @@ mod tests {
 
     #[test]
     fn composed_prompt_uses_contributions_instead_of_the_extension_catalog() {
-        let mut manager = PromptManager::new();
-        let working_dir = tempfile::tempdir().unwrap();
+        let manager = PromptManager::new();
 
         let prompt = manager.build_system_prompt(
-            working_dir.path(),
             vec![(
                 "extensions".to_string(),
                 "# Extensions\n\n## developer".to_string(),
@@ -429,6 +455,62 @@ mod tests {
 
         assert!(prompt.contains("## developer"));
         assert!(!prompt.contains("No extensions are defined"));
+    }
+
+    /// Les hints de sous-répertoires viennent du disque : l'assemblage les
+    /// journalise dans le manifeste du tour et les resert de là. Le tracker du
+    /// manager ne doit donc plus les injecter par-dessus.
+    #[test]
+    fn subdirectory_hints_are_read_back_and_can_be_left_out_of_the_prompt() {
+        let mut manager = PromptManager::new();
+        manager.add_system_prompt_extra(
+            format!("{SUBDIRECTORY_HINT_PREFIX}/repo/sub"),
+            "hint du sous-répertoire".to_string(),
+        );
+        manager.add_system_prompt_extra("recipe".to_string(), "extra de recette".to_string());
+
+        assert_eq!(
+            manager.subdirectory_hints(),
+            vec![(
+                format!("{SUBDIRECTORY_HINT_PREFIX}/repo/sub"),
+                "hint du sous-répertoire".to_string()
+            )]
+        );
+
+        let with_live_hints = manager.builder().build();
+        assert!(with_live_hints.contains("hint du sous-répertoire"));
+
+        let from_the_log = manager
+            .builder()
+            .without_subdirectory_hints()
+            .with_prompt_extras(vec![(
+                format!("{SUBDIRECTORY_HINT_PREFIX}/repo/sub"),
+                "hint tel qu'enregistré".to_string(),
+            )])
+            .build();
+        assert!(from_the_log.contains("hint tel qu'enregistré"));
+        assert!(!from_the_log.contains("hint du sous-répertoire"));
+        assert!(from_the_log.contains("extra de recette"));
+    }
+
+    /// `with_hints_block` porte le bloc du journal : `None` doit l'effacer, pas
+    /// laisser en place celui d'un build précédent.
+    #[test]
+    fn an_absent_hints_block_clears_the_hints() {
+        let manager = PromptManager::new();
+
+        let with_hints = manager
+            .builder()
+            .with_hints_block(Some("bloc de hints".to_string()))
+            .build();
+        assert!(with_hints.contains("bloc de hints"));
+
+        let cleared = manager
+            .builder()
+            .with_hints_block(Some("bloc de hints".to_string()))
+            .with_hints_block(None)
+            .build();
+        assert!(!cleared.contains("bloc de hints"));
     }
 
     #[test]

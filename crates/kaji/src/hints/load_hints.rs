@@ -7,6 +7,11 @@ use std::{
 use crate::config::paths::{find_git_root, Paths};
 use crate::hints::import_files::read_referenced_files;
 
+/// Le préfixe des clés d'extras que porte un hint de sous-répertoire. Le rejeu
+/// les distingue des autres extras du `PromptManager` : ce sont des fichiers du
+/// disque, servis du journal.
+pub const SUBDIRECTORY_HINT_PREFIX: &str = "subdir_hints:";
+
 pub const KAJI_HINTS_FILENAME: &str = ".kajihints";
 pub const AGENTS_MD_FILENAME: &str = "AGENTS.md";
 pub const CLAUDE_MD_FILENAME: &str = "CLAUDE.md";
@@ -94,7 +99,7 @@ impl SubdirectoryHintTracker {
             if let Some(content) =
                 load_hints_from_directory(&dir, &working_dir, &self.hints_filenames)
             {
-                let key = format!("subdir_hints:{}", dir.display());
+                let key = format!("{SUBDIRECTORY_HINT_PREFIX}{}", dir.display());
                 results.push((key, content));
             }
             self.loaded_dirs.insert(dir);

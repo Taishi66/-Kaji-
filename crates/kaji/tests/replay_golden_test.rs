@@ -39,7 +39,7 @@ use rmcp::model::{
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
-use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use rmcp::{object, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -66,6 +66,14 @@ const FRONTEND_INSTRUCTIONS: &str = "golden frontend instructions marker";
 const AGENTS_MD: &str = "AGENTS.md";
 const RECORDED_HINT: &str = "golden hint as recorded";
 const EDITED_HINT: &str = "golden hint edited after the recording";
+
+/// Un sous-répertoire du working dir, visité par l'argument `path` du second
+/// appel d'outil : ses hints entrent dans le prompt système des appels
+/// suivants, par un autre chemin que le bloc de hints du working dir.
+const SUB_DIR: &str = "sub";
+const SUB_PATH_ARGUMENT: &str = "sub/probe.rs";
+const RECORDED_SUB_HINT: &str = "golden subdirectory hint as recorded";
+const EDITED_SUB_HINT: &str = "golden subdirectory hint edited after the recording";
 
 /// Les faits mémoire de l'enregistrement, et celui qu'on ajoute *après* pour
 /// prouver que le rejeu ne consulte pas le magasin vivant.
@@ -183,7 +191,11 @@ impl Provider for FixtureProvider {
         } else {
             Message::assistant()
                 .with_tool_request(TOOL_REQUEST_ID, Ok(CallToolRequestParams::new(TOOL)))
-                .with_tool_request(TOOL_REQUEST_ID_2, Ok(CallToolRequestParams::new(TOOL)))
+                .with_tool_request(
+                    TOOL_REQUEST_ID_2,
+                    Ok(CallToolRequestParams::new(TOOL)
+                        .with_arguments(object!({"path": SUB_PATH_ARGUMENT}))),
+                )
         };
         Ok(stream_from_single_message(message, usage))
     }
@@ -391,6 +403,8 @@ async fn record_fixture_with(probe: &ProbeFixture, model_config: ModelConfig) ->
     let working_dir = data_dir.path().join("workspace");
     std::fs::create_dir_all(&working_dir)?;
     std::fs::write(working_dir.join(AGENTS_MD), RECORDED_HINT)?;
+    std::fs::create_dir_all(working_dir.join(SUB_DIR))?;
+    std::fs::write(working_dir.join(SUB_DIR).join(AGENTS_MD), RECORDED_SUB_HINT)?;
 
     let session_manager = Arc::new(SessionManager::new(data_dir.path().join("data")));
     let agent = new_agent(&session_manager, &data_dir);
@@ -935,6 +949,69 @@ async fn assert_edited_hints_do_not_move_the_replay(state_machine: Option<&str>)
         "{label}: le rejeu sert le bloc de hints du journal, pas celui du disque"
     );
     Ok(())
+}
+
+/// Les hints d'un **sous-répertoire** visité pendant le tour entrent dans le
+/// prompt système par un autre chemin que le bloc du working dir : la boucle
+/// legacy les charge dans les extras du `PromptManager` après le résultat
+/// d'outil et réassemble. Ils sont lus du disque, donc un `git pull` qui touche
+/// `sub/AGENTS.md` les fait diverger — au tour 1, appel 1 — s'ils ne viennent
+/// pas du journal.
+async fn assert_edited_subdirectory_hints_do_not_move_the_replay(
+    state_machine: Option<&str>,
+) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?} subdir");
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env(state_machine, &memory_dir);
+
+    let probe = ProbeFixture::new().await;
+    let fixture = record_fixture_with(&probe, model_config()).await?;
+    let before = replay_once(&fixture, &label).await?;
+    assert!(
+        before
+            .prompts
+            .iter()
+            .any(|prompt| prompt.contains(RECORDED_SUB_HINT)),
+        "{label}: le hint du sous-répertoire est bien dans un prompt, sinon le test ne prouve rien"
+    );
+
+    std::fs::write(
+        fixture.working_dir.join(SUB_DIR).join(AGENTS_MD),
+        EDITED_SUB_HINT,
+    )?;
+
+    let after = replay_once(&fixture, &label).await?;
+    assert_eq!(
+        before.transcript.rendered(),
+        after.transcript.rendered(),
+        "{label}: un hint de sous-répertoire réécrit après l'enregistrement ne déplace pas le rejeu"
+    );
+    assert!(
+        after
+            .prompts
+            .iter()
+            .any(|prompt| prompt.contains(RECORDED_SUB_HINT)),
+        "{label}: le rejeu sert le hint de sous-répertoire du journal"
+    );
+    assert!(
+        after
+            .prompts
+            .iter()
+            .all(|prompt| !prompt.contains(EDITED_SUB_HINT)),
+        "{label}: le rejeu ne relit pas le sous-répertoire du disque"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn edited_subdirectory_hints_do_not_move_the_replay_on_the_legacy_loop() -> Result<()> {
+    assert_edited_subdirectory_hints_do_not_move_the_replay(None).await
+}
+
+#[tokio::test]
+async fn edited_subdirectory_hints_do_not_move_the_replay_on_the_state_machine_loop() -> Result<()>
+{
+    assert_edited_subdirectory_hints_do_not_move_the_replay(Some("1")).await
 }
 
 #[tokio::test]
