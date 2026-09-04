@@ -414,7 +414,9 @@ fn v2_shape(events: &[SessionEvent]) -> Vec<String> {
             let key = match event.kind.as_str() {
                 "llm_request" | "llm_response" => format!("call_idx={}", payload["call_idx"]),
                 "tool_result" => format!("tool_call_id={}", payload["tool_call_id"]),
-                "memory_block" | "clock_reads" | "condense_triggered" => "-".to_string(),
+                "memory_block" | "clock_reads" | "condense_triggered" | "tool_manifest" => {
+                    "-".to_string()
+                }
                 _ => return None,
             };
             Some(format!("turn={} {} {key}", event.turn_seq, event.kind))
@@ -426,12 +428,10 @@ fn v2_shape(events: &[SessionEvent]) -> Vec<String> {
 
 /// Rejoue la session enregistrée de bout en bout, tour par tour, comme le fait
 /// le CLI : session dérivée, `IdGen` redérivé de la graine du journal, curseur
-/// et mode branchés, extensions identiques à l'enregistrement.
-async fn replay_once(
-    fixture: &Fixture,
-    probe: &ProbeFixture,
-    label: &str,
-) -> Result<(Transcript, Vec<String>)> {
+/// et mode branchés — et **aucune extension rechargée**, exactement comme
+/// `kaji replay`. La liste d'outils et les fragments de prompt qui en dérivent
+/// viennent du journal (`tool_manifest`), pas d'un serveur MCP relancé.
+async fn replay_once(fixture: &Fixture, label: &str) -> Result<(Transcript, Vec<String>)> {
     let cursor = Arc::new(EventCursor::load(&fixture.session_manager, &fixture.session_id).await?);
     let provider = ReplayProvider::new(Arc::clone(&cursor), LENIENT);
     let position = provider.position();
@@ -461,12 +461,6 @@ async fn replay_once(
     ));
     agent
         .update_provider(spy, model_config(), &derived.id)
-        .await?;
-    agent
-        .add_extension(
-            ExtensionConfig::streamable_http("probe", &probe.url, "instrumented probe", 30_u64),
-            &derived.id,
-        )
         .await?;
 
     let executions_before = TOOL_CALLS.load(Ordering::SeqCst);
@@ -519,9 +513,17 @@ async fn assert_two_replays_agree(state_machine: Option<&str>) -> Result<()> {
         !cursor.memory_blocks.is_empty(),
         "{label}: les faits mémoire sont entrés dans le prompt et sont journalisés"
     );
+    assert!(
+        cursor
+            .tool_manifests
+            .values()
+            .any(|manifest| manifest.tools.iter().any(|tool| tool.name == TOOL)),
+        "{label}: l'outil de l'extension est journalisé — sans quoi le rejeu sans extension \
+         ne prouverait rien"
+    );
 
-    let (first, _) = replay_once(&fixture, &probe, &label).await?;
-    let (second, _) = replay_once(&fixture, &probe, &label).await?;
+    let (first, _) = replay_once(&fixture, &label).await?;
+    let (second, _) = replay_once(&fixture, &label).await?;
 
     assert!(
         !first.lines.is_empty(),
@@ -593,7 +595,7 @@ async fn assert_a_late_memory_fact_does_not_move_the_replay(
 
     let probe = ProbeFixture::new().await;
     let fixture = record_fixture(&probe).await?;
-    let (before, _) = replay_once(&fixture, &probe, &label).await?;
+    let (before, _) = replay_once(&fixture, &label).await?;
 
     let mut memory = SessionMemory::load("golden-late-session");
     memory.remember(LATE_FACT, &["po", "dashboard", "onboarding"], None);
@@ -607,7 +609,7 @@ async fn assert_a_late_memory_fact_does_not_move_the_replay(
     );
     drop(fresh_recall);
 
-    let (after, prompts) = replay_once(&fixture, &probe, &label).await?;
+    let (after, prompts) = replay_once(&fixture, &label).await?;
 
     assert_eq!(
         before.rendered(),

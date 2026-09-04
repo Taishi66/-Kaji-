@@ -545,7 +545,7 @@ impl std::fmt::Display for ExtensionConfig {
 }
 
 /// Information about the extension used for building prompts
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionInfo {
     pub name: String,
     pub instructions: String,

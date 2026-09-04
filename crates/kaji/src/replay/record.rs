@@ -4,6 +4,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tracing::warn;
 
+use crate::replay::manifest::ToolManifest;
 use crate::session::SessionManager;
 
 fn parse_or_wrap(raw: &str) -> Value {
@@ -123,6 +124,14 @@ impl RecordSink {
         .await;
     }
 
+    pub async fn record_tool_manifest(&self, turn_seq: i64, manifest: &ToolManifest) {
+        let mut payload = serde_json::to_value(manifest).unwrap_or_else(|_| json!({}));
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("turn_seq".to_string(), json!(turn_seq));
+        }
+        self.append(turn_seq, "tool_manifest", payload).await;
+    }
+
     pub async fn record_clock_reads(&self, turn_seq: i64, reads: &[String]) {
         self.append(
             turn_seq,
@@ -156,6 +165,7 @@ pub struct TurnRecorder {
     turn_seq: i64,
     next_call_idx: AtomicU32,
     memory_block_recorded: AtomicBool,
+    tool_manifest_recorded: AtomicBool,
 }
 
 impl TurnRecorder {
@@ -165,6 +175,7 @@ impl TurnRecorder {
             turn_seq,
             next_call_idx: AtomicU32::new(0),
             memory_block_recorded: AtomicBool::new(false),
+            tool_manifest_recorded: AtomicBool::new(false),
         }
     }
 
@@ -217,6 +228,24 @@ pub async fn record_memory_block(recorder: Option<&Arc<TurnRecorder>>, block: Op
     recorder
         .sink
         .record_memory_block(recorder.turn_seq, block)
+        .await;
+}
+
+/// Records the tool environment this turn presented to the model. Like the
+/// memory block, only the turn's first assembly is journaled: the
+/// state-machine loop reassembles before every provider call of the turn, the
+/// legacy loop assembles once, and the log carries one manifest per turn on
+/// both.
+pub async fn record_tool_manifest(recorder: Option<&Arc<TurnRecorder>>, manifest: &ToolManifest) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    if recorder.tool_manifest_recorded.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    recorder
+        .sink
+        .record_tool_manifest(recorder.turn_seq, manifest)
         .await;
 }
 

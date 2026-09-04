@@ -13,6 +13,7 @@ use crate::conversation::message::{InferenceMetadata, Message, MessageContent};
 use crate::conversation::{effective_role, Conversation, EffectiveRole};
 use crate::providers::base::{Provider, ProviderUsage};
 use crate::replay::idgen::{default_idgen, IdGen};
+use crate::replay::manifest::ToolManifest;
 use crate::replay::record::{next_llm_call, TurnRecorder};
 use crate::replay::source::ReplaySource;
 use crate::session::Session;
@@ -482,9 +483,20 @@ impl Inference for InferenceRunner<'_> {
                     .prompt_parts
                     .push(("frontend".to_string(), frontend_instructions));
             }
+            let manifest = crate::replay::manifest::turn_tool_manifest(
+                self.turn_recorder().as_ref(),
+                self.replay_source.as_ref(),
+                ToolManifest {
+                    tools,
+                    prompt_parts: input.prompt_parts,
+                    ..ToolManifest::default()
+                },
+            )
+            .await;
+            let (tools, prompt_parts) = (manifest.tools, manifest.prompt_parts);
             let system_prompt = self.prompt_manager.lock().await.build_system_prompt(
                 &session.working_dir,
-                input.prompt_parts,
+                prompt_parts,
                 kaji_mode,
             );
             // KAJI : splice recalled inter-session facts (parity with the legacy

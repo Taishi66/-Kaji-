@@ -15,6 +15,7 @@ use tracing::warn;
 use crate::conversation::message::{Message, MessageContent};
 use crate::permission::Permission;
 use crate::replay::cursor::EventCursor;
+use crate::replay::manifest::ToolManifest;
 use crate::replay::provider::ReplayPosition;
 
 #[derive(Clone)]
@@ -41,6 +42,13 @@ impl ReplaySource {
     /// l'enregistrement : le splice réel n'est jamais rejoué.
     pub fn memory_block(&self) -> Option<String> {
         self.cursor.memory_blocks.get(&self.turn()).cloned()
+    }
+
+    /// L'environnement d'extensions enregistré pour ce tour : outils envoyés
+    /// au provider et fragments de prompt système qui en dérivent. Absent ⇒
+    /// aucun outil et aucun fragment, comme une session sans extension.
+    pub fn tool_manifest(&self) -> Option<ToolManifest> {
+        self.cursor.tool_manifests.get(&self.turn()).cloned()
     }
 
     /// L'estampille d'horloge que le prompt système portait à
@@ -124,6 +132,7 @@ mod tests {
             llm_responses: HashMap::new(),
             tool_results: HashMap::new(),
             memory_blocks: HashMap::from([(2, "bloc du tour 2".to_string())]),
+            tool_manifests: HashMap::new(),
             clock_reads: HashMap::from([(2, vec!["2026-08-27 09:00 +00:00".to_string()])]),
             condense_turns: HashSet::from([3]),
             approvals: HashMap::from([

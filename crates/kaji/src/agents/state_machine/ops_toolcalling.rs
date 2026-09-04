@@ -709,14 +709,28 @@ impl Operation for ToolExecutionOperation<'_> {
             return not_applicable();
         }
 
-        let known_tools: HashSet<_> = self
-            .extension_manager
-            .get_prefixed_tools_excluding(&session.id, crate::skills::EXTENSION_NAME)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect();
+        // Un tour rejoué n'a aucune extension chargée : les outils que le
+        // modèle pouvait appeler viennent du manifeste du journal, sans quoi
+        // tout appel enregistré passerait pour un outil inconnu.
+        let known_tools: HashSet<_> = match self
+            .replay_source
+            .as_ref()
+            .and_then(ReplaySource::tool_manifest)
+        {
+            Some(manifest) => manifest
+                .tools
+                .into_iter()
+                .map(|tool| tool.name.to_string())
+                .collect(),
+            None => self
+                .extension_manager
+                .get_prefixed_tools_excluding(&session.id, crate::skills::EXTENSION_NAME)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|tool| tool.name.to_string())
+                .collect(),
+        };
         pending.retain(|(request, _)| {
             request
                 .tool_call

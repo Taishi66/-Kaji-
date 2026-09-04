@@ -210,6 +210,7 @@ mod tests {
             )]),
             tool_results: HashMap::new(),
             memory_blocks: HashMap::new(),
+            tool_manifests: HashMap::new(),
             clock_reads: HashMap::new(),
             condense_turns: HashSet::new(),
             approvals: HashMap::new(),

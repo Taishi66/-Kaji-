@@ -15,6 +15,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::permission::Permission;
+use crate::replay::manifest::ToolManifest;
 use crate::session::session_manager::SessionEvent;
 use crate::session::SessionManager;
 
@@ -58,6 +59,9 @@ pub struct EventCursor {
     pub llm_responses: HashMap<(i64, u32), LlmExchange>,
     pub tool_results: HashMap<String, String>,
     pub memory_blocks: HashMap<i64, String>,
+    /// L'environnement d'extensions de chaque tour : outils et fragments de
+    /// prompt système qui en dérivent (`replay::manifest`).
+    pub tool_manifests: HashMap<i64, ToolManifest>,
     pub clock_reads: HashMap<i64, Vec<String>>,
     pub condense_turns: HashSet<i64>,
     /// Les décisions d'approbation v1 du journal, par `(turn_seq, request_id)`,
@@ -132,6 +136,7 @@ impl EventCursor {
             llm_responses: HashMap::new(),
             tool_results: HashMap::new(),
             memory_blocks: HashMap::new(),
+            tool_manifests: HashMap::new(),
             clock_reads: HashMap::new(),
             condense_turns: HashSet::new(),
             approvals: HashMap::new(),
@@ -193,6 +198,13 @@ impl EventCursor {
                         cursor
                             .memory_blocks
                             .insert(turn_seq(event, &payload), block.to_string());
+                    }
+                }
+                "tool_manifest" => {
+                    if let Ok(manifest) = serde_json::from_value::<ToolManifest>(payload.clone()) {
+                        cursor
+                            .tool_manifests
+                            .insert(turn_seq(event, &payload), manifest);
                     }
                 }
                 "clock_reads" => {

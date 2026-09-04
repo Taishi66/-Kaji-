@@ -25,6 +25,7 @@ use crate::providers::toolshim::{
 #[cfg(test)]
 use crate::replay::idgen::default_idgen;
 use crate::replay::idgen::IdGen;
+use crate::replay::manifest::ToolManifest;
 use crate::replay::record::RecordSink;
 use kaji_providers::conversation::token_usage::{CostSource, ProviderStats, ProviderUsage, Usage};
 use kaji_providers::model::ModelConfig;
@@ -248,6 +249,26 @@ impl Agent {
             .get_extensions_info(working_dir)
             .await;
         let (extension_count, tool_count) = self.total_extension_and_tool_counts(session_id).await;
+
+        let manifest = crate::replay::manifest::turn_tool_manifest(
+            self.turn_recorder().as_ref(),
+            self.replay_source().as_ref(),
+            ToolManifest {
+                tools,
+                extensions: extensions_info,
+                extension_count,
+                tool_count,
+                ..ToolManifest::default()
+            },
+        )
+        .await;
+        let ToolManifest {
+            tools,
+            extensions: extensions_info,
+            extension_count,
+            tool_count,
+            ..
+        } = manifest;
 
         let model_config = self.model_config_for_session(session_id).await?;
 

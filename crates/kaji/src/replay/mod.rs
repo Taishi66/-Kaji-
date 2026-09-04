@@ -2,6 +2,7 @@ pub mod clock;
 pub mod cursor;
 pub mod hashing;
 pub mod idgen;
+pub mod manifest;
 pub mod mode;
 pub mod provider;
 pub mod record;
