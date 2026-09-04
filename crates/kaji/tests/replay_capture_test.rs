@@ -14,7 +14,7 @@ use kaji_providers::conversation::token_usage::{ProviderUsage, Usage};
 use kaji_providers::errors::ProviderError;
 use kaji_providers::model::ModelConfig;
 use kaji_test_support::{McpFixture, FAKE_CODE};
-use rmcp::model::{CallToolRequestParams, Tool};
+use rmcp::model::{CallToolRequestParams, Role, Tool};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -684,6 +684,132 @@ async fn condense_is_captured_on_the_legacy_loop() -> Result<()> {
 #[tokio::test]
 async fn condense_is_captured_on_the_state_machine_loop() -> Result<()> {
     assert_condense_capture(Some("1")).await
+}
+
+/// Un tour ouvert par une slash-command. Les deux boucles rendent le message
+/// de commande en `AgentEvent` en plus de l'enveloppe qui le journalise déjà.
+async fn run_slash_command_turn(state_machine: Option<&str>) -> Result<Vec<SessionEvent>> {
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env_lock::lock_env([
+        ("KAJI_STATE_MACHINE", state_machine),
+        (
+            "KAJI_MEMORY_DIR",
+            Some(memory_dir.path().to_str().expect("utf8 temp path")),
+        ),
+    ]);
+
+    let temp_dir = tempfile::tempdir()?;
+    let session_manager = Arc::new(SessionManager::new(temp_dir.path().join("data")));
+    let agent = agent_for(&session_manager, temp_dir.path().join("config"));
+    let session = session_manager
+        .create_session(
+            PathBuf::from("."),
+            "replay-slash-command-test".to_string(),
+            SessionType::Hidden,
+            KajiMode::Auto,
+        )
+        .await?;
+    agent
+        .update_provider(
+            Arc::new(TextProvider),
+            ModelConfig::new("mock-model"),
+            &session.id,
+        )
+        .await?;
+
+    drain(
+        agent
+            .reply(
+                Message::user().with_text("/clear"),
+                session_config(&session.id),
+                None,
+            )
+            .await?,
+    )
+    .await?;
+
+    session_manager.session_events(&session.id).await
+}
+
+fn message_rows(events: &[SessionEvent], role: Role) -> Vec<Message> {
+    events
+        .iter()
+        .filter(|event| event.kind == "message")
+        .filter_map(|event| serde_json::from_str::<Message>(&event.payload_json).ok())
+        .filter(|message| message.role == role)
+        .collect()
+}
+
+/// Les lignes `message` qui portent le texte du message d'ouverture — la
+/// réponse d'outil d'un tour est elle aussi un message de rôle user.
+fn opening_message_rows(events: &[SessionEvent], text: &str) -> Vec<Message> {
+    message_rows(events, Role::User)
+        .into_iter()
+        .filter(|message| message.as_concat_text().contains(text))
+        .collect()
+}
+
+/// Un message d'ouverture, une ligne `message`. L'enveloppe de `reply()`
+/// journalise le message qui ouvre le tour ; le chemin des slash-commands le
+/// rend en plus en `AgentEvent`, et l'enveloppe journalise tout événement —
+/// deux lignes pour un seul message, avec des payloads différents.
+async fn assert_one_opening_message_row(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let events = run_slash_command_turn(state_machine).await?;
+
+    let confirmations = message_rows(&events, Role::Assistant);
+    assert!(
+        confirmations
+            .iter()
+            .any(|message| message.as_concat_text().contains("Conversation cleared")),
+        "{label}: la commande a bien tourné, sinon le test ne prouve rien: {:?}",
+        kinds(&events)
+    );
+
+    let opening = opening_message_rows(&events, "/clear");
+    assert_eq!(
+        opening.len(),
+        1,
+        "{label}: une seule ligne `message` pour le message qui ouvre le tour: {opening:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_opening_message_is_journaled_once_on_the_legacy_loop() -> Result<()> {
+    assert_one_opening_message_row(None).await
+}
+
+#[tokio::test]
+async fn the_opening_message_is_journaled_once_on_the_state_machine_loop() -> Result<()> {
+    assert_one_opening_message_row(Some("1")).await
+}
+
+/// Le chemin normal (aucune slash-command) n'a jamais journalisé qu'une ligne :
+/// le contrôle ci-dessus ne doit pas la faire disparaître.
+async fn assert_one_opening_message_row_without_command(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let events = run_turn(state_machine).await?;
+
+    let opening = opening_message_rows(&events, "capture this turn");
+    assert_eq!(
+        opening.len(),
+        1,
+        "{label}: le message qui ouvre un tour normal est journalisé une fois: {opening:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_plain_turn_journals_its_opening_message_on_the_legacy_loop() -> Result<()> {
+    assert_one_opening_message_row_without_command(None).await
+}
+
+#[tokio::test]
+async fn a_plain_turn_journals_its_opening_message_on_the_state_machine_loop() -> Result<()> {
+    assert_one_opening_message_row_without_command(Some("1")).await
 }
 
 #[tokio::test]

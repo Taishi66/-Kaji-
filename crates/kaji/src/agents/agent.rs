@@ -352,6 +352,18 @@ fn ensure_message_event_id(event: AgentEvent, idgen: &Arc<dyn IdGen>) -> AgentEv
     }
 }
 
+/// Le message qui a ouvert le tour, rendu une seconde fois par la boucle. Les
+/// deux boucles réémettent le message de commande sur le chemin des
+/// slash-commands (`reply_impl` en legacy, `Emitter::message` côté machine à
+/// états) alors que l'enveloppe l'a déjà journalisé : sans ce contrôle le
+/// journal porterait deux lignes `message` pour un seul message user.
+fn is_opening_message(event: &AgentEvent, opening_message_id: Option<&str>) -> bool {
+    match (event, opening_message_id) {
+        (AgentEvent::Message(message), Some(id)) => message.id.as_deref() == Some(id),
+        _ => false,
+    }
+}
+
 /// `kind` column for a `session_events` row logging this event — see the
 /// `kind` enum in `docs/superpowers/specs/2026-08-12-event-log-design.md`.
 fn agent_event_kind(event: &AgentEvent) -> &'static str {
@@ -2426,7 +2438,11 @@ impl Agent {
         // Le message qui ouvre le tour. Hors chemin des slash-commands la
         // boucle ne le rend jamais en `AgentEvent`, donc le journal ne le
         // porterait pas — et le rejeu n'aurait rien à réinjecter pour
-        // redérouler le tour (`kaji replay`, `user_turns`).
+        // redérouler le tour (`kaji replay`, `user_turns`). Il est nommé ici,
+        // avant d'être sérialisé : le journal porte son id, et l'enveloppe
+        // reconnaît la seconde émission du chemin des slash-commands.
+        let user_message = user_message.with_generated_id_if_missing();
+        let opening_message_id = user_message.id.clone();
         let opening_message = journal_seq.map(|_| serialize_event_payload(&user_message));
 
         let events = self
@@ -2501,13 +2517,15 @@ impl Agent {
                 match events.next().await {
                     Some(Ok(event)) => {
                         if let Some(turn_seq) = journal_seq {
-                            let kind = agent_event_kind(&event);
-                            let payload = agent_event_payload(&event);
-                            if let Err(error) = session_manager
-                                .append_event(&session_id, turn_seq, kind, &payload)
-                                .await
-                            {
-                                warn!(?error, kind = %kind, "event log append failed");
+                            if !is_opening_message(&event, opening_message_id.as_deref()) {
+                                let kind = agent_event_kind(&event);
+                                let payload = agent_event_payload(&event);
+                                if let Err(error) = session_manager
+                                    .append_event(&session_id, turn_seq, kind, &payload)
+                                    .await
+                                {
+                                    warn!(?error, kind = %kind, "event log append failed");
+                                }
                             }
                         }
                         yield event;
@@ -2555,7 +2573,6 @@ impl Agent {
         session_config: SessionConfig,
         cancel_token: Option<CancellationToken>,
     ) -> Result<BoxStream<'_, Result<AgentEvent>>> {
-        let user_message = user_message.with_generated_id_if_missing();
         let session_manager = self.config.session_manager.clone();
 
         let message_text_for_trace = agent_visible_message_text(&user_message);
