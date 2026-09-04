@@ -1265,6 +1265,17 @@ impl Agent {
         &self,
         session_id: &str,
     ) -> Result<kaji_providers::model::ModelConfig> {
+        // Un tour rejoué assemble sous le `ModelConfig` de la session
+        // enregistrée : la session dérivée du rejeu ne porte que le placeholder
+        // du CLI, et `toolshim`/`context_limit` entrent dans la requête hachée.
+        if let Some(model_config) = self
+            .replay_mode
+            .as_ref()
+            .and_then(|replay_mode| replay_mode.model_config.clone())
+        {
+            return Ok(model_config);
+        }
+
         if let Ok(session) = self
             .config
             .session_manager
@@ -2114,7 +2125,9 @@ impl Agent {
         let cancel = cancel_token.unwrap_or_default();
         let session_id = session_config.id.clone();
 
-        let entry_session = session_manager.get_session(&session_id, false).await?;
+        // La session doit exister avant que le tour ne s'ouvre : son absence
+        // remonte ici plutôt qu'au milieu de la boucle.
+        session_manager.get_session(&session_id, false).await?;
         if let Some(schedule_id) = session_config.schedule_id.clone() {
             session_manager
                 .update(&session_id)
@@ -2156,19 +2169,7 @@ impl Agent {
             });
         }
 
-        let model_config = match entry_session.model_config {
-            Some(model_config) => model_config,
-            None => {
-                let provider_name = Config::global()
-                    .get_kaji_provider()
-                    .map_err(|_| anyhow!("Could not resolve model config: missing provider"))?;
-                let model_name = Config::global()
-                    .get_kaji_model()
-                    .map_err(|_| anyhow!("Could not resolve model config: missing model"))?;
-                crate::model_config::model_config_from_user_config(&provider_name, &model_name)
-                    .map_err(|error| anyhow!("Could not resolve model config: {error}"))?
-            }
-        };
+        let model_config = self.model_config_for_session(&session_id).await?;
 
         let context_limit = provider
             .get_context_limit(&model_config)

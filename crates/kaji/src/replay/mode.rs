@@ -6,7 +6,10 @@
 //! mémoire P1, l'usage ledger ou les checkpoints
 //! (`docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`, S3).
 
+use kaji_providers::model::ModelConfig;
+
 use crate::config::KajiMode;
+use crate::session::Session;
 
 /// Le tour rejoue `source_session_id`. `lenient` laisse le replay continuer
 /// sur divergence au lieu de s'arrêter ; `until_turn` borne le replay au
@@ -14,12 +17,19 @@ use crate::config::KajiMode;
 /// celui de la session **enregistrée** : le prompt système en dépend
 /// (`is_autonomous`, branche `Chat`), donc la requête hachée aussi — le porter
 /// ici plutôt que de le reposer au CLI rend l'oubli impossible.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct ReplayMode {
     pub source_session_id: String,
     pub lenient: bool,
     pub until_turn: Option<i64>,
     pub kaji_mode: KajiMode,
+    /// Le `ModelConfig` de la session enregistrée. `toolshim` vide la liste
+    /// d'outils envoyée au provider, réécrit le prompt système et convertit les
+    /// messages, `context_limit` pilote les seuils : tout cela entre dans la
+    /// requête hachée. En inventer un rendrait toute session toolshim
+    /// irrejouable dès le tour 1, appel 0. `None` pour une session sans config
+    /// persistée — le rejeu garde alors celui que l'appelant a monté.
+    pub model_config: Option<ModelConfig>,
 }
 
 impl ReplayMode {
@@ -29,6 +39,20 @@ impl ReplayMode {
             lenient: false,
             until_turn: None,
             kaji_mode,
+            model_config: None,
+        }
+    }
+
+    /// Le mode **et** le `ModelConfig` de la session enregistrée. Les deux
+    /// vivent dans la session, pas dans le journal : une session déjà
+    /// enregistrée porte donc déjà de quoi être rejouée fidèlement.
+    pub fn for_session(session: &Session) -> Self {
+        Self {
+            source_session_id: session.id.clone(),
+            lenient: false,
+            until_turn: None,
+            kaji_mode: session.kaji_mode,
+            model_config: session.model_config.clone(),
         }
     }
 }

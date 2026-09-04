@@ -305,6 +305,23 @@ fn model_config() -> ModelConfig {
     ModelConfig::new("mock-model").with_context_limit(Some(CONTEXT_LIMIT))
 }
 
+/// Le même modèle en `toolshim` : les outils quittent la liste envoyée au
+/// provider pour un bloc JSON du prompt système, et les messages d'outils sont
+/// convertis en texte. Tout cela entre dans la requête hachée.
+fn toolshim_model_config() -> ModelConfig {
+    ModelConfig {
+        toolshim: true,
+        ..model_config()
+    }
+}
+
+/// Ce que `modify_system_prompt_for_tool_json` ajoute au prompt système.
+const TOOLSHIM_PROMPT_MARKER: &str = "Break down your task into smaller steps";
+
+/// Le `ModelConfig` que le CLI de rejeu monte sur la session dérivée : un
+/// marqueur, pas le modèle enregistré (`kaji-cli/src/commands/replay.rs`).
+const REPLAY_PLACEHOLDER_MODEL: &str = "kaji-replay";
+
 fn session_config(id: &str) -> SessionConfig {
     SessionConfig {
         id: id.to_string(),
@@ -332,6 +349,10 @@ fn env<'a>(state_machine: Option<&'a str>, memory_dir: &'a TempDir) -> env_lock:
             "KAJI_MEMORY_DIR",
             Some(memory_dir.path().to_str().expect("utf8 temp path")),
         ),
+        // Aucun interpréteur toolshim joignable depuis un test : le backend est
+        // rendu invalide pour que la post-passe retombe, des deux côtés de
+        // l'enregistrement, sur le même nettoyage local.
+        ("KAJI_TOOLSHIM_BACKEND", Some("none")),
     ])
 }
 
@@ -360,6 +381,10 @@ async fn drain(agent: &Agent, session_id: &str, message: Message) -> Result<Vec<
 /// premier, des faits mémoire dans le prompt de chacun. L'appelant détient
 /// déjà le verrou d'environnement.
 async fn record_fixture(probe: &ProbeFixture) -> Result<Fixture> {
+    record_fixture_with(probe, model_config()).await
+}
+
+async fn record_fixture_with(probe: &ProbeFixture, model_config: ModelConfig) -> Result<Fixture> {
     seed_memory();
 
     let data_dir = tempfile::tempdir()?;
@@ -379,7 +404,7 @@ async fn record_fixture(probe: &ProbeFixture) -> Result<Fixture> {
         .await?;
 
     agent
-        .update_provider(Arc::new(FixtureProvider), model_config(), &session.id)
+        .update_provider(Arc::new(FixtureProvider), model_config, &session.id)
         .await?;
     agent
         .add_extension(
@@ -538,15 +563,21 @@ async fn replay_once_with(fixture: &Fixture, label: &str, lenient: bool) -> Resu
         )
         .await?;
 
+    // Monté comme `kaji replay` le fait : le mode et le `ModelConfig` viennent
+    // de la session enregistrée, et la session dérivée ne porte qu'un marqueur.
+    let source_session = fixture
+        .session_manager
+        .get_session(&fixture.session_id, false)
+        .await?;
     let mut agent = new_agent(&fixture.session_manager, &fixture.data_dir);
     agent.set_idgen(Arc::new(SessionIdGen::new(&cursor.log_meta.idgen_seed)));
-    agent.set_replay_mode(ReplayMode::new(fixture.session_id.clone(), KajiMode::Auto));
+    agent.set_replay_mode(ReplayMode::for_session(&source_session));
     agent.set_replay_source(ReplaySource::new(
         Arc::clone(&cursor),
         Arc::clone(&position),
     ));
     agent
-        .update_provider(spy, model_config(), &derived.id)
+        .update_provider(spy, ModelConfig::new(REPLAY_PLACEHOLDER_MODEL), &derived.id)
         .await?;
 
     let executions_before = TOOL_CALLS.load(Ordering::SeqCst);
@@ -952,6 +983,47 @@ async fn the_frontend_instructions_come_from_the_log_on_the_legacy_loop() -> Res
 #[tokio::test]
 async fn the_frontend_instructions_come_from_the_log_on_the_state_machine_loop() -> Result<()> {
     assert_the_frontend_instructions_come_from_the_log(Some("1")).await
+}
+
+/// `toolshim` vide la liste d'outils envoyée au provider, pousse leur schéma
+/// JSON dans le prompt système et convertit les messages d'outils en texte —
+/// avant le hash. Le CLI de rejeu montait la session dérivée sur un
+/// `ModelConfig` inventé, donc `toolshim: false` : toute cette population de
+/// sessions (petits modèles sans tool calling natif) divergeait au tour 1,
+/// appel 0. Le `ModelConfig` de la session enregistrée doit être restauré comme
+/// l'est son `KajiMode`.
+async fn assert_a_toolshim_session_replays_identically(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?} toolshim");
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env(state_machine, &memory_dir);
+
+    let probe = ProbeFixture::new().await;
+    let fixture = record_fixture_with(&probe, toolshim_model_config()).await?;
+
+    let replayed = replay_once(&fixture, &label).await?;
+    assert!(
+        replayed
+            .prompts
+            .iter()
+            .all(|prompt| prompt.contains(TOOLSHIM_PROMPT_MARKER)),
+        "{label}: le rejeu réassemble le prompt toolshim — sinon le test ne prouve rien"
+    );
+    assert_eq!(
+        fixture.transcript.rendered(),
+        replayed.transcript.rendered(),
+        "{label}: une session toolshim se rejoue à l'identique"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_toolshim_session_replays_identically_on_the_legacy_loop() -> Result<()> {
+    assert_a_toolshim_session_replays_identically(None).await
+}
+
+#[tokio::test]
+async fn a_toolshim_session_replays_identically_on_the_state_machine_loop() -> Result<()> {
+    assert_a_toolshim_session_replays_identically(Some("1")).await
 }
 
 #[tokio::test]

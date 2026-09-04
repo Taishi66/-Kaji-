@@ -90,7 +90,7 @@ pub async fn handle_replay_subcommand(
     let position = provider.position();
     let divergences = provider.divergences();
 
-    let mut replay_mode = ReplayMode::new(session_id.clone(), source.kaji_mode);
+    let mut replay_mode = ReplayMode::for_session(&source);
     replay_mode.lenient = lenient;
     replay_mode.until_turn = until;
 
@@ -103,6 +103,9 @@ pub async fn handle_replay_subcommand(
     agent
         .update_provider(
             Arc::new(provider),
+            // Marqueur de la session dérivée : l'assemblage d'un tour rejoué
+            // prend le `ModelConfig` de la session enregistrée, porté par
+            // `ReplayMode` — pas celui-ci.
             ModelConfig::new("kaji-replay"),
             &derived.id,
         )
