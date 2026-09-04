@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -127,10 +127,16 @@ impl RecordSink {
         .await;
     }
 
-    pub async fn record_tool_manifest(&self, turn_seq: i64, manifest: &ToolManifest) {
+    pub async fn record_tool_manifest(
+        &self,
+        turn_seq: i64,
+        call_idx: u32,
+        manifest: &ToolManifest,
+    ) {
         let mut payload = serde_json::to_value(manifest).unwrap_or_else(|_| json!({}));
         if let Some(object) = payload.as_object_mut() {
             object.insert("turn_seq".to_string(), json!(turn_seq));
+            object.insert("call_idx".to_string(), json!(call_idx));
         }
         self.append(turn_seq, "tool_manifest", payload).await;
     }
@@ -160,12 +166,13 @@ impl RecordSink {
         .await;
     }
 
-    pub async fn record_condense_summary(&self, turn_seq: i64, summary: &Message) {
+    pub async fn record_condense_summary(&self, turn_seq: i64, call_idx: u32, summary: &Message) {
         self.append(
             turn_seq,
             "condense_summary",
             json!({
                 "turn_seq": turn_seq,
+                "call_idx": call_idx,
                 "summary": summary,
             }),
         )
@@ -192,7 +199,6 @@ pub struct TurnRecorder {
     sink: RecordSink,
     turn_seq: i64,
     next_call_idx: AtomicU32,
-    tool_manifest_recorded: AtomicBool,
 }
 
 impl TurnRecorder {
@@ -201,7 +207,6 @@ impl TurnRecorder {
             sink: RecordSink::new(session_manager, session_id),
             turn_seq,
             next_call_idx: AtomicU32::new(0),
-            tool_manifest_recorded: AtomicBool::new(false),
         }
     }
 
@@ -260,35 +265,31 @@ pub async fn record_memory_block(recorder: Option<&Arc<TurnRecorder>>, block: Op
         .await;
 }
 
-/// Records the tool environment this turn presented to the model. Like the
-/// memory block, only the turn's first assembly is journaled: the
-/// state-machine loop reassembles before every provider call of the turn, the
-/// legacy loop assembles once, and the log carries one manifest per turn on
-/// both.
+/// Records the tool environment presented to the model for the call the loop is
+/// assembling. Keyed by `(turn_seq, call_idx)`: the environment moves inside a
+/// turn — the model installs an extension, a subdirectory hint appears — and
+/// both loops reassemble before the calls that follow.
 pub async fn record_tool_manifest(recorder: Option<&Arc<TurnRecorder>>, manifest: &ToolManifest) {
     let Some(recorder) = recorder else {
         return;
     };
-    if recorder.tool_manifest_recorded.swap(true, Ordering::SeqCst) {
-        return;
-    }
     recorder
         .sink
-        .record_tool_manifest(recorder.turn_seq, manifest)
+        .record_tool_manifest(recorder.turn_seq, recorder.current_call_idx(), manifest)
         .await;
 }
 
-/// Records the summary the compaction LLM call produced for this turn. The
-/// spec has the replay serve it like any other recorded call, but the call
-/// itself goes through `Provider::complete`, off the loop's `next_llm_call`
-/// channel: it is captured under its own kind rather than a `call_idx`.
+/// Records the summary the compaction LLM call produced. The call itself goes
+/// through `Provider::complete`, off the loop's `next_llm_call` channel, but it
+/// is addressed by the call it ran in front of: a turn compacts on opening and
+/// again as salvage on `ContextLengthExceeded`.
 pub async fn record_condense_summary(recorder: Option<&Arc<TurnRecorder>>, summary: &Message) {
     let Some(recorder) = recorder else {
         return;
     };
     recorder
         .sink
-        .record_condense_summary(recorder.turn_seq, summary)
+        .record_condense_summary(recorder.turn_seq, recorder.current_call_idx(), summary)
         .await;
 }
 

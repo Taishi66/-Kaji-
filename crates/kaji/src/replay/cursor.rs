@@ -67,15 +67,18 @@ pub struct EventCursor {
     /// vivant, il entre pourtant dans la requête hachée, et il bouge d'un appel
     /// à l'autre du même tour quand le budget de tours avance.
     pub turn_contexts: HashMap<(i64, u32), String>,
-    /// L'environnement d'extensions de chaque tour : outils et fragments de
-    /// prompt système qui en dérivent (`replay::manifest`).
-    pub tool_manifests: HashMap<i64, ToolManifest>,
+    /// L'environnement d'extensions de chaque appel : outils et fragments de
+    /// prompt système qui en dérivent (`replay::manifest`). Adressé par appel
+    /// parce qu'il bouge en cours de tour — une extension installée par le
+    /// modèle, un hint découvert — sur les deux boucles.
+    pub tool_manifests: HashMap<(i64, u32), ToolManifest>,
     pub clock_reads: HashMap<i64, Vec<String>>,
     pub condense_turns: HashSet<i64>,
-    /// Le résumé que l'appel LLM de compaction a rendu, par tour. Cet appel
-    /// passe par `Provider::complete`, hors du canal `(turn_seq, call_idx)` :
-    /// il a donc sa propre clé.
-    pub condense_summaries: HashMap<i64, Message>,
+    /// Le résumé que l'appel LLM de compaction a rendu. Cet appel passe par
+    /// `Provider::complete`, hors du canal du provider, mais il est adressé par
+    /// l'appel devant lequel il a été produit : un tour compacte à l'ouverture
+    /// puis, sur `ContextLengthExceeded`, une seconde fois.
+    pub condense_summaries: HashMap<(i64, u32), Message>,
     /// Les décisions d'approbation v1 du journal, par `(turn_seq, request_id)`,
     /// réduites à ce que le rejeu en fait : l'outil a-t-il eu le droit de
     /// tourner. Rejouées telles quelles, jamais redemandées à l'utilisateur
@@ -89,11 +92,7 @@ pub struct EventCursor {
 /// le bloc mémoire et le bloc turn-context une fois par tour, la machine à
 /// états avant chaque appel — et chacune doit retrouver ce qu'elle avait sous
 /// les yeux au moment de l'appel.
-pub fn per_call(
-    index: &HashMap<(i64, u32), String>,
-    turn_seq: i64,
-    call_idx: u32,
-) -> Option<&String> {
+pub fn per_call<T>(index: &HashMap<(i64, u32), T>, turn_seq: i64, call_idx: u32) -> Option<&T> {
     (0..=call_idx)
         .rev()
         .find_map(|candidate| index.get(&(turn_seq, candidate)))
@@ -242,11 +241,13 @@ impl EventCursor {
                     cursor.turn_contexts.insert(key, block.to_string());
                 }
                 "tool_manifest" => {
-                    if let Ok(manifest) = serde_json::from_value::<ToolManifest>(payload.clone()) {
-                        cursor
-                            .tool_manifests
-                            .insert(turn_seq(event, &payload), manifest);
-                    }
+                    let (Some(key), Ok(manifest)) = (
+                        call_key(event, &payload),
+                        serde_json::from_value::<ToolManifest>(payload.clone()),
+                    ) else {
+                        continue;
+                    };
+                    cursor.tool_manifests.insert(key, manifest);
                 }
                 "clock_reads" => {
                     if let Some(reads) = payload.get("reads").and_then(Value::as_array) {
@@ -262,14 +263,15 @@ impl EventCursor {
                     cursor.condense_turns.insert(turn_seq(event, &payload));
                 }
                 "condense_summary" => {
-                    if let Some(summary) = payload
-                        .get("summary")
-                        .and_then(|summary| serde_json::from_value::<Message>(summary.clone()).ok())
-                    {
-                        cursor
-                            .condense_summaries
-                            .insert(turn_seq(event, &payload), summary);
-                    }
+                    let (Some(key), Some(summary)) = (
+                        call_key(event, &payload),
+                        payload.get("summary").and_then(|summary| {
+                            serde_json::from_value::<Message>(summary.clone()).ok()
+                        }),
+                    ) else {
+                        continue;
+                    };
+                    cursor.condense_summaries.insert(key, summary);
                 }
                 "approval" => {
                     let (Some(request_id), Some(permission)) = (
@@ -294,5 +296,55 @@ impl EventCursor {
         }
 
         Ok(cursor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::Tool;
+
+    fn manifest(tool: &str) -> ToolManifest {
+        ToolManifest {
+            tools: vec![Tool::new(tool.to_string(), "", serde_json::Map::new())],
+            ..ToolManifest::default()
+        }
+    }
+
+    fn tool_of(manifest: Option<&ToolManifest>) -> Option<String> {
+        Some(manifest?.tools.first()?.name.to_string())
+    }
+
+    /// La règle de péremption vaut pour tout index adressé par appel, manifeste
+    /// d'outils compris : l'entrée de l'appel gagne, à défaut la plus récente
+    /// qui le précède **dans le tour** — jamais celle d'un autre tour.
+    #[test]
+    fn a_per_call_index_serves_the_entry_of_the_call_then_the_latest_before_it() {
+        let index = HashMap::from([
+            ((1, 0), manifest("avant")),
+            ((1, 2), manifest("après installation")),
+            ((2, 0), manifest("autre tour")),
+        ]);
+
+        assert_eq!(
+            tool_of(per_call(&index, 1, 0)).as_deref(),
+            Some("avant"),
+            "l'appel 0 lit son propre manifeste"
+        );
+        assert_eq!(
+            tool_of(per_call(&index, 1, 1)).as_deref(),
+            Some("avant"),
+            "un appel sans manifeste propre garde celui qui le précède"
+        );
+        assert_eq!(
+            tool_of(per_call(&index, 1, 2)).as_deref(),
+            Some("après installation"),
+            "l'appel qui a réassemblé lit le manifeste réassemblé, pas celui de l'appel 0"
+        );
+        assert_eq!(
+            per_call(&index, 3, 5).map(|_| ()),
+            None,
+            "un tour sans entrée n'emprunte pas celle d'un autre"
+        );
     }
 }

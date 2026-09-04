@@ -61,11 +61,17 @@ impl ReplaySource {
         .cloned()
     }
 
-    /// L'environnement d'extensions enregistré pour ce tour : outils envoyés
-    /// au provider et fragments de prompt système qui en dérivent. Absent ⇒
-    /// aucun outil et aucun fragment, comme une session sans extension.
+    /// L'environnement d'extensions enregistré pour l'appel que la boucle
+    /// assemble : outils envoyés au provider et fragments de prompt système qui
+    /// en dérivent. Absent ⇒ aucun outil et aucun fragment, comme une session
+    /// sans extension.
     pub fn tool_manifest(&self) -> Option<ToolManifest> {
-        self.cursor.tool_manifests.get(&self.turn()).cloned()
+        crate::replay::cursor::per_call(
+            &self.cursor.tool_manifests,
+            self.turn(),
+            self.position.call(),
+        )
+        .cloned()
     }
 
     /// L'estampille d'horloge que le prompt système portait à
@@ -74,11 +80,16 @@ impl ReplaySource {
         self.cursor.clock_reads.get(&self.turn())?.first().cloned()
     }
 
-    /// Le résumé que la compaction de ce tour a produit à l'enregistrement.
-    /// Absent alors que le tour a compacté ⇒ le rejeu échoue plutôt que de
-    /// résumer à nouveau avec un modèle vivant.
+    /// Le résumé que la compaction a produit devant cet appel à
+    /// l'enregistrement. Absent alors que le tour a compacté ⇒ le rejeu échoue
+    /// plutôt que de résumer à nouveau avec un modèle vivant.
     pub fn condense_summary(&self) -> Option<Message> {
-        self.cursor.condense_summaries.get(&self.turn()).cloned()
+        crate::replay::cursor::per_call(
+            &self.cursor.condense_summaries,
+            self.turn(),
+            self.position.call(),
+        )
+        .cloned()
     }
 
     pub fn condensed(&self) -> bool {
@@ -164,7 +175,7 @@ mod tests {
             clock_reads: HashMap::from([(2, vec!["2026-08-27 09:00 +00:00".to_string()])]),
             condense_turns: HashSet::from([3]),
             condense_summaries: HashMap::from([(
-                3,
+                (3, 0),
                 Message::user().with_text("résumé de compaction du tour 3"),
             )]),
             approvals: HashMap::from([

@@ -821,3 +821,99 @@ async fn a_quiet_turn_journals_no_condense_on_the_legacy_loop() -> Result<()> {
 async fn a_quiet_turn_journals_no_condense_on_the_state_machine_loop() -> Result<()> {
     assert_no_condense_without_compaction(Some("1")).await
 }
+
+/// L'environnement d'outils bouge en cours de tour : la machine à états
+/// réassemble avant chaque appel du provider, la boucle legacy réassemble dès
+/// qu'une extension est installée ou qu'un hint apparaît. Un manifeste par tour
+/// servirait donc celui de l'appel 0 aux appels suivants — le manifeste est
+/// adressé `(turn_seq, call_idx)` comme le bloc mémoire.
+async fn assert_manifest_is_addressed_per_call(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let events = run_turn(state_machine).await?;
+
+    let manifests = payloads(&events, "tool_manifest");
+    assert!(
+        !manifests.is_empty(),
+        "{label}: le tour journalise son environnement d'outils: {:?}",
+        kinds(&events)
+    );
+    for manifest in &manifests {
+        assert!(
+            manifest["call_idx"].is_u64(),
+            "{label}: chaque manifeste nomme l'appel qu'il a nourri: {manifest}"
+        );
+        assert!(
+            manifest["turn_seq"].is_i64(),
+            "{label}: chaque manifeste nomme son tour: {manifest}"
+        );
+    }
+
+    let calls: Vec<u64> = manifests
+        .iter()
+        .filter_map(|manifest| manifest["call_idx"].as_u64())
+        .collect();
+    let requests = payloads(&events, "llm_request");
+    assert_eq!(
+        requests.len(),
+        2,
+        "{label}: le tour fait bien deux appels, sinon le test ne prouve rien"
+    );
+    if state_machine.is_some() {
+        assert_eq!(
+            calls,
+            vec![0, 1],
+            "{label}: la machine à états réassemble avant chaque appel — un manifeste par appel"
+        );
+    } else {
+        assert_eq!(
+            calls,
+            vec![0],
+            "{label}: la boucle legacy n'assemble qu'une fois par tour, à l'appel 0"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_tool_manifest_is_addressed_per_call_on_the_legacy_loop() -> Result<()> {
+    assert_manifest_is_addressed_per_call(None).await
+}
+
+#[tokio::test]
+async fn the_tool_manifest_is_addressed_per_call_on_the_state_machine_loop() -> Result<()> {
+    assert_manifest_is_addressed_per_call(Some("1")).await
+}
+
+/// Un tour peut compacter deux fois (auto-compaction d'ouverture, puis
+/// compaction de secours sur `ContextLengthExceeded`). Sans `call_idx`, le
+/// curseur écrase le premier résumé par le second et le rejeu sert le mauvais.
+async fn assert_condense_summary_is_addressed_per_call(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let events = run_compaction_turn(state_machine).await?;
+
+    let summaries = payloads(&events, "condense_summary");
+    assert_eq!(
+        summaries.len(),
+        1,
+        "{label}: le tour a compacté une fois: {:?}",
+        kinds(&events)
+    );
+    assert!(
+        summaries[0]["call_idx"].is_u64(),
+        "{label}: le résumé nomme l'appel devant lequel il a été produit: {:?}",
+        summaries[0]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_condense_summary_is_addressed_per_call_on_the_legacy_loop() -> Result<()> {
+    assert_condense_summary_is_addressed_per_call(None).await
+}
+
+#[tokio::test]
+async fn the_condense_summary_is_addressed_per_call_on_the_state_machine_loop() -> Result<()> {
+    assert_condense_summary_is_addressed_per_call(Some("1")).await
+}
