@@ -9,7 +9,7 @@ use crate::utils::bytes_to_hex;
 struct NormalizedRequest<'a> {
     system: &'a str,
     messages: Vec<(Role, Vec<MessageContent>)>,
-    tools: &'a [Tool],
+    tools: Vec<&'a Tool>,
 }
 
 /// SHA-256 hex de la requête telle que le provider la reçoit, sous forme
@@ -21,11 +21,17 @@ struct NormalizedRequest<'a> {
 /// Clé de vérification du replay strict : l'écart entre le hash journalisé dans
 /// `llm_request` et celui de la requête reconstruite arrête le rejeu
 /// (`docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`).
+///
+/// Les outils sont triés par nom pour le seul calcul du hash : `ExtensionManager`
+/// les agrège en itérant une `HashMap`, dont l'ordre change d'un processus à
+/// l'autre. L'ordre envoyé au provider, lui, n'est pas touché.
 pub fn request_hash(system: &str, messages: &[Message], tools: &[Tool]) -> String {
+    let mut sorted_tools: Vec<&Tool> = tools.iter().collect();
+    sorted_tools.sort_by(|left, right| left.name.cmp(&right.name));
     let normalized = NormalizedRequest {
         system,
         messages: normalized_messages(messages),
-        tools,
+        tools: sorted_tools,
     };
     let serialized = serde_json::to_string(&normalized).unwrap_or_default();
     let mut hasher = Sha256::new();
@@ -150,6 +156,20 @@ mod tests {
         assert_ne!(
             request_hash("system", &conversation(), &[]),
             request_hash("system", &conversation(), &tools)
+        );
+    }
+
+    /// `ExtensionManager` agrège les outils en itérant une `HashMap`, dont le
+    /// `RandomState` est réamorcé à chaque processus : l'ordre du processus
+    /// d'enregistrement n'est pas celui du processus de rejeu. Le hash doit
+    /// donc être insensible à cet ordre.
+    #[test]
+    fn tool_order_does_not_move_the_hash() {
+        let add = Tool::new("calculator__add", "add two numbers", serde_json::Map::new());
+        let sub = Tool::new("calculator__sub", "sub two numbers", serde_json::Map::new());
+        assert_eq!(
+            request_hash("system", &conversation(), &[add.clone(), sub.clone()]),
+            request_hash("system", &conversation(), &[sub, add])
         );
     }
 
