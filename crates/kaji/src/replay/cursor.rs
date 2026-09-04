@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::conversation::message::Message;
 use crate::permission::Permission;
 use crate::replay::manifest::ToolManifest;
 use crate::session::session_manager::SessionEvent;
@@ -64,6 +65,10 @@ pub struct EventCursor {
     pub tool_manifests: HashMap<i64, ToolManifest>,
     pub clock_reads: HashMap<i64, Vec<String>>,
     pub condense_turns: HashSet<i64>,
+    /// Le résumé que l'appel LLM de compaction a rendu, par tour. Cet appel
+    /// passe par `Provider::complete`, hors du canal `(turn_seq, call_idx)` :
+    /// il a donc sa propre clé.
+    pub condense_summaries: HashMap<i64, Message>,
     /// Les décisions d'approbation v1 du journal, par `(turn_seq, request_id)`,
     /// réduites à ce que le rejeu en fait : l'outil a-t-il eu le droit de
     /// tourner. Rejouées telles quelles, jamais redemandées à l'utilisateur
@@ -139,6 +144,7 @@ impl EventCursor {
             tool_manifests: HashMap::new(),
             clock_reads: HashMap::new(),
             condense_turns: HashSet::new(),
+            condense_summaries: HashMap::new(),
             approvals: HashMap::new(),
         };
 
@@ -219,6 +225,16 @@ impl EventCursor {
                 }
                 "condense_triggered" => {
                     cursor.condense_turns.insert(turn_seq(event, &payload));
+                }
+                "condense_summary" => {
+                    if let Some(summary) = payload
+                        .get("summary")
+                        .and_then(|summary| serde_json::from_value::<Message>(summary.clone()).ok())
+                    {
+                        cursor
+                            .condense_summaries
+                            .insert(turn_seq(event, &payload), summary);
+                    }
                 }
                 "approval" => {
                     let (Some(request_id), Some(permission)) = (

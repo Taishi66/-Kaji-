@@ -57,6 +57,13 @@ impl ReplaySource {
         self.cursor.clock_reads.get(&self.turn())?.first().cloned()
     }
 
+    /// Le résumé que la compaction de ce tour a produit à l'enregistrement.
+    /// Absent alors que le tour a compacté ⇒ le rejeu échoue plutôt que de
+    /// résumer à nouveau avec un modèle vivant.
+    pub fn condense_summary(&self) -> Option<Message> {
+        self.cursor.condense_summaries.get(&self.turn()).cloned()
+    }
+
     pub fn condensed(&self) -> bool {
         self.cursor.condense_turns.contains(&self.turn())
     }
@@ -135,6 +142,10 @@ mod tests {
             tool_manifests: HashMap::new(),
             clock_reads: HashMap::from([(2, vec!["2026-08-27 09:00 +00:00".to_string()])]),
             condense_turns: HashSet::from([3]),
+            condense_summaries: HashMap::from([(
+                3,
+                Message::user().with_text("résumé de compaction du tour 3"),
+            )]),
             approvals: HashMap::from([
                 ((2, "call-allowed".to_string()), true),
                 ((2, "call-denied".to_string()), false),
@@ -154,6 +165,21 @@ mod tests {
         let other_turn = open(cursor(), 5);
         assert_eq!(other_turn.memory_block(), None);
         assert_eq!(other_turn.clock_read(), None);
+    }
+
+    /// L'appel LLM de résumé passe par `Provider::complete`, hors du canal
+    /// `(turn_seq, call_idx)` du provider : il a sa propre clé, et le tour
+    /// ouvert la désigne comme il désigne le bloc mémoire.
+    #[test]
+    fn the_compaction_summary_is_served_for_the_turn_that_compacted() {
+        let compacted = open(cursor(), 3);
+        assert_eq!(
+            compacted
+                .condense_summary()
+                .map(|summary| summary.as_concat_text()),
+            Some("résumé de compaction du tour 3".to_string())
+        );
+        assert!(open(cursor(), 2).condense_summary().is_none());
     }
 
     #[test]

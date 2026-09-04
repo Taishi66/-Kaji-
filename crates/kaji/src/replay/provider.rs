@@ -117,6 +117,26 @@ impl Provider for ReplayProvider {
         "replay"
     }
 
+    /// `Provider::complete` délègue à `stream` par défaut, donc tout appel qui
+    /// ne vient pas de la boucle — nommage de session (spawné, en course),
+    /// résumé de compaction, résumé de paires d'outils — consommerait un
+    /// `call_idx` du flux principal et décalerait tout le tour. Le rejeu n'a
+    /// qu'un canal, celui que `next_llm_call` annonce : les autres sont
+    /// refusés, jamais servis en silence.
+    async fn complete(
+        &self,
+        _model_config: &ModelConfig,
+        _system: &str,
+        _messages: &[Message],
+        _tools: &[Tool],
+    ) -> Result<(Message, ProviderUsage), ProviderError> {
+        Err(ProviderError::ExecutionError(format!(
+            "replay: appel LLM hors boucle au tour {} — le rejeu ne sert que les appels \
+             annoncés par la boucle",
+            self.position.turn()
+        )))
+    }
+
     async fn stream(
         &self,
         _model_config: &ModelConfig,
@@ -213,6 +233,7 @@ mod tests {
             tool_manifests: HashMap::new(),
             clock_reads: HashMap::new(),
             condense_turns: HashSet::new(),
+            condense_summaries: HashMap::new(),
             approvals: HashMap::new(),
         })
     }
@@ -242,6 +263,32 @@ mod tests {
             divergences.drain().is_empty(),
             "drain rend ce qui s'est accumulé depuis le dernier appel"
         );
+    }
+
+    /// Le nommage de session, le résumé de compaction et le résumé de paires
+    /// d'outils appellent `Provider::complete`, dont l'implémentation par
+    /// défaut délègue à `stream` : ils consommeraient un `call_idx` du flux
+    /// principal — le nommage depuis un `tokio::spawn`, donc en course avec la
+    /// boucle. Le rejeu les refuse au lieu de décaler le journal.
+    #[tokio::test]
+    async fn an_off_loop_completion_is_refused_without_moving_the_position() {
+        let provider =
+            ReplayProvider::new(cursor_recording(&request_hash("system", &[], &[])), false);
+        provider.position().begin_turn(1);
+
+        let refused = provider
+            .complete(&ModelConfig::new("kaji-replay"), "system", &[], &[])
+            .await;
+        let error = refused.expect_err("un appel hors boucle ne peut pas être rejoué");
+        assert!(
+            error.to_string().contains("hors boucle"),
+            "l'erreur nomme la cause : {error}"
+        );
+
+        let _served = provider
+            .stream(&ModelConfig::new("kaji-replay"), "system", &[], &[])
+            .await
+            .expect("le premier appel de la boucle reste l'appel 0");
     }
 
     #[tokio::test]

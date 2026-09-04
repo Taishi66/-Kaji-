@@ -172,6 +172,8 @@ impl Operation for CompactionOperation {
             &session.id,
             conversation,
             true,
+            self.turn_recorder.as_ref(),
+            self.replay_source.as_ref(),
         )
         .instrument(span.clone())
         .await
@@ -314,6 +316,8 @@ impl Operation for CompactionOperation {
             &session.id,
             conversation,
             false,
+            self.turn_recorder.as_ref(),
+            self.replay_source.as_ref(),
         )
         .instrument(span.clone())
         .await

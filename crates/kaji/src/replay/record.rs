@@ -4,6 +4,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tracing::warn;
 
+use crate::conversation::message::Message;
 use crate::replay::manifest::ToolManifest;
 use crate::session::SessionManager;
 
@@ -12,7 +13,8 @@ fn parse_or_wrap(raw: &str) -> Value {
 }
 
 /// Écrit les kinds v2 de l'event log (`llm_request`, `llm_response`,
-/// `tool_result`, `memory_block`, `clock_reads`, `condense_triggered`) —
+/// `tool_result`, `memory_block`, `tool_manifest`, `clock_reads`,
+/// `condense_triggered`, `condense_summary`) —
 /// voir `docs/superpowers/specs/2026-08-27-event-log-v2-replay-exact-design.md`.
 /// Toutes les méthodes sont non-fatales : un échec d'écriture ne remonte
 /// jamais au tour en cours, il marque la session non rejouable.
@@ -144,6 +146,18 @@ impl RecordSink {
         .await;
     }
 
+    pub async fn record_condense_summary(&self, turn_seq: i64, summary: &Message) {
+        self.append(
+            turn_seq,
+            "condense_summary",
+            json!({
+                "turn_seq": turn_seq,
+                "summary": summary,
+            }),
+        )
+        .await;
+    }
+
     pub async fn record_condense_triggered(&self, turn_seq: i64, reason: &str) {
         self.append(
             turn_seq,
@@ -246,6 +260,20 @@ pub async fn record_tool_manifest(recorder: Option<&Arc<TurnRecorder>>, manifest
     recorder
         .sink
         .record_tool_manifest(recorder.turn_seq, manifest)
+        .await;
+}
+
+/// Records the summary the compaction LLM call produced for this turn. The
+/// spec has the replay serve it like any other recorded call, but the call
+/// itself goes through `Provider::complete`, off the loop's `next_llm_call`
+/// channel: it is captured under its own kind rather than a `call_idx`.
+pub async fn record_condense_summary(recorder: Option<&Arc<TurnRecorder>>, summary: &Message) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    recorder
+        .sink
+        .record_condense_summary(recorder.turn_seq, summary)
         .await;
 }
 

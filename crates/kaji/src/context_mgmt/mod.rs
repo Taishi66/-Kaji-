@@ -12,7 +12,7 @@ use crate::providers::base::{stream_from_single_message, MessageStream};
 use crate::{config::Config, token_counter::create_token_counter};
 use anyhow::Result;
 use indoc::indoc;
-use kaji_providers::conversation::token_usage::ProviderUsage;
+use kaji_providers::conversation::token_usage::{ProviderUsage, Usage};
 use kaji_providers::errors::ProviderError;
 use kaji_providers::model::ModelConfig;
 use rmcp::model::Role;
@@ -84,6 +84,8 @@ pub async fn compact_messages(
     session_id: &str,
     conversation: &Conversation,
     manual_compact: bool,
+    recorder: Option<&Arc<crate::replay::record::TurnRecorder>>,
+    replay: Option<&crate::replay::source::ReplaySource>,
 ) -> Result<CompactionResult> {
     info!("Performing message compaction");
 
@@ -141,8 +143,26 @@ pub async fn compact_messages(
 
     let messages_to_compact = messages.as_slice();
 
-    let (summary_message, summarization_usage) =
-        do_compact(provider, model_config, session_id, messages_to_compact).await?;
+    let (summary_message, summarization_usage) = match replay {
+        Some(source) => {
+            let summary = source.condense_summary().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "replay: aucun résumé de compaction enregistré au tour {}",
+                    source.turn()
+                )
+            })?;
+            (
+                summary,
+                ProviderUsage::new("replay".to_string(), Usage::default()),
+            )
+        }
+        None => {
+            let compacted =
+                do_compact(provider, model_config, session_id, messages_to_compact).await?;
+            crate::replay::record::record_condense_summary(recorder, &compacted.0).await;
+            compacted
+        }
+    };
 
     // Create the final message list with updated visibility metadata:
     // 1. Original messages become user_visible but not agent_visible
@@ -839,6 +859,8 @@ mod tests {
             "test-session-id",
             &conversation,
             false,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -874,6 +896,8 @@ mod tests {
             "test-session-id",
             &conversation,
             true,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -915,6 +939,8 @@ mod tests {
                 "test-session-id",
                 &conversation,
                 false,
+                None,
+                None,
             )
             .await
             .unwrap()
@@ -957,6 +983,8 @@ mod tests {
             "test-session-id",
             &conversation,
             false,
+            None,
+            None,
         )
         .await
         .unwrap()
@@ -1020,6 +1048,8 @@ mod tests {
             "test-session-id",
             &conversation,
             false,
+            None,
+            None,
         )
         .await
         .unwrap()
@@ -1082,6 +1112,8 @@ mod tests {
             "test-session-id",
             &conversation,
             false,
+            None,
+            None,
         )
         .await
         .unwrap()
@@ -1141,6 +1173,8 @@ mod tests {
             "test-session-id",
             &conversation,
             false,
+            None,
+            None,
         )
         .await
         .unwrap()
@@ -1174,6 +1208,8 @@ mod tests {
             "test-session-id",
             &conversation,
             false,
+            None,
+            None,
         )
         .await
         .unwrap()
@@ -1231,6 +1267,8 @@ mod tests {
             "test-session-id",
             &conversation,
             false,
+            None,
+            None,
         )
         .await
         .unwrap()
@@ -1368,6 +1406,8 @@ mod tests {
             "test-session-id",
             &conversation,
             false,
+            None,
+            None,
         )
         .await;
 

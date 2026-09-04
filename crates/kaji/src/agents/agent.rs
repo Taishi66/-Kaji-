@@ -1985,8 +1985,12 @@ impl Agent {
             .unwrap_or_else(|_| {
                 crate::context_mgmt::compute_tool_call_cutoff(context_limit, compaction_threshold)
             });
+        // Le résumé de paires est une optimisation de budget de contexte
+        // vivante : elle appelle le modèle hors du canal de la boucle. Un tour
+        // rejoué garde donc la conversation du journal telle quelle.
         let tool_pair_compaction_enabled = crate::context_mgmt::tool_pair_summarization_enabled()
-            && !provider.manages_own_context();
+            && !provider.manages_own_context()
+            && !self.is_replay();
 
         let operations: Vec<Arc<dyn Operation + '_>> = vec![
             Arc::new(SteerOperation::new(steer_queue, self.hook_manager.clone())),
@@ -2102,7 +2106,10 @@ impl Agent {
             .clone()
             .ok_or_else(|| anyhow!("Provider not set"))?;
 
-        if !self.config.disable_session_naming {
+        // Le nommage part dans un `tokio::spawn` : au rejeu il courrait avec
+        // la boucle pour le même journal, deux rejeux pouvant diverger selon
+        // qui gagne. Il ne produit qu'un titre de session — rien à rejouer.
+        if !self.config.disable_session_naming && !self.is_replay() {
             let manager = session_manager.clone();
             let tx = self.config.session_name_update_tx.clone();
             let id = session_id.clone();
@@ -2834,6 +2841,8 @@ impl Agent {
                     &session_config.id,
                     &conversation_to_compact,
                     false,
+                    self.turn_recorder().as_ref(),
+                    self.replay_source().as_ref(),
                 )
                 .await
                 {
@@ -2913,7 +2922,9 @@ impl Agent {
             });
         let session_manager = self.config.session_manager.clone();
         let session_id = session_config.id.clone();
-        if !self.config.disable_session_naming {
+        // Spawné, donc en course avec la boucle au rejeu — cf. la boucle
+        // machine à états.
+        if !self.config.disable_session_naming && !self.is_replay() {
             let provider = provider.clone();
             let manager_for_spawn = session_manager.clone();
             let session_name_update_tx = self.config.session_name_update_tx.clone();
@@ -3134,7 +3145,7 @@ impl Agent {
                     .count()
                     .saturating_sub(pre_turn_tool_count);
 
-                let tool_pair_summarization_task = if tool_pair_summarization_done {
+                let tool_pair_summarization_task = if tool_pair_summarization_done || self.is_replay() {
                     None
                 } else {
                     crate::context_mgmt::maybe_summarize_tool_pairs(
@@ -3680,6 +3691,8 @@ impl Agent {
                                 &session_config.id,
                                 &conversation,
                                 false,
+                                self.turn_recorder().as_ref(),
+                                self.replay_source().as_ref(),
                             )
                             .await
                             {

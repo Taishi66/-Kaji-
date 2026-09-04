@@ -604,6 +604,19 @@ async fn assert_condense_capture(state_machine: Option<&str>) -> Result<()> {
         triggered[0]
     );
 
+    let summaries = payloads(&events, "condense_summary");
+    assert_eq!(
+        summaries.len(),
+        1,
+        "{label}: the summarization call is journaled too — it goes through \
+         Provider::complete, off the loop's call_idx channel: {kinds:?}"
+    );
+    assert!(
+        summaries[0]["summary"]["content"].is_array(),
+        "{label}: the summary is journaled as the message the replay will splice back: {:?}",
+        summaries[0]
+    );
+
     let turn_start = payloads(&events, "turn_start");
     assert_eq!(turn_start.len(), 1, "{label}: one turn ran: {kinds:?}");
     let condense_at = kinds

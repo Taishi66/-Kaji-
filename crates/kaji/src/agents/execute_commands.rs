@@ -240,6 +240,8 @@ impl Agent {
             session_id,
             &conversation,
             true, // is_manual_compact
+            self.turn_recorder().as_ref(),
+            self.replay_source().as_ref(),
         )
         .await?;
 
