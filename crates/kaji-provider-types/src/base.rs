@@ -670,6 +670,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // test
     fn create_test_stream(
         items: Vec<String>,
     ) -> impl Stream<Item = Result<(Option<Message>, Option<ProviderUsage>), ProviderError>> {

@@ -402,7 +402,7 @@ impl TestPipeline {
 
         let cancel = CancellationToken::new();
         let (tx, mut rx) = mpsc::channel(1024);
-        let emit = Emitter::new(tx, cancel.clone());
+        let emit = Emitter::new(tx, cancel.clone(), crate::replay::idgen::default_idgen());
         let mut events = Vec::new();
         let mut applied_steps = 0;
 
@@ -505,7 +505,7 @@ impl TestPipeline {
         cancel.cancel();
         let machine = self.machine(cancel.clone());
         let (tx, mut rx) = mpsc::channel(1024);
-        let emit = Emitter::new(tx, cancel);
+        let emit = Emitter::new(tx, cancel, crate::replay::idgen::default_idgen());
         let session = machine
             .run(self.session_manager.as_ref(), &self.session_id, &emit)
             .await?;
@@ -527,7 +527,7 @@ impl TestPipeline {
             .await?;
         let machine = self.machine(cancel.clone());
         let (tx, mut rx) = mpsc::channel(1024);
-        let emit = Emitter::new(tx, cancel);
+        let emit = Emitter::new(tx, cancel, crate::replay::idgen::default_idgen());
         let session = machine
             .run(self.session_manager.as_ref(), &self.session_id, &emit)
             .await?;
@@ -551,7 +551,7 @@ impl TestPipeline {
         let cancel = CancellationToken::new();
         let machine = self.machine(cancel.clone());
         let (tx, mut rx) = mpsc::channel(1024);
-        let emit = Emitter::new(tx, cancel);
+        let emit = Emitter::new(tx, cancel, crate::replay::idgen::default_idgen());
         let mut events = Vec::new();
         let mut answered = false;
 
@@ -1060,7 +1060,7 @@ pub(super) async fn run_machine(pipeline: &TestPipeline) -> Result<Vec<AgentEven
     let cancel = CancellationToken::new();
     let machine = pipeline.machine(cancel.clone());
     let (tx, mut rx) = mpsc::channel(1024);
-    let emit = Emitter::new(tx, cancel);
+    let emit = Emitter::new(tx, cancel, crate::replay::idgen::default_idgen());
     let mut events = Vec::new();
     loop {
         let session = pipeline.session().await?;

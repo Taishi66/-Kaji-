@@ -160,7 +160,7 @@ async fn custom_pipeline_supports_step_apply_run_tracing_and_usage() -> Result<(
 
     let cancel = CancellationToken::new();
     let (tx, mut rx) = mpsc::channel(16);
-    let emit = Emitter::new(tx, cancel.clone());
+    let emit = Emitter::new(tx, cancel.clone(), kaji::replay::idgen::default_idgen());
     let machine = StateMachine::new(
         vec![
             Step::Operation(Arc::new(PromptPart)),

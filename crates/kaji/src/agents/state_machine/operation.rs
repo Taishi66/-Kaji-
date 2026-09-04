@@ -263,19 +263,30 @@ impl From<Conversation> for StateEffect {
 pub struct Emitter {
     tx: mpsc::Sender<AgentEvent>,
     cancel: CancellationToken,
+    idgen: Arc<dyn IdGen>,
 }
 
 impl Emitter {
-    pub fn new(tx: mpsc::Sender<AgentEvent>, cancel: CancellationToken) -> Self {
-        Self { tx, cancel }
+    pub fn new(
+        tx: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+        idgen: Arc<dyn IdGen>,
+    ) -> Self {
+        Self { tx, cancel, idgen }
     }
 
     pub async fn emit(&self, event: AgentEvent) {
         let _ = self.tx.send(event).await;
     }
 
+    /// Nomme le message avec l'`IdGen` du tour, comme
+    /// `StateEffect::ensure_message_ids` : un UUID libre ici rendrait deux
+    /// rejeux d'un même journal différents (`crate::replay::idgen`).
     pub async fn message(&self, message: Message) -> Message {
-        let message = message.with_generated_id_if_missing();
+        let message = match message.id {
+            Some(_) => message,
+            None => message.with_id(self.idgen.next_message_id()),
+        };
         self.emit(AgentEvent::Message(message.clone())).await;
         message
     }

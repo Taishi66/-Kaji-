@@ -84,7 +84,11 @@ async fn proactive_and_manual_compaction_continue_with_replaced_usage() -> Resul
     let machine =
         state_machine::StateMachine::new(Vec::new(), tokio_util::sync::CancellationToken::new());
     let (tx, _rx) = tokio::sync::mpsc::channel(4);
-    let emit = state_machine::Emitter::new(tx, tokio_util::sync::CancellationToken::new());
+    let emit = state_machine::Emitter::new(
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        crate::replay::idgen::default_idgen(),
+    );
     let apply = async |effects: Vec<state_machine::StateEffect>| -> Result<()> {
         let session = pipeline.session().await?;
         let mut result = state_machine::StepResult {

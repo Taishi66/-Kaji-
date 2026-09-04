@@ -16,6 +16,7 @@ activities:
   - Test multi-turn thinking preservation for providers that reject replayed reasoning_content
   - Test error boundaries including nested delegation prevention
   - Test the decisional memory round trip (remember, list curated facts, forget)
+  - Test the replay CLI surface (unknown session refused, help exits 0)
   - Generate comprehensive test report
 
 parameters:
@@ -23,7 +24,7 @@ parameters:
     input_type: string
     requirement: optional
     default: "all"
-    description: "Which test phases to run: all, basic, extensions, delegation, reasoning, advanced, memory"
+    description: "Which test phases to run: all, basic, extensions, delegation, reasoning, advanced, memory, replay"
 
   - key: test_depth
     input_type: string
@@ -110,6 +111,12 @@ instructions: |
   - `/remember` writes a durable fact to disk, spending no model token
   - `kaji memory list --curated` reads the facts back from both scopes
   - Deleting the markdown file is the documented way to forget a fact
+
+  ### Phase 7 — Replay CLI surface
+  Check the `kaji replay` command line only — a full replay needs a session recorded by the same
+  binary, which stays a manual verification:
+  - an unknown session id fails with « introuvable » and a non-zero exit
+  - `kaji replay --help` exits 0
 
   ## Success Criteria
   - Phase success: ≥80% tests pass
@@ -453,6 +460,34 @@ prompt: |
   ```
 
   Log results to: {{ workspace_dir }}/phase6_memory.md
+  {% endif %}
+
+  {% if test_phases == "all" or "replay" in test_phases %}
+  ## ⟲ PHASE 7: Replay CLI Surface
+
+  `kaji replay <session-id>` rejoue une session enregistrée depuis son event log v2. Un rejeu
+  complet exige une session enregistrée par **ce même binaire** (le journal porte la version de
+  kaji) : cette phase ne valide donc que la surface CLI, le rejeu de bout en bout restant une
+  vérification manuelle.
+
+  ### La session inexistante échoue proprement
+  ```
+  kaji replay session-qui-nexiste-pas-self-test; echo "exit=$?"
+  ```
+  **Expected**: sortie non nulle et un message contenant `introuvable`. Un exit 0, ou un panic
+  Rust au lieu du message, est une FAILURE.
+
+  ### L'aide sort 0
+  ```
+  kaji replay --help; echo "exit=$?"
+  ```
+  **Expected**: `exit=0`, et l'aide nomme `--until` et `--lenient`.
+
+  ### Vérification manuelle (hors périmètre automatique)
+  Note dans le rapport que le rejeu réel se vérifie à la main : `kaji session --name <s>` pour
+  enregistrer un tour, puis `kaji replay <session-id>` sur cette session.
+
+  Log results to: {{ workspace_dir }}/phase7_replay.md
   {% endif %}
 
   ## 📊 PHASE 5: Final Report Generation

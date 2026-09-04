@@ -173,6 +173,16 @@ fn message_has_timing_content(message: &Message) -> bool {
         .any(|content| !matches!(content, MessageContent::SystemNotification(_)))
 }
 
+/// Nomme un message anonyme avec l'`IdGen` du tour — jamais un UUID libre :
+/// deux rejeux d'un même journal doivent donner les mêmes ids
+/// (`crate::replay::idgen`).
+fn named_by(message: Message, idgen: &Arc<dyn IdGen>) -> Message {
+    match message.id {
+        Some(_) => message,
+        None => message.with_id(idgen.next_message_id()),
+    }
+}
+
 fn is_mergeable_assistant_chunk(message: &Message) -> bool {
     message.role == rmcp::model::Role::Assistant
         && !message.content.is_empty()
@@ -630,9 +640,7 @@ pub(crate) async fn stream_response_from_provider(
             }
 
             if let Some(msg) = accumulated_message {
-                let processed = toolshim_postprocess(msg, &toolshim_tools)
-                    .await?
-                    .with_generated_id_if_missing();
+                let processed = named_by(toolshim_postprocess(msg, &toolshim_tools).await?, &idgen);
                 if capture_message_content {
                     let output_messages = gen_ai_telemetry::output_message_json(&processed);
                     span.record("gen_ai.output.messages", output_messages.as_str());
@@ -684,7 +692,7 @@ pub(crate) async fn stream_response_from_provider(
                         message.with_id(id)
                     } else {
                         active_mergeable_assistant_id = None;
-                        message.with_generated_id()
+                        message.with_id(idgen.next_message_id())
                     }
                 });
 

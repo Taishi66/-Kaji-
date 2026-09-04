@@ -339,9 +339,15 @@ pub enum AgentEvent {
     HistoryReplaced(Conversation),
 }
 
-fn ensure_message_event_id(event: AgentEvent) -> AgentEvent {
+/// L'`IdGen` du tour plutôt qu'un UUID libre : c'est ici que passent les
+/// messages qu'aucune boucle n'a nommés (réponses d'outils, notifications), et
+/// un id tiré du hasard à ce point rendrait deux rejeux du même journal
+/// différents (`crate::replay::idgen`).
+fn ensure_message_event_id(event: AgentEvent, idgen: &Arc<dyn IdGen>) -> AgentEvent {
     match event {
-        AgentEvent::Message(message) => AgentEvent::Message(message.with_generated_id_if_missing()),
+        AgentEvent::Message(message) if message.id.is_none() => {
+            AgentEvent::Message(message.with_id(idgen.next_message_id()))
+        }
         other => other,
     }
 }
@@ -2148,7 +2154,7 @@ impl Agent {
         Ok(Box::pin(
             async_stream::try_stream! {
                 let (tx, mut rx) = mpsc::channel::<AgentEvent>(32);
-                let emit = Emitter::new(tx, cancel.clone());
+                let emit = Emitter::new(tx, cancel.clone(), self.idgen.clone());
                 let result = {
                     let run = machine.run(session_manager.as_ref(), &session_id, &emit);
                     tokio::pin!(run);
@@ -2410,13 +2416,20 @@ impl Agent {
             ))
         });
 
+        // Le message qui ouvre le tour. Hors chemin des slash-commands la
+        // boucle ne le rend jamais en `AgentEvent`, donc le journal ne le
+        // porterait pas — et le rejeu n'aurait rien à réinjecter pour
+        // redérouler le tour (`kaji replay`, `user_turns`).
+        let opening_message = journal_seq.map(|_| serialize_event_payload(&user_message));
+
         let events = self
             .reply_impl(user_message, session_config, cancel_token)
             .await?;
 
         // This is the single live-event identity boundary. Callers that intentionally stream
         // multiple events for one logical message must assign their shared ID before this point.
-        let events = events.map_ok(ensure_message_event_id);
+        let idgen = self.idgen.clone();
+        let events = events.map_ok(move |event| ensure_message_event_id(event, &idgen));
 
         let session_manager = self.config.session_manager.clone();
         let turn_start_payload = serde_json::json!({
@@ -2456,6 +2469,15 @@ impl Agent {
                     .await
                 {
                     warn!(?error, "event log append failed for turn_start");
+                }
+
+                if let Some(payload) = opening_message {
+                    if let Err(error) = session_manager
+                        .append_event(&session_id, turn_seq, "message", &payload)
+                        .await
+                    {
+                        warn!(?error, "event log append failed for the opening message");
+                    }
                 }
 
                 crate::replay::record::record_clock_reads(turn_recorder.as_ref(), &clock_reads)
@@ -3243,7 +3265,7 @@ impl Agent {
                                 let mut request_to_response_map = HashMap::new();
                                 let mut request_metadata: HashMap<String, Option<ProviderMetadata>> = HashMap::new();
                                 for request in frontend_requests.iter().chain(remaining_requests.iter()) {
-                                    request_to_response_map.insert(request.id.clone(), Message::user().with_generated_id());
+                                    request_to_response_map.insert(request.id.clone(), Message::user().with_id(self.idgen.next_message_id()));
                                     request_metadata.insert(request.id.clone(), request.metadata.clone());
                                 }
 
@@ -4759,8 +4781,11 @@ mod tests {
 
     #[test]
     fn ensure_message_event_id_assigns_missing_ids_and_preserves_existing_ids() {
-        let generated =
-            ensure_message_event_id(AgentEvent::Message(Message::assistant().with_text("hello")));
+        let idgen = default_idgen();
+        let generated = ensure_message_event_id(
+            AgentEvent::Message(Message::assistant().with_text("hello")),
+            &idgen,
+        );
         let AgentEvent::Message(generated_message) = generated else {
             panic!("expected message event");
         };
@@ -4770,19 +4795,47 @@ mod tests {
             .expect("generated message id");
         assert!(generated_id.starts_with("msg_"));
 
-        let preserved = ensure_message_event_id(AgentEvent::Message(
-            Message::assistant()
-                .with_id("provider-message-id")
-                .with_text("hello"),
-        ));
+        let preserved = ensure_message_event_id(
+            AgentEvent::Message(
+                Message::assistant()
+                    .with_id("provider-message-id")
+                    .with_text("hello"),
+            ),
+            &idgen,
+        );
         let AgentEvent::Message(preserved_message) = preserved else {
             panic!("expected message event");
         };
         assert_eq!(preserved_message.id.as_deref(), Some("provider-message-id"));
 
         let non_message =
-            ensure_message_event_id(AgentEvent::HistoryReplaced(Conversation::empty()));
+            ensure_message_event_id(AgentEvent::HistoryReplaced(Conversation::empty()), &idgen);
         assert!(matches!(non_message, AgentEvent::HistoryReplaced(_)));
+    }
+
+    /// Deux `Agent`s montés sur la même graine nomment identiquement les
+    /// messages qui arrivent sans id — la propriété dont dépend l'égalité de
+    /// deux rejeux d'un même journal.
+    #[test]
+    fn the_identity_boundary_follows_the_agents_idgen() {
+        let anonymous = || AgentEvent::Message(Message::assistant().with_text("hello"));
+        let id_of = |event: AgentEvent| {
+            let AgentEvent::Message(message) = event else {
+                panic!("expected message event");
+            };
+            message.id.expect("generated message id")
+        };
+
+        let first: Arc<dyn IdGen> = Arc::new(crate::replay::idgen::SessionIdGen::new("seed"));
+        let second: Arc<dyn IdGen> = Arc::new(crate::replay::idgen::SessionIdGen::new("seed"));
+        assert_eq!(
+            id_of(ensure_message_event_id(anonymous(), &first)),
+            id_of(ensure_message_event_id(anonymous(), &second))
+        );
+        assert_ne!(
+            id_of(ensure_message_event_id(anonymous(), &first)),
+            id_of(ensure_message_event_id(anonymous(), &default_idgen()))
+        );
     }
 
     #[test]

@@ -82,6 +82,7 @@ crates/
 - Error: Use anyhow::Result
 - Provider: Implement Provider trait see providers/base.rs
 - MCP: Extensions in crates/kaji-mcp/
+- Replay v2: toute nouvelle source d'état externe entrant dans le prompt (hints, extensions, splices futurs) exige son kind d'événement dans session_events + son service au replay — sinon le replay diverge silencieusement (voir spec 2026-08-27)
 
 ## Code Quality
 

@@ -47,7 +47,7 @@ pub async fn handle_replay_subcommand(
     let source = session_manager
         .get_session(&session_id, false)
         .await
-        .with_context(|| format!("chargement de la session « {session_id} »"))?;
+        .with_context(|| format!("session « {session_id} » introuvable"))?;
 
     let cursor = match EventCursor::load_until(&session_manager, &session_id, until).await {
         Ok(cursor) => cursor,
