@@ -15,6 +15,8 @@ use crate::context_mgmt::{summarize_tool_call, tool_ids_to_summarize};
 use crate::conversation::message::MessageContent;
 use crate::conversation::Conversation;
 use crate::providers::base::Provider;
+use crate::replay::record::TurnRecorder;
+use crate::replay::source::ReplaySource;
 use crate::session::Session;
 use kaji_providers::model::ModelConfig;
 
@@ -23,6 +25,8 @@ pub struct ToolPairCompactionOperation {
     model_config: ModelConfig,
     cutoff: usize,
     enabled: bool,
+    turn_recorder: Option<Arc<TurnRecorder>>,
+    replay_source: Option<ReplaySource>,
 }
 
 impl ToolPairCompactionOperation {
@@ -37,7 +41,19 @@ impl ToolPairCompactionOperation {
             model_config,
             cutoff,
             enabled,
+            turn_recorder: None,
+            replay_source: None,
         }
+    }
+
+    pub fn with_turn_recorder(mut self, turn_recorder: Option<Arc<TurnRecorder>>) -> Self {
+        self.turn_recorder = turn_recorder;
+        self
+    }
+
+    pub fn with_replay_source(mut self, replay_source: Option<ReplaySource>) -> Self {
+        self.replay_source = replay_source;
+        self
     }
 }
 
@@ -129,6 +145,8 @@ impl Operation for ToolPairCompactionOperation {
                 &session.id,
                 conversation,
                 &tool_id,
+                self.turn_recorder.as_ref(),
+                self.replay_source.as_ref(),
             )
             .instrument(span.clone())
             .await

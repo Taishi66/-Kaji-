@@ -84,6 +84,11 @@ pub struct EventCursor {
     /// l'appel devant lequel il a été produit : un tour compacte à l'ouverture
     /// puis, sur `ContextLengthExceeded`, une seconde fois.
     pub condense_summaries: HashMap<(i64, u32), Message>,
+    /// Le résumé qui a remplacé une paire d'outils, par `(turn_seq,
+    /// tool_call_id)`. Il mute la conversation persistée — la paire devient
+    /// invisible à l'agent, le résumé prend sa place — donc le tour suivant en
+    /// dépend.
+    pub tool_pair_summaries: HashMap<(i64, String), Message>,
     /// Les décisions d'approbation v1 du journal, par `(turn_seq, request_id)`,
     /// réduites à ce que le rejeu en fait : l'outil a-t-il eu le droit de
     /// tourner. Rejouées telles quelles, jamais redemandées à l'utilisateur
@@ -173,6 +178,7 @@ impl EventCursor {
             clock_reads: HashMap::new(),
             condense_turns: HashSet::new(),
             condense_summaries: HashMap::new(),
+            tool_pair_summaries: HashMap::new(),
             approvals: HashMap::new(),
         };
 
@@ -280,6 +286,20 @@ impl EventCursor {
                         continue;
                     };
                     cursor.condense_summaries.insert(key, summary);
+                }
+                "tool_pair_summary" => {
+                    let (Some(tool_call_id), Some(summary)) = (
+                        payload.get("tool_call_id").and_then(Value::as_str),
+                        payload.get("summary").and_then(|summary| {
+                            serde_json::from_value::<Message>(summary.clone()).ok()
+                        }),
+                    ) else {
+                        continue;
+                    };
+                    cursor.tool_pair_summaries.insert(
+                        (turn_seq(event, &payload), tool_call_id.to_string()),
+                        summary,
+                    );
                 }
                 "approval" => {
                     let (Some(request_id), Some(permission)) = (

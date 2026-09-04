@@ -908,6 +908,148 @@ async fn assert_condense_summary_is_addressed_per_call(state_machine: Option<&st
     Ok(())
 }
 
+/// Assez de paires d'outils agent-visibles pour dépasser
+/// `cutoff + TOOLCALL_SUMMARIZATION_BATCH_SIZE`, seuil au-delà duquel la boucle
+/// résume le plus vieux lot.
+const SEEDED_PAIRS: usize = 14;
+
+/// Un tour dont l'historique dépasse le seuil de résumé de paires d'outils. Le
+/// résumé masque les deux messages de la paire et en persiste un troisième :
+/// c'est de la conversation persistée, donc du hash du tour suivant.
+async fn run_tool_pair_summarization_turn(
+    state_machine: Option<&str>,
+) -> Result<(Vec<SessionEvent>, Vec<Message>)> {
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env_lock::lock_env([
+        ("KAJI_STATE_MACHINE", state_machine),
+        (
+            "KAJI_MEMORY_DIR",
+            Some(memory_dir.path().to_str().expect("utf8 temp path")),
+        ),
+        ("KAJI_TOOL_CALL_CUTOFF", Some("0")),
+    ]);
+
+    let temp_dir = tempfile::tempdir()?;
+    let session_manager = Arc::new(SessionManager::new(temp_dir.path().join("data")));
+    let agent = agent_for(&session_manager, temp_dir.path().join("config"));
+    let session = session_manager
+        .create_session(
+            PathBuf::from("."),
+            "replay-tool-pair-test".to_string(),
+            SessionType::Hidden,
+            KajiMode::Auto,
+        )
+        .await?;
+
+    let history = (0..SEEDED_PAIRS)
+        .flat_map(|i| {
+            let call_id = format!("seeded-call-{i}");
+            [
+                Message::assistant()
+                    .with_tool_request(
+                        &call_id,
+                        Ok(CallToolRequestParams::new("seeded__probe".to_string())),
+                    )
+                    .with_id(format!("msg-request-{i}")),
+                Message::user()
+                    .with_tool_response(
+                        &call_id,
+                        Ok(rmcp::model::CallToolResult::success(vec![
+                            rmcp::model::ContentBlock::text(format!("result {i}")),
+                        ])),
+                    )
+                    .with_id(format!("msg-response-{i}")),
+            ]
+        })
+        .collect::<Vec<_>>();
+    session_manager
+        .replace_conversation(&session.id, &Conversation::new_unvalidated(history))
+        .await?;
+
+    agent
+        .update_provider(
+            Arc::new(TextProvider),
+            ModelConfig::new("mock-model"),
+            &session.id,
+        )
+        .await?;
+
+    drain(
+        agent
+            .reply(
+                Message::user().with_text("keep going"),
+                session_config(&session.id),
+                None,
+            )
+            .await?,
+    )
+    .await?;
+
+    let conversation = session_manager
+        .get_session(&session.id, true)
+        .await?
+        .conversation
+        .map(|conversation| conversation.messages().clone())
+        .unwrap_or_default();
+    Ok((
+        session_manager.session_events(&session.id).await?,
+        conversation,
+    ))
+}
+
+/// Le résumé de paires d'outils modifie la conversation persistée : sans
+/// capture, le tour suivant du rejeu porte encore la paire complète et aucun
+/// résumé, donc un hash divergent. Il est journalisé comme `condense_summary`,
+/// sous la clé qui l'adresse — l'id de l'appel d'outil résumé.
+async fn assert_tool_pair_summary_is_captured(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+    let (events, conversation) = run_tool_pair_summarization_turn(state_machine).await?;
+
+    assert!(
+        conversation.iter().any(|message| message
+            .id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("msg-request-"))
+            && !message.is_agent_visible()),
+        "{label}: le tour a bien résumé des paires — sinon le test ne prouve rien"
+    );
+
+    let summaries = payloads(&events, "tool_pair_summary");
+    assert!(
+        !summaries.is_empty(),
+        "{label}: le tour a résumé des paires, elles sont journalisées: {:?}",
+        kinds(&events)
+    );
+    for summary in &summaries {
+        assert!(
+            summary["tool_call_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("seeded-call-")),
+            "{label}: le résumé est adressé par l'id de l'appel qu'il remplace: {summary}"
+        );
+        assert!(
+            summary["summary"]["content"].is_array(),
+            "{label}: le résumé est journalisé comme le message que le rejeu resplicera: {summary}"
+        );
+        assert!(
+            summary["summary"]["id"].is_string(),
+            "{label}: le résumé porte l'id que la conversation persistée a gardé: {summary}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_tool_pair_summary_is_captured_on_the_legacy_loop() -> Result<()> {
+    assert_tool_pair_summary_is_captured(None).await
+}
+
+#[tokio::test]
+async fn the_tool_pair_summary_is_captured_on_the_state_machine_loop() -> Result<()> {
+    assert_tool_pair_summary_is_captured(Some("1")).await
+}
+
 #[tokio::test]
 async fn the_condense_summary_is_addressed_per_call_on_the_legacy_loop() -> Result<()> {
     assert_condense_summary_is_addressed_per_call(None).await

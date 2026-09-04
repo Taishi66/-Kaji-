@@ -2011,12 +2011,8 @@ impl Agent {
             .unwrap_or_else(|_| {
                 crate::context_mgmt::compute_tool_call_cutoff(context_limit, compaction_threshold)
             });
-        // Le résumé de paires est une optimisation de budget de contexte
-        // vivante : elle appelle le modèle hors du canal de la boucle. Un tour
-        // rejoué garde donc la conversation du journal telle quelle.
         let tool_pair_compaction_enabled = crate::context_mgmt::tool_pair_summarization_enabled()
-            && !provider.manages_own_context()
-            && !self.is_replay();
+            && !provider.manages_own_context();
 
         let operations: Vec<Arc<dyn Operation + '_>> = vec![
             Arc::new(SteerOperation::new(steer_queue, self.hook_manager.clone())),
@@ -2032,12 +2028,16 @@ impl Agent {
                 .with_turn_recorder(self.turn_recorder())
                 .with_replay_source(self.replay_source()),
             ),
-            Arc::new(ToolPairCompactionOperation::new(
-                provider.clone(),
-                model_config.clone(),
-                tool_call_cutoff,
-                tool_pair_compaction_enabled,
-            )),
+            Arc::new(
+                ToolPairCompactionOperation::new(
+                    provider.clone(),
+                    model_config.clone(),
+                    tool_call_cutoff,
+                    tool_pair_compaction_enabled,
+                )
+                .with_turn_recorder(self.turn_recorder())
+                .with_replay_source(self.replay_source()),
+            ),
             Arc::new(
                 ToolApprovalOperation::new(&self.current_kaji_mode, &self.tool_inspection_manager)
                     .with_replay_source(self.replay_source()),
@@ -3205,7 +3205,7 @@ impl Agent {
                     .count()
                     .saturating_sub(pre_turn_tool_count);
 
-                let tool_pair_summarization_task = if tool_pair_summarization_done || self.is_replay() {
+                let tool_pair_summarization_task = if tool_pair_summarization_done {
                     None
                 } else {
                     crate::context_mgmt::maybe_summarize_tool_pairs(
@@ -3215,6 +3215,8 @@ impl Agent {
                         conversation.clone(),
                         tool_call_cut_off,
                         current_turn_tool_count,
+                        self.turn_recorder(),
+                        self.replay_source(),
                     )
                 };
 

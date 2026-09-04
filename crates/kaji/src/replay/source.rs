@@ -92,6 +92,16 @@ impl ReplaySource {
         .cloned()
     }
 
+    /// Le résumé que l'enregistrement a substitué à cette paire d'outils.
+    /// Absent alors que le tour rejoué veut résumer la paire ⇒ le rejeu échoue
+    /// plutôt que d'appeler un modèle vivant.
+    pub fn tool_pair_summary(&self, tool_call_id: &str) -> Option<Message> {
+        self.cursor
+            .tool_pair_summaries
+            .get(&(self.turn(), tool_call_id.to_string()))
+            .cloned()
+    }
+
     pub fn condensed(&self) -> bool {
         self.cursor.condense_turns.contains(&self.turn())
     }
@@ -178,6 +188,10 @@ mod tests {
                 (3, 0),
                 Message::user().with_text("résumé de compaction du tour 3"),
             )]),
+            tool_pair_summaries: HashMap::from([(
+                (2, "call-allowed".to_string()),
+                Message::user().with_text("résumé de la paire call-allowed"),
+            )]),
             approvals: HashMap::from([
                 ((2, "call-allowed".to_string()), true),
                 ((2, "call-denied".to_string()), false),
@@ -217,6 +231,24 @@ mod tests {
             Some("résumé de compaction du tour 3".to_string())
         );
         assert!(open(cursor(), 2).condense_summary().is_none());
+    }
+
+    /// Le résumé de paires d'outils mute la conversation persistée : il est
+    /// servi depuis le journal, adressé par la paire qu'il remplace et par le
+    /// tour qui l'a produit.
+    #[test]
+    fn the_tool_pair_summary_is_served_for_the_pair_that_was_summarized() {
+        let source = open(cursor(), 2);
+        assert_eq!(
+            source
+                .tool_pair_summary("call-allowed")
+                .map(|summary| summary.as_concat_text()),
+            Some("résumé de la paire call-allowed".to_string())
+        );
+        assert!(source.tool_pair_summary("call-denied").is_none());
+        assert!(open(cursor(), 5)
+            .tool_pair_summary("call-allowed")
+            .is_none());
     }
 
     #[test]

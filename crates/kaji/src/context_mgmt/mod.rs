@@ -638,13 +638,29 @@ fn agent_visible_tool_pair(conversation: &Conversation, tool_id: &str) -> Result
     Ok(matching_messages)
 }
 
+/// Le résumé d'une paire d'outils. Il n'est pas hors canal : il masque les deux
+/// messages de la paire et en persiste un troisième, donc il change ce que le
+/// tour suivant hache. Comme le résumé de compaction, il est capturé à
+/// l'enregistrement et resservi depuis le journal en rejeu — jamais recalculé
+/// avec un modèle vivant, jamais désactivé.
 pub async fn summarize_tool_call(
     provider: &dyn Provider,
     model_config: &ModelConfig,
     session_id: &str,
     conversation: &Conversation,
     tool_id: &str,
+    recorder: Option<&Arc<crate::replay::record::TurnRecorder>>,
+    replay: Option<&crate::replay::source::ReplaySource>,
 ) -> Result<Message> {
+    if let Some(source) = replay {
+        return source.tool_pair_summary(tool_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "replay: aucun résumé de paire d'outils enregistré au tour {} pour {tool_id}",
+                source.turn()
+            )
+        });
+    }
+
     let matching_messages = agent_visible_tool_pair(conversation, tool_id)?;
 
     let formatted = matching_messages
@@ -683,13 +699,16 @@ pub async fn summarize_tool_call(
     response.created = matching_messages.last().unwrap().created;
     response.metadata = MessageMetadata::agent_only();
 
-    // Le résumé de paires d'outils est désactivé en rejeu (`ReplayMode`) : il
-    // ne consomme donc jamais l'`IdGen` du tour, et le faire ici décalerait les
-    // ids de l'enregistrement par rapport à ceux du rejeu.
+    // Hors du canal `(turn_seq, call_idx)` de la boucle, donc hors de l'IdGen
+    // du tour : le rejeu ne redérive pas cet id, il resert le message
+    // journalisé, qui porte celui de l'enregistrement.
     #[allow(clippy::disallowed_methods)]
-    Ok(response.with_generated_id())
+    let response = response.with_generated_id();
+    crate::replay::record::record_tool_pair_summary(recorder, tool_id, &response).await;
+    Ok(response)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn maybe_summarize_tool_pairs(
     provider: Arc<dyn Provider>,
     model_config: ModelConfig,
@@ -697,6 +716,8 @@ pub fn maybe_summarize_tool_pairs(
     conversation: Conversation,
     cutoff: usize,
     protect_last_n: usize,
+    recorder: Option<Arc<crate::replay::record::TurnRecorder>>,
+    replay: Option<crate::replay::source::ReplaySource>,
 ) -> Option<JoinHandle<Vec<(Message, String)>>> {
     if !tool_pair_summarization_enabled() || provider.manages_own_context() {
         return None;
@@ -716,6 +737,8 @@ pub fn maybe_summarize_tool_pairs(
                 &session_id,
                 &conversation,
                 &tool_id,
+                recorder.as_ref(),
+                replay.as_ref(),
             )
             .await
             {
@@ -1347,6 +1370,8 @@ mod tests {
             "test-session-id",
             &conversation,
             "tool_0",
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1374,6 +1399,8 @@ mod tests {
             "test-session-id",
             &conversation,
             "tool_0",
+            None,
+            None,
         )
         .await
         .unwrap_err();

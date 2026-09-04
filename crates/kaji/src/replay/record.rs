@@ -201,6 +201,24 @@ impl RecordSink {
         .await;
     }
 
+    pub async fn record_tool_pair_summary(
+        &self,
+        turn_seq: i64,
+        tool_call_id: &str,
+        summary: &Message,
+    ) {
+        self.append(
+            turn_seq,
+            "tool_pair_summary",
+            json!({
+                "turn_seq": turn_seq,
+                "tool_call_id": tool_call_id,
+                "summary": summary,
+            }),
+        )
+        .await;
+    }
+
     pub async fn record_condense_triggered(&self, turn_seq: i64, reason: &str) {
         self.append(
             turn_seq,
@@ -327,6 +345,25 @@ pub async fn record_turn_context(recorder: Option<&Arc<TurnRecorder>>, block: Op
     recorder
         .sink
         .record_turn_context(recorder.turn_seq, recorder.current_call_idx(), &block)
+        .await;
+}
+
+/// Records the summary that replaced one tool request/response pair. Like the
+/// compaction summary it comes from an LLM call off the loop's channel, but it
+/// is addressed by the pair it replaces: the summary is persisted into the
+/// conversation and the pair is hidden, so the next turn's request depends on
+/// it.
+pub async fn record_tool_pair_summary(
+    recorder: Option<&Arc<TurnRecorder>>,
+    tool_call_id: &str,
+    summary: &Message,
+) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    recorder
+        .sink
+        .record_tool_pair_summary(recorder.turn_seq, tool_call_id, summary)
         .await;
 }
 

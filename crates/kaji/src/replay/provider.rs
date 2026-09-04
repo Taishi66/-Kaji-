@@ -256,6 +256,7 @@ mod tests {
             clock_reads: HashMap::new(),
             condense_turns: HashSet::new(),
             condense_summaries: HashMap::new(),
+            tool_pair_summaries: HashMap::new(),
             approvals: HashMap::new(),
         })
     }

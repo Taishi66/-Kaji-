@@ -13,7 +13,7 @@ use kaji::session::session_manager::{SessionType, DB_NAME, SESSIONS_FOLDER};
 use kaji::session::SessionManager;
 use tempfile::TempDir;
 
-const PURGEABLE_KINDS: [&str; 8] = [
+const PURGEABLE_KINDS: [&str; 9] = [
     "llm_request",
     "llm_response",
     "tool_result",
@@ -21,6 +21,7 @@ const PURGEABLE_KINDS: [&str; 8] = [
     "tool_manifest",
     "turn_context",
     "condense_summary",
+    "tool_pair_summary",
     "clock_reads",
 ];
 
