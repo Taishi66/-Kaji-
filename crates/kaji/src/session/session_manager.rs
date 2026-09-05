@@ -808,11 +808,14 @@ impl SessionManager {
         self.storage.mark_not_replayable(session_id).await
     }
 
-    /// Efface les payloads de rejeu (`replay::retention::PURGEABLE_KINDS`)
-    /// plus vieux que `retention_days` jours et marque non rejouables les
-    /// sessions ainsi amputées ; retourne le nombre d'events effacés. `0`
-    /// purge tout, une valeur négative ne purge rien. Appelée au démarrage du
-    /// stockage avec `KAJI_REPLAY_RETENTION_DAYS`.
+    /// Efface les payloads de rejeu (`replay::retention::PURGEABLE_KINDS`) des
+    /// sessions dont le dernier event est plus vieux que `retention_days`
+    /// jours, et marque non rejouables les sessions ainsi amputées ; retourne
+    /// le nombre d'events effacés. Une session encore active dans la fenêtre
+    /// garde l'intégralité de ses payloads, aussi vieux soient-ils : elle reste
+    /// rejouable de bout en bout. `0` purge tout, une valeur négative ne purge
+    /// rien. Appelée au démarrage du stockage avec
+    /// `KAJI_REPLAY_RETENTION_DAYS`.
     pub async fn purge_replay_payloads(&self, retention_days: i64) -> Result<u64> {
         self.storage.purge_replay_payloads(retention_days).await
     }
@@ -2701,6 +2704,10 @@ impl SessionStorage {
         Self::run_payload_retention(pool, retention_days).await
     }
 
+    /// La granularité est la session : une session dont le dernier event est
+    /// antérieur au cutoff perd tous ses payloads, une session active dans la
+    /// fenêtre les garde tous, y compris ceux de ses plus vieux tours.
+    ///
     /// Le marquage précède la suppression : les sessions à démarquer se lisent
     /// dans les lignes que la suppression fait disparaître.
     async fn run_payload_retention(pool: &Pool<Sqlite>, retention_days: i64) -> Result<u64> {
@@ -2711,7 +2718,10 @@ impl SessionStorage {
         let kinds = crate::replay::retention::PURGEABLE_KINDS
             .map(|kind| format!("'{kind}'"))
             .join(", ");
-        let expired = format!("FROM session_events WHERE kind IN ({kinds}) AND ts_ms < ?");
+        let dormant =
+            "SELECT session_id FROM session_events GROUP BY session_id HAVING MAX(ts_ms) < ?";
+        let expired =
+            format!("FROM session_events WHERE kind IN ({kinds}) AND session_id IN ({dormant})");
 
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(&format!(

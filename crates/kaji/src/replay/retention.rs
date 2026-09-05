@@ -12,8 +12,14 @@
 //!
 //! `KAJI_REPLAY_RETENTION_DAYS` règle la fenêtre, en jours : `30` par défaut,
 //! `0` purge tout au prochain démarrage, une valeur négative ne purge jamais.
-//! Une session amputée de ses payloads est marquée `replayable = 0` : le rejeu
-//! la refuse (`ReplayUnavailable::Purged`) au lieu de rejouer un journal troué.
+//!
+//! La fenêtre s'applique à la session entière, pas à chaque ligne : une session
+//! dont le dernier event date d'avant le cutoff perd tous ses payloads d'un
+//! bloc, une session encore active les garde tous — y compris ceux de ses tours
+//! les plus anciens. Une session de travail longue reste donc rejouable de bout
+//! en bout tant qu'on y touche. Amputée, elle est marquée `replayable = 0` : le
+//! rejeu la refuse (`ReplayUnavailable::Purged`) au lieu de rejouer un journal
+//! troué.
 
 use chrono::Utc;
 

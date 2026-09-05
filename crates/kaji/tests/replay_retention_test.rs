@@ -1,9 +1,12 @@
 //! Rétention par kind du journal v2 : les payloads volumineux (requêtes et
 //! réponses LLM, résultats d'outils, bloc mémoire, lectures d'horloge)
-//! s'effacent passé la fenêtre de rétention, la structure du tour reste. Une
-//! session amputée de ses payloads n'est plus rejouable exactement : elle est
-//! marquée `replayable = 0` pour que le chargement du curseur la refuse avec
-//! `ReplayUnavailable::Purged` plutôt que de rejouer un journal troué
+//! s'effacent passé la fenêtre de rétention, la structure du tour reste. La
+//! granularité est la session, pas la ligne : une session active dans la
+//! fenêtre garde tous ses payloads, même ceux de ses plus vieux tours ; une
+//! session dormante les perd tous d'un bloc. Amputée, elle n'est plus rejouable
+//! exactement : elle est marquée `replayable = 0` pour que le chargement du
+//! curseur la refuse avec `ReplayUnavailable::Purged` plutôt que de rejouer un
+//! journal troué
 //! (`docs/superpowers/plans/2026-08-27-event-log-v2-replay-exact.md`, Task 12).
 
 use anyhow::Result;
@@ -85,9 +88,45 @@ impl Fixture {
         Ok(session.id)
     }
 
+    /// Un second tour, écrit à l'instant courant : une session encore active.
+    async fn append_turn(&self, session_id: &str, turn_seq: i64) -> Result<()> {
+        for kind in ["turn_start"]
+            .into_iter()
+            .chain(PURGEABLE_KINDS)
+            .chain(["turn_end"])
+        {
+            self.session_manager
+                .append_event(session_id, turn_seq, kind, "{}")
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Antidate tout le journal d'une session : l'API publique n'écrit que
     /// l'instant courant.
     async fn backdate(&self, session_id: &str, days: i64) -> Result<()> {
+        self.backdate_where(days, "session_id = ?", session_id, None)
+            .await
+    }
+
+    /// Antidate un seul tour : le reste du journal garde son horodatage.
+    async fn backdate_turn(&self, session_id: &str, turn_seq: i64, days: i64) -> Result<()> {
+        self.backdate_where(
+            days,
+            "session_id = ? AND turn_seq = ?",
+            session_id,
+            Some(turn_seq),
+        )
+        .await
+    }
+
+    async fn backdate_where(
+        &self,
+        days: i64,
+        predicate: &str,
+        session_id: &str,
+        turn_seq: Option<i64>,
+    ) -> Result<()> {
         let db_path = self
             .data_dir
             .path()
@@ -100,11 +139,14 @@ impl Fixture {
                 .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
         )
         .await?;
-        sqlx::query("UPDATE session_events SET ts_ms = ? WHERE session_id = ?")
+        let sql = format!("UPDATE session_events SET ts_ms = ? WHERE {predicate}");
+        let mut query = sqlx::query(&sql)
             .bind(now_ms() - days * DAY_MS)
-            .bind(session_id)
-            .execute(&pool)
-            .await?;
+            .bind(session_id);
+        if let Some(turn_seq) = turn_seq {
+            query = query.bind(turn_seq);
+        }
+        query.execute(&pool).await?;
         pool.close().await;
         Ok(())
     }
@@ -126,6 +168,53 @@ impl Fixture {
             .await?
             .replayable)
     }
+}
+
+#[tokio::test]
+async fn a_session_active_inside_the_window_keeps_even_its_oldest_payloads() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let long_running = fixture.recorded_session("long-running").await?;
+    fixture.append_turn(&long_running, 2).await?;
+    fixture.backdate_turn(&long_running, 1, 60).await?;
+
+    let purged = fixture.session_manager.purge_replay_payloads(30).await?;
+
+    assert_eq!(purged, 0, "la session a été active dans la fenêtre");
+    let kinds = fixture.kinds(&long_running).await?;
+    for kind in PURGEABLE_KINDS.into_iter().chain(PERMANENT_KINDS) {
+        assert!(kinds.contains(&kind.to_string()), "{kind} aurait dû rester");
+    }
+    assert!(fixture.replayable(&long_running).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_inactive_session_loses_every_payload_of_every_turn() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let dormant = fixture.recorded_session("dormant").await?;
+    fixture.append_turn(&dormant, 2).await?;
+    fixture.backdate_turn(&dormant, 1, 90).await?;
+    fixture.backdate_turn(&dormant, 2, 60).await?;
+
+    let purged = fixture.session_manager.purge_replay_payloads(30).await?;
+
+    assert_eq!(
+        purged,
+        2 * PURGEABLE_KINDS.len() as u64,
+        "les deux tours partent ensemble"
+    );
+    let kinds = fixture.kinds(&dormant).await?;
+    for kind in PURGEABLE_KINDS {
+        assert!(
+            !kinds.contains(&kind.to_string()),
+            "{kind} aurait dû partir"
+        );
+    }
+    for kind in PERMANENT_KINDS {
+        assert!(kinds.contains(&kind.to_string()), "{kind} aurait dû rester");
+    }
+    assert!(!fixture.replayable(&dormant).await?);
+    Ok(())
 }
 
 #[tokio::test]

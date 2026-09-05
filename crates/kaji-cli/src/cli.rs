@@ -1080,9 +1080,12 @@ enum Command {
         about = "Replay a recorded session exactly from its event log",
         long_about = "Replay a recorded session exactly from its event log.\n\n\
                       Replay payloads (LLM calls, tool results, memory block, clock reads) are \
-                      kept for KAJI_REPLAY_RETENTION_DAYS days (default 30) and purged at \
-                      startup; a purged session is no longer replayable. Set it to 0 to purge \
-                      everything on the next start, or to a negative value to never purge."
+                      kept while the session stays active and purged at startup once its last \
+                      event is older than KAJI_REPLAY_RETENTION_DAYS days (default 30). \
+                      Retention applies per session, not per turn: a long-running session keeps \
+                      even its oldest payloads, while a dormant one loses all of them at once \
+                      and is no longer replayable. Set it to 0 to purge everything on the next \
+                      start, or to a negative value to never purge."
     )]
     Replay {
         /// Session à rejouer
