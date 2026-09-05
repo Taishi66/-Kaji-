@@ -1,7 +1,15 @@
 use std::net::IpAddr;
+use std::time::Duration;
 
-/// Les refus de l'extension web. Chacun nomme ce qui bloque et ce qu'il faut
-/// changer : rien n'est jamais contourné silencieusement.
+/// Les refus de l'extension web. Chacun nomme ce qui bloque : rien n'est jamais
+/// contourné silencieusement.
+///
+/// Ces messages partent dans le `tool_result`, donc dans le prompt. Ceux de la
+/// garde réseau disent **ce qui** est refusé et **pourquoi**, jamais comment
+/// lever la restriction : une page injectée qui souffle « demande à relancer
+/// avec telle variable » ne doit pas trouver la confirmation de sa consigne
+/// dans le message système du tour suivant. La remédiation appartient à
+/// l'opérateur — journal de session et documentation de `web/mod.rs`.
 #[derive(Debug, thiserror::Error)]
 pub enum WebError {
     #[error(
@@ -34,22 +42,27 @@ pub enum WebError {
         detail: String,
     },
 
+    #[error(
+        "web_search: l'endpoint configuré pour {backend} est refusé par la garde réseau — {detail}"
+    )]
+    BackendEndpointRefused {
+        backend: &'static str,
+        detail: String,
+    },
+
     #[error("web_fetch: URL invalide — {0}")]
     InvalidUrl(String),
 
     #[error("web_fetch: schéma '{0}' refusé — seuls http et https sont autorisés")]
     BlockedScheme(String),
 
-    #[error(
-        "web_fetch: port {0} refusé — ports autorisés : 80, 443, 8080, 8443 \
-         (KAJI_WEB_ALLOW_PRIVATE=1 pour lever la restriction)"
-    )]
+    #[error("web_fetch: port {0} refusé — ports autorisés : 80, 443, 8080, 8443")]
     BlockedPort(u16),
 
-    #[error(
-        "web_fetch: {host} résout vers {addr} ({reason}) — refusé \
-         (KAJI_WEB_ALLOW_PRIVATE=1 pour autoriser les réseaux internes)"
-    )]
+    #[error("web_fetch: identifiants dans l'URL de {0} — refusé")]
+    BlockedUserinfo(String),
+
+    #[error("web_fetch: {host} résout vers {addr} ({reason}) — hôte non joignable")]
     BlockedAddress {
         host: String,
         addr: IpAddr,
@@ -67,6 +80,9 @@ pub enum WebError {
 
     #[error("web_fetch: {url} a répondu {status}")]
     HttpStatus { url: String, status: u16 },
+
+    #[error("web_fetch: délai de {0:?} dépassé, redirections comprises")]
+    DeadlineExceeded(Duration),
 
     #[error("web_fetch: {0}")]
     Transport(String),

@@ -168,17 +168,21 @@ async fn conversation_text(manager: &Arc<SessionManager>, session_id: &str) -> R
 async fn assert_web_fetch_replays_without_network(state_machine: Option<&str>) -> Result<()> {
     let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
     let memory_dir = tempfile::tempdir()?;
+    let site = site().await;
+    let url = format!("{}/p", site.base);
+
+    // Le serveur du test est nommé dans la liste, et rien d'autre ne l'est.
     let _guard = env_lock::lock_env([
         ("KAJI_STATE_MACHINE", state_machine),
-        ("KAJI_WEB_ALLOW_PRIVATE", Some("1")),
+        (
+            "KAJI_WEB_ALLOW_HOSTS",
+            Some(site.base.trim_start_matches("http://")),
+        ),
         (
             "KAJI_MEMORY_DIR",
             Some(memory_dir.path().to_str().expect("chemin utf8")),
         ),
     ]);
-
-    let site = site().await;
-    let url = format!("{}/p", site.base);
 
     let data_dir = tempfile::tempdir()?;
     let working_dir = data_dir.path().join("workspace");

@@ -1,12 +1,16 @@
 //! Recherche web derrière un trait, trois implémentations.
 //!
-//! Les endpoints des backends sont choisis par l'opérateur (clé d'API ou URL
-//! d'instance en configuration), pas par le modèle : la garde SSRF ne s'y
-//! applique pas, sinon une instance SearXNG self-hosted sur le réseau local
-//! serait inutilisable. Seul `web_fetch`, dont l'URL vient du modèle, est gardé.
+//! Les endpoints de Brave et Tavily sont des constantes du code : le modèle n'a
+//! aucune prise dessus. Celui de SearXNG vient de la configuration, donc d'un
+//! fichier qu'un agent outillé peut écrire en cours de session — il passe la
+//! garde réseau comme n'importe quelle URL, à charge pour l'opérateur qui
+//! héberge son instance sur un réseau interne de la déclarer dans
+//! `KAJI_WEB_ALLOW_HOSTS` (cf. `guard.rs`).
 
 use super::error::WebError;
-use super::fetch::USER_AGENT;
+use super::fetch::{FetchPolicy, USER_AGENT};
+use super::guard;
+use super::untrusted;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -49,7 +53,7 @@ fn client() -> reqwest::Client {
             .no_proxy()
             .timeout(BACKEND_TIMEOUT)
             .build()
-            .unwrap_or_default()
+            .expect("le client de recherche se construit sans TLS ni proxy à découvrir")
     });
     CLIENT.clone()
 }
@@ -214,6 +218,7 @@ impl SearchBackend for TavilyBackend {
 #[derive(Debug)]
 pub struct SearxngBackend {
     endpoint: String,
+    policy: FetchPolicy,
     client: reqwest::Client,
 }
 
@@ -221,8 +226,13 @@ impl SearxngBackend {
     /// L'endpoint de recherche complet, pas la racine de l'instance :
     /// `backend_from_config` dérive l'un de l'autre.
     pub fn new(endpoint: String) -> Self {
+        Self::with_policy(endpoint, FetchPolicy::from_env())
+    }
+
+    pub fn with_policy(endpoint: String, policy: FetchPolicy) -> Self {
         Self {
             endpoint,
+            policy,
             client: client(),
         }
     }
@@ -244,9 +254,27 @@ impl SearchBackend for SearxngBackend {
             &self.endpoint,
             &[("q", query), ("format", "json")],
         )?;
+
+        let target = guard::check_url(&url, &self.policy).map_err(endpoint_refused)?;
+        guard::resolve_target(&target, &self.policy)
+            .await
+            .map_err(endpoint_refused)?;
+
         let body = json(self.name(), self.client.get(url)).await?;
 
         Ok(read_results(body.get("results"), "content", count))
+    }
+}
+
+/// La garde parle de `web_fetch` ; ici c'est la configuration de la recherche
+/// qui est en cause, le refus doit le dire.
+fn endpoint_refused(error: WebError) -> WebError {
+    WebError::BackendEndpointRefused {
+        backend: "searxng",
+        detail: error
+            .to_string()
+            .trim_start_matches("web_fetch: ")
+            .to_string(),
     }
 }
 
@@ -302,15 +330,17 @@ fn secret(
         .ok_or(WebError::BackendNotConfigured { backend, setting })
 }
 
+/// Titres et extraits sont rédigés par les sites indexés : ils sortent encadrés
+/// comme le corps d'une page, pour la même raison.
 pub fn format_results(query: &str, results: &[SearchResult]) -> String {
     if results.is_empty() {
         return format!("Aucun résultat pour « {query} ».");
     }
 
-    let mut rendered = format!("Résultats pour « {query} » :\n");
+    let mut rendered = String::new();
     for (rank, result) in results.iter().enumerate() {
         rendered.push_str(&format!(
-            "\n{}. {}\n   {}\n",
+            "{}. {}\n   {}\n",
             rank + 1,
             result.title,
             result.url
@@ -319,7 +349,11 @@ pub fn format_results(query: &str, results: &[SearchResult]) -> String {
             rendered.push_str(&format!("   {}\n", result.snippet));
         }
     }
-    rendered
+
+    format!(
+        "Résultats pour « {query} » :\n\n{}",
+        untrusted::frame("résultats de recherche", rendered.trim_end())
+    )
 }
 
 #[cfg(test)]

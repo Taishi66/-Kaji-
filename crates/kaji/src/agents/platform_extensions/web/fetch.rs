@@ -3,14 +3,20 @@
 //! Les redirections ne sont pas déléguées à reqwest : chaque saut est repassé
 //! par la garde, sinon un 302 vers `http://169.254.169.254/` suffirait à
 //! contourner la vérification faite sur l'URL initiale.
+//!
+//! Le plafond de temps vaut pour l'appel entier : une chaîne de redirections
+//! traînantes ne le multiplie pas par le nombre de sauts.
 
 use super::error::WebError;
 use super::extract::html_to_markdown;
 use super::guard::{self, CONNECT_TIMEOUT};
+use super::untrusted;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Instant;
 use url::Url;
 
 pub use super::guard::FetchPolicy;
@@ -37,11 +43,26 @@ pub struct FetchOutcome {
 }
 
 pub async fn fetch_guarded(url: &str, policy: &FetchPolicy) -> Result<FetchOutcome, WebError> {
+    let deadline = Instant::now() + policy.timeout;
+    tokio::time::timeout(policy.timeout, follow_redirects(url, policy, deadline))
+        .await
+        .unwrap_or(Err(WebError::DeadlineExceeded(policy.timeout)))
+}
+
+async fn follow_redirects(
+    url: &str,
+    policy: &FetchPolicy,
+    deadline: Instant,
+) -> Result<FetchOutcome, WebError> {
     let mut current =
         Url::parse(url).map_err(|error| WebError::InvalidUrl(format!("{url} — {error}")))?;
     let mut hops = 0usize;
 
     loop {
+        if Instant::now() >= deadline {
+            return Err(WebError::DeadlineExceeded(policy.timeout));
+        }
+
         let target = guard::check_url(&current, policy)?;
         let addrs = guard::resolve_target(&target, policy).await?;
         let client = build_client(&target, &addrs, policy)?;
@@ -87,15 +108,32 @@ pub async fn fetch_guarded(url: &str, policy: &FetchPolicy) -> Result<FetchOutco
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let (bytes, truncated) = read_capped(response, policy.max_bytes).await?;
+        let (bytes, capped) = read_capped(response, policy.max_bytes).await?;
+        let (body, cut) = to_capped_string(bytes, policy.max_bytes);
 
         return Ok(FetchOutcome {
             final_url: current.to_string(),
             status: status.as_u16(),
             content_type,
-            body: to_capped_string(bytes, policy.max_bytes),
-            truncated,
+            body,
+            truncated: capped || cut,
         });
+    }
+}
+
+/// Aucun nom ne se résout hors de l'épinglage. Les surcharges de
+/// `resolve_to_addrs` sont consultées avant ce résolveur ; ce qui arrive
+/// jusqu'ici n'a pas été validé par la garde et n'a donc pas à joindre quoi que
+/// ce soit. Sans lui, une clé d'épinglage qui cesserait de correspondre à
+/// l'hôte demandé rouvrirait la fenêtre de rebinding en silence.
+#[derive(Debug)]
+struct PinnedOnly;
+
+impl reqwest::dns::Resolve for PinnedOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let refusal: Box<dyn std::error::Error + Send + Sync> =
+            format!("{} n'est pas épinglé par la garde web", name.as_str()).into();
+        Box::pin(std::future::ready(Err(refusal)))
     }
 }
 
@@ -111,6 +149,7 @@ fn build_client(
         .redirect(reqwest::redirect::Policy::none())
         .timeout(policy.timeout)
         .connect_timeout(CONNECT_TIMEOUT)
+        .dns_resolver(Arc::new(PinnedOnly))
         .no_proxy();
 
     if let Some(domain) = target.domain() {
@@ -147,17 +186,21 @@ async fn read_capped(
 }
 
 /// Une troncature au milieu d'un caractère produirait des `U+FFFD` de trois
-/// octets, qui feraient repasser la chaîne au-dessus du plafond.
-fn to_capped_string(bytes: Vec<u8>, max: usize) -> String {
+/// octets, qui feraient repasser la chaîne au-dessus du plafond. Le second
+/// membre dit si cette seconde coupe a eu lieu : elle est invisible du
+/// plafonnement en streaming, et le modèle doit savoir qu'il lit un corps
+/// tronqué.
+fn to_capped_string(bytes: Vec<u8>, max: usize) -> (String, bool) {
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
-    if text.len() > max {
-        let mut cut = max;
-        while cut > 0 && !text.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        text.truncate(cut);
+    if text.len() <= max {
+        return (text, false);
     }
-    text
+    let mut cut = max;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text.truncate(cut);
+    (text, true)
 }
 
 pub async fn run_fetch(
@@ -178,11 +221,14 @@ pub async fn run_fetch(
         }
     };
 
-    let mut rendered = format!("Source : {}\n\n{}", outcome.final_url, body);
+    let mut body = body;
     if outcome.truncated {
-        rendered.push_str("\n\n[tronqué au plafond de 2 Mo]");
+        body.push_str(&format!(
+            "\n\n[corps tronqué au plafond de {} octets]",
+            policy.max_bytes
+        ));
     }
-    Ok(rendered)
+    Ok(untrusted::frame(&outcome.final_url, &body))
 }
 
 fn looks_like_html(content_type: Option<&str>, body: &str) -> bool {
@@ -223,6 +269,43 @@ mod tests {
     #[test]
     fn the_cap_never_lets_a_lossy_conversion_grow_past_it() {
         let bytes = vec![0xff; 64];
-        assert!(to_capped_string(bytes, 64).len() <= 64);
+        let (text, cut) = to_capped_string(bytes, 64);
+        assert!(text.len() <= 64);
+        assert!(cut, "la seconde coupe est signalée");
+        assert!(!to_capped_string(b"court".to_vec(), 64).1);
+    }
+
+    /// L'épinglage est fail-closed : un nom que la garde n'a pas validé ne se
+    /// résout pas, il est refusé.
+    #[tokio::test]
+    async fn an_unpinned_name_is_refused_instead_of_resolved() {
+        let target = guard::Target {
+            host: "pinned.test".to_string(),
+            literal_ip: None,
+            port: 80,
+        };
+        let client = build_client(
+            &target,
+            &["127.0.0.1:80".parse().unwrap()],
+            &FetchPolicy::strict(),
+        )
+        .expect("client construit");
+
+        let error = client
+            .get("http://localhost/")
+            .send()
+            .await
+            .expect_err("un nom non épinglé ne se résout pas");
+
+        let mut chain = error.to_string();
+        let mut source = std::error::Error::source(&error);
+        while let Some(inner) = source {
+            chain.push_str(&format!(" / {inner}"));
+            source = inner.source();
+        }
+        assert!(
+            chain.contains("épinglé"),
+            "le refus vient du résolveur, pas d'un fallback DNS : {chain}"
+        );
     }
 }

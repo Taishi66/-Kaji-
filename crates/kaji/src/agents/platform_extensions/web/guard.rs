@@ -5,9 +5,23 @@
 //! La résolution est faite ici et l'adresse validée est ensuite épinglée sur le
 //! client HTTP, donc une seconde résolution ne peut pas basculer vers un réseau
 //! interne entre la vérification et la connexion.
+//!
+//! Aucune adresse interne n'est joignable par défaut, et il n'existe pas
+//! d'interrupteur qui les ouvre toutes : l'opérateur ouvre des exceptions
+//! **nommées** par `KAJI_WEB_ALLOW_HOSTS`, une liste séparée par des virgules
+//! dont chaque entrée s'écrit `hôte[:port]` ou `CIDR[:port]` —
+//! `127.0.0.1:11434`, `localhost:11434`, `10.0.0.0/8`, `[::1]:8888`. Une entrée
+//! n'ouvre qu'elle-même : autoriser son Ollama local ne rend pas
+//! `169.254.169.254` joignable, et le port n'est levé que pour l'entrée qui le
+//! porte. Une entrée sans port s'en tient à la liste blanche de ports.
+//!
+//! La variable est lue par `std::env::var`, jamais par `Config::get_param` :
+//! l'escalade n'est pas posable depuis le fichier de configuration, qu'un agent
+//! outillé peut écrire.
 
 use super::error::WebError;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::str::FromStr;
 use std::time::Duration;
 use url::{Host, Url};
 
@@ -16,12 +30,129 @@ pub const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_REDIRECTS: usize = 5;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-pub const ALLOW_PRIVATE_ENV: &str = "KAJI_WEB_ALLOW_PRIVATE";
+pub const ALLOW_HOSTS_ENV: &str = "KAJI_WEB_ALLOW_HOSTS";
+
+/// Ce qu'une entrée de la liste désigne : un nom d'hôte tel qu'il est écrit
+/// dans l'URL, ou un réseau qui contient l'adresse résolue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HostPattern {
+    Name(String),
+    Net { addr: IpAddr, prefix: u8 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllowEntry {
+    host: HostPattern,
+    port: Option<u16>,
+}
+
+impl AllowEntry {
+    /// Sans port explicite, l'entrée s'en tient à la liste blanche : ouvrir un
+    /// hôte n'ouvre pas tous ses ports.
+    fn allows_port(&self, port: u16) -> bool {
+        match self.port {
+            Some(listed) => listed == port,
+            None => ALLOWED_PORTS.contains(&port),
+        }
+    }
+
+    fn covers(&self, host: &str, ip: IpAddr, port: u16) -> bool {
+        self.allows_port(port) && self.matches_host(host, ip)
+    }
+
+    fn matches_host(&self, host: &str, ip: IpAddr) -> bool {
+        match &self.host {
+            HostPattern::Name(name) => name.eq_ignore_ascii_case(host),
+            HostPattern::Net { addr, prefix } => {
+                in_net(ip, *addr, *prefix)
+                    || matches!(ip, IpAddr::V6(v6) if embedded_ipv4(v6)
+                        .is_some_and(|v4| in_net(IpAddr::V4(v4), *addr, *prefix)))
+            }
+        }
+    }
+}
+
+impl FromStr for AllowEntry {
+    type Err = ();
+
+    fn from_str(raw: &str) -> Result<Self, ()> {
+        let (host, port) = split_host_port(raw.trim())?;
+        if host.is_empty() || host.contains(char::is_whitespace) {
+            return Err(());
+        }
+
+        let host = match host.split_once('/') {
+            Some((addr, prefix)) => {
+                let addr: IpAddr = addr.parse().map_err(|_| ())?;
+                let prefix: u8 = prefix.parse().map_err(|_| ())?;
+                let width = if addr.is_ipv4() { 32 } else { 128 };
+                if prefix > width {
+                    return Err(());
+                }
+                HostPattern::Net { addr, prefix }
+            }
+            None => match host.parse::<IpAddr>() {
+                Ok(addr) => HostPattern::Net {
+                    addr,
+                    prefix: if addr.is_ipv4() { 32 } else { 128 },
+                },
+                Err(_) => HostPattern::Name(host.to_ascii_lowercase()),
+            },
+        };
+
+        Ok(Self { host, port })
+    }
+}
+
+/// `[::1]:8888`, `10.0.0.0/8:9000`, `localhost`, `fe80::1`. Un littéral IPv6
+/// sans crochets n'a pas de port : ses deux-points sont les siens.
+fn split_host_port(raw: &str) -> Result<(&str, Option<u16>), ()> {
+    if let Some(rest) = raw.strip_prefix('[') {
+        let (host, rest) = rest.split_once(']').ok_or(())?;
+        let port = match rest {
+            "" => None,
+            _ => Some(rest.strip_prefix(':').ok_or(())?.parse().map_err(|_| ())?),
+        };
+        return Ok((host, port));
+    }
+
+    match raw.split_once(':') {
+        Some((host, port)) if !port.contains(':') => {
+            Ok((host, Some(port.parse().map_err(|_| ())?)))
+        }
+        Some(_) => Ok((raw, None)),
+        None => Ok((raw, None)),
+    }
+}
+
+fn in_net(ip: IpAddr, net: IpAddr, prefix: u8) -> bool {
+    fn bits_match(candidate: &[u8], net: &[u8], prefix: u8) -> bool {
+        let full = usize::from(prefix / 8);
+        let rest = prefix % 8;
+        if candidate[..full] != net[..full] {
+            return false;
+        }
+        if rest == 0 {
+            return true;
+        }
+        let mask = 0xffu8 << (8 - rest);
+        candidate[full] & mask == net[full] & mask
+    }
+
+    match (ip, net) {
+        (IpAddr::V4(candidate), IpAddr::V4(net)) => {
+            bits_match(&candidate.octets(), &net.octets(), prefix)
+        }
+        (IpAddr::V6(candidate), IpAddr::V6(net)) => {
+            bits_match(&candidate.octets(), &net.octets(), prefix)
+        }
+        _ => false,
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct FetchPolicy {
-    pub allow_loopback: bool,
-    pub allow_private: bool,
+    pub allowed: Vec<AllowEntry>,
     pub max_redirects: usize,
     pub max_bytes: usize,
     pub timeout: Duration,
@@ -30,36 +161,51 @@ pub struct FetchPolicy {
 impl FetchPolicy {
     pub fn strict() -> Self {
         Self {
-            allow_loopback: false,
-            allow_private: false,
+            allowed: Vec::new(),
             max_redirects: MAX_REDIRECTS,
             max_bytes: MAX_BODY_BYTES,
             timeout: REQUEST_TIMEOUT,
         }
     }
 
-    /// L'opt-out complet : réseaux internes et ports libres, pour les usages
-    /// self-hosted assumés.
-    pub fn permissive() -> Self {
+    /// Une entrée illisible est écartée, pas interprétée : une liste mal écrite
+    /// n'ouvre rien de plus que la politique stricte.
+    pub fn allowing(spec: &str) -> Self {
+        let allowed = spec
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .filter_map(|entry| match entry.parse::<AllowEntry>() {
+                Ok(parsed) => Some(parsed),
+                Err(()) => {
+                    tracing::warn!("{ALLOW_HOSTS_ENV} : entrée illisible ignorée — '{entry}'");
+                    None
+                }
+            })
+            .collect();
         Self {
-            allow_loopback: true,
-            allow_private: true,
+            allowed,
             ..Self::strict()
         }
     }
 
     pub fn from_env() -> Self {
-        match std::env::var(ALLOW_PRIVATE_ENV) {
-            Ok(value) if is_truthy(&value) => Self::permissive(),
-            _ => Self::strict(),
+        match std::env::var(ALLOW_HOSTS_ENV) {
+            Ok(spec) => Self::allowing(&spec),
+            Err(_) => Self::strict(),
         }
     }
 
-    /// La liste blanche de ports ne tient que tant que les réseaux internes
-    /// sont fermés : un service self-hosted qu'on a explicitement autorisé
-    /// écoute rarement sur 80 ou 443.
-    pub fn restricts_ports(&self) -> bool {
-        !self.allow_loopback && !self.allow_private
+    pub fn allows(&self, host: &str, ip: IpAddr, port: u16) -> bool {
+        self.allowed
+            .iter()
+            .any(|entry| entry.covers(host, ip, port))
+    }
+
+    /// Le port peut-il être joint par quelqu'un ? Refuser ici évite une
+    /// résolution DNS ; l'autorisation définitive tient compte de l'adresse.
+    fn port_is_conceivable(&self, port: u16) -> bool {
+        ALLOWED_PORTS.contains(&port) || self.allowed.iter().any(|entry| entry.port == Some(port))
     }
 }
 
@@ -67,13 +213,6 @@ impl Default for FetchPolicy {
     fn default() -> Self {
         Self::from_env()
     }
-}
-
-fn is_truthy(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
 }
 
 /// Un saut validé : l'hôte tel qu'écrit, et son IP quand l'URL en portait une
@@ -99,6 +238,12 @@ pub fn check_url(url: &Url, policy: &FetchPolicy) -> Result<Target, WebError> {
         other => return Err(WebError::BlockedScheme(other.to_string())),
     }
 
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(WebError::BlockedUserinfo(
+            url.host_str().unwrap_or_default().to_string(),
+        ));
+    }
+
     let host = url
         .host()
         .ok_or_else(|| WebError::InvalidUrl(format!("{url} n'a pas d'hôte")))?;
@@ -106,7 +251,7 @@ pub fn check_url(url: &Url, policy: &FetchPolicy) -> Result<Target, WebError> {
         .port_or_known_default()
         .ok_or_else(|| WebError::InvalidUrl(format!("{url} n'a pas de port")))?;
 
-    if policy.restricts_ports() && !ALLOWED_PORTS.contains(&port) {
+    if !policy.port_is_conceivable(port) {
         return Err(WebError::BlockedPort(port));
     }
 
@@ -149,12 +294,21 @@ pub async fn resolve_target(
     }
 
     for addr in &addrs {
-        if let Some(reason) = refuse_address(addr.ip(), policy) {
+        let ip = addr.ip();
+        if policy.allows(&target.host, ip, target.port) {
+            continue;
+        }
+        if let Some((_, reason)) = address_kind(ip) {
             return Err(WebError::BlockedAddress {
                 host: target.host.clone(),
-                addr: addr.ip(),
+                addr: ip,
                 reason,
             });
+        }
+        // Adresse publique : le port sort de la liste blanche et l'entrée qui
+        // l'y avait fait entrer ne couvre pas cet hôte.
+        if !ALLOWED_PORTS.contains(&target.port) {
+            return Err(WebError::BlockedPort(target.port));
         }
     }
 
@@ -165,15 +319,6 @@ pub async fn resolve_target(
 pub enum AddressKind {
     Loopback,
     Internal,
-}
-
-pub fn refuse_address(ip: IpAddr, policy: &FetchPolicy) -> Option<&'static str> {
-    let (kind, reason) = address_kind(ip)?;
-    match kind {
-        AddressKind::Loopback if policy.allow_loopback => None,
-        _ if policy.allow_private => None,
-        _ => Some(reason),
-    }
 }
 
 /// `None` pour une adresse publique routable. Le reste porte sa raison, en
@@ -212,6 +357,9 @@ fn ipv4_kind(ip: Ipv4Addr) -> Option<(AddressKind, &'static str)> {
     if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
         return Some((AddressKind::Internal, "banc d'essai réseau"));
     }
+    if octets[0] == 192 && octets[1] == 88 && octets[2] == 99 {
+        return Some((AddressKind::Internal, "anycast de relais 6to4"));
+    }
     if ip.is_multicast() {
         return Some((AddressKind::Internal, "multicast"));
     }
@@ -240,6 +388,12 @@ fn ipv6_kind(ip: Ipv6Addr) -> Option<(AddressKind, &'static str)> {
     if (segments[0] & 0xffc0) == 0xfe80 {
         return Some((AddressKind::Internal, "lien-local"));
     }
+    if (segments[0] & 0xffc0) == 0xfec0 {
+        return Some((AddressKind::Internal, "site-local"));
+    }
+    if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 0x0001 {
+        return Some((AddressKind::Internal, "NAT64 à usage local"));
+    }
     if ip.is_multicast() {
         return Some((AddressKind::Internal, "multicast"));
     }
@@ -256,8 +410,9 @@ fn ipv6_kind(ip: Ipv6Addr) -> Option<(AddressKind, &'static str)> {
 }
 
 /// L'IPv4 qu'une IPv6 transporte : forme mappée `::ffff:a.b.c.d`, traduction
-/// NAT64 `64:ff9b::/96`, et la forme compatible `::a.b.c.d`. Sans ce
-/// déballage, `::ffff:127.0.0.1` passerait pour une adresse v6 quelconque.
+/// NAT64 `64:ff9b::/96`, forme traduite `::ffff:0:a.b.c.d`, encapsulation 6to4
+/// `2002:aabb:ccdd::`, et la forme compatible `::a.b.c.d`. Sans ce déballage,
+/// `::ffff:127.0.0.1` passerait pour une adresse v6 quelconque.
 fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     if let Some(v4) = ip.to_ipv4_mapped() {
         return Some(v4);
@@ -266,9 +421,21 @@ fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     let segments = ip.segments();
     let trailing = ((segments[6] as u32) << 16) | segments[7] as u32;
 
+    if segments[0] == 0x2002 {
+        return Some(Ipv4Addr::from(
+            ((segments[1] as u32) << 16) | segments[2] as u32,
+        ));
+    }
+
     if segments[0] == 0x0064
         && segments[1] == 0xff9b
         && segments[2..6].iter().all(|part| *part == 0)
+    {
+        return Some(Ipv4Addr::from(trailing));
+    }
+
+    // IPv4-translated : `::ffff:0:a.b.c.d`, à ne pas confondre avec la mappée.
+    if segments[..4].iter().all(|part| *part == 0) && segments[4] == 0xffff && segments[5] == 0x0000
     {
         return Some(Ipv4Addr::from(trailing));
     }
@@ -308,6 +475,7 @@ mod tests {
         assert_eq!(kind("192.0.0.1"), Some("assignation de protocole IETF"));
         assert_eq!(kind("192.0.2.1"), Some("plage de documentation"));
         assert_eq!(kind("198.18.0.1"), Some("banc d'essai réseau"));
+        assert_eq!(kind("192.88.99.1"), Some("anycast de relais 6to4"));
         assert_eq!(kind("224.0.0.1"), Some("multicast"));
         assert_eq!(kind("255.255.255.255"), Some("plage réservée"));
     }
@@ -322,6 +490,8 @@ mod tests {
         assert_eq!(kind("ff02::1"), Some("multicast"));
         assert_eq!(kind("2001:db8::1"), Some("plage de documentation"));
         assert_eq!(kind("100::1"), Some("trou noir"));
+        assert_eq!(kind("fec0::1"), Some("site-local"));
+        assert_eq!(kind("64:ff9b:1::1"), Some("NAT64 à usage local"));
     }
 
     #[test]
@@ -330,21 +500,52 @@ mod tests {
         assert_eq!(kind("::ffff:10.0.0.1"), Some("réseau privé"));
         assert_eq!(kind("64:ff9b::169.254.169.254"), Some("lien-local"));
         assert_eq!(kind("::127.0.0.1"), Some("bouclage"));
+        assert_eq!(kind("::ffff:0:7f00:1"), Some("bouclage"));
+        assert_eq!(kind("2002:7f00:1::"), Some("bouclage"));
+        assert_eq!(kind("2002:a9fe:a9fe::"), Some("lien-local"));
         assert_eq!(kind("::ffff:1.1.1.1"), None);
     }
 
+    fn allows(policy: &FetchPolicy, host: &str, ip: &str, port: u16) -> bool {
+        policy.allows(host, ip.parse().unwrap(), port)
+    }
+
     #[test]
-    fn the_loopback_opt_in_is_narrower_than_the_private_one() {
-        let policy = FetchPolicy {
-            allow_loopback: true,
-            allow_private: false,
-            ..FetchPolicy::strict()
-        };
-        assert_eq!(refuse_address("127.0.0.1".parse().unwrap(), &policy), None);
-        assert_eq!(
-            refuse_address("10.0.0.1".parse().unwrap(), &policy),
-            Some("réseau privé")
-        );
+    fn an_entry_opens_its_host_and_port_and_nothing_else() {
+        let policy = FetchPolicy::allowing("127.0.0.1:11434");
+        assert!(allows(&policy, "127.0.0.1", "127.0.0.1", 11434));
+        assert!(!allows(&policy, "127.0.0.1", "127.0.0.1", 80));
+        assert!(!allows(&policy, "127.0.0.2", "127.0.0.2", 11434));
+        assert!(!allows(&policy, "metadata.test", "169.254.169.254", 11434));
+    }
+
+    #[test]
+    fn an_entry_without_a_port_keeps_the_port_whitelist() {
+        let policy = FetchPolicy::allowing("10.0.0.0/8");
+        assert!(allows(&policy, "srv.lan", "10.1.2.3", 8080));
+        assert!(!allows(&policy, "srv.lan", "10.1.2.3", 11434));
+        assert!(!allows(&policy, "srv.lan", "192.168.0.1", 8080));
+    }
+
+    #[test]
+    fn a_name_entry_matches_the_host_as_written() {
+        let policy = FetchPolicy::allowing("localhost:11434, [::1]:8888");
+        assert!(allows(&policy, "localhost", "127.0.0.1", 11434));
+        assert!(allows(&policy, "LOCALHOST", "::1", 11434));
+        assert!(!allows(&policy, "127.0.0.1", "127.0.0.1", 11434));
+        assert!(allows(&policy, "::1", "::1", 8888));
+    }
+
+    #[test]
+    fn an_unreadable_entry_is_dropped_not_widened() {
+        let policy = FetchPolicy::allowing("pas une entrée, 10.0.0.0/99, [::1, , 127.0.0.1:99999");
+        assert!(policy.allowed.is_empty(), "{:?}", policy.allowed);
+    }
+
+    #[test]
+    fn a_v4_entry_also_covers_the_v6_form_of_that_address() {
+        let policy = FetchPolicy::allowing("127.0.0.0/8:11434");
+        assert!(allows(&policy, "x.test", "::ffff:127.0.0.1", 11434));
     }
 
     #[test]
@@ -354,18 +555,19 @@ mod tests {
             check_url(&url, &FetchPolicy::strict()),
             Err(WebError::BlockedPort(6379))
         ));
+        assert!(matches!(
+            check_url(&url, &FetchPolicy::allowing("127.0.0.1:11434")),
+            Err(WebError::BlockedPort(6379))
+        ));
     }
 
     #[test]
-    fn opening_an_internal_network_also_opens_the_ports() {
-        assert!(FetchPolicy::strict().restricts_ports());
-        assert!(!FetchPolicy::permissive().restricts_ports());
-        assert!(!FetchPolicy {
-            allow_loopback: true,
-            allow_private: false,
-            ..FetchPolicy::strict()
-        }
-        .restricts_ports());
+    fn credentials_in_the_url_are_refused() {
+        let url = Url::parse("http://user:pass@example.com/").unwrap();
+        assert!(matches!(
+            check_url(&url, &FetchPolicy::strict()),
+            Err(WebError::BlockedUserinfo(_))
+        ));
     }
 
     #[test]

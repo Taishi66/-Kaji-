@@ -16,7 +16,13 @@ pub fn html_to_markdown(html: &str) -> String {
 
 enum Token<'a> {
     Text(&'a str),
-    Open { name: String, attributes: &'a str },
+    Open {
+        name: String,
+        attributes: &'a str,
+        /// `<svg/>` n'ouvre rien : sans cette distinction, la balise ferait
+        /// sauter tout ce qui suit jusqu'à une fermeture qui ne viendra pas.
+        self_closing: bool,
+    },
     Close(String),
 }
 
@@ -79,6 +85,7 @@ impl<'a> Iterator for Tokenizer<'a> {
             let inner = slice(rest, 1..end);
             self.cursor += end + 1;
 
+            let self_closing = inner.ends_with('/');
             let inner = inner.strip_suffix('/').unwrap_or(inner);
             if let Some(name) = inner.strip_prefix('/') {
                 return Some(Token::Close(name.trim().to_ascii_lowercase()));
@@ -90,6 +97,7 @@ impl<'a> Iterator for Tokenizer<'a> {
             return Some(Token::Open {
                 name: slice(inner, 0..split).to_ascii_lowercase(),
                 attributes: inner.get(split..).unwrap_or(""),
+                self_closing,
             });
         }
     }
@@ -150,9 +158,15 @@ struct Renderer {
 impl Renderer {
     fn push(&mut self, out: &mut String, token: Token<'_>) {
         match token {
-            Token::Open { name, attributes } => {
+            Token::Open {
+                name,
+                attributes,
+                self_closing,
+            } => {
                 if SKIPPED.contains(&name.as_str()) {
-                    self.skip_depth += 1;
+                    if !self_closing {
+                        self.skip_depth += 1;
+                    }
                     return;
                 }
                 if self.skip_depth > 0 {
