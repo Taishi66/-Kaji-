@@ -1517,3 +1517,186 @@ stages:
         "la recette n'est journalisée qu'une fois, pas une fois par agent"
     );
 }
+
+const SOLO: &str = r#"
+name: pause
+stages:
+  - name: collecte
+    agents:
+      - name: scan
+        prompt: scanne
+"#;
+
+#[tokio::test]
+async fn a_paused_stage_holds_its_agents_until_it_is_resumed() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = fixture.executor(spec(SOLO), Arc::clone(&runner)).await;
+    let handle = executor.handle();
+
+    assert!(handle.pause("collecte"));
+    let run = tokio::spawn(executor.run());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        runner.started().is_empty(),
+        "un stage en pause ne lance aucun de ses agents"
+    );
+    assert_eq!(
+        handle.snapshot().stage("collecte").unwrap().state,
+        StageState::Paused
+    );
+
+    assert!(handle.resume("collecte"));
+    let state = run.await.unwrap().unwrap();
+
+    assert_eq!(state.outcome(), WorkflowOutcome::Done);
+    assert_eq!(runner.started(), vec!["collecte.scan".to_string()]);
+    assert_eq!(
+        handle.artifact("collecte", "scan").as_deref(),
+        Some("[scan]"),
+        "la sortie publiée reste lisible par la vue"
+    );
+}
+
+/// L'annulation d'un agent est adressée par `(stage, agent)` : elle coupe
+/// celui-là, pas le fan-out ni le workflow.
+#[tokio::test]
+async fn cancelling_one_agent_leaves_its_fan_out_siblings_alone() {
+    let yaml = r#"
+name: coupe
+stages:
+  - name: collecte
+    agents:
+      - name: bloque
+        prompt: attends
+      - name: rapide
+        prompt: scanne
+"#;
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new().with("collecte.bloque", Script::Hang));
+    let executor = fixture.executor(spec(yaml), Arc::clone(&runner)).await;
+    let handle = executor.handle();
+    let run = tokio::spawn(executor.run());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(handle.cancel_agent("collecte", "bloque"));
+    assert!(
+        !handle.cancel_agent("collecte", "fantome"),
+        "un agent absent du workflow ne s'annule pas"
+    );
+
+    let state = run.await.unwrap().unwrap();
+    let collecte = state.stage("collecte").unwrap();
+    let agent = |name: &str| {
+        collecte
+            .agents
+            .iter()
+            .find(|agent| agent.name == name)
+            .unwrap()
+            .state
+            .clone()
+    };
+
+    assert_eq!(agent("bloque"), AgentState::Cancelled);
+    assert_eq!(agent("rapide"), AgentState::Done);
+    assert_eq!(collecte.state, StageState::Cancelled);
+}
+
+/// Ce que `kaji workflow list` et `kaji workflow status` relisent : le run
+/// enregistré, retrouvé par son seul journal.
+#[tokio::test]
+async fn a_recorded_run_is_listed_and_read_back_from_the_journal() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = fixture
+        .executor(spec(FAN_OUT_THEN_JOIN), Arc::clone(&runner))
+        .await;
+    executor.run().await.unwrap();
+
+    let runs = crate::workflow::list_workflow_runs(&fixture.session_manager)
+        .await
+        .unwrap();
+
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].session_id, fixture.session_id);
+    assert_eq!(runs[0].workflow, "revue");
+    assert!(runs[0].finished);
+    assert_eq!(runs[0].outcome(), Some(WorkflowOutcome::Done));
+
+    let found = crate::workflow::find_workflow_run(&fixture.session_manager, &fixture.session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.state.topology(), runs[0].state.topology());
+    assert_eq!(
+        found.spec.stages.len(),
+        2,
+        "la spec enregistrée revient avec le run"
+    );
+}
+
+/// `kaji replay` redéroule le DAG sur une session fille, qui porte donc elle
+/// aussi un `workflow_started`. La lister ferait apparaître chaque rejeu comme
+/// un run de plus.
+#[tokio::test]
+async fn a_replay_session_is_not_listed_as_a_run_of_its_own() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    fixture
+        .executor(spec(SOLO), Arc::clone(&runner))
+        .await
+        .run()
+        .await
+        .unwrap();
+
+    let derived = fixture
+        .session_manager
+        .create_session(
+            fixture.working_dir.clone(),
+            "replay-of".to_string(),
+            SessionType::Hidden,
+            KajiMode::Auto,
+        )
+        .await
+        .unwrap();
+    fixture
+        .session_manager
+        .update(&derived.id)
+        .parent_session_id(Some(fixture.session_id.clone()))
+        .apply()
+        .await
+        .unwrap();
+    let recorder = WorkflowRecorder::open(
+        Arc::clone(&fixture.session_manager),
+        derived.id.clone(),
+        "pause",
+    )
+    .await
+    .unwrap();
+    WorkflowExecutor::new(
+        spec(SOLO),
+        Arc::new(FixtureRunner::new()),
+        recorder,
+        derived.id.clone(),
+        fixture.working_dir.clone(),
+    )
+    .unwrap()
+    .run()
+    .await
+    .unwrap();
+
+    let runs = crate::workflow::list_workflow_runs(&fixture.session_manager)
+        .await
+        .unwrap();
+
+    assert_eq!(runs.len(), 1, "seul le run lancé est listé");
+    assert_eq!(runs[0].session_id, fixture.session_id);
+    assert!(
+        crate::workflow::find_workflow_run(&fixture.session_manager, &derived.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "le rejeu reste inspectable par son identifiant"
+    );
+}

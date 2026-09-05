@@ -16,3 +16,4 @@ pub mod term;
 pub mod tui;
 #[cfg(feature = "update")]
 pub mod update;
+pub mod workflow;

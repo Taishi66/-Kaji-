@@ -62,13 +62,16 @@ impl AgentState {
 
 /// `Waiting` est l'attente d'une décision de gate, pas une attente de
 /// dépendance : un stage dont les dépendances ne sont pas finies reste
-/// `Pending`.
+/// `Pending`. `Paused` est la suspension demandée par un opérateur, distincte
+/// de `Waiting` : elle ne consomme aucune décision de gate et se lève par
+/// `WorkflowHandle::resume`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StageState {
     Pending,
     Running,
     Waiting,
+    Paused,
     Done,
     Failed(FailureCause),
     Cancelled,
@@ -87,10 +90,36 @@ impl StageState {
             StageState::Pending => "en attente",
             StageState::Running => "en cours",
             StageState::Waiting => "gate",
+            StageState::Paused => "en pause",
             StageState::Done => "terminé",
             StageState::Failed(_) => "échoué",
             StageState::Cancelled => "annulé",
         }
+    }
+
+    /// L'état d'un stage déduit de celui de ses agents, par précédence
+    /// `Failed > Cancelled > Done` : un échec reste nommé même déclaré après un
+    /// agent annulé. **Entre deux échecs**, c'est le premier dans l'ordre du
+    /// document qui donne la cause — la cause par agent, elle, vit dans
+    /// `AgentStatus`, et c'est elle que les vues affichent.
+    ///
+    /// `None` tant qu'un agent n'a pas conclu : le journal n'émet aucun
+    /// événement de fin de stage, donc c'est la seule façon d'en dériver un
+    /// après coup sans inventer une fin qui n'a pas eu lieu.
+    pub fn from_agents(agents: &[AgentState]) -> Option<Self> {
+        if agents.iter().any(|agent| !agent.is_terminal()) {
+            return None;
+        }
+        if let Some(cause) = agents.iter().find_map(|agent| match agent {
+            AgentState::Failed(cause) => Some(cause.clone()),
+            _ => None,
+        }) {
+            return Some(StageState::Failed(cause));
+        }
+        if agents.contains(&AgentState::Cancelled) {
+            return Some(StageState::Cancelled);
+        }
+        Some(StageState::Done)
     }
 }
 

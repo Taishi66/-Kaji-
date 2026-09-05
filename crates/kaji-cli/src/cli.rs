@@ -25,6 +25,9 @@ use crate::commands::replay::handle_replay_subcommand;
 use crate::commands::term::{
     handle_term_info, handle_term_init, handle_term_log, handle_term_run, Shell,
 };
+use crate::commands::workflow::{
+    handle_workflow_list, handle_workflow_run, handle_workflow_status,
+};
 
 use crate::commands::schedule::{
     handle_schedule_add, handle_schedule_cron_help, handle_schedule_list, handle_schedule_remove,
@@ -759,6 +762,34 @@ enum SkillsCommand {
 }
 
 #[derive(Subcommand)]
+pub enum WorkflowCommand {
+    /// Run a workflow spec in a dedicated session
+    #[command(about = "Run a workflow spec in a dedicated session")]
+    Run {
+        /// Fichier YAML du workflow
+        spec: PathBuf,
+
+        /// Approuver toutes les gates sans rien demander (non interactif)
+        #[arg(
+            long = "approve-all",
+            help = "Approve every gate without asking (non-interactive runs)"
+        )]
+        approve_all: bool,
+    },
+
+    /// List recorded workflow runs, newest first
+    #[command(about = "List recorded workflow runs, newest first")]
+    List,
+
+    /// Show the stages, agents and pending gates of a recorded run
+    #[command(about = "Show the stages, agents and pending gates of a recorded run")]
+    Status {
+        /// Session parente du workflow
+        session_id: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum MemoryCommand {
     /// List entries in the shared memory store, newest first
     #[command(about = "List entries in the shared memory store")]
@@ -1123,6 +1154,22 @@ enum Command {
         /// Sortie lisible ou JSON pour un script
         #[arg(long, value_enum, default_value_t = MetricsFormat::Table)]
         format: MetricsFormat,
+    },
+
+    /// Orchestre un workflow déclaratif (stages, fan-out d'agents, gates)
+    #[command(
+        about = "Run and inspect declarative multi-agent workflows",
+        long_about = "Run and inspect declarative multi-agent workflows.\n\n\
+                      `run` always creates a dedicated session: the orchestration turn is \
+                      claimed exclusively, so a session carries exactly one workflow and its \
+                      gate decisions stay unambiguous. That session is what `kaji replay` \
+                      replays, gates served from the log instead of asked again.\n\n\
+                      Exit codes: 0 finished, 1 failed or cancelled, 2 unreadable or invalid \
+                      spec (no session created), 130 interrupted at the keyboard."
+    )]
+    Workflow {
+        #[command(subcommand)]
+        command: WorkflowCommand,
     },
 
     /// Manage plugins
@@ -1497,6 +1544,7 @@ fn get_command_name(command: &Option<Command>) -> &'static str {
         Some(Command::Skills { .. }) => "skills",
         Some(Command::Memory { .. }) => "memory",
         Some(Command::Replay { .. }) => "replay",
+        Some(Command::Workflow { .. }) => "workflow",
         Some(Command::Metrics { .. }) => "metrics",
         Some(Command::Plugin { .. }) => "plugin",
         Some(Command::Term { .. }) => "term",
@@ -2496,6 +2544,13 @@ pub async fn cli() -> anyhow::Result<()> {
             until,
             lenient,
         }) => handle_replay_subcommand(session_id, until, lenient).await,
+        Some(Command::Workflow { command }) => match command {
+            WorkflowCommand::Run { spec, approve_all } => {
+                handle_workflow_run(spec, approve_all).await
+            }
+            WorkflowCommand::List => handle_workflow_list().await,
+            WorkflowCommand::Status { session_id } => handle_workflow_status(session_id).await,
+        },
         Some(Command::Metrics { window, by, format }) => {
             handle_metrics_subcommand(window, by, format).await
         }

@@ -846,6 +846,14 @@ impl SessionManager {
         self.storage.session_events(session_id).await
     }
 
+    /// Les sessions dont le journal porte au moins un événement de ce kind,
+    /// de la plus récemment ouverte à la plus ancienne. `kaji workflow list`
+    /// s'en sert pour trouver les sessions de workflow sans parcourir toutes
+    /// les sessions de la base.
+    pub async fn sessions_with_event_kind(&self, kind: &str) -> Result<Vec<String>> {
+        self.storage.sessions_with_event_kind(kind).await
+    }
+
     /// Journalise l'événement `log_meta` (une fois par session) — idempotent.
     pub async fn append_log_meta_if_absent(&self, session_id: &str) -> Result<()> {
         self.storage.append_log_meta_if_absent(session_id).await
@@ -3057,6 +3065,20 @@ impl SessionStorage {
                 payload_json,
             })
             .collect())
+    }
+
+    /// Les sessions portant ce kind, ordonnées par la première occurrence la
+    /// plus récente — l'ordre d'un `list` qui montre les runs les plus frais
+    /// en tête.
+    async fn sessions_with_event_kind(&self, kind: &str) -> Result<Vec<String>> {
+        let pool = self.pool().await?;
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT session_id FROM session_events WHERE kind = ? \
+             GROUP BY session_id ORDER BY MIN(ts_ms) DESC",
+        )
+        .bind(kind)
+        .fetch_all(pool)
+        .await?)
     }
 
     async fn events_for_session(&self, session_id: &str) -> Result<Vec<SessionEvent>> {

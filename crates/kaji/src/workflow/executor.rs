@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
 use kaji_core::workflow::{AgentSource, AgentSpec, Gate, WorkflowSpec};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -48,6 +49,95 @@ struct Shared {
     artifacts: Mutex<Artifacts>,
     cancel: CancellationToken,
     live_gates: Option<Arc<LiveGates>>,
+    pauses: PauseSwitch,
+    agent_cancels: Mutex<AgentCancels>,
+}
+
+impl Shared {
+    /// Enregistre l'intention d'annuler un agent et coupe son jeton s'il est
+    /// déjà armé. L'intention est gardée pour l'agent qui n'a pas encore
+    /// démarré : sans elle, une annulation posée pendant la préparation se
+    /// perdrait entre la demande et l'armement.
+    fn request_agent_cancel(&self, key: (String, String)) {
+        let mut cancels = self.agent_cancels.lock().expect("annulations empoisonnées");
+        if let Some(token) = cancels.tokens.get(&key) {
+            token.cancel();
+        }
+        cancels.requested.insert(key);
+    }
+
+    fn arm_agent_cancel(&self, key: (String, String), token: &CancellationToken) {
+        let mut cancels = self.agent_cancels.lock().expect("annulations empoisonnées");
+        if cancels.requested.contains(&key) {
+            token.cancel();
+        }
+        cancels.tokens.insert(key, token.clone());
+    }
+
+    fn disarm_agent_cancel(&self, key: &(String, String)) {
+        self.agent_cancels
+            .lock()
+            .expect("annulations empoisonnées")
+            .tokens
+            .remove(key);
+    }
+}
+
+/// Les jetons d'annulation par agent, et les annulations demandées avant leur
+/// armement. Les deux vivent sous le **même** verrou : c'est ce qui ferme la
+/// course entre `cancel_agent` et le démarrage de l'agent visé.
+#[derive(Default)]
+struct AgentCancels {
+    requested: HashSet<(String, String)>,
+    tokens: HashMap<(String, String), CancellationToken>,
+}
+
+/// Les stages suspendus par un opérateur. Même patron que [`LiveGates`] : la
+/// table porte l'état, le `watch` sert de réveil — un stage qui s'abonne avant
+/// de relire la table ne peut pas rater une reprise.
+struct PauseSwitch {
+    paused: Mutex<HashSet<String>>,
+    version: watch::Sender<u64>,
+}
+
+impl Default for PauseSwitch {
+    fn default() -> Self {
+        let (version, _) = watch::channel(0);
+        Self {
+            paused: Mutex::new(HashSet::new()),
+            version,
+        }
+    }
+}
+
+impl PauseSwitch {
+    fn set(&self, stage: &str, paused: bool) {
+        {
+            let mut table = self.paused.lock().expect("pauses empoisonnées");
+            if paused {
+                table.insert(stage.to_string());
+            } else {
+                table.remove(stage);
+            }
+        }
+        self.version.send_modify(|version| *version += 1);
+    }
+
+    fn is_paused(&self, stage: &str) -> bool {
+        self.paused
+            .lock()
+            .expect("pauses empoisonnées")
+            .contains(stage)
+    }
+
+    async fn wait_until_resumed(&self, stage: &str) {
+        let mut version = self.version.subscribe();
+        while self.is_paused(stage) {
+            if version.changed().await.is_err() {
+                return;
+            }
+        }
+    }
 }
 
 /// D'où vient le contenu d'une recette référencée par la spec : du disque en
@@ -106,6 +196,69 @@ impl WorkflowHandle {
         }
         gates.record(stage, decision);
         GateVerdict::Applied
+    }
+
+    /// Suspend un stage à son prochain point d'arrêt — avant son démarrage,
+    /// et de nouveau après sa gate. Rend `false` sur un stage inconnu ou déjà
+    /// terminal.
+    ///
+    /// La suspension n'est **pas** rétroactive : un stage dont le fan-out est
+    /// déjà parti n'est pas rattrapé, c'est [`Self::cancel_agent`] qui coupe
+    /// un agent en vol.
+    pub fn pause(&self, stage: &str) -> bool {
+        self.switch_pause(stage, true)
+    }
+
+    /// Relâche un stage suspendu. Rend `false` sur un stage inconnu ou
+    /// terminal, comme [`Self::pause`] — jamais sur un stage simplement pas en
+    /// pause, où reprendre est un non-événement.
+    pub fn resume(&self, stage: &str) -> bool {
+        self.switch_pause(stage, false)
+    }
+
+    fn switch_pause(&self, stage: &str, paused: bool) -> bool {
+        let snapshot = self.snapshot();
+        let Some(status) = snapshot.stage(stage) else {
+            return false;
+        };
+        if status.state.is_terminal() {
+            return false;
+        }
+        self.shared.pauses.set(stage, paused);
+        true
+    }
+
+    /// Coupe **un** agent, sans toucher au reste de son fan-out ni au
+    /// workflow. Rend `false` sur un agent inconnu ou déjà terminal.
+    ///
+    /// Une annulation posée avant le démarrage de l'agent est gardée : elle
+    /// coupera le jeton dès son armement, plutôt que de se perdre.
+    pub fn cancel_agent(&self, stage: &str, agent: &str) -> bool {
+        let snapshot = self.snapshot();
+        let Some(status) = snapshot
+            .stage(stage)
+            .and_then(|stage| stage.agents.iter().find(|status| status.name == agent))
+        else {
+            return false;
+        };
+        if status.state.is_terminal() {
+            return false;
+        }
+        self.shared
+            .request_agent_cancel((stage.to_string(), agent.to_string()));
+        true
+    }
+
+    /// La sortie publiée par un agent, telle que les descendants la
+    /// substitueront. Ce que les vues affichent d'un agent terminé, sans
+    /// relire le journal.
+    pub fn artifact(&self, stage: &str, agent: &str) -> Option<String> {
+        self.shared
+            .artifacts
+            .lock()
+            .expect("artefacts empoisonnés")
+            .get(stage, agent)
+            .map(str::to_string)
     }
 
     /// La seule sortie d'un workflow suspendu : une gate sans approbateur
@@ -199,6 +352,8 @@ impl WorkflowExecutor {
             artifacts: Mutex::new(Artifacts::default()),
             cancel: CancellationToken::new(),
             live_gates,
+            pauses: PauseSwitch::default(),
+            agent_cancels: Mutex::new(AgentCancels::default()),
         });
         Ok(Self {
             spec,
@@ -318,6 +473,10 @@ impl WorkflowExecutor {
             return (index, StageState::Cancelled);
         }
 
+        if !self.hold_while_paused(index).await {
+            return (index, StageState::Cancelled);
+        }
+
         self.set_stage(index, StageState::Running);
         self.recorder.stage_started(&stage.name, stage.gate).await;
 
@@ -348,6 +507,13 @@ impl WorkflowExecutor {
             }
             self.set_stage(index, StageState::Running);
         }
+
+        // Second point d'arrêt : une gate approuvée peut avoir ouvert un stage
+        // qu'un opérateur veut retenir avant que son fan-out parte.
+        if !self.hold_while_paused(index).await {
+            return (index, StageState::Cancelled);
+        }
+        self.set_stage(index, StageState::Running);
 
         // Le budget `max_tokens` appartient au stage, donc à tout son fan-out :
         // un seul garde somme l'usage des sessions enfants et coupe les agents
@@ -442,14 +608,18 @@ impl WorkflowExecutor {
         }
 
         let started = Instant::now();
+        // Enfant du jeton du workflow : une annulation d'ensemble le tire
+        // aussi, et `cancel_agent` peut le tirer seul.
         let cancel = self.shared.cancel.child_token();
+        let key = (stage.name.clone(), agent.name.clone());
+        self.shared.arm_agent_cancel(key.clone(), &cancel);
         let mut run = Box::pin(self.runner.run(request, &session_id, cancel.clone()));
 
         let interrupted = tokio::select! {
             result = &mut run => Ok(result),
             _ = duration_guard(stage.budgets.max_duration_s) => Err(Interrupt::Budget(BudgetLimit::Duration)),
             _ = overspent.cancelled() => Err(Interrupt::Budget(BudgetLimit::Tokens)),
-            _ = self.shared.cancel.cancelled() => Err(Interrupt::Cancelled),
+            _ = cancel.cancelled() => Err(Interrupt::Cancelled),
         };
 
         let state = match interrupted {
@@ -458,7 +628,7 @@ impl WorkflowExecutor {
                     .await;
                 AgentState::Done
             }
-            Ok(Err(error)) => match self.interruption(overspent) {
+            Ok(Err(error)) => match self.interruption(overspent, &cancel) {
                 Some(state) => {
                     warn!(
                         stage = %stage.name,
@@ -488,6 +658,7 @@ impl WorkflowExecutor {
             }
         };
 
+        self.shared.disarm_agent_cancel(&key);
         let tokens = self.runner.tokens_used(&session_id).await;
         let duration_ms = started.elapsed().as_millis() as i64;
         self.finish_agent(
@@ -506,7 +677,15 @@ impl WorkflowExecutor {
     /// pas un agent en échec : le jeton tiré fait foi sur le message rendu.
     /// Sans cette précédence, `cancel()` donnerait tantôt `Cancelled`, tantôt
     /// `Failed(Error("annulé"))`, au gré du `select!`.
-    fn interruption(&self, overspent: &CancellationToken) -> Option<AgentState> {
+    ///
+    /// Le budget passe avant le jeton de l'agent : le dépassement tire ce
+    /// jeton lui-même, et « coupé faute de tokens » est plus informatif
+    /// qu'« annulé ».
+    fn interruption(
+        &self,
+        overspent: &CancellationToken,
+        agent_cancel: &CancellationToken,
+    ) -> Option<AgentState> {
         if self.shared.cancel.is_cancelled() {
             return Some(AgentState::Cancelled);
         }
@@ -515,7 +694,29 @@ impl WorkflowExecutor {
                 BudgetLimit::Tokens,
             )));
         }
+        if agent_cancel.is_cancelled() {
+            return Some(AgentState::Cancelled);
+        }
         None
+    }
+
+    /// Retient un stage suspendu à son point d'arrêt. Rend `false` quand
+    /// l'attente est rompue par l'annulation du workflow — le stage et ses
+    /// agents sont alors déjà marqués.
+    async fn hold_while_paused(&self, index: usize) -> bool {
+        let stage = &self.spec.stages[index];
+        if !self.shared.pauses.is_paused(&stage.name) {
+            return true;
+        }
+        self.set_stage(index, StageState::Paused);
+        tokio::select! {
+            () = self.shared.pauses.wait_until_resumed(&stage.name) => true,
+            _ = self.shared.cancel.cancelled() => {
+                self.set_stage(index, StageState::Cancelled);
+                self.cancel_stage_agents(index);
+                false
+            }
+        }
     }
 
     /// Le contenu d'une recette est de l'état externe qui entre dans le prompt
@@ -692,22 +893,14 @@ impl WorkflowExecutor {
     }
 }
 
-/// L'état d'un stage à partir de celui de ses agents, par précédence
-/// `Failed > Cancelled > Done` : un échec reste nommé même déclaré après un
-/// agent annulé. **Entre deux échecs**, en revanche, c'est le premier dans
-/// l'ordre du document qui donne la cause — la cause par agent, elle, vit dans
-/// `WorkflowState.stages[].agents[]`, et c'est elle que les vues affichent.
+/// L'état d'un stage à partir de celui de ses agents — la **même** dérivation
+/// que celle dont `kaji workflow status` se sert pour relire un run depuis son
+/// journal ([`StageState::from_agents`]).
+///
+/// `run_agent` ne rend que des états terminaux et la validation de la spec
+/// interdit un stage sans agent : la dérivation aboutit toujours ici.
 fn stage_state(outcomes: &[AgentState]) -> StageState {
-    if let Some(cause) = outcomes.iter().find_map(|outcome| match outcome {
-        AgentState::Failed(cause) => Some(cause.clone()),
-        _ => None,
-    }) {
-        return StageState::Failed(cause);
-    }
-    if outcomes.contains(&AgentState::Cancelled) {
-        return StageState::Cancelled;
-    }
-    StageState::Done
+    StageState::from_agents(outcomes).unwrap_or(StageState::Done)
 }
 
 enum Interrupt {

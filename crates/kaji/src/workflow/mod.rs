@@ -8,6 +8,7 @@ pub mod artifacts;
 pub mod events;
 pub mod executor;
 pub mod gate;
+pub mod registry;
 pub mod runner;
 pub mod state;
 
@@ -16,6 +17,7 @@ mod tests;
 
 pub use executor::{WorkflowExecutor, WorkflowHandle};
 pub use gate::{GateDecision, GateSource, GateVerdict, LiveGates, ReplayGates};
+pub use registry::{find_workflow_run, list_workflow_runs, WorkflowRun};
 pub use runner::{
     AgentRunRequest, AgentRunner, RecordedOutcome, ReplayRunner, ResolvedRecipe, SubagentRunner,
 };
