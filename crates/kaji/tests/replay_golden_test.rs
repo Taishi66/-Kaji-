@@ -402,6 +402,22 @@ fn env<'a>(state_machine: Option<&'a str>, memory_dir: &'a TempDir) -> env_lock:
     ])
 }
 
+/// Le même environnement, seuil de compaction au ras : chaque tour compacte.
+fn compacting_env<'a>(
+    state_machine: Option<&'a str>,
+    memory_dir: &'a TempDir,
+) -> env_lock::EnvGuard<'a> {
+    env_lock::lock_env([
+        ("KAJI_STATE_MACHINE", state_machine),
+        (
+            "KAJI_MEMORY_DIR",
+            Some(memory_dir.path().to_str().expect("utf8 temp path")),
+        ),
+        ("KAJI_TOOLSHIM_BACKEND", Some("none")),
+        ("KAJI_AUTO_COMPACT_THRESHOLD", Some("0.0001")),
+    ])
+}
+
 fn seed_memory() {
     let mut memory = SessionMemory::load("golden-seeding-session");
     for (fact, entity) in SEEDED_FACTS {
@@ -1375,6 +1391,54 @@ async fn a_mid_session_model_change_replays_per_turn_on_the_legacy_loop() -> Res
 #[tokio::test]
 async fn a_mid_session_model_change_replays_per_turn_on_the_state_machine_loop() -> Result<()> {
     assert_a_mid_session_model_change_replays_per_turn(Some("1")).await
+}
+
+/// Une session qui compacte. La décision (`condense_triggered`) et le résumé
+/// (`condense_summary`) sont journalisés : le rejeu les sert au lieu de
+/// recompacter avec un modèle vivant. Le contrôle est fort par construction —
+/// `ReplayProvider::complete` refuse tout appel hors boucle, donc un rejeu qui
+/// relancerait la compaction échouerait au lieu de passer inaperçu.
+async fn assert_a_compacted_session_replays_identically(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?} compaction");
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = compacting_env(state_machine, &memory_dir);
+
+    let probe = ProbeFixture::new().await;
+    let fixture = record_fixture(&probe).await?;
+
+    let kinds = |kind: &str| {
+        fixture
+            .events
+            .iter()
+            .filter(|event| event.kind == kind)
+            .count()
+    };
+    assert!(
+        kinds("condense_triggered") > 0,
+        "{label}: la session a bien compacté, sinon le test ne prouve rien"
+    );
+    assert!(
+        kinds("condense_summary") > 0,
+        "{label}: le résumé de compaction est journalisé"
+    );
+
+    let replayed = replay_once(&fixture, &label).await?;
+    assert_eq!(
+        fixture.transcript.rendered_stable(),
+        replayed.transcript.rendered_stable(),
+        "{label}: une session compactée se rejoue à l'identique"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_compacted_session_replays_identically_on_the_legacy_loop() -> Result<()> {
+    assert_a_compacted_session_replays_identically(None).await
+}
+
+#[tokio::test]
+async fn a_compacted_session_replays_identically_on_the_state_machine_loop() -> Result<()> {
+    assert_a_compacted_session_replays_identically(Some("1")).await
 }
 
 #[tokio::test]
