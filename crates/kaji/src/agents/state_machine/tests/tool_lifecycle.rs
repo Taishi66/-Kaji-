@@ -130,8 +130,12 @@ async fn multiple_tool_calls_are_paired_and_executed_once() -> Result<()> {
 
     result.assert_message(1, ToolCall, ADD);
     result.assert_message(2, ToolCall, ADD);
-    result.assert_message(3, ToolResponse, "result: 2");
-    result.assert_message(4, ToolResponse, "result: 3");
+    // « first » est retardé, donc il rend son résultat en dernier — la
+    // calculatrice partagée le voit après « duplicate » (2 puis 3). Sa réponse
+    // n'en reste pas moins la première du message : l'ordre d'insertion suit
+    // celui des requêtes, pas celui d'achèvement.
+    result.assert_message(3, ToolResponse, "result: 3");
+    result.assert_message(4, ToolResponse, "result: 2");
     result.assert_message(-1, Agent, "done");
     assert_eq!(pipeline.calculator_total(), 3);
 
@@ -204,8 +208,10 @@ async fn approvals_and_per_tool_permissions() -> Result<()> {
         .calls([("allowed", ADD, value(1)), ("blocked", DIVIDE, value(2))]);
     api.on("result: 4").reply("permissions applied");
     let result = pipeline.run(["apply the saved permissions"]).await?;
-    result.assert_message(-3, ToolResponse, DECLINED_RESPONSE);
-    result.assert_message(-2, ToolResponse, "result: 4");
+    // « allowed » précède « blocked » dans la réponse du modèle : un refus ne
+    // remonte plus en tête du message parce qu'il est connu sans exécution.
+    result.assert_message(-3, ToolResponse, "result: 4");
+    result.assert_message(-2, ToolResponse, DECLINED_RESPONSE);
     result.assert_message(-1, Agent, "permissions applied");
     assert_eq!(pipeline.calculator_total(), 4);
 

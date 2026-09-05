@@ -23,6 +23,7 @@ use crate::conversation::message::{ActionRequiredData, Message, MessageContent, 
 use crate::conversation::Conversation;
 use crate::hints::load_hints::SubdirectoryHintTracker;
 use crate::hooks::{HookContext, HookDecision, HookEvent, HookManager};
+use crate::mcp_utils::ToolResult;
 use crate::replay::cursor::EventCursor;
 use crate::replay::record::TurnRecorder;
 use crate::replay::source::ReplaySource;
@@ -737,8 +738,7 @@ impl Operation for ToolExecutionOperation<'_> {
                 .as_ref()
                 .is_ok_and(|tool_call| known_tools.contains(tool_call.name.as_ref()))
         });
-        let requests: Vec<_> = pending.iter().map(|(request, _)| request.clone()).collect();
-        if requests.is_empty() {
+        if pending.is_empty() {
             return not_applicable();
         }
 
@@ -812,30 +812,7 @@ impl Operation for ToolExecutionOperation<'_> {
         let mut combined = futures::stream::select_all(tool_streams);
         let mut response = Message::user();
         let mut effects = Vec::new();
-        for (request, disposition) in &pending {
-            match disposition {
-                ToolDisposition::Execute => {}
-                ToolDisposition::Decline => {
-                    response.add_tool_response_with_metadata(
-                        request.id.clone(),
-                        Ok(CallToolResult::error(vec![ContentBlock::text(
-                            DECLINED_RESPONSE,
-                        )])),
-                        request.metadata.as_ref(),
-                    );
-                }
-                ToolDisposition::ParseError(parse_error) => {
-                    response.add_tool_response_with_metadata(
-                        request.id.clone(),
-                        Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                            "The tool call could not be parsed: {parse_error}. \
-                             Correct the arguments and try again."
-                        ))])),
-                        request.metadata.as_ref(),
-                    );
-                }
-            }
-        }
+        let mut outputs: HashMap<String, ToolResult<CallToolResult>> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -858,11 +835,7 @@ impl Operation for ToolExecutionOperation<'_> {
                                     .await;
                                 }
                             }
-                            let metadata = requests
-                                .iter()
-                                .find(|r| r.id == request_id)
-                                .and_then(|r| r.metadata.as_ref());
-                            response.add_tool_response_with_metadata(request_id, output, metadata);
+                            outputs.insert(request_id, output);
                         }
                         ToolStreamItem::Message(msg) => {
                             emit.emit(AgentEvent::McpNotification((request_id, msg)))
@@ -878,21 +851,33 @@ impl Operation for ToolExecutionOperation<'_> {
             }
         }
 
-        let answered: HashSet<String> = response
-            .get_tool_response_ids()
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        for request in &requests {
-            if !answered.contains(request.id.as_str()) {
-                response.add_tool_response_with_metadata(
-                    request.id.clone(),
-                    Ok(CallToolResult::error(vec![ContentBlock::text(
-                        "Tool call was interrupted before completing",
-                    )])),
-                    request.metadata.as_ref(),
-                );
-            }
+        // Les réponses entrent dans le message dans l'ordre des requêtes, pas
+        // dans celui d'achèvement des futures : l'exécution reste concurrente,
+        // mais la conversation persistée devient rejouable.
+        for (request, disposition) in &pending {
+            let result = match disposition {
+                ToolDisposition::Execute => {
+                    outputs.remove(request.id.as_str()).unwrap_or_else(|| {
+                        Ok(CallToolResult::error(vec![ContentBlock::text(
+                            "Tool call was interrupted before completing",
+                        )]))
+                    })
+                }
+                ToolDisposition::Decline => Ok(CallToolResult::error(vec![ContentBlock::text(
+                    DECLINED_RESPONSE,
+                )])),
+                ToolDisposition::ParseError(parse_error) => {
+                    Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                        "The tool call could not be parsed: {parse_error}. \
+                         Correct the arguments and try again."
+                    ))]))
+                }
+            };
+            response.add_tool_response_with_metadata(
+                request.id.clone(),
+                result,
+                request.metadata.as_ref(),
+            );
         }
 
         if !manage_extensions_ids.is_empty() && !extension_change_failed {
