@@ -253,6 +253,7 @@ mod tests {
             memory_blocks: HashMap::new(),
             turn_contexts: HashMap::new(),
             tool_manifests: HashMap::new(),
+            toolshim_messages: HashMap::new(),
             clock_reads: HashMap::new(),
             condense_turns: HashSet::new(),
             condense_summaries: HashMap::new(),

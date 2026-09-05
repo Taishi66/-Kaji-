@@ -201,6 +201,22 @@ impl RecordSink {
         .await;
     }
 
+    /// La réponse d'un appel `toolshim` telle que la post-passe l'a rendue. Les
+    /// chunks journalisés sont ceux d'avant elle, et elle appelle un
+    /// interpréteur vivant : sans cette ligne, le rejeu la relancerait.
+    pub async fn record_toolshim_message(&self, turn_seq: i64, call_idx: u32, message: &Message) {
+        self.append(
+            turn_seq,
+            "toolshim_message",
+            json!({
+                "turn_seq": turn_seq,
+                "call_idx": call_idx,
+                "message": message,
+            }),
+        )
+        .await;
+    }
+
     pub async fn record_tool_pair_summary(
         &self,
         turn_seq: i64,

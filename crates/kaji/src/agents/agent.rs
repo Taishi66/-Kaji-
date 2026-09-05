@@ -3199,6 +3199,7 @@ impl Agent {
                     &toolshim_tools,
                     self.idgen.clone(),
                     record.as_ref(),
+                    self.replay_source().as_ref(),
                     call_ctx,
                 ).await?;
                 last_assistant_text.clear();

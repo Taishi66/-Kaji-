@@ -616,6 +616,7 @@ impl Inference for InferenceRunner<'_> {
                 &toolshim_tools,
                 self.idgen.clone(),
                 record.as_ref(),
+                self.replay_source.as_ref(),
                 call_ctx,
             )
             .await;

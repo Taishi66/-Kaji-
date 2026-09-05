@@ -1174,6 +1174,47 @@ async fn assert_a_mid_session_model_change_replays_per_turn(
     Ok(())
 }
 
+/// La post-passe toolshim de la réponse appelle un interpréteur vivant (Ollama
+/// ou modèle local) sur le message accumulé : les chunks journalisés le sont
+/// avant elle, donc un rejeu qui la relance dépend d'un backend joignable et de
+/// son verdict du jour. Son résultat est journalisé avec l'appel.
+async fn assert_the_toolshim_response_is_journaled(state_machine: Option<&str>) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?} post-passe");
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env(state_machine, &memory_dir);
+
+    let probe = ProbeFixture::new().await;
+    let fixture = record_fixture_with(&probe, toolshim_model_config()).await?;
+
+    let journaled = fixture
+        .events
+        .iter()
+        .filter(|event| event.kind == "toolshim_message")
+        .count();
+    assert!(
+        journaled > 0,
+        "{label}: la réponse d'après post-passe est journalisée, appel par appel"
+    );
+
+    let replayed = replay_once(&fixture, &label).await?;
+    assert_eq!(
+        fixture.transcript.rendered_stable(),
+        replayed.transcript.rendered_stable(),
+        "{label}: la réponse servie est celle du journal"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_toolshim_response_is_journaled_on_the_legacy_loop() -> Result<()> {
+    assert_the_toolshim_response_is_journaled(None).await
+}
+
+#[tokio::test]
+async fn the_toolshim_response_is_journaled_on_the_state_machine_loop() -> Result<()> {
+    assert_the_toolshim_response_is_journaled(Some("1")).await
+}
+
 /// Un journal enregistré avant que la config du tour y entre : ses manifestes
 /// n'ont pas de champ `model_config`. Le rejeu doit retomber sur celui de la
 /// session enregistrée, c'est-à-dire se comporter comme avant.

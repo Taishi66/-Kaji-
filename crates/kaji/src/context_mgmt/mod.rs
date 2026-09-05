@@ -1586,6 +1586,7 @@ mod tests {
             memory_blocks: std::collections::HashMap::new(),
             turn_contexts: std::collections::HashMap::new(),
             tool_manifests: std::collections::HashMap::new(),
+            toolshim_messages: std::collections::HashMap::new(),
             clock_reads: std::collections::HashMap::new(),
             condense_turns: std::collections::HashSet::new(),
             condense_summaries: std::collections::HashMap::new(),

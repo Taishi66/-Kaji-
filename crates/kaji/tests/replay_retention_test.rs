@@ -12,21 +12,10 @@
 use anyhow::Result;
 use kaji::config::KajiMode;
 use kaji::replay::cursor::{EventCursor, ReplayUnavailable};
+use kaji::replay::retention::PURGEABLE_KINDS;
 use kaji::session::session_manager::{SessionType, DB_NAME, SESSIONS_FOLDER};
 use kaji::session::SessionManager;
 use tempfile::TempDir;
-
-const PURGEABLE_KINDS: [&str; 9] = [
-    "llm_request",
-    "llm_response",
-    "tool_result",
-    "memory_block",
-    "tool_manifest",
-    "turn_context",
-    "condense_summary",
-    "tool_pair_summary",
-    "clock_reads",
-];
 
 const PERMANENT_KINDS: [&str; 6] = [
     "log_meta",

@@ -27,6 +27,7 @@ use crate::replay::idgen::default_idgen;
 use crate::replay::idgen::IdGen;
 use crate::replay::manifest::{ToolManifest, TurnModelConfig};
 use crate::replay::record::RecordSink;
+use crate::replay::source::ReplaySource;
 use kaji_providers::conversation::token_usage::{CostSource, ProviderStats, ProviderUsage, Usage};
 use kaji_providers::model::ModelConfig;
 use rmcp::model::Tool;
@@ -489,6 +490,22 @@ async fn record_llm_chunks(
 /// Un appel LLM qui échoue est journalisé comme réponse `error`, variante
 /// comprise : le rejeu la reconstruit pour prendre le même bras de `match` que
 /// l'enregistrement, au lieu de retomber sur le bras générique.
+/// La post-passe `toolshim` interroge un interpréteur vivant, et les chunks
+/// journalisés sont ceux d'avant elle : son résultat est journalisé à part pour
+/// que le rejeu le serve au lieu de relancer l'interpréteur.
+async fn record_toolshim_message(
+    record: &Option<RecordSink>,
+    call_ctx: Option<(i64, u32)>,
+    message: &Message,
+) {
+    let (Some(record), Some((turn_seq, call_idx))) = (record.as_ref(), call_ctx) else {
+        return;
+    };
+    record
+        .record_toolshim_message(turn_seq, call_idx, message)
+        .await;
+}
+
 async fn record_llm_failure(
     record: &Option<RecordSink>,
     call_ctx: Option<(i64, u32)>,
@@ -511,6 +528,7 @@ async fn record_llm_failure(
         toolshim_tools,
         idgen,
         record,
+        replay,
         call_ctx
     ),
     fields(
@@ -540,6 +558,7 @@ pub(crate) async fn stream_response_from_provider(
     toolshim_tools: &[Tool],
     idgen: Arc<dyn IdGen>,
     record: Option<&RecordSink>,
+    replay: Option<&ReplaySource>,
     call_ctx: Option<(i64, u32)>,
 ) -> Result<MessageStream, ProviderError> {
     let config = model_config.clone();
@@ -599,6 +618,10 @@ pub(crate) async fn stream_response_from_provider(
             .await;
     }
     let record = record.cloned();
+    // Lu avant `Provider::stream`, qui consomme l'index d'appel du rejeu.
+    let replayed_toolshim_message = replay
+        .filter(|_| config.toolshim)
+        .and_then(ReplaySource::toolshim_message);
 
     debug!("WAITING_LLM_STREAM_START");
     let stream_result = crate::session_context::with_session_id(
@@ -691,7 +714,15 @@ pub(crate) async fn stream_response_from_provider(
             }
 
             if let Some(msg) = accumulated_message {
-                let processed = named_by(toolshim_postprocess(msg, &toolshim_tools).await?, &idgen);
+                let processed = match replayed_toolshim_message {
+                    Some(recorded) => recorded,
+                    None => {
+                        let processed = toolshim_postprocess(msg, &toolshim_tools).await?;
+                        record_toolshim_message(&record, call_ctx, &processed).await;
+                        processed
+                    }
+                };
+                let processed = named_by(processed, &idgen);
                 if capture_message_content {
                     let output_messages = gen_ai_telemetry::output_message_json(&processed);
                     span.record("gen_ai.output.messages", output_messages.as_str());
@@ -1107,6 +1138,70 @@ mod tests {
         }
     }
 
+    /// La post-passe `toolshim` interroge un interpréteur vivant (Ollama ou
+    /// modèle local) et les chunks journalisés sont ceux d'avant elle. Au rejeu
+    /// c'est son résultat enregistré qui est servi : le message rendu ne dépend
+    /// ni du backend joignable ni de son verdict du jour.
+    #[tokio::test]
+    async fn a_replayed_toolshim_response_comes_from_the_log() {
+        use crate::replay::cursor::{EventCursor, LogMeta};
+        use crate::replay::provider::ReplayPosition;
+        use crate::replay::source::ReplaySource;
+        use futures::StreamExt;
+        use std::collections::{HashMap, HashSet};
+
+        const JOURNALED: &str = "réponse d'après post-passe, telle qu'enregistrée";
+
+        let cursor = EventCursor {
+            log_meta: LogMeta {
+                kaji_version: "test".to_string(),
+                schema_version: 2,
+                idgen_seed: "seed".to_string(),
+            },
+            llm_responses: HashMap::new(),
+            tool_results: HashMap::new(),
+            memory_blocks: HashMap::new(),
+            turn_contexts: HashMap::new(),
+            tool_manifests: HashMap::new(),
+            toolshim_messages: HashMap::from([((1, 0), Message::assistant().with_text(JOURNALED))]),
+            clock_reads: HashMap::new(),
+            condense_turns: HashSet::new(),
+            condense_summaries: HashMap::new(),
+            tool_pair_summaries: HashMap::new(),
+            approvals: HashMap::new(),
+        };
+        let position = Arc::new(ReplayPosition::default());
+        position.begin_turn(1);
+        let replay = ReplaySource::new(Arc::new(cursor), position);
+
+        let mut stream = stream_response_from_provider(
+            Arc::new(MockProvider),
+            ModelConfig {
+                toolshim: true,
+                ..ModelConfig::new("test-model")
+            },
+            "test-session",
+            "system",
+            &[Message::user().with_text("go")],
+            &[],
+            &[],
+            default_idgen(),
+            None,
+            Some(&replay),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut rendered = Vec::new();
+        while let Some(item) = stream.next().await {
+            if let (Some(message), _) = item.unwrap() {
+                rendered.push(message.as_concat_text());
+            }
+        }
+        assert_eq!(rendered, vec![JOURNALED.to_string()]);
+    }
+
     #[tokio::test]
     async fn provider_stream_records_gen_ai_span_attributes() {
         use futures::StreamExt;
@@ -1126,6 +1221,7 @@ mod tests {
             &[],
             &[],
             default_idgen(),
+            None,
             None,
             None,
         )
@@ -1182,6 +1278,7 @@ mod tests {
             default_idgen(),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1215,6 +1312,7 @@ mod tests {
             &[],
             &[],
             default_idgen(),
+            None,
             None,
             None,
         )
@@ -1262,6 +1360,7 @@ mod tests {
             &[],
             &[],
             default_idgen(),
+            None,
             None,
             None,
         )
@@ -1543,6 +1642,7 @@ mod tests {
             default_idgen(),
             None,
             None,
+            None,
         )
         .await?;
 
@@ -1652,6 +1752,7 @@ mod tests {
             default_idgen(),
             None,
             None,
+            None,
         )
         .await?;
 
@@ -1691,6 +1792,7 @@ mod tests {
             &[],
             &[],
             default_idgen(),
+            None,
             None,
             None,
         )

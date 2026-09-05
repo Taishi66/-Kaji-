@@ -74,6 +74,19 @@ impl ReplaySource {
         .cloned()
     }
 
+    /// La réponse que la post-passe `toolshim` a rendue pour l'appel que la
+    /// boucle s'apprête à faire. À lire avant `Provider::stream`, qui consomme
+    /// l'index d'appel. Absente ⇒ session sans `toolshim`, ou journal antérieur
+    /// à ce kind : la post-passe tourne alors comme avant. Lecture exacte, pas
+    /// `per_call` — chaque appel produit la sienne, donc en hériter d'un appel
+    /// précédent servirait une réponse d'un autre tour de boucle.
+    pub fn toolshim_message(&self) -> Option<Message> {
+        self.cursor
+            .toolshim_messages
+            .get(&(self.turn(), self.position.call()))
+            .cloned()
+    }
+
     /// L'estampille d'horloge que le prompt système portait à
     /// l'enregistrement. Le tour n'en lit qu'une.
     pub fn clock_read(&self) -> Option<String> {
@@ -191,6 +204,7 @@ mod tests {
                 "<turn-context>tour 2</turn-context>".to_string(),
             )]),
             tool_manifests: HashMap::new(),
+            toolshim_messages: HashMap::new(),
             clock_reads: HashMap::from([(2, vec!["2026-08-27 09:00 +00:00".to_string()])]),
             condense_turns: HashSet::from([3]),
             condense_summaries: HashMap::from([(

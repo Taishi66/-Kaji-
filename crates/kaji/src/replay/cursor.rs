@@ -77,6 +77,11 @@ pub struct EventCursor {
     /// parce qu'il bouge en cours de tour — une extension installée par le
     /// modèle, un hint découvert — sur les deux boucles.
     pub tool_manifests: HashMap<(i64, u32), ToolManifest>,
+    /// La réponse rendue par la post-passe `toolshim`, par appel. Les chunks
+    /// enregistrés sont ceux d'avant elle, et elle interroge un interpréteur
+    /// vivant : le rejeu sert ce message au lieu de la relancer. Vide pour une
+    /// session sans `toolshim` — et pour un journal antérieur à ce kind.
+    pub toolshim_messages: HashMap<(i64, u32), Message>,
     pub clock_reads: HashMap<i64, Vec<String>>,
     pub condense_turns: HashSet<i64>,
     /// Le résumé que l'appel LLM de compaction a rendu. Cet appel passe par
@@ -175,6 +180,7 @@ impl EventCursor {
             memory_blocks: HashMap::new(),
             turn_contexts: HashMap::new(),
             tool_manifests: HashMap::new(),
+            toolshim_messages: HashMap::new(),
             clock_reads: HashMap::new(),
             condense_turns: HashSet::new(),
             condense_summaries: HashMap::new(),
@@ -262,6 +268,17 @@ impl EventCursor {
                         continue;
                     };
                     cursor.tool_manifests.insert(key, manifest);
+                }
+                "toolshim_message" => {
+                    let (Some(key), Some(message)) = (
+                        call_key(event, &payload),
+                        payload.get("message").and_then(|message| {
+                            serde_json::from_value::<Message>(message.clone()).ok()
+                        }),
+                    ) else {
+                        continue;
+                    };
+                    cursor.toolshim_messages.insert(key, message);
                 }
                 "clock_reads" => {
                     if let Some(reads) = payload.get("reads").and_then(Value::as_array) {

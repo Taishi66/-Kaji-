@@ -30,9 +30,10 @@ pub const RETENTION_DAYS_KEY: &str = "KAJI_REPLAY_RETENTION_DAYS";
 
 /// Les kinds effacés par la rétention. Tout kind absent de cette liste est
 /// permanent — la purge ne le voit jamais.
-pub const PURGEABLE_KINDS: [&str; 9] = [
+pub const PURGEABLE_KINDS: [&str; 10] = [
     "llm_request",
     "llm_response",
+    "toolshim_message",
     "tool_result",
     "memory_block",
     "tool_manifest",
