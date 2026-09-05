@@ -81,7 +81,7 @@ impl Operation for StopHookOperation {
             .with_last_assistant_message(last_assistant_text);
         match self
             .hook_manager
-            .emit_blocking(HookEvent::Stop, context)
+            .emit_blocking(HookEvent::Stop, context, None, "")
             .await
         {
             HookDecision::Allow => yielded(),

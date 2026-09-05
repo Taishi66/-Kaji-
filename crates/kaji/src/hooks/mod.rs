@@ -22,10 +22,24 @@
 //! Kaji currently supports `type: "command"` actions. Unknown event names and
 //! action types are ignored per the spec. Hook scripts receive the JSON event
 //! context on stdin and SHOULD exit 0 on success.
+//!
+//! Les hooks déclarés par l'utilisateur — clé `hooks` de `config.yaml` et
+//! `.kaji/hooks.yaml` du projet — arrivent par [`config`] et rejoignent les
+//! mêmes index : un hook de config et un hook de plugin sont exécutés par le
+//! même chemin, avec les mêmes règles de blocage et de timeout.
+//!
+//! Ce que le modèle finit par lire d'un hook — la sortie standard injectée dans
+//! le prompt, la décision d'un `pre_tool_use` — est de l'état externe : c'est
+//! journalisé sous le kind `hook_output` et **servi au rejeu**. Un
+//! [`HookManager`] monté avec [`HookManager::with_replay`] ne lance jamais de
+//! processus (spec S6, `docs/superpowers/specs/2026-09-05-p3-vision-web-workflows-mission-control-design.md`).
+
+pub mod config;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -39,9 +53,16 @@ use tracing::{debug, info, warn};
 use tracing_futures::Instrument;
 
 use crate::plugins::discovery::{discover_enabled_plugins, DiscoveredPlugin};
+use crate::replay::record::{record_hook_output, TurnRecorder};
+use crate::replay::source::ReplaySource;
 
 /// Default per-hook timeout when the plugin does not specify one.
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 30;
+
+/// La raison rendue au modèle quand un `pre_tool_use` n'a pas répondu à temps.
+/// Le seul événement en fail-closed : laisser passer un appel qu'un garde-fou
+/// n'a pas pu examiner reviendrait à ne pas avoir de garde-fou.
+pub const TIMEOUT_DENIAL: &str = "hook timeout";
 
 /// Lifecycle events a hook can subscribe to.
 ///
@@ -59,6 +80,7 @@ pub enum HookEvent {
     AfterFileEdit,
     BeforeShellExecution,
     AfterShellExecution,
+    TurnEnd,
     Stop,
 }
 
@@ -75,25 +97,61 @@ impl HookEvent {
             HookEvent::AfterFileEdit => "AfterFileEdit",
             HookEvent::BeforeShellExecution => "BeforeShellExecution",
             HookEvent::AfterShellExecution => "AfterShellExecution",
+            HookEvent::TurnEnd => "TurnEnd",
             HookEvent::Stop => "Stop",
         }
     }
 
+    /// Le nom que la config user écrit — celui de la spec S6, en snake_case.
+    /// C'est aussi la clé d'adressage du kind `hook_output` : le journal ne doit
+    /// pas dépendre de la casse qu'un fichier de config a employée.
+    pub fn config_name(&self) -> &'static str {
+        match self {
+            HookEvent::PreToolUse => "pre_tool_use",
+            HookEvent::PostToolUse => "post_tool_use",
+            HookEvent::PostToolUseFailure => "post_tool_use_failure",
+            HookEvent::SessionStart => "session_start",
+            HookEvent::SessionEnd => "session_end",
+            HookEvent::UserPromptSubmit => "user_prompt_submit",
+            HookEvent::BeforeReadFile => "before_read_file",
+            HookEvent::AfterFileEdit => "after_file_edit",
+            HookEvent::BeforeShellExecution => "before_shell_execution",
+            HookEvent::AfterShellExecution => "after_shell_execution",
+            HookEvent::TurnEnd => "turn_end",
+            HookEvent::Stop => "stop",
+        }
+    }
+
+    /// Reconnaît les deux orthographes : `PostToolUse` des plugins Open-Plugins
+    /// et `post_tool_use` de la config user. Un nom inconnu reste ignoré, comme
+    /// le veut la spec plugins.
     fn from_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "PreToolUse" => HookEvent::PreToolUse,
-            "PostToolUse" => HookEvent::PostToolUse,
-            "PostToolUseFailure" => HookEvent::PostToolUseFailure,
-            "SessionStart" => HookEvent::SessionStart,
-            "SessionEnd" => HookEvent::SessionEnd,
-            "UserPromptSubmit" => HookEvent::UserPromptSubmit,
-            "BeforeReadFile" => HookEvent::BeforeReadFile,
-            "AfterFileEdit" => HookEvent::AfterFileEdit,
-            "BeforeShellExecution" => HookEvent::BeforeShellExecution,
-            "AfterShellExecution" => HookEvent::AfterShellExecution,
-            "Stop" => HookEvent::Stop,
-            _ => return None,
-        })
+        const EVENTS: [HookEvent; 12] = [
+            HookEvent::PreToolUse,
+            HookEvent::PostToolUse,
+            HookEvent::PostToolUseFailure,
+            HookEvent::SessionStart,
+            HookEvent::SessionEnd,
+            HookEvent::UserPromptSubmit,
+            HookEvent::BeforeReadFile,
+            HookEvent::AfterFileEdit,
+            HookEvent::BeforeShellExecution,
+            HookEvent::AfterShellExecution,
+            HookEvent::TurnEnd,
+            HookEvent::Stop,
+        ];
+        EVENTS
+            .into_iter()
+            .find(|event| event.name() == name || event.config_name() == name)
+    }
+
+    /// Vrai pour les événements dont la sortie standard entre dans le prompt —
+    /// et qui sont donc journalisés puis servis au rejeu.
+    fn injects_output(&self) -> bool {
+        matches!(
+            self,
+            HookEvent::SessionStart | HookEvent::UserPromptSubmit | HookEvent::PostToolUse
+        )
     }
 }
 
@@ -153,6 +211,13 @@ enum LoadedAction {
 /// string for shell events. Other fields carry the same value plus the
 /// raw JSON payload of the underlying event so scripts can do richer things
 /// without needing to parse a hook-specific schema.
+///
+/// Le payload est **borné à ces champs** : rien de la conversation, de la
+/// config, des secrets ou de l'environnement de kaji n'y entre. Un hook qui a
+/// besoin de plus le lit lui-même, sous l'identité de l'utilisateur.
+/// `prompt` et `tool_args` sont les noms de la spec S6, `message` et
+/// `tool_input` ceux des plugins Open-Plugins : les deux paires portent la même
+/// valeur pour qu'un script écrit contre l'une ou l'autre fonctionne.
 #[derive(Debug, Clone, Serialize)]
 pub struct HookContext {
     pub event: String,
@@ -163,9 +228,13 @@ pub struct HookContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_input: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_args: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_output: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_assistant_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -180,8 +249,10 @@ impl HookContext {
             matcher_context: None,
             tool_name: None,
             tool_input: None,
+            tool_args: None,
             tool_output: None,
             message: None,
+            prompt: None,
             last_assistant_message: None,
             working_dir: None,
         }
@@ -191,6 +262,7 @@ impl HookContext {
         let name = tool_name.into();
         self.matcher_context = Some(name.clone());
         self.tool_name = Some(name);
+        self.tool_args = tool_input.clone();
         self.tool_input = tool_input;
         self
     }
@@ -203,6 +275,7 @@ impl HookContext {
     pub fn with_message(mut self, message: impl Into<String>) -> Self {
         let msg = message.into();
         self.matcher_context.get_or_insert_with(|| msg.clone());
+        self.prompt = Some(msg.clone());
         self.message = Some(msg);
         self
     }
@@ -228,22 +301,84 @@ pub enum HookDecision {
 }
 
 /// Loads and executes plugin hooks.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct HookManager {
     rules: HashMap<HookEvent, Vec<LoadedRule>>,
     use_login_shell_path: bool,
+    /// Le journal du tour rejoué. Sa seule présence suffit à interdire tout
+    /// `spawn` : un rejeu relit ce que les hooks ont produit, il ne les
+    /// rejoue pas — un `rtk-rewrite` d'hier ne doit pas réécrire autrement
+    /// aujourd'hui, et un `shosoin-context` absent de la machine de rejeu ne
+    /// doit rien changer au prompt.
+    replay: Option<ReplaySource>,
 }
 
 impl HookManager {
-    /// Build a manager by scanning all enabled plugins for `hooks/hooks.json`.
+    /// Build a manager by scanning all enabled plugins for `hooks/hooks.json`,
+    /// then the user's own `hooks:` config and the project's
+    /// `.kaji/hooks.yaml` (voir [`config`] pour le gate d'activation projet).
     pub fn load(project_root: Option<&Path>, use_login_shell_path: bool) -> Self {
         let plugins = discover_enabled_plugins(project_root);
-        Self::from_plugins(plugins, use_login_shell_path)
+        let mut manager = Self::from_plugins(plugins, use_login_shell_path);
+        manager.add_config_rules(project_root);
+        manager
     }
 
     #[cfg(test)]
     pub(crate) fn from_plugins_for_test(plugins: Vec<DiscoveredPlugin>) -> Self {
         Self::from_plugins(plugins, false)
+    }
+
+    /// Un manager monté sur les seuls hooks de config — l'entrée de test des
+    /// suites d'acceptation S6, qui n'ont pas de plugin à découvrir.
+    pub fn from_entries(entries: Vec<config::HookEntry>, root: &Path, source: &str) -> Self {
+        let mut manager = Self::default();
+        manager.extend_from_entries(entries, root, source);
+        manager
+    }
+
+    /// Sert le journal au lieu du shell. Point unique : tous les événements
+    /// passent par `emit`/`emit_blocking`/`emit_capturing`, qui court-circuitent
+    /// tous les trois quand il est posé.
+    pub fn with_replay(mut self, replay: ReplaySource) -> Self {
+        self.replay = Some(replay);
+        self
+    }
+
+    fn add_config_rules(&mut self, project_root: Option<&Path>) {
+        let user_root = crate::config::paths::Paths::config_dir();
+        self.extend_from_entries(config::user_entries(), &user_root, "user");
+        if let Some(root) = project_root {
+            self.extend_from_entries(config::project_entries(project_root), root, "project");
+        }
+    }
+
+    fn extend_from_entries(&mut self, entries: Vec<config::HookEntry>, root: &Path, source: &str) {
+        for entry in entries {
+            let Some(event) = HookEvent::from_name(&entry.event) else {
+                warn!(event = %entry.event, source, "hook ignoré : événement inconnu");
+                continue;
+            };
+            let matcher = match entry.matcher.as_deref().filter(|s| !s.is_empty()) {
+                Some(pattern) => match Regex::new(pattern) {
+                    Ok(regex) => Some(regex),
+                    Err(error) => {
+                        warn!(pattern, source, %error, "hook ignoré : matcher invalide");
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            self.rules.entry(event).or_default().push(LoadedRule {
+                plugin_name: source.to_string(),
+                plugin_root: root.to_path_buf(),
+                matcher,
+                actions: vec![LoadedAction::Command {
+                    command: entry.command.clone(),
+                    timeout: entry.timeout(),
+                }],
+            });
+        }
     }
 
     fn from_plugins(plugins: Vec<DiscoveredPlugin>, use_login_shell_path: bool) -> Self {
@@ -282,12 +417,29 @@ impl HookManager {
         Self {
             rules,
             use_login_shell_path,
+            replay: None,
         }
     }
 
     /// Returns true if any rule is registered for `event`.
     pub fn has_hooks(&self, event: HookEvent) -> bool {
         self.rules.get(&event).is_some_and(|r| !r.is_empty())
+    }
+
+    /// Les règles à faire tourner pour cet événement, ou `None` quand il n'y a
+    /// rien à faire — pas de règle, ou un rejeu en cours.
+    fn runnable(&self, event: HookEvent) -> Option<&Vec<LoadedRule>> {
+        if self.replay.is_some() {
+            return None;
+        }
+        self.rules.get(&event).filter(|rules| !rules.is_empty())
+    }
+
+    fn matches(rule: &LoadedRule, ctx: &HookContext) -> bool {
+        match &rule.matcher {
+            Some(matcher) => matcher.is_match(ctx.matcher_context.as_deref().unwrap_or("")),
+            None => true,
+        }
     }
 
     async fn run_action(
@@ -333,12 +485,9 @@ impl HookManager {
     /// individual hooks are logged but never propagated — a misbehaving hook
     /// MUST NOT crash the host tool.
     pub async fn emit(&self, event: HookEvent, ctx: HookContext) {
-        let Some(rules) = self.rules.get(&event) else {
+        let Some(rules) = self.runnable(event) else {
             return;
         };
-        if rules.is_empty() {
-            return;
-        }
 
         let payload = match serde_json::to_string(&ctx) {
             Ok(s) => s,
@@ -392,12 +541,36 @@ impl HookManager {
     }
 
     /// Like [`Self::emit`], but stops at the first rule that denies the event
-    /// and returns the denial. A hook denies by exiting with status code 2
-    /// (reason on stderr) or by printing `{"decision":"block","reason":"..."}`
-    /// to stdout. All other failures (spawn, timeout, other non-zero exits)
-    /// are logged and treated as Allow — a misbehaving hook MUST NOT block.
-    pub async fn emit_blocking(&self, event: HookEvent, ctx: HookContext) -> HookDecision {
-        let Some(rules) = self.rules.get(&event) else {
+    /// and returns the denial.
+    ///
+    /// Sur `pre_tool_use` la règle S6 s'applique : **toute** sortie non nulle
+    /// bloque l'appel, stderr en devient la raison rendue au modèle, et un
+    /// timeout bloque aussi ([`TIMEOUT_DENIAL`]) — fail-closed, parce qu'un
+    /// garde-fou qui n'a pas pu répondre n'est pas un garde-fou qui a dit oui.
+    /// Sur les autres événements (`Stop`) le contrat plugins tient : seuls
+    /// l'exit 2 avec la raison sur stderr et
+    /// `{"decision":"block","reason":"..."}` sur stdout bloquent, tout le reste
+    /// est laissé passer.
+    ///
+    /// La décision est journalisée sous `hook_output` et **servie au rejeu** :
+    /// `addr` en est la clé (l'id d'appel d'outil, vide pour un événement de
+    /// tour). Un rejeu ne relance donc aucun hook, et rejoue le même blocage
+    /// sur une machine où le hook n'existe pas.
+    pub async fn emit_blocking(
+        &self,
+        event: HookEvent,
+        ctx: HookContext,
+        recorder: Option<&Arc<TurnRecorder>>,
+        addr: &str,
+    ) -> HookDecision {
+        if let Some(replay) = &self.replay {
+            return match replay.hook_denial(event.config_name(), addr) {
+                Some((reason, plugin)) => HookDecision::Deny { reason, plugin },
+                None => HookDecision::Allow,
+            };
+        }
+
+        let Some(rules) = self.runnable(event) else {
             return HookDecision::Allow;
         };
 
@@ -409,21 +582,20 @@ impl HookManager {
             }
         };
 
+        let fail_closed = event == HookEvent::PreToolUse;
+
         for rule in rules {
-            if let Some(matcher) = &rule.matcher {
-                let target = ctx.matcher_context.as_deref().unwrap_or("");
-                if !matcher.is_match(target) {
-                    continue;
-                }
+            if !Self::matches(rule, &ctx) {
+                continue;
             }
 
             for action in &rule.actions {
                 let LoadedAction::Command { command, timeout } = action;
-                let output = match self
+                let denial = match self
                     .run_action(event, &ctx.session_id, rule, command, &payload, *timeout)
                     .await
                 {
-                    Ok(o) => o,
+                    Ok(output) => deny_reason(&output, fail_closed),
                     Err(err) => {
                         warn!(
                             plugin = %rule.plugin_name,
@@ -432,11 +604,11 @@ impl HookManager {
                             error = %err,
                             "Plugin hook failed",
                         );
-                        continue;
+                        fail_closed.then(|| TIMEOUT_DENIAL.to_string())
                     }
                 };
 
-                if let Some(reason) = deny_reason(&output) {
+                if let Some(reason) = denial {
                     info!(
                         plugin = %rule.plugin_name,
                         event = %event,
@@ -444,6 +616,14 @@ impl HookManager {
                         reason = %reason,
                         "Plugin hook denied tool call",
                     );
+                    record_hook_output(
+                        recorder,
+                        event.config_name(),
+                        addr,
+                        None,
+                        Some((&reason, &rule.plugin_name)),
+                    )
+                    .await;
                     return HookDecision::Deny {
                         reason,
                         plugin: rule.plugin_name.clone(),
@@ -454,13 +634,116 @@ impl HookManager {
 
         HookDecision::Allow
     }
+
+    /// Lance les hooks de `event` et rend ce que le modèle doit lire : la sortie
+    /// standard des exécutions réussies, dans l'ordre des règles, jointe par une
+    /// ligne vide. `None` quand rien n'a été produit.
+    ///
+    /// Un hook qui échoue ou dépasse son délai est ignoré, avec un warning —
+    /// fail-open : injecter du contexte est un service, pas un garde-fou, et le
+    /// tour doit partir même quand `shosoin-context` est cassé.
+    ///
+    /// La sortie entre dans le prompt : elle est journalisée sous `hook_output`
+    /// et servie telle quelle au rejeu, sans jamais relancer la commande.
+    pub async fn emit_capturing(
+        &self,
+        event: HookEvent,
+        ctx: HookContext,
+        recorder: Option<&Arc<TurnRecorder>>,
+        addr: &str,
+    ) -> Option<String> {
+        debug_assert!(
+            event.injects_output(),
+            "seuls les événements dont la sortie entre dans le prompt sont capturés"
+        );
+        if let Some(replay) = &self.replay {
+            return replay.hook_output(event.config_name(), addr);
+        }
+
+        let rules = self.runnable(event)?;
+        let payload = match serde_json::to_string(&ctx) {
+            Ok(payload) => payload,
+            Err(error) => {
+                warn!(event = %event, %error, "Failed to serialize hook context");
+                return None;
+            }
+        };
+
+        let mut captured: Vec<String> = Vec::new();
+        for rule in rules {
+            if !Self::matches(rule, &ctx) {
+                continue;
+            }
+            for action in &rule.actions {
+                let LoadedAction::Command { command, timeout } = action;
+                match self
+                    .run_action(event, &ctx.session_id, rule, command, &payload, *timeout)
+                    .await
+                {
+                    Ok(output) if output.status.success() => {
+                        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if !stdout.is_empty() {
+                            captured.push(stdout);
+                        }
+                    }
+                    Ok(output) => warn!(
+                        plugin = %rule.plugin_name,
+                        event = %event,
+                        command = %command,
+                        code = ?output.status.code(),
+                        stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                        "hook en échec — sortie ignorée",
+                    ),
+                    Err(error) => warn!(
+                        plugin = %rule.plugin_name,
+                        event = %event,
+                        command = %command,
+                        %error,
+                        "hook en échec — sortie ignorée",
+                    ),
+                }
+            }
+        }
+
+        if captured.is_empty() {
+            return None;
+        }
+        let output = captured.join("\n\n");
+        record_hook_output(recorder, event.config_name(), addr, Some(&output), None).await;
+        Some(output)
+    }
 }
 
-fn deny_reason(output: &std::process::Output) -> Option<String> {
+/// `any_non_zero` porte la sémantique S6 de `pre_tool_use` : là, un exit
+/// quelconque non nul bloque. Ailleurs seul l'exit 2 du contrat plugins compte.
+/// Ajoute le retour d'un `post_tool_use` au résultat d'outil que le modèle va
+/// lire. Un bloc de texte de plus, jamais une réécriture : le résultat réel de
+/// l'outil reste intact devant.
+///
+/// Les deux boucles appellent cette fonction — la sémantique n'est écrite
+/// qu'ici, seul le branchement est en double.
+pub fn append_tool_feedback(
+    result: std::result::Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
+    feedback: &str,
+) -> std::result::Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    result.map(|mut call_result| {
+        call_result
+            .content
+            .push(rmcp::model::ContentBlock::text(feedback));
+        call_result
+    })
+}
+
+fn deny_reason(output: &std::process::Output, any_non_zero: bool) -> Option<String> {
     const DEFAULT: &str = "denied by plugin hook";
     let non_empty = |s: String| if s.is_empty() { DEFAULT.into() } else { s };
 
-    if output.status.code() == Some(2) {
+    let blocking_exit = match output.status.code() {
+        Some(2) => true,
+        Some(code) => any_non_zero && code != 0,
+        None => any_non_zero,
+    };
+    if blocking_exit {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Some(non_empty(stderr));
     }
@@ -792,7 +1075,12 @@ mod tests {
         }]);
 
         let decision = mgr
-            .emit_blocking(HookEvent::Stop, HookContext::new(HookEvent::Stop, "s"))
+            .emit_blocking(
+                HookEvent::Stop,
+                HookContext::new(HookEvent::Stop, "s"),
+                None,
+                "",
+            )
             .await;
 
         assert_eq!(

@@ -129,6 +129,21 @@ pub struct EventCursor {
     /// celui-là : sans ce témoin, « rejoué sans divergence » ne serait
     /// vérifiable contre rien.
     pub workflow_final: Option<WorkflowState>,
+    /// Ce que les hooks de cycle de vie ont rendu, par `(turn_seq, event,
+    /// addr)` — `addr` est l'id d'appel d'outil pour `pre_tool_use` et
+    /// `post_tool_use`, vide pour les événements de tour. Le rejeu les sert et
+    /// n'exécute jamais la commande : le shell d'un hook est de l'état externe
+    /// au même titre qu'un outil (spec S6).
+    pub hook_outputs: HashMap<(i64, String, String), HookOutput>,
+}
+
+/// Une ligne `hook_output` du journal : soit la sortie standard injectée dans le
+/// prompt, soit le refus d'un `pre_tool_use`. Jamais les deux — un hook qui a
+/// bloqué n'a rien injecté.
+#[derive(Debug, Clone, Default)]
+pub struct HookOutput {
+    pub stdout: Option<String>,
+    pub denial: Option<(String, String)>,
 }
 
 /// Ce qu'un appel retrouve dans un index adressé par `(turn_seq, call_idx)` :
@@ -222,6 +237,7 @@ impl EventCursor {
             workflow_recipes: HashMap::new(),
             workflow: None,
             workflow_final: None,
+            hook_outputs: HashMap::new(),
         };
 
         // Les deux moitiés d'un échange arrivent dans des events séparés :
@@ -352,6 +368,33 @@ impl EventCursor {
                     cursor.tool_pair_summaries.insert(
                         (turn_seq(event, &payload), tool_call_id.to_string()),
                         summary,
+                    );
+                }
+                "hook_output" => {
+                    let Some(hook_event) = payload.get("event").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let addr = payload
+                        .get("addr")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let reason = payload.get("reason").and_then(Value::as_str);
+                    let plugin = payload.get("plugin").and_then(Value::as_str);
+                    cursor.hook_outputs.insert(
+                        (
+                            turn_seq(event, &payload),
+                            hook_event.to_string(),
+                            addr.to_string(),
+                        ),
+                        HookOutput {
+                            stdout: payload
+                                .get("stdout")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            denial: reason.map(|reason| {
+                                (reason.to_string(), plugin.unwrap_or("").to_string())
+                            }),
+                        },
                     );
                 }
                 "approval" => {

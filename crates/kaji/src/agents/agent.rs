@@ -481,6 +481,16 @@ fn agent_visible_message_text(message: &Message) -> String {
     message.agent_visible_content().as_concat_text()
 }
 
+/// Met la sortie des hooks devant le message de l'utilisateur, en tête de
+/// contenu. Un bloc par hook, dans l'ordre où ils ont tourné : la réécriture
+/// reste lisible côté journal, et le message original n'est jamais amputé.
+fn prepend_hook_output(mut message: Message, prelude: &[String]) -> Message {
+    for (index, block) in prelude.iter().enumerate() {
+        message.content.insert(index, MessageContent::text(block));
+    }
+    message
+}
+
 fn attach_turn_usage(
     messages: &mut Conversation,
     usage: &ProviderUsage,
@@ -624,11 +634,14 @@ impl Agent {
     }
 
     /// Branche le journal que les tours rejoués liront. Le routeur de
-    /// confirmation le reçoit du même coup : en rejeu, aucune approbation
-    /// n'est jamais redemandée à l'utilisateur.
+    /// confirmation et le gestionnaire de hooks le reçoivent du même coup : en
+    /// rejeu, aucune approbation n'est redemandée à l'utilisateur et aucun hook
+    /// n'est exécuté — leurs sorties viennent du journal.
     pub fn set_replay_source(&mut self, replay_source: ReplaySource) {
         self.tool_confirmation_router
             .set_replay_source(replay_source.clone());
+        self.hook_manager =
+            std::mem::take(&mut self.hook_manager).with_replay(replay_source.clone());
         self.replay_source = Some(replay_source);
     }
 
@@ -650,6 +663,16 @@ impl Agent {
 
     /// Emit a lifecycle hook event with no extra context. Useful for events
     /// that have no matcher (e.g. `SessionStart`, `SessionEnd`).
+    /// Remplace les hooks montés au démarrage. Le journal de rejeu déjà branché
+    /// est reporté sur le nouveau manager : brancher des hooks après
+    /// `set_replay_source` ne doit pas rouvrir la porte au shell.
+    pub fn set_hook_manager(&mut self, hook_manager: crate::hooks::HookManager) {
+        self.hook_manager = match self.replay_source.clone() {
+            Some(replay_source) => hook_manager.with_replay(replay_source),
+            None => hook_manager,
+        };
+    }
+
     #[cfg(test)]
     pub(crate) fn set_hook_manager_for_test(&mut self, hook_manager: crate::hooks::HookManager) {
         self.hook_manager = hook_manager;
@@ -786,6 +809,92 @@ impl Agent {
             .await;
     }
 
+    /// Le tour ouvre-t-il la session ? Vrai tant qu'aucun message n'a de
+    /// contenu visible par l'agent — même prédicat que la boucle legacy
+    /// employait pour `SessionStart`, remonté dans l'enveloppe partagée. Le
+    /// coût de la lecture n'est payé que quand un hook `session_start` existe.
+    async fn opens_the_session(&self, session_id: &str) -> bool {
+        match self
+            .config
+            .session_manager
+            .get_session(session_id, true)
+            .await
+        {
+            Ok(session) => session
+                .conversation
+                .as_ref()
+                .map(|conversation| {
+                    conversation.messages().iter().all(|message| {
+                        !message.is_agent_visible()
+                            || message.agent_visible_content().content.is_empty()
+                    })
+                })
+                .unwrap_or(true),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    session_id, "hooks: session illisible — session_start non émis"
+                );
+                false
+            }
+        }
+    }
+
+    /// Applique les hooks qui écrivent devant le prompt : `session_start` au
+    /// premier tour, puis `user_prompt_submit`. Leur sortie standard est
+    /// préfixée au message de l'utilisateur, dans cet ordre.
+    ///
+    /// En rejeu, `HookManager` sert ces sorties depuis le journal
+    /// (`hook_output`) et n'exécute rien : le prompt reconstruit est le même
+    /// sur une machine où les hooks n'existent pas.
+    async fn apply_prompt_hooks(&self, session_id: &str, user_message: Message) -> Message {
+        use crate::hooks::{HookContext, HookEvent};
+
+        let replaying = self.is_replay();
+        let prompt = agent_visible_message_text(&user_message);
+        if prompt.is_empty() {
+            return user_message;
+        }
+        let recorder = self.turn_recorder();
+        let working_dir = self
+            .config
+            .session_manager
+            .get_session(session_id, false)
+            .await
+            .map(|session| session.working_dir.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let mut prelude: Vec<String> = Vec::new();
+
+        let wants_session_start = replaying || self.hook_manager.has_hooks(HookEvent::SessionStart);
+        if wants_session_start && self.opens_the_session(session_id).await {
+            let context = HookContext::new(HookEvent::SessionStart, session_id)
+                .with_working_dir(working_dir.clone());
+            if let Some(output) = self
+                .hook_manager
+                .emit_capturing(HookEvent::SessionStart, context, recorder.as_ref(), "")
+                .await
+            {
+                prelude.push(output);
+            }
+        }
+
+        if replaying || self.hook_manager.has_hooks(HookEvent::UserPromptSubmit) {
+            let context = HookContext::new(HookEvent::UserPromptSubmit, session_id)
+                .with_message(prompt)
+                .with_working_dir(working_dir);
+            if let Some(output) = self
+                .hook_manager
+                .emit_capturing(HookEvent::UserPromptSubmit, context, recorder.as_ref(), "")
+                .await
+            {
+                prelude.push(output);
+            }
+        }
+
+        prepend_hook_output(user_message, &prelude)
+    }
+
     fn stop_hook_context(
         session_id: &str,
         last_assistant_message: &str,
@@ -823,6 +932,8 @@ impl Agent {
             .emit_blocking(
                 crate::hooks::HookEvent::Stop,
                 Self::stop_hook_context(session_id, last_assistant_message, working_dir),
+                None,
+                "",
             )
             .await
     }
@@ -933,8 +1044,10 @@ impl Agent {
         result: ToolCallResult,
         tool_call: &CallToolRequestParams,
         session: &Session,
+        tool_call_id: String,
     ) -> ToolCallResult {
         let hook_manager = self.hook_manager.clone();
+        let recorder = self.turn_recorder();
         let session_id = session.id.clone();
         let working_dir = session.working_dir.to_string_lossy().to_string();
         let tool_name = tool_call.name.to_string();
@@ -965,7 +1078,23 @@ impl Agent {
                 _ => crate::hooks::HookEvent::PostToolUseFailure,
             };
 
-            if hook_manager.has_hooks(event) {
+            // `post_tool_use` a le droit de parler au modèle : sa sortie
+            // standard est jointe au résultat d'outil, journalisée sous
+            // `hook_output` et servie au rejeu. Les autres événements de cette
+            // fonction restent muets.
+            let mut processed_result = processed_result;
+            if event == crate::hooks::HookEvent::PostToolUse {
+                let ctx = crate::hooks::HookContext::new(event, &session_id)
+                    .with_tool(tool_name.clone(), tool_input.clone())
+                    .with_working_dir(working_dir.clone());
+                if let Some(feedback) = hook_manager
+                    .emit_capturing(event, ctx, recorder.as_ref(), &tool_call_id)
+                    .await
+                {
+                    processed_result =
+                        crate::hooks::append_tool_feedback(processed_result, &feedback);
+                }
+            } else if hook_manager.has_hooks(event) {
                 let ctx = crate::hooks::HookContext::new(event, &session_id)
                     .with_tool(tool_name.clone(), tool_input.clone())
                     .with_working_dir(working_dir.clone());
@@ -1489,9 +1618,14 @@ impl Agent {
             .await
             .record_tool_arguments(&tool_call.arguments, &session.working_dir);
 
-        if self
-            .hook_manager
-            .has_hooks(crate::hooks::HookEvent::PreToolUse)
+        // L'id de corrélation de l'appel : la clé sous laquelle le journal range
+        // ce que les hooks d'outil ont produit pour lui.
+        let tool_call_id = request_id.clone();
+
+        // Pas de garde `has_hooks` : en rejeu le manager sert la décision
+        // journalisée, y compris sur une machine dépourvue du hook qui avait
+        // bloqué. Le gate d'exécution vit dans `emit_blocking`, une seule fois
+        // pour les deux boucles.
         {
             let ctx =
                 crate::hooks::HookContext::new(crate::hooks::HookEvent::PreToolUse, &session.id)
@@ -1505,7 +1639,12 @@ impl Agent {
                     .with_working_dir(session.working_dir.to_string_lossy().to_string());
             if let crate::hooks::HookDecision::Deny { reason, plugin } = self
                 .hook_manager
-                .emit_blocking(crate::hooks::HookEvent::PreToolUse, ctx)
+                .emit_blocking(
+                    crate::hooks::HookEvent::PreToolUse,
+                    ctx,
+                    self.turn_recorder().as_ref(),
+                    &request_id,
+                )
                 .await
             {
                 return (
@@ -1538,7 +1677,7 @@ impl Agent {
                 let result = final_output_tool.execute_tool_call(tool_call.clone()).await;
                 (
                     request_id,
-                    Ok(self.with_post_tool_hook(result, &tool_call, session)),
+                    Ok(self.with_post_tool_hook(result, &tool_call, session, tool_call_id.clone())),
                 )
             } else {
                 (
@@ -1590,7 +1729,7 @@ impl Agent {
 
         (
             request_id,
-            Ok(self.with_post_tool_hook(result, &tool_call, session)),
+            Ok(self.with_post_tool_hook(result, &tool_call, session, tool_call_id.clone())),
         )
     }
 
@@ -2452,6 +2591,14 @@ impl Agent {
                 turn_seq,
             ))
         });
+        // Les hooks de cycle de vie qui écrivent dans le prompt tournent ici :
+        // `reply()` est le point où les deux boucles convergent, et le seul
+        // qui précède la persistance du message d'ouverture. Le prompt réécrit
+        // est donc celui que la conversation garde, celui que le journal porte
+        // sous `message`, et celui que le tour envoie au modèle — aucune des
+        // deux boucles n'a de variante à appliquer (parité par construction).
+        let user_message = self.apply_prompt_hooks(&session_id, user_message).await;
+
         // Les ids de message du tour, à l'enregistrement comme au rejeu.
         // L'enregistrement les dérive de sa propre session ; le rejeu tourne
         // dans une session dérivée mais sous la graine du journal source
@@ -2509,6 +2656,7 @@ impl Agent {
             .await
             .current_date_timestamp()
             .to_string()];
+        let turn_end_hooks = self.hook_manager.clone();
         let checkpoint_store = self.checkpoint_store.clone();
         // Skip the session lookup entirely when no store is wired — true for
         // every non-TUI `build_session` caller and most tests — rather than
@@ -2599,6 +2747,20 @@ impl Agent {
                                 warn!(?error, "event log append failed for turn_end");
                             }
                         }
+                        // Le hook de fin de tour, au même endroit que la borne
+                        // qu'il accompagne : un seul site pour les deux
+                        // boucles. Sa sortie n'entre nulle part — rien à
+                        // journaliser, rien à servir au rejeu, et le manager
+                        // de rejeu ne l'exécute pas.
+                        turn_end_hooks
+                            .emit(
+                                crate::hooks::HookEvent::TurnEnd,
+                                crate::hooks::HookContext::new(
+                                    crate::hooks::HookEvent::TurnEnd,
+                                    &session_id,
+                                ),
+                            )
+                            .await;
                         break;
                     }
                 }
@@ -2672,20 +2834,12 @@ impl Agent {
 
         let message_text = message_text_for_trace;
 
-        let session = session_manager
+        // La session doit exister avant que le tour ne s'ouvre — la charger ici
+        // fait remonter son absence en tête de `reply_impl` plutôt qu'au milieu
+        // de la boucle.
+        session_manager
             .get_session(&session_config.id, true)
             .await?;
-        let is_first_agent_turn = session
-            .conversation
-            .as_ref()
-            .map(|conversation| {
-                conversation.messages().iter().all(|message| {
-                    !message.is_agent_visible()
-                        || message.agent_visible_content().content.is_empty()
-                })
-            })
-            .unwrap_or(true);
-
         if !user_message.is_agent_visible()
             || user_message.agent_visible_content().content.is_empty()
         {
@@ -2695,25 +2849,6 @@ impl Agent {
                 .add_message(&session_config.id, &user_message)
                 .await?;
             return Ok(Box::pin(futures::stream::empty()));
-        }
-
-        if is_first_agent_turn {
-            self.emit_hook(crate::hooks::HookEvent::SessionStart, &session_config.id)
-                .await;
-        }
-
-        if self
-            .hook_manager
-            .has_hooks(crate::hooks::HookEvent::UserPromptSubmit)
-        {
-            let ctx = crate::hooks::HookContext::new(
-                crate::hooks::HookEvent::UserPromptSubmit,
-                &session_config.id,
-            )
-            .with_message(message_text.clone());
-            self.hook_manager
-                .emit(crate::hooks::HookEvent::UserPromptSubmit, ctx)
-                .await;
         }
 
         let command_result = self
@@ -4867,6 +5002,7 @@ mod tests {
             )]))),
             &tool_call,
             &session,
+            "test-call".to_string(),
         );
         drop(entered);
         drop(span);

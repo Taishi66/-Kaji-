@@ -172,8 +172,10 @@ impl<'a> ToolExecutionOperation<'a> {
         tool_call: &CallToolRequestParams,
         session: &Session,
         span: tracing::Span,
+        tool_call_id: String,
     ) -> ToolCallResult {
         let hook_manager = self.hook_manager.clone();
+        let recorder = self.turn_recorder();
         let session_id = session.id.clone();
         let working_dir = session.working_dir.to_string_lossy().to_string();
         let tool_name = tool_call.name.to_string();
@@ -198,7 +200,21 @@ impl<'a> ToolExecutionOperation<'a> {
                 Ok(result) if result.is_error != Some(true) => HookEvent::PostToolUse,
                 _ => HookEvent::PostToolUseFailure,
             };
-            if hook_manager.has_hooks(event) {
+            // Même contrat que la boucle legacy : la sortie d'un
+            // `post_tool_use` rejoint le résultat d'outil, via le point unique
+            // `hooks::append_tool_feedback`.
+            let mut result = result;
+            if event == HookEvent::PostToolUse {
+                let context = HookContext::new(event, &session_id)
+                    .with_tool(tool_name.clone(), tool_input.clone())
+                    .with_working_dir(working_dir.clone());
+                if let Some(feedback) = hook_manager
+                    .emit_capturing(event, context, recorder.as_ref(), &tool_call_id)
+                    .await
+                {
+                    result = crate::hooks::append_tool_feedback(result, &feedback);
+                }
+            } else if hook_manager.has_hooks(event) {
                 let context = HookContext::new(event, &session_id)
                     .with_tool(tool_name.clone(), tool_input.clone())
                     .with_working_dir(working_dir.clone());
@@ -256,13 +272,25 @@ impl<'a> ToolExecutionOperation<'a> {
                 .arguments
                 .as_ref()
                 .map(|arguments| serde_json::Value::Object(arguments.clone()));
-            if self.hook_manager.has_hooks(HookEvent::PreToolUse) {
+            // L'id de corrélation de l'appel : la clé sous laquelle le journal
+            // range ce que les hooks d'outil ont produit pour lui.
+            let tool_call_id = request_id.clone();
+            // Pas de garde `has_hooks` : en rejeu le manager sert la décision
+            // journalisée, y compris sur une machine dépourvue du hook. Le gate
+            // d'exécution vit dans `emit_blocking` — même site que la boucle
+            // legacy, aucune sémantique dupliquée ici.
+            {
                 let context = HookContext::new(HookEvent::PreToolUse, &session.id)
                     .with_tool(tool_call.name.to_string(), tool_input.clone())
                     .with_working_dir(session.working_dir.to_string_lossy().to_string());
                 if let HookDecision::Deny { reason, plugin } = self
                     .hook_manager
-                    .emit_blocking(HookEvent::PreToolUse, context)
+                    .emit_blocking(
+                        HookEvent::PreToolUse,
+                        context,
+                        self.turn_recorder().as_ref(),
+                        &request_id,
+                    )
                     .await
                 {
                     tracing::Span::current().record("error.type", "hook_denied");
@@ -298,7 +326,7 @@ impl<'a> ToolExecutionOperation<'a> {
                 );
                 ToolCallResult::from(Err(error))
             });
-            Ok(self.with_post_hooks(result, &tool_call, session, result_span))
+            Ok(self.with_post_hooks(result, &tool_call, session, result_span, tool_call_id))
         }
         .instrument(span)
         .await

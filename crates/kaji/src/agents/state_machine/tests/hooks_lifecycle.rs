@@ -120,33 +120,13 @@ async fn stop_hooks_allow_block_and_skip_non_stop_exits() -> Result<()> {
     Ok(())
 }
 
+/// `session_start` et `user_prompt_submit` ne sont plus émis par la machine :
+/// leur sortie entre dans le prompt, donc ils tournent dans l'enveloppe
+/// `Agent::reply()` — le seul point qui précède la persistance du message
+/// d'ouverture, et le seul commun aux deux boucles. Leur couverture vit dans
+/// `tests/hooks_lifecycle_test.rs`, qui les joue sur les deux boucles.
 #[tokio::test]
-async fn session_prompt_and_tool_hooks_fire_at_their_boundaries() -> Result<()> {
-    let session_start = HookTestEnv::new("SessionStart", LOG_AND_ALLOW_SCRIPT);
-    let (pipeline, api) = test_pipeline().await?;
-    let pipeline = pipeline.with_hook_manager(session_start.hook_manager());
-    api.on("first").reply("ok");
-    api.on("second").reply("ok");
-
-    pipeline.run(["/status"]).await?;
-    assert_eq!(session_start.invocations(), 1);
-    pipeline.run(["first", "second"]).await?;
-    assert_eq!(session_start.invocations(), 1);
-    assert_eq!(api.call_count(), 2);
-
-    let prompt_submit = HookTestEnv::new("UserPromptSubmit", LOG_AND_ALLOW_SCRIPT);
-    let (pipeline, api) = test_pipeline().await?;
-    let pipeline = pipeline.with_hook_manager(prompt_submit.hook_manager());
-    api.on("add one").call(ADD, value(1));
-    api.on("result: 1").reply("done");
-
-    pipeline.run(["/status"]).await?;
-    assert_eq!(prompt_submit.invocations(), 1);
-    let (_, result, _) = pipeline.run_reconstructing_each_step("add one").await?;
-    result.assert_message(-1, Agent, "done");
-    assert_eq!(api.call_count(), 2);
-    assert_eq!(prompt_submit.invocations(), 2);
-
+async fn pre_tool_hooks_block_at_the_tool_boundary() -> Result<()> {
     let pre_tool = HookTestEnv::new("PreToolUse", LOG_AND_BLOCK_SCRIPT);
     let (pipeline, api) = test_pipeline().await?;
     let pipeline = pipeline.with_hook_manager(pre_tool.hook_manager());

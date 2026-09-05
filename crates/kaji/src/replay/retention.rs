@@ -7,7 +7,7 @@
 //! l'historique de la session : permanente, et petite. Les payloads du rejeu
 //! — requêtes et réponses LLM, résultats d'outils, bloc mémoire, manifeste
 //! d'outils, bloc turn-context, résumés de compaction et de paires d'outils,
-//! lectures d'horloge, sorties d'agents de workflow — ne
+//! sorties de hooks, lectures d'horloge, sorties d'agents de workflow — ne
 //! servent qu'à rejouer ce tour à l'identique ; ce sont eux
 //! qui pèsent, et eux seuls que la rétention efface.
 //!
@@ -31,7 +31,8 @@ pub const RETENTION_DAYS_KEY: &str = "KAJI_REPLAY_RETENTION_DAYS";
 
 /// Les kinds effacés par la rétention. Tout kind absent de cette liste est
 /// permanent — la purge ne le voit jamais.
-pub const PURGEABLE_KINDS: [&str; 12] = [
+pub const PURGEABLE_KINDS: [&str; 13] = [
+    "hook_output",
     "llm_request",
     "llm_response",
     "toolshim_message",

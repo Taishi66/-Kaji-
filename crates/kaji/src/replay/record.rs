@@ -235,6 +235,33 @@ impl RecordSink {
         .await;
     }
 
+    /// Ce qu'un hook de cycle de vie a rendu : la sortie standard injectée dans
+    /// le prompt, ou la décision d'un `pre_tool_use` qui a bloqué. `addr` est
+    /// l'id d'appel d'outil pour les événements d'outil, vide pour ceux de tour.
+    pub async fn record_hook_output(
+        &self,
+        turn_seq: i64,
+        event: &str,
+        addr: &str,
+        stdout: Option<&str>,
+        denial: Option<(&str, &str)>,
+    ) {
+        let mut payload = json!({
+            "turn_seq": turn_seq,
+            "event": event,
+            "addr": addr,
+        });
+        let object = payload.as_object_mut().expect("json! built an object");
+        if let Some(stdout) = stdout {
+            object.insert("stdout".to_string(), json!(stdout));
+        }
+        if let Some((reason, plugin)) = denial {
+            object.insert("reason".to_string(), json!(reason));
+            object.insert("plugin".to_string(), json!(plugin));
+        }
+        self.append(turn_seq, "hook_output", payload).await;
+    }
+
     pub async fn record_condense_triggered(&self, turn_seq: i64, reason: &str) {
         self.append(
             turn_seq,
@@ -380,6 +407,25 @@ pub async fn record_tool_pair_summary(
     recorder
         .sink
         .record_tool_pair_summary(recorder.turn_seq, tool_call_id, summary)
+        .await;
+}
+
+/// Journalise ce qu'un hook a rendu au tour ouvert. Point unique appelé par
+/// [`crate::hooks::HookManager`] : les deux boucles passent par le même
+/// manager, donc aucune n'a à connaître l'adressage.
+pub async fn record_hook_output(
+    recorder: Option<&Arc<TurnRecorder>>,
+    event: &str,
+    addr: &str,
+    stdout: Option<&str>,
+    denial: Option<(&str, &str)>,
+) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    recorder
+        .sink
+        .record_hook_output(recorder.turn_seq, event, addr, stdout, denial)
         .await;
 }
 

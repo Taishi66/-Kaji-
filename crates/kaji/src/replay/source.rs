@@ -136,6 +136,26 @@ impl ReplaySource {
             .contains_key(&(self.turn(), tool_call_id.to_string()))
     }
 
+    /// La sortie standard que ce hook a rendue au tour rejoué. Absente ⇒ rien à
+    /// injecter, comme un hook qui n'avait rien écrit — jamais une exécution de
+    /// rattrapage : c'est ce qui rend un rejeu identique sur une machine où le
+    /// hook n'est pas installé.
+    pub fn hook_output(&self, event: &str, addr: &str) -> Option<String> {
+        self.hook_entry(event, addr)?.stdout.clone()
+    }
+
+    /// Le refus qu'un `pre_tool_use` a opposé à cet appel d'outil, tel qu'il a
+    /// été journalisé. Absent ⇒ l'appel avait le droit de tourner.
+    pub fn hook_denial(&self, event: &str, addr: &str) -> Option<(String, String)> {
+        self.hook_entry(event, addr)?.denial.clone()
+    }
+
+    fn hook_entry(&self, event: &str, addr: &str) -> Option<&crate::replay::cursor::HookOutput> {
+        self.cursor
+            .hook_outputs
+            .get(&(self.turn(), event.to_string(), addr.to_string()))
+    }
+
     pub fn condensed(&self) -> bool {
         self.cursor.condense_turns.contains(&self.turn())
     }
@@ -237,7 +257,49 @@ mod tests {
             workflow_recipes: HashMap::new(),
             workflow: None,
             workflow_final: None,
+            hook_outputs: HashMap::from([
+                (
+                    (2, "session_start".to_string(), String::new()),
+                    crate::replay::cursor::HookOutput {
+                        stdout: Some("contexte du tour 2".to_string()),
+                        denial: None,
+                    },
+                ),
+                (
+                    (2, "pre_tool_use".to_string(), "call-denied".to_string()),
+                    crate::replay::cursor::HookOutput {
+                        stdout: None,
+                        denial: Some(("outil interdit".to_string(), "user".to_string())),
+                    },
+                ),
+            ]),
         }
+    }
+
+    /// Ce qu'un hook a produit est servi par tour et par adresse, jamais
+    /// recalculé : c'est ce qui rend un rejeu identique sur une machine où le
+    /// hook n'existe pas.
+    #[test]
+    fn hook_output_and_denial_are_served_for_the_replayed_turn() {
+        let source = open(cursor(), 2);
+        assert_eq!(
+            source.hook_output("session_start", "").as_deref(),
+            Some("contexte du tour 2")
+        );
+        assert_eq!(
+            source.hook_denial("pre_tool_use", "call-denied"),
+            Some(("outil interdit".to_string(), "user".to_string()))
+        );
+        assert_eq!(
+            source.hook_denial("pre_tool_use", "call-allowed"),
+            None,
+            "un appel sans refus journalisé a le droit de tourner"
+        );
+        assert_eq!(
+            open(cursor(), 5).hook_output("session_start", ""),
+            None,
+            "un autre tour n'emprunte pas la sortie de celui-ci"
+        );
     }
 
     #[test]

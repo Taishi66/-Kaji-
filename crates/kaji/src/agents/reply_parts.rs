@@ -1175,6 +1175,7 @@ mod tests {
             workflow_recipes: HashMap::new(),
             workflow: None,
             workflow_final: None,
+            hook_outputs: HashMap::new(),
         };
         let position = Arc::new(ReplayPosition::default());
         position.begin_turn(1);
