@@ -13,6 +13,7 @@ use rmcp::model::Role;
 
 use crate::conversation::message::Message;
 use crate::session::session_manager::SessionEvent;
+use crate::workflow::events::workflow_of_turn_start;
 
 /// Le message user de chaque tour, tel qu'enregistré : la boucle journalise
 /// `AgentEvent::Message(user_message)` en tout premier événement d'un tour
@@ -43,6 +44,12 @@ pub fn user_turns(events: &[SessionEvent]) -> Vec<(i64, Message)> {
 /// Ce que le rejeu fait d'un tour du journal.
 pub enum PlannedTurn {
     Replay(Message),
+    /// Un tour d'orchestration, reconnu au champ `workflow` de son
+    /// `turn_start`. Il ne porte aucun message user à réinjecter : ce qui le
+    /// rejoue est le DAG du workflow, redéroulé sur le journal (spec, gates,
+    /// sorties d'agents). Sans ce cas, rejouer la session parente d'un
+    /// workflow sortirait vert sans avoir rien rejoué.
+    Workflow(String),
     Skipped,
 }
 
@@ -56,6 +63,11 @@ pub enum PlannedTurn {
 /// que le journal en portait un de plus que ce qui a été rejoué.
 pub fn replay_plan(events: &[SessionEvent], until: Option<i64>) -> Vec<(i64, PlannedTurn)> {
     let mut messages: HashMap<i64, Message> = user_turns(events).into_iter().collect();
+    let workflows: HashMap<i64, String> = events
+        .iter()
+        .filter(|event| event.kind == "turn_start")
+        .filter_map(|event| Some((event.turn_seq, workflow_of_turn_start(&event.payload_json)?)))
+        .collect();
     let mut turn_seqs: Vec<i64> = events
         .iter()
         .filter(|event| event.kind == "turn_start")
@@ -68,10 +80,13 @@ pub fn replay_plan(events: &[SessionEvent], until: Option<i64>) -> Vec<(i64, Pla
 
     turn_seqs
         .into_iter()
-        .map(|turn_seq| match messages.remove(&turn_seq) {
-            Some(message) => (turn_seq, PlannedTurn::Replay(message)),
-            None => (turn_seq, PlannedTurn::Skipped),
-        })
+        .map(
+            |turn_seq| match (workflows.get(&turn_seq), messages.remove(&turn_seq)) {
+                (Some(workflow), _) => (turn_seq, PlannedTurn::Workflow(workflow.clone())),
+                (None, Some(message)) => (turn_seq, PlannedTurn::Replay(message)),
+                (None, None) => (turn_seq, PlannedTurn::Skipped),
+            },
+        )
         .collect()
 }
 

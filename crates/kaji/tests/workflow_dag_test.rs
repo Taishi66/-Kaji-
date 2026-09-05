@@ -16,8 +16,8 @@ use kaji::session::session_manager::SessionType;
 use kaji::session::SessionManager;
 use kaji::workflow::events::WorkflowRecorder;
 use kaji::workflow::{
-    AgentRunRequest, AgentRunner, GateDecision, ReplayGates, StageState, SubagentRunner,
-    WorkflowExecutor,
+    AgentRunRequest, AgentRunner, GateDecision, GateVerdict, ReplayGates, ReplayRunner,
+    SubagentRunner, WorkflowExecutor, WorkflowOutcome,
 };
 use kaji_core::workflow::WorkflowSpec;
 use tempfile::TempDir;
@@ -98,15 +98,19 @@ impl Harness {
         }
     }
 
-    async fn recorder(&self) -> WorkflowRecorder {
-        WorkflowRecorder::open(Arc::clone(&self.session_manager), self.session_id.clone())
-            .await
-            .unwrap()
+    async fn recorder(&self, workflow: &str) -> WorkflowRecorder {
+        WorkflowRecorder::open(
+            Arc::clone(&self.session_manager),
+            self.session_id.clone(),
+            workflow,
+        )
+        .await
+        .unwrap()
     }
 }
 
 #[tokio::test]
-async fn a_recorded_workflow_replays_its_gates_without_asking_again() {
+async fn a_recorded_workflow_replays_hermetically_from_its_log() {
     let spec = WorkflowSpec::from_yaml(SPEC).unwrap();
 
     let recorded = Harness::new().await;
@@ -114,16 +118,24 @@ async fn a_recorded_workflow_replays_its_gates_without_asking_again() {
     let executor = WorkflowExecutor::new(
         spec.clone(),
         Arc::clone(&runner) as Arc<dyn AgentRunner>,
-        recorded.recorder().await,
+        recorded.recorder("livraison").await,
         recorded.session_id.clone(),
         recorded.working_dir.clone(),
-    );
+    )
+    .unwrap();
     let handle = executor.handle();
     let run = tokio::spawn(executor.run());
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(handle.approve("deploie"));
+    assert_eq!(handle.approve("deploie"), GateVerdict::Applied);
     let recorded_state = run.await.unwrap().unwrap();
-    assert_eq!(recorded_state.outcome(), StageState::Done);
+    assert_eq!(recorded_state.outcome(), WorkflowOutcome::Done);
+    assert_eq!(
+        runner.inputs.lock().unwrap()[1].1,
+        HashMap::from([("artefact".to_string(), "[compile]".to_string())])
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+        "la sortie de l'ancêtre est substituée dans l'entrée du descendant"
+    );
 
     let cursor = EventCursor::load(&recorded.session_manager, &recorded.session_id)
         .await
@@ -142,18 +154,24 @@ async fn a_recorded_workflow_replays_its_gates_without_asking_again() {
         "la sortie de l'agent est journalisée sous son kind purgeable"
     );
 
+    // Le rejeu tourne sur `ReplayRunner` : gates, sorties et issues viennent
+    // du journal, aucun sous-agent ne part. Le runner vivant sert de témoin —
+    // s'il est sollicité, le rejeu n'était pas hermétique.
     let replayed = Harness::new().await;
-    let replay_runner = Arc::new(EchoRunner::default());
+    let live = Arc::new(EchoRunner::default());
     let executor = WorkflowExecutor::replaying(
-        spec,
-        Arc::clone(&replay_runner) as Arc<dyn AgentRunner>,
+        cursor.workflow.clone().unwrap().spec,
+        Arc::new(ReplayRunner::from_cursor(&cursor)),
         Arc::new(ReplayGates::from_cursor(&cursor)),
-        replayed.recorder().await,
+        cursor.workflow_recipes.clone(),
+        replayed.recorder("livraison").await,
         replayed.session_id.clone(),
         replayed.working_dir.clone(),
-    );
-    assert!(
-        !executor.handle().approve("deploie"),
+    )
+    .unwrap();
+    assert_eq!(
+        executor.handle().approve("deploie"),
+        GateVerdict::Settled,
         "un rejeu n'accepte pas de décision vivante"
     );
 
@@ -162,17 +180,23 @@ async fn a_recorded_workflow_replays_its_gates_without_asking_again() {
         .expect("le rejeu n'attend aucune approbation")
         .unwrap();
 
-    assert_eq!(state, recorded_state);
-    assert_eq!(
-        *replay_runner.started.lock().unwrap(),
-        *runner.started.lock().unwrap()
+    // `duration_ms` est une horloge murale, pas un invariant de rejeu : la
+    // comparaison porte sur la topologie et les états.
+    assert_eq!(state.topology(), recorded_state.topology());
+    assert!(
+        live.started.lock().unwrap().is_empty(),
+        "aucun sous-agent réel ne part au rejeu : {:?}",
+        live.started.lock().unwrap()
     );
     assert_eq!(
-        replay_runner.inputs.lock().unwrap()[1].1,
-        HashMap::from([("artefact".to_string(), "[compile]".to_string())])
-            .into_iter()
-            .collect::<BTreeMap<_, _>>(),
-        "les artefacts sont substitués à l'identique au rejeu"
+        state
+            .stage("deploie")
+            .unwrap()
+            .agents
+            .first()
+            .and_then(|agent| agent.session_id.clone()),
+        Some("session_deploie_pousse".to_string()),
+        "la session enfant enregistrée est resservie, pas recréée"
     );
 }
 
@@ -188,6 +212,7 @@ async fn the_production_runner_links_the_child_session_to_the_workflow_session()
             source: kaji_core::workflow::AgentSource::Prompt("compile".to_string()),
             model: None,
             inputs: BTreeMap::new(),
+            recipe: None,
             parent_session_id: harness.session_id.clone(),
             working_dir: harness.working_dir.clone(),
         })

@@ -565,7 +565,7 @@ fn recorded_turns(events: &[SessionEvent]) -> Vec<(i64, Message)> {
         .into_iter()
         .filter_map(|(turn_seq, planned)| match planned {
             PlannedTurn::Replay(message) => Some((turn_seq, message)),
-            PlannedTurn::Skipped => None,
+            PlannedTurn::Workflow(_) | PlannedTurn::Skipped => None,
         })
         .collect()
 }

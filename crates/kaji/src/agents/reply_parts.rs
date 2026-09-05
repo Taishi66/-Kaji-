@@ -1171,6 +1171,10 @@ mod tests {
             approvals: HashMap::new(),
             gate_decisions: HashMap::new(),
             workflow_artifacts: HashMap::new(),
+            workflow_agents: HashMap::new(),
+            workflow_recipes: HashMap::new(),
+            workflow: None,
+            workflow_final: None,
         };
         let position = Arc::new(ReplayPosition::default());
         position.begin_turn(1);

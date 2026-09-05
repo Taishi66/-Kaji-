@@ -31,7 +31,7 @@ pub const RETENTION_DAYS_KEY: &str = "KAJI_REPLAY_RETENTION_DAYS";
 
 /// Les kinds effacés par la rétention. Tout kind absent de cette liste est
 /// permanent — la purge ne le voit jamais.
-pub const PURGEABLE_KINDS: [&str; 11] = [
+pub const PURGEABLE_KINDS: [&str; 12] = [
     "llm_request",
     "llm_response",
     "toolshim_message",
@@ -43,8 +43,10 @@ pub const PURGEABLE_KINDS: [&str; 11] = [
     "tool_pair_summary",
     "clock_reads",
     // Les six autres kinds de workflow sont structurels donc permanents ;
-    // celui-ci porte la sortie complète d'un agent.
+    // ces deux-là portent la sortie complète d'un agent et le contenu d'une
+    // recette.
     crate::workflow::events::WORKFLOW_ARTIFACT,
+    crate::workflow::events::WORKFLOW_RECIPE,
 ];
 
 const MS_PER_DAY: i64 = 24 * 60 * 60 * 1000;

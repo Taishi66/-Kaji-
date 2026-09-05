@@ -233,6 +233,10 @@ mod tests {
             ]),
             gate_decisions: HashMap::new(),
             workflow_artifacts: HashMap::new(),
+            workflow_agents: HashMap::new(),
+            workflow_recipes: HashMap::new(),
+            workflow: None,
+            workflow_final: None,
         }
     }
 

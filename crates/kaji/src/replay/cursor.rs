@@ -20,8 +20,12 @@ use crate::permission::Permission;
 use crate::replay::manifest::ToolManifest;
 use crate::session::session_manager::SessionEvent;
 use crate::session::SessionManager;
-use crate::workflow::events::{GATE_DECISION, WORKFLOW_ARTIFACT};
+use crate::workflow::events::{
+    AgentDone, WorkflowDone, WorkflowRecipeContent, WorkflowStarted, AGENT_DONE, GATE_DECISION,
+    WORKFLOW_ARTIFACT, WORKFLOW_DONE, WORKFLOW_RECIPE, WORKFLOW_STARTED,
+};
 use crate::workflow::gate::GateDecision;
+use crate::workflow::state::WorkflowState;
 
 /// Pourquoi une session ne peut pas être rejouée. Chaque cas a sa réponse
 /// utilisateur propre — le CLI de rejeu (Task 11) les traduit ; aucune n'est
@@ -106,10 +110,25 @@ pub struct EventCursor {
     /// stage n'ouvre sa gate qu'une fois par exécution et une session parente
     /// ne porte qu'un workflow, donc le nom du stage suffit comme clé.
     pub gate_decisions: HashMap<String, GateDecision>,
-    /// Les sorties d'agents du workflow, par `(stage, agent)`. Purgeable (c'est
-    /// le seul payload volumineux de la famille) : absent d'un journal
-    /// tronqué par la rétention.
+    /// Les sorties d'agents du workflow, par `(stage, agent)`. Purgeable
+    /// (payload volumineux) : absent d'un journal tronqué par la rétention.
     pub workflow_artifacts: HashMap<(String, String), String>,
+    /// L'issue enregistrée de chaque agent du workflow, par `(stage, agent)` :
+    /// état terminal, session enfant et compteurs. Permanent, contrairement à
+    /// la sortie — c'est ce que `ReplayRunner` sert pour rejouer un échec ou
+    /// une annulation sans relancer d'agent.
+    pub workflow_agents: HashMap<(String, String), AgentDone>,
+    /// Le contenu des recettes référencées par la spec, par chemin. Servi au
+    /// rejeu à la place du fichier sur disque : le fichier a pu changer depuis
+    /// l'enregistrement. Purgeable — un journal amputé refuse de rejouer.
+    pub workflow_recipes: HashMap<String, WorkflowRecipeContent>,
+    /// La spec du workflow enregistré sur ce tour, quand la session en porte
+    /// un. C'est elle que le rejeu redéroule — pas celle du disque.
+    pub workflow: Option<WorkflowStarted>,
+    /// L'état final enregistré du workflow. Le rejeu compare le sien à
+    /// celui-là : sans ce témoin, « rejoué sans divergence » ne serait
+    /// vérifiable contre rien.
+    pub workflow_final: Option<WorkflowState>,
 }
 
 /// Ce qu'un appel retrouve dans un index adressé par `(turn_seq, call_idx)` :
@@ -199,6 +218,10 @@ impl EventCursor {
             approvals: HashMap::new(),
             gate_decisions: HashMap::new(),
             workflow_artifacts: HashMap::new(),
+            workflow_agents: HashMap::new(),
+            workflow_recipes: HashMap::new(),
+            workflow: None,
+            workflow_final: None,
         };
 
         // Les deux moitiés d'un échange arrivent dans des events séparés :
@@ -371,6 +394,29 @@ impl EventCursor {
                     cursor
                         .workflow_artifacts
                         .insert((stage.to_string(), agent.to_string()), output.to_string());
+                }
+                AGENT_DONE => {
+                    let Ok(done) = serde_json::from_value::<AgentDone>(payload.clone()) else {
+                        continue;
+                    };
+                    cursor
+                        .workflow_agents
+                        .insert((done.stage.clone(), done.agent.clone()), done);
+                }
+                WORKFLOW_RECIPE => {
+                    let Ok(recipe) = serde_json::from_value::<WorkflowRecipeContent>(payload)
+                    else {
+                        continue;
+                    };
+                    cursor.workflow_recipes.insert(recipe.path.clone(), recipe);
+                }
+                WORKFLOW_STARTED => {
+                    cursor.workflow = serde_json::from_value::<WorkflowStarted>(payload).ok();
+                }
+                WORKFLOW_DONE => {
+                    cursor.workflow_final = serde_json::from_value::<WorkflowDone>(payload)
+                        .ok()
+                        .map(|done| done.state);
                 }
                 _ => {}
             }

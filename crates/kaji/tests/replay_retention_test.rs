@@ -17,13 +17,24 @@ use kaji::session::session_manager::{SessionType, DB_NAME, SESSIONS_FOLDER};
 use kaji::session::SessionManager;
 use tempfile::TempDir;
 
-const PERMANENT_KINDS: [&str; 6] = [
+/// Tout ce que la purge ne doit jamais toucher : les bornes et le contenu
+/// structurel d'un tour, et la topologie d'un workflow avec ses décisions de
+/// gates — six kinds petits et permanents, contrepartie des deux payloads
+/// volumineux (`workflow_artifact`, `workflow_recipe`) qui, eux, sont
+/// purgeables.
+const PERMANENT_KINDS: [&str; 12] = [
     "log_meta",
     "turn_start",
     "message",
     "usage",
     "condense_triggered",
     "turn_end",
+    "workflow_started",
+    "stage_started",
+    "agent_started",
+    "agent_done",
+    "gate_decision",
+    "workflow_done",
 ];
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -64,10 +75,10 @@ impl Fixture {
         self.session_manager
             .append_log_meta_if_absent(&session.id)
             .await?;
-        for kind in ["turn_start", "message"]
+        for kind in PERMANENT_KINDS
             .into_iter()
+            .filter(|kind| *kind != "log_meta")
             .chain(PURGEABLE_KINDS)
-            .chain(["usage", "condense_triggered", "turn_end"])
         {
             self.session_manager
                 .append_event(&session.id, 1, kind, "{}")
@@ -79,10 +90,10 @@ impl Fixture {
 
     /// Un second tour, écrit à l'instant courant : une session encore active.
     async fn append_turn(&self, session_id: &str, turn_seq: i64) -> Result<()> {
-        for kind in ["turn_start"]
+        for kind in PERMANENT_KINDS
             .into_iter()
+            .filter(|kind| *kind != "log_meta" && *kind != "message")
             .chain(PURGEABLE_KINDS)
-            .chain(["turn_end"])
         {
             self.session_manager
                 .append_event(session_id, turn_seq, kind, "{}")

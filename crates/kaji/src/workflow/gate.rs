@@ -37,6 +37,36 @@ impl GateDecision {
     }
 }
 
+/// Ce qu'une décision posée par [`crate::workflow::WorkflowHandle`] a produit.
+/// Trois cas et non deux : « ce workflow prend des décisions vivantes » ne dit
+/// pas si la décision servira, et T6 ne doit pas afficher « approuvé » sur un
+/// stage mort.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateVerdict {
+    /// Décision enregistrée : le stage la lira quand il ouvrira sa gate, ou
+    /// l'a déjà sous les yeux.
+    Applied,
+    /// Aucun stage de ce nom dans le workflow.
+    UnknownStage,
+    /// Le stage ne prendra plus de décision vivante : il est terminal, ou le
+    /// workflow rejoue (ses gates viennent du journal).
+    Settled,
+}
+
+impl GateVerdict {
+    pub fn applied(&self) -> bool {
+        *self == GateVerdict::Applied
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            GateVerdict::Applied => "décision enregistrée",
+            GateVerdict::UnknownStage => "stage inconnu",
+            GateVerdict::Settled => "stage déjà terminal ou rejeu",
+        }
+    }
+}
+
 #[async_trait]
 pub trait GateSource: Send + Sync {
     async fn decide(&self, stage: &str) -> Result<GateDecision>;

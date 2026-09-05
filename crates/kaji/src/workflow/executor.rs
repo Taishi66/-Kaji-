@@ -10,6 +10,11 @@
 //! partagés — `session_manager::append_event` pour le journal,
 //! `run_subagent_task` pour le spawn — donc rien à appliquer deux fois côté
 //! legacy/machine à états.
+//!
+//! Un workflow n'a pas de borne de temps propre : une gate sans approbateur
+//! attend indéfiniment, et [`WorkflowHandle::cancel`] est **la** sortie. Elle
+//! réveille l'attente de gate comme elle coupe un agent en vol, et laisse le
+//! workflow en `Cancelled` avec son journal fermé.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -18,16 +23,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
-use kaji_core::workflow::{AgentSpec, Gate, WorkflowSpec};
+use kaji_core::workflow::{AgentSource, AgentSpec, Gate, WorkflowSpec};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
+use crate::recipe::local_recipes::load_local_recipe_file;
 use crate::workflow::artifacts::Artifacts;
-use crate::workflow::events::{AgentDone, WorkflowRecorder};
-use crate::workflow::gate::{GateDecision, GateSource, LiveGates};
-use crate::workflow::runner::{AgentRunRequest, AgentRunner};
+use crate::workflow::events::{AgentDone, WorkflowRecipeContent, WorkflowRecorder};
+use crate::workflow::gate::{GateDecision, GateSource, GateVerdict, LiveGates};
+use crate::workflow::runner::{AgentRunRequest, AgentRunner, ResolvedRecipe};
 use crate::workflow::state::{AgentState, BudgetLimit, FailureCause, StageState, WorkflowState};
 
-/// Période de relecture de l'usage de la session enfant pour le budget
+/// Période de relecture de l'usage des sessions enfants pour le budget
 /// `max_tokens`. Le dépassement se constate donc à un demi-tick près : un
 /// budget de tokens borne le coût, il ne le coupe pas au token exact.
 const TOKEN_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -43,6 +50,13 @@ struct Shared {
     live_gates: Option<Arc<LiveGates>>,
 }
 
+/// D'où vient le contenu d'une recette référencée par la spec : du disque en
+/// exécution vivante — et il est alors journalisé —, du journal au rejeu.
+enum RecipeSource {
+    Disk,
+    Recorded(HashMap<String, WorkflowRecipeContent>),
+}
+
 /// La prise de contrôle d'un workflow en vol : approuver/refuser une gate,
 /// annuler, lire l'état. T5 (CLI) et T6 (mission-control) ne consomment que
 /// ça.
@@ -56,24 +70,36 @@ impl WorkflowHandle {
         self.shared.state.lock().expect("état empoisonné").clone()
     }
 
-    /// `false` quand le workflow ne prend pas de décision vivante — un rejeu
-    /// sert ses gates depuis le journal et n'attend personne.
-    pub fn approve(&self, stage: &str) -> bool {
+    pub fn approve(&self, stage: &str) -> GateVerdict {
         self.decide(stage, GateDecision::Approve)
     }
 
-    pub fn deny(&self, stage: &str) -> bool {
+    pub fn deny(&self, stage: &str) -> GateVerdict {
         self.decide(stage, GateDecision::Deny)
     }
 
-    fn decide(&self, stage: &str, decision: GateDecision) -> bool {
-        let Some(gates) = self.shared.live_gates.as_ref() else {
-            return false;
+    /// Trois verdicts et non un booléen : « ce workflow prend des décisions
+    /// vivantes » ne dit pas si la décision servira, et une décision posée sur
+    /// un stage mort ou inexistant ne doit pas s'afficher comme une
+    /// approbation.
+    fn decide(&self, stage: &str, decision: GateDecision) -> GateVerdict {
+        let snapshot = self.snapshot();
+        let Some(status) = snapshot.stage(stage) else {
+            return GateVerdict::UnknownStage;
         };
+        let Some(gates) = self.shared.live_gates.as_ref() else {
+            return GateVerdict::Settled;
+        };
+        if status.state.is_terminal() {
+            return GateVerdict::Settled;
+        }
         gates.record(stage, decision);
-        true
+        GateVerdict::Applied
     }
 
+    /// La seule sortie d'un workflow suspendu : une gate sans approbateur
+    /// attend sans borne, et c'est l'annulation qui la réveille. Elle coupe
+    /// aussi les agents en vol et empêche les stages restants de démarrer.
     pub fn cancel(&self) {
         self.shared.cancel.cancel();
     }
@@ -83,6 +109,7 @@ pub struct WorkflowExecutor {
     spec: WorkflowSpec,
     runner: Arc<dyn AgentRunner>,
     gates: Arc<dyn GateSource>,
+    recipes: RecipeSource,
     recorder: WorkflowRecorder,
     parent_session_id: String,
     working_dir: PathBuf,
@@ -98,7 +125,7 @@ impl WorkflowExecutor {
         recorder: WorkflowRecorder,
         parent_session_id: String,
         working_dir: PathBuf,
-    ) -> Self {
+    ) -> Result<Self> {
         let live_gates = Arc::new(LiveGates::default());
         let gates = Arc::clone(&live_gates) as Arc<dyn GateSource>;
         Self::build(
@@ -106,57 +133,68 @@ impl WorkflowExecutor {
             runner,
             gates,
             Some(live_gates),
+            RecipeSource::Disk,
             recorder,
             parent_session_id,
             working_dir,
         )
     }
 
-    /// Rejeu : les gates viennent du journal, aucune approbation n'est
-    /// redemandée.
+    /// Rejeu : les gates et les recettes viennent du journal, aucune
+    /// approbation n'est redemandée et aucun fichier n'est relu.
     pub fn replaying(
         spec: WorkflowSpec,
         runner: Arc<dyn AgentRunner>,
         gates: Arc<dyn GateSource>,
+        recipes: HashMap<String, WorkflowRecipeContent>,
         recorder: WorkflowRecorder,
         parent_session_id: String,
         working_dir: PathBuf,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::build(
             spec,
             runner,
             gates,
             None,
+            RecipeSource::Recorded(recipes),
             recorder,
             parent_session_id,
             working_dir,
         )
     }
 
+    /// La spec est validée **ici**, pas seulement à la lecture du YAML : elle
+    /// peut aussi venir d'un payload `workflow_started` relu, et un
+    /// `depends_on` pointant un stage disparu ferait sortir la boucle sans
+    /// avoir rien exécuté.
+    #[allow(clippy::too_many_arguments)]
     fn build(
         spec: WorkflowSpec,
         runner: Arc<dyn AgentRunner>,
         gates: Arc<dyn GateSource>,
         live_gates: Option<Arc<LiveGates>>,
+        recipes: RecipeSource,
         recorder: WorkflowRecorder,
         parent_session_id: String,
         working_dir: PathBuf,
-    ) -> Self {
+    ) -> Result<Self> {
+        spec.validate()?;
         let shared = Arc::new(Shared {
             state: Mutex::new(WorkflowState::from_spec(&spec)),
             artifacts: Mutex::new(Artifacts::default()),
             cancel: CancellationToken::new(),
             live_gates,
         });
-        Self {
+        Ok(Self {
             spec,
             runner,
             gates,
+            recipes,
             recorder,
             parent_session_id,
             working_dir,
             shared,
-        }
+        })
     }
 
     pub fn handle(&self) -> WorkflowHandle {
@@ -296,40 +334,63 @@ impl WorkflowExecutor {
             self.set_stage(index, StageState::Running);
         }
 
-        let outcomes = futures::future::join_all(
-            stage
-                .agents
-                .iter()
-                .map(|agent| self.run_agent(index, agent)),
+        // Le budget `max_tokens` appartient au stage, donc à tout son fan-out :
+        // un seul garde somme l'usage des sessions enfants et coupe les agents
+        // ensemble. Un garde par agent laisserait N agents dépenser N × le
+        // budget déclaré.
+        let overspent = CancellationToken::new();
+        let stage_over = CancellationToken::new();
+        let agents = async {
+            let outcomes = futures::future::join_all(
+                stage
+                    .agents
+                    .iter()
+                    .map(|agent| self.run_agent(index, agent, &overspent)),
+            )
+            .await;
+            stage_over.cancel();
+            outcomes
+        };
+        let (outcomes, ()) = futures::future::join(
+            agents,
+            self.token_budget_guard(index, stage.budgets.max_tokens, &overspent, &stage_over),
         )
         .await;
 
-        let state = outcomes
-            .iter()
-            .find_map(|outcome| match outcome {
-                AgentState::Failed(cause) => Some(StageState::Failed(cause.clone())),
-                AgentState::Cancelled => Some(StageState::Cancelled),
-                _ => None,
-            })
-            .unwrap_or(StageState::Done);
-
+        let state = stage_state(&outcomes);
         self.set_stage(index, state.clone());
         (index, state)
     }
 
-    async fn run_agent(&self, stage_index: usize, agent: &AgentSpec) -> AgentState {
+    async fn run_agent(
+        &self,
+        stage_index: usize,
+        agent: &AgentSpec,
+        overspent: &CancellationToken,
+    ) -> AgentState {
         let stage = &self.spec.stages[stage_index];
+        self.set_agent(stage_index, &agent.name, AgentState::Running);
+
+        let recipe = match self.resolve_recipe(&agent.source).await {
+            Ok(recipe) => recipe,
+            Err(error) => {
+                let state = AgentState::Failed(FailureCause::Error(error));
+                self.finish_agent(stage_index, agent, None, state.clone(), 0, 0)
+                    .await;
+                return state;
+            }
+        };
+
         let request = AgentRunRequest {
             stage: stage.name.clone(),
             agent: agent.name.clone(),
             source: agent.source.clone(),
             model: agent.model.clone(),
             inputs: self.substituted_inputs(agent),
+            recipe,
             parent_session_id: self.parent_session_id.clone(),
             working_dir: self.working_dir.clone(),
         };
-
-        self.set_agent(stage_index, &agent.name, AgentState::Running);
 
         let session_id = match self.runner.prepare(&request).await {
             Ok(session_id) => session_id,
@@ -345,6 +406,26 @@ impl WorkflowExecutor {
             .agent_started(&stage.name, &agent.name, &session_id, &agent.model)
             .await;
 
+        // Rejeu : l'issue vient du journal, aucun sous-agent ne part. Les
+        // gardes de budget ne sont pas armés — un budget dépassé à
+        // l'enregistrement est déjà dans l'état servi.
+        if let Some(recorded) = self.runner.recorded_outcome(&request).await {
+            if let Some(output) = &recorded.output {
+                self.publish_artifact(&stage.name, &agent.name, output)
+                    .await;
+            }
+            self.finish_agent(
+                stage_index,
+                agent,
+                Some(session_id),
+                recorded.state.clone(),
+                recorded.tokens,
+                0,
+            )
+            .await;
+            return recorded.state;
+        }
+
         let started = Instant::now();
         let cancel = self.shared.cancel.child_token();
         let mut run = Box::pin(self.runner.run(request, &session_id, cancel.clone()));
@@ -352,28 +433,29 @@ impl WorkflowExecutor {
         let interrupted = tokio::select! {
             result = &mut run => Ok(result),
             _ = duration_guard(stage.budgets.max_duration_s) => Err(Interrupt::Budget(BudgetLimit::Duration)),
-            _ = token_guard(self.runner.as_ref(), &session_id, stage.budgets.max_tokens) => {
-                Err(Interrupt::Budget(BudgetLimit::Tokens))
-            }
+            _ = overspent.cancelled() => Err(Interrupt::Budget(BudgetLimit::Tokens)),
             _ = self.shared.cancel.cancelled() => Err(Interrupt::Cancelled),
         };
 
         let state = match interrupted {
             Ok(Ok(output)) => {
-                self.shared
-                    .artifacts
-                    .lock()
-                    .expect("artefacts empoisonnés")
-                    .insert(&stage.name, &agent.name, output.clone());
-                self.recorder
-                    .artifact(&stage.name, &agent.name, &output)
+                self.publish_artifact(&stage.name, &agent.name, &output)
                     .await;
                 AgentState::Done
             }
-            Ok(Err(error)) => AgentState::Failed(FailureCause::Error(error)),
+            Ok(Err(error)) => self
+                .interruption(overspent)
+                .unwrap_or(AgentState::Failed(FailureCause::Error(error))),
             Err(interrupt) => {
                 cancel.cancel();
-                let _ = tokio::time::timeout(CANCEL_GRACE, &mut run).await;
+                if tokio::time::timeout(CANCEL_GRACE, &mut run).await.is_err() {
+                    warn!(
+                        stage = %stage.name,
+                        agent = %agent.name,
+                        session_id = %session_id,
+                        "workflow: agent toujours en vol après la grâce d'annulation — abandonné"
+                    );
+                }
                 match interrupt {
                     Interrupt::Budget(limit) => AgentState::Failed(FailureCause::Budget(limit)),
                     Interrupt::Cancelled => AgentState::Cancelled,
@@ -393,6 +475,102 @@ impl WorkflowExecutor {
         )
         .await;
         state
+    }
+
+    /// Un agent qui rend une erreur **parce qu'il vient d'être coupé** n'est
+    /// pas un agent en échec : le jeton tiré fait foi sur le message rendu.
+    /// Sans cette précédence, `cancel()` donnerait tantôt `Cancelled`, tantôt
+    /// `Failed(Error("annulé"))`, au gré du `select!`.
+    fn interruption(&self, overspent: &CancellationToken) -> Option<AgentState> {
+        if self.shared.cancel.is_cancelled() {
+            return Some(AgentState::Cancelled);
+        }
+        if overspent.is_cancelled() {
+            return Some(AgentState::Failed(FailureCause::Budget(
+                BudgetLimit::Tokens,
+            )));
+        }
+        None
+    }
+
+    /// Le contenu d'une recette est de l'état externe qui entre dans le prompt
+    /// de l'agent : il est journalisé à l'exécution et servi au rejeu, jamais
+    /// relu du disque une seconde fois.
+    async fn resolve_recipe(&self, source: &AgentSource) -> Result<Option<ResolvedRecipe>, String> {
+        let AgentSource::Recipe(path) = source else {
+            return Ok(None);
+        };
+        let path = path.to_string_lossy().to_string();
+        match &self.recipes {
+            RecipeSource::Recorded(recorded) => recorded
+                .get(&path)
+                .map(|recipe| Some(ResolvedRecipe::from(recipe)))
+                .ok_or_else(|| {
+                    format!(
+                        "recette « {path} » absente du journal : le rejeu ne relit pas le disque"
+                    )
+                }),
+            RecipeSource::Disk => {
+                let file = load_local_recipe_file(&path).map_err(|error| error.to_string())?;
+                let recipe = WorkflowRecipeContent {
+                    path,
+                    parent_dir: file.parent_dir.to_string_lossy().to_string(),
+                    content: file.content,
+                };
+                self.recorder.recipe(&recipe).await;
+                Ok(Some(ResolvedRecipe::from(&recipe)))
+            }
+        }
+    }
+
+    async fn publish_artifact(&self, stage: &str, agent: &str, output: &str) {
+        self.shared
+            .artifacts
+            .lock()
+            .expect("artefacts empoisonnés")
+            .insert(stage, agent, output.to_string());
+        self.recorder.artifact(stage, agent, output).await;
+    }
+
+    /// Somme l'usage des sessions enfants du stage — celles déjà préparées —
+    /// et coupe tout le fan-out au franchissement. Le garde s'arrête avec le
+    /// stage : il ne survit pas à ses agents.
+    async fn token_budget_guard(
+        &self,
+        stage_index: usize,
+        max_tokens: Option<i64>,
+        overspent: &CancellationToken,
+        stage_over: &CancellationToken,
+    ) {
+        let Some(max_tokens) = max_tokens else {
+            return;
+        };
+        loop {
+            tokio::select! {
+                _ = stage_over.cancelled() => return,
+                _ = tokio::time::sleep(TOKEN_POLL_INTERVAL) => {}
+            }
+            if self.stage_tokens(stage_index).await > max_tokens {
+                overspent.cancel();
+                return;
+            }
+        }
+    }
+
+    async fn stage_tokens(&self, stage_index: usize) -> i64 {
+        let sessions: Vec<String> = {
+            let workflow = self.shared.state.lock().expect("état empoisonné");
+            workflow.stages[stage_index]
+                .agents
+                .iter()
+                .filter_map(|agent| agent.session_id.clone())
+                .collect()
+        };
+        let mut total = 0;
+        for session in sessions {
+            total += self.runner.tokens_used(&session).await;
+        }
+        total
     }
 
     fn substituted_inputs(&self, agent: &AgentSpec) -> std::collections::BTreeMap<String, String> {
@@ -479,6 +657,23 @@ impl WorkflowExecutor {
     }
 }
 
+/// L'état d'un stage à partir de celui de ses agents, par précédence
+/// `Failed > Cancelled > Done`. La cause remontée ne dépend pas du rang de
+/// l'agent dans le document : un échec de budget reste nommé même déclaré
+/// après un agent annulé.
+fn stage_state(outcomes: &[AgentState]) -> StageState {
+    if let Some(cause) = outcomes.iter().find_map(|outcome| match outcome {
+        AgentState::Failed(cause) => Some(cause.clone()),
+        _ => None,
+    }) {
+        return StageState::Failed(cause);
+    }
+    if outcomes.contains(&AgentState::Cancelled) {
+        return StageState::Cancelled;
+    }
+    StageState::Done
+}
+
 enum Interrupt {
     Budget(BudgetLimit),
     Cancelled,
@@ -488,19 +683,7 @@ enum Interrupt {
 /// le garde ne se termine pas.
 async fn duration_guard(max_duration_s: Option<i64>) {
     match max_duration_s {
-        Some(seconds) => tokio::time::sleep(Duration::from_secs(seconds.max(0) as u64)).await,
+        Some(seconds) => tokio::time::sleep(Duration::from_secs(seconds as u64)).await,
         None => std::future::pending().await,
-    }
-}
-
-async fn token_guard(runner: &dyn AgentRunner, session_id: &str, max_tokens: Option<i64>) {
-    let Some(max_tokens) = max_tokens else {
-        return std::future::pending().await;
-    };
-    loop {
-        tokio::time::sleep(TOKEN_POLL_INTERVAL).await;
-        if runner.tokens_used(session_id).await > max_tokens {
-            return;
-        }
     }
 }

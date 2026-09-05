@@ -12,7 +12,7 @@
 //! l'agent tourne, et au garde de budget de tokens de lire l'usage de cette
 //! session pendant qu'elle tourne.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -27,10 +27,12 @@ use crate::config::permission::PermissionManager;
 use crate::config::{Config, KajiMode};
 use crate::providers;
 use crate::recipe::build_recipe::build_recipe_from_template;
-use crate::recipe::local_recipes::load_local_recipe_file;
 use crate::recipe::Recipe;
+use crate::replay::cursor::EventCursor;
 use crate::session::extension_data::EnabledExtensionsState;
 use crate::session::{SessionManager, SessionType};
+use crate::workflow::events::{AgentDone, WorkflowRecipeContent};
+use crate::workflow::state::{AgentState, FailureCause};
 
 #[derive(Debug, Clone)]
 pub struct AgentRunRequest {
@@ -40,6 +42,11 @@ pub struct AgentRunRequest {
     pub model: Option<String>,
     /// Entrées déjà substituées : plus aucun `{{stage.agent.output}}` ici.
     pub inputs: BTreeMap<String, String>,
+    /// La recette, résolue par l'exécuteur — du disque en exécution vivante,
+    /// du journal au rejeu. Le runner ne lit jamais le fichier lui-même :
+    /// c'est ce qui empêche une recette éditée entre deux runs de changer
+    /// silencieusement le prompt d'un rejeu.
+    pub recipe: Option<ResolvedRecipe>,
     pub parent_session_id: String,
     pub working_dir: PathBuf,
 }
@@ -63,6 +70,34 @@ impl AgentRunRequest {
     }
 }
 
+/// Une recette prête à être rendue : son contenu et le dossier depuis lequel
+/// elle résout ses inclusions.
+#[derive(Debug, Clone)]
+pub struct ResolvedRecipe {
+    pub content: String,
+    pub parent_dir: PathBuf,
+}
+
+impl From<&WorkflowRecipeContent> for ResolvedRecipe {
+    fn from(recipe: &WorkflowRecipeContent) -> Self {
+        Self {
+            content: recipe.content.clone(),
+            parent_dir: PathBuf::from(&recipe.parent_dir),
+        }
+    }
+}
+
+/// L'issue enregistrée d'un agent, telle que le journal la rend au rejeu.
+/// Elle porte ce que `run` ne sait pas exprimer — un dépassement de budget,
+/// une annulation — pour qu'un rejeu reproduise l'état exact plutôt qu'une
+/// approximation en erreur.
+#[derive(Debug, Clone)]
+pub struct RecordedOutcome {
+    pub state: AgentState,
+    pub output: Option<String>,
+    pub tokens: i64,
+}
+
 #[async_trait]
 pub trait AgentRunner: Send + Sync {
     /// Crée la session enfant de l'agent et rend son id.
@@ -80,6 +115,14 @@ pub trait AgentRunner: Send + Sync {
     /// Tokens cumulés de la session enfant, lus pour le budget `max_tokens`.
     async fn tokens_used(&self, _session_id: &str) -> i64 {
         0
+    }
+
+    /// L'issue de cet agent servie depuis un journal. `None` en exécution
+    /// vivante : l'état se construit alors de `run` et des gardes de budget.
+    /// `Some` court-circuite le lancement — c'est ce qui rend le rejeu d'un
+    /// workflow hermétique.
+    async fn recorded_outcome(&self, _request: &AgentRunRequest) -> Option<RecordedOutcome> {
+        None
     }
 }
 
@@ -111,16 +154,17 @@ impl SubagentRunner {
                 .build()
                 .map_err(|error| error.to_string()),
             AgentSource::Recipe(path) => {
-                let file = load_local_recipe_file(&path.to_string_lossy())
-                    .map_err(|error| error.to_string())?;
+                let recipe = request.recipe.as_ref().ok_or_else(|| {
+                    format!("recette « {} » non résolue par l'exécuteur", path.display())
+                })?;
                 let parameters: Vec<(String, String)> = request
                     .inputs
                     .iter()
                     .map(|(name, value)| (name.clone(), value.clone()))
                     .collect();
                 build_recipe_from_template(
-                    file.content,
-                    &file.parent_dir,
+                    recipe.content.clone(),
+                    &recipe.parent_dir,
                     parameters,
                     None::<fn(&str, &str) -> Result<String, anyhow::Error>>,
                 )
@@ -244,5 +288,102 @@ impl AgentRunner for SubagentRunner {
             .ok()
             .and_then(|totals| totals.accumulated_usage.total_tokens)
             .unwrap_or(0) as i64
+    }
+}
+
+/// Le runner du rejeu : il sert la session enfant, la sortie et l'issue de
+/// chaque agent depuis `agent_done` / `workflow_artifact`, et ne lance **aucun**
+/// sous-agent. Sans lui, rejouer la session parente d'un workflow relancerait
+/// de vrais agents, de vrais appels LLM et produirait des sorties différentes —
+/// les entrées substituées des stages descendants divergeraient en silence.
+///
+/// Une clé absente du journal est une erreur nommée, jamais un retour au
+/// lancement : un journal purgé de ses artefacts ne rejoue pas, il le dit.
+pub struct ReplayRunner {
+    agents: HashMap<(String, String), AgentDone>,
+    artifacts: HashMap<(String, String), String>,
+}
+
+impl ReplayRunner {
+    pub fn new(
+        agents: HashMap<(String, String), AgentDone>,
+        artifacts: HashMap<(String, String), String>,
+    ) -> Self {
+        Self { agents, artifacts }
+    }
+
+    pub fn from_cursor(cursor: &EventCursor) -> Self {
+        Self::new(
+            cursor.workflow_agents.clone(),
+            cursor.workflow_artifacts.clone(),
+        )
+    }
+
+    fn recorded(&self, request: &AgentRunRequest) -> Option<&AgentDone> {
+        self.agents
+            .get(&(request.stage.clone(), request.agent.clone()))
+    }
+}
+
+#[async_trait]
+impl AgentRunner for ReplayRunner {
+    async fn prepare(&self, request: &AgentRunRequest) -> Result<String, String> {
+        let Some(done) = self.recorded(request) else {
+            return Err(format!(
+                "agent « {} » absent du journal : le rejeu ne lance aucun sous-agent",
+                request.label()
+            ));
+        };
+        match (&done.session_id, &done.state) {
+            (Some(session_id), _) => Ok(session_id.clone()),
+            // L'agent avait déjà échoué à la préparation à l'enregistrement :
+            // le rejeu rejoue cet échec-là, avec son message.
+            (None, AgentState::Failed(FailureCause::Error(error))) => Err(error.clone()),
+            (None, state) => Err(format!(
+                "agent « {} » enregistré {} sans session enfant",
+                request.label(),
+                state.label()
+            )),
+        }
+    }
+
+    async fn run(
+        &self,
+        request: AgentRunRequest,
+        _session_id: &str,
+        _cancel: CancellationToken,
+    ) -> Result<String, String> {
+        Err(format!(
+            "agent « {} » : le rejeu sert le journal, il ne lance pas de sous-agent",
+            request.label()
+        ))
+    }
+
+    async fn tokens_used(&self, session_id: &str) -> i64 {
+        self.agents
+            .values()
+            .find(|done| done.session_id.as_deref() == Some(session_id))
+            .map(|done| done.tokens)
+            .unwrap_or(0)
+    }
+
+    async fn recorded_outcome(&self, request: &AgentRunRequest) -> Option<RecordedOutcome> {
+        let done = self.recorded(request)?;
+        let key = (request.stage.clone(), request.agent.clone());
+        let output = self.artifacts.get(&key).cloned();
+        // Une sortie purgée sur un agent qui avait réussi ne se remplace pas
+        // par du vide : les descendants la substituent dans leur prompt.
+        let state = match (&done.state, &output) {
+            (AgentState::Done, None) => AgentState::Failed(FailureCause::Error(format!(
+                "sortie de « {}.{} » purgée du journal : le rejeu n'a rien à substituer",
+                request.stage, request.agent
+            ))),
+            (state, _) => state.clone(),
+        };
+        Some(RecordedOutcome {
+            state,
+            output,
+            tokens: done.tokens,
+        })
     }
 }

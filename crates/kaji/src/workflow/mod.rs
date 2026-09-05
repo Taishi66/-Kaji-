@@ -15,8 +15,11 @@ pub mod state;
 mod tests;
 
 pub use executor::{WorkflowExecutor, WorkflowHandle};
-pub use gate::{GateDecision, GateSource, LiveGates, ReplayGates};
-pub use runner::{AgentRunRequest, AgentRunner, SubagentRunner};
+pub use gate::{GateDecision, GateSource, GateVerdict, LiveGates, ReplayGates};
+pub use runner::{
+    AgentRunRequest, AgentRunner, RecordedOutcome, ReplayRunner, ResolvedRecipe, SubagentRunner,
+};
 pub use state::{
-    AgentState, AgentStatus, BudgetLimit, FailureCause, StageState, StageStatus, WorkflowState,
+    AgentState, AgentStatus, BudgetLimit, FailureCause, StageState, StageStatus, WorkflowOutcome,
+    WorkflowState,
 };

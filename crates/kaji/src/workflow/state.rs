@@ -94,6 +94,10 @@ impl StageState {
     }
 }
 
+/// `tokens` et `duration_ms` sont des **mesures**, pas des invariants de
+/// rejeu : un rejeu resert les compteurs du journal mais son horloge murale
+/// lui est propre. Une égalité d'états entre deux exécutions se compare sur la
+/// topologie et les états, jamais sur ces deux champs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStatus {
     pub name: String,
@@ -116,6 +120,10 @@ pub struct WorkflowState {
     pub workflow: String,
     pub stages: Vec<StageStatus>,
 }
+
+/// Un stage réduit à ce qu'un rejeu doit reproduire : son nom, son état, et
+/// l'état de chacun de ses agents.
+pub type StageTopology = (String, StageState, Vec<(String, AgentState)>);
 
 impl WorkflowState {
     pub fn from_spec(spec: &kaji_core::workflow::WorkflowSpec) -> Self {
@@ -148,23 +156,73 @@ impl WorkflowState {
         self.stages.iter().find(|stage| stage.name == name)
     }
 
-    /// L'état d'ensemble : `Failed` dès qu'un stage a échoué, `Cancelled` si
-    /// l'un a été annulé (gate refusée, annulation), `Done` sinon.
-    pub fn outcome(&self) -> StageState {
-        if let Some(failed) = self
-            .stages
+    /// Ce qu'un rejeu doit reproduire à l'identique : la topologie et les
+    /// états, sans les mesures. `duration_ms` est une horloge murale et
+    /// `tokens` un compteur — les comparer ferait échouer le test du
+    /// déterminisme sur les deux champs qui n'en font pas partie.
+    pub fn topology(&self) -> Vec<StageTopology> {
+        self.stages
             .iter()
-            .find(|stage| matches!(stage.state, StageState::Failed(_)))
-        {
-            return failed.state.clone();
+            .map(|stage| {
+                (
+                    stage.name.clone(),
+                    stage.state.clone(),
+                    stage
+                        .agents
+                        .iter()
+                        .map(|agent| (agent.name.clone(), agent.state.clone()))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// Le verdict d'ensemble, par précédence `Failed > Cancelled > Done` et
+    /// insensible à l'ordre de déclaration. Un stage resté non terminal —
+    /// `Pending`, `Running`, `Waiting` — est un **échec nommé** : la boucle a
+    /// pu sortir sans l'exécuter, et rendre `Done` ferait sortir en 0 un
+    /// workflow qui n'a rien fait.
+    pub fn outcome(&self) -> WorkflowOutcome {
+        if let Some(cause) = self.stages.iter().find_map(|stage| match &stage.state {
+            StageState::Failed(cause) => Some(cause.clone()),
+            _ => None,
+        }) {
+            return WorkflowOutcome::Failed(cause);
+        }
+        if let Some(stage) = self.stages.iter().find(|stage| !stage.state.is_terminal()) {
+            return WorkflowOutcome::Failed(FailureCause::Error(format!(
+                "stage « {} » n'a jamais abouti ({})",
+                stage.name,
+                stage.state.label()
+            )));
         }
         if self
             .stages
             .iter()
             .any(|stage| stage.state == StageState::Cancelled)
         {
-            return StageState::Cancelled;
+            return WorkflowOutcome::Cancelled;
         }
-        StageState::Done
+        WorkflowOutcome::Done
+    }
+}
+
+/// Le verdict d'un **workflow**, distinct de l'état d'un stage : `Pending` y
+/// est inexprimable, et T5 le mappe directement sur un code de sortie.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowOutcome {
+    Done,
+    Failed(FailureCause),
+    Cancelled,
+}
+
+impl WorkflowOutcome {
+    pub fn label(&self) -> &'static str {
+        match self {
+            WorkflowOutcome::Done => "terminé",
+            WorkflowOutcome::Failed(_) => "échoué",
+            WorkflowOutcome::Cancelled => "annulé",
+        }
     }
 }

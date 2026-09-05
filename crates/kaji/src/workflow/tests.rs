@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use kaji_core::workflow::WorkflowSpec;
+use kaji_core::workflow::{AgentSource, AgentSpec, Budgets, Gate, Stage, WorkflowSpec};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -19,11 +19,15 @@ use crate::config::KajiMode;
 use crate::replay::cursor::EventCursor;
 use crate::session::session_manager::SessionType;
 use crate::session::SessionManager;
-use crate::workflow::events::WorkflowRecorder;
+use crate::workflow::events::{
+    WorkflowRecorder, AGENT_DONE, AGENT_STARTED, STAGE_STARTED, WORKFLOW_KINDS, WORKFLOW_STARTED,
+};
 use crate::workflow::executor::WorkflowExecutor;
-use crate::workflow::gate::{GateDecision, ReplayGates};
-use crate::workflow::runner::{AgentRunRequest, AgentRunner};
-use crate::workflow::state::{AgentState, BudgetLimit, FailureCause, StageState};
+use crate::workflow::gate::{GateDecision, GateVerdict, ReplayGates};
+use crate::workflow::runner::{AgentRunRequest, AgentRunner, ReplayRunner};
+use crate::workflow::state::{
+    AgentState, BudgetLimit, FailureCause, StageState, WorkflowOutcome, WorkflowState,
+};
 
 /// Ce qu'un agent fixture fait de son tour.
 #[derive(Clone)]
@@ -34,10 +38,16 @@ enum Script {
     /// Ne rend jamais rien tant que son jeton d'annulation n'est pas tiré :
     /// c'est la cible des tests de budget.
     Hang,
-    /// Consomme des tokens à chaque relecture d'usage.
+    /// Déclare une consommation fixe sur sa session enfant, puis attend son
+    /// annulation. La valeur ne bouge pas d'une relecture à l'autre : un
+    /// compteur d'usage est une lecture pure, et un test de budget doit
+    /// dépendre de la valeur lue, jamais du nombre de lectures.
     Burn {
-        per_poll: i64,
+        tokens: i64,
     },
+    /// Ne rend sa sortie qu'une fois l'autre branche partie : un stage qui
+    /// attendrait son voisin au lieu de tourner avec lui bloque le test.
+    Rendezvous(Arc<tokio::sync::Barrier>),
 }
 
 #[derive(Default)]
@@ -126,26 +136,30 @@ impl AgentRunner for FixtureRunner {
                 cancel.cancelled().await;
                 Err("annulé".to_string())
             }
-            Script::Burn { per_poll } => {
+            Script::Burn { tokens } => {
                 self.journal
                     .lock()
                     .unwrap()
                     .tokens
-                    .insert(session_id.to_string(), per_poll);
+                    .insert(session_id.to_string(), tokens);
                 cancel.cancelled().await;
                 Err("annulé".to_string())
+            }
+            Script::Rendezvous(barrier) => {
+                barrier.wait().await;
+                Ok(format!("[{}]", request.agent))
             }
         }
     }
 
     async fn tokens_used(&self, session_id: &str) -> i64 {
-        let mut journal = self.journal.lock().unwrap();
-        let Some(tokens) = journal.tokens.get_mut(session_id) else {
-            return 0;
-        };
-        let seen = *tokens;
-        *tokens += seen;
-        seen
+        self.journal
+            .lock()
+            .unwrap()
+            .tokens
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -187,19 +201,28 @@ impl Fixture {
     }
 
     async fn recorder(&self) -> WorkflowRecorder {
-        WorkflowRecorder::open(Arc::clone(&self.session_manager), self.session_id.clone())
-            .await
-            .unwrap()
+        self.open_recorder("test").await.unwrap()
+    }
+
+    async fn open_recorder(&self, workflow: &str) -> anyhow::Result<WorkflowRecorder> {
+        WorkflowRecorder::open(
+            Arc::clone(&self.session_manager),
+            self.session_id.clone(),
+            workflow,
+        )
+        .await
     }
 
     async fn executor(&self, spec: WorkflowSpec, runner: Arc<FixtureRunner>) -> WorkflowExecutor {
+        let recorder = self.open_recorder(&spec.name).await.unwrap();
         WorkflowExecutor::new(
             spec,
             runner,
-            self.recorder().await,
+            recorder,
             self.session_id.clone(),
             self.working_dir.clone(),
         )
+        .unwrap()
     }
 
     async fn kinds(&self) -> Vec<String> {
@@ -280,7 +303,7 @@ async fn a_dag_runs_topologically_and_feeds_artifacts_to_its_descendants() {
 
     let state = executor.run().await.unwrap();
 
-    assert_eq!(state.outcome(), StageState::Done);
+    assert_eq!(state.outcome(), WorkflowOutcome::Done);
     let started = runner.started();
     assert_eq!(
         started.last().map(String::as_str),
@@ -317,10 +340,10 @@ async fn a_gate_holds_the_stage_until_it_is_approved() {
         StageState::Waiting
     );
 
-    assert!(handle.approve("deploie"));
+    assert_eq!(handle.approve("deploie"), GateVerdict::Applied);
     let state = run.await.unwrap().unwrap();
 
-    assert_eq!(state.outcome(), StageState::Done);
+    assert_eq!(state.outcome(), WorkflowOutcome::Done);
     assert_eq!(
         runner.started(),
         vec![
@@ -340,7 +363,7 @@ async fn a_denied_gate_cancels_the_stage_and_everything_downstream() {
     let run = tokio::spawn(executor.run());
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(handle.deny("deploie"));
+    assert_eq!(handle.deny("deploie"), GateVerdict::Applied);
     let state = run.await.unwrap().unwrap();
 
     assert_eq!(state.stage("build").unwrap().state, StageState::Done);
@@ -398,8 +421,7 @@ stages:
         prompt: consomme
 "#;
     let fixture = Fixture::new().await;
-    let runner =
-        Arc::new(FixtureRunner::new().with("cher.gourmand", Script::Burn { per_poll: 80 }));
+    let runner = Arc::new(FixtureRunner::new().with("cher.gourmand", Script::Burn { tokens: 150 }));
     let executor = fixture.executor(spec(yaml), Arc::clone(&runner)).await;
 
     let state = executor.run().await.unwrap();
@@ -407,6 +429,51 @@ stages:
     assert_eq!(
         state.stage("cher").unwrap().agents[0].state,
         AgentState::Failed(FailureCause::Budget(BudgetLimit::Tokens))
+    );
+}
+
+/// C-1 : `max_tokens` est porté par le **stage**, donc partagé par ses agents.
+/// Deux agents sous le budget chacun mais au-dessus à eux deux doivent être
+/// coupés tous les deux — sinon un fan-out de N agents dépense N × le budget.
+#[tokio::test]
+async fn a_token_budget_is_shared_across_the_agents_of_its_stage() {
+    let yaml = r#"
+name: borne
+stages:
+  - name: cher
+    budgets:
+      max_tokens: 100
+    agents:
+      - name: gauche
+        prompt: consomme
+      - name: droite
+        prompt: consomme
+"#;
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(
+        FixtureRunner::new()
+            .with("cher.gauche", Script::Burn { tokens: 60 })
+            .with("cher.droite", Script::Burn { tokens: 60 }),
+    );
+    let executor = fixture.executor(spec(yaml), Arc::clone(&runner)).await;
+
+    let state = tokio::time::timeout(Duration::from_secs(5), executor.run())
+        .await
+        .expect("le budget du stage est partagé : 60 + 60 > 100 coupe le fan-out")
+        .unwrap();
+
+    let stage = state.stage("cher").unwrap();
+    for agent in &stage.agents {
+        assert_eq!(
+            agent.state,
+            AgentState::Failed(FailureCause::Budget(BudgetLimit::Tokens)),
+            "l'agent « {} » devait être coupé par le budget du stage",
+            agent.name
+        );
+    }
+    assert_eq!(
+        stage.state,
+        StageState::Failed(FailureCause::Budget(BudgetLimit::Tokens))
     );
 }
 
@@ -448,6 +515,7 @@ async fn the_v2_kinds_are_journalled_in_execution_order() {
         kinds,
         vec![
             "log_meta",
+            "turn_start",
             "workflow_started",
             "stage_started",
             "agent_started",
@@ -463,6 +531,7 @@ async fn the_v2_kinds_are_journalled_in_execution_order() {
             "workflow_artifact",
             "agent_done",
             "workflow_done",
+            "turn_end",
         ]
         .into_iter()
         .map(String::from)
@@ -476,6 +545,33 @@ async fn the_v2_kinds_are_journalled_in_execution_order() {
             .is_some_and(|id| !id.is_empty())),
         "chaque agent_started porte l'id de la session enfant"
     );
+}
+
+/// M-1 : `WORKFLOW_KINDS` prétend énumérer les kinds de l'orchestration. Sans
+/// lecteur, la liste dérive au premier kind ajouté ailleurs.
+#[tokio::test]
+async fn the_recorder_writes_no_kind_outside_the_declared_family() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = fixture
+        .executor(spec(FAN_OUT_THEN_JOIN), Arc::clone(&runner))
+        .await;
+    executor.run().await.unwrap();
+
+    let journal = fixture.kinds().await;
+    let bornes = ["log_meta", "turn_start", "turn_end"];
+    for kind in &journal {
+        assert!(
+            bornes.contains(&kind.as_str()) || WORKFLOW_KINDS.contains(&kind.as_str()),
+            "kind « {kind} » écrit hors de WORKFLOW_KINDS"
+        );
+    }
+    for kind in [WORKFLOW_STARTED, STAGE_STARTED, AGENT_STARTED, AGENT_DONE] {
+        assert!(
+            journal.iter().any(|written| written == kind),
+            "le kind structurel « {kind} » n'a pas été écrit"
+        );
+    }
 }
 
 #[tokio::test]
@@ -505,13 +601,16 @@ async fn a_replayed_gate_comes_from_the_log_instead_of_a_live_decision() {
         spec(GATED),
         Arc::clone(&replay_runner) as Arc<dyn AgentRunner>,
         Arc::new(ReplayGates::from_cursor(&cursor)),
+        cursor.workflow_recipes.clone(),
         replayed.recorder().await,
         replayed.session_id.clone(),
         replayed.working_dir.clone(),
-    );
+    )
+    .unwrap();
     let replay_handle = executor.handle();
-    assert!(
-        !replay_handle.approve("deploie"),
+    assert_eq!(
+        replay_handle.approve("deploie"),
+        GateVerdict::Settled,
         "un rejeu ne prend pas de décision vivante"
     );
 
@@ -520,7 +619,7 @@ async fn a_replayed_gate_comes_from_the_log_instead_of_a_live_decision() {
         .expect("le rejeu ne doit pas attendre d'approbation")
         .unwrap();
 
-    assert_eq!(state.outcome(), StageState::Done);
+    assert_eq!(state.outcome(), WorkflowOutcome::Done);
     assert_eq!(replay_runner.started(), runner.started());
 }
 
@@ -532,10 +631,12 @@ async fn a_replay_without_the_recorded_gate_fails_the_stage_instead_of_waiting()
         spec(GATED),
         Arc::clone(&runner) as Arc<dyn AgentRunner>,
         Arc::new(ReplayGates::new(HashMap::new())),
+        HashMap::new(),
         fixture.recorder().await,
         fixture.session_id.clone(),
         fixture.working_dir.clone(),
-    );
+    )
+    .unwrap();
 
     let state = tokio::time::timeout(Duration::from_secs(5), executor.run())
         .await
@@ -547,4 +648,580 @@ async fn a_replay_without_the_recorded_gate_fails_the_stage_instead_of_waiting()
         StageState::Failed(FailureCause::Error(_))
     ));
     assert_eq!(state.stage("annonce").unwrap().state, StageState::Cancelled);
+}
+
+/// I-1 : une spec relue d'un payload `workflow_started` n'est pas passée par
+/// `from_yaml` — c'est l'exécuteur qui doit la valider, sinon un `depends_on`
+/// pointant un stage disparu laisse tout `Pending` et sort vert.
+#[tokio::test]
+async fn an_executor_refuses_a_spec_that_never_passed_validation() {
+    let fixture = Fixture::new().await;
+    let broken = WorkflowSpec {
+        name: "cassé".to_string(),
+        stages: vec![Stage {
+            name: "seul".to_string(),
+            agents: vec![AgentSpec {
+                name: "agent".to_string(),
+                source: AgentSource::Prompt("fais".to_string()),
+                model: None,
+                inputs: BTreeMap::new(),
+            }],
+            depends_on: vec!["disparu".to_string()],
+            gate: Gate::Auto,
+            budgets: Budgets::default(),
+        }],
+    };
+
+    let Err(error) = WorkflowExecutor::new(
+        broken,
+        Arc::new(FixtureRunner::new()),
+        fixture.recorder().await,
+        fixture.session_id.clone(),
+        fixture.working_dir.clone(),
+    ) else {
+        panic!("une spec invalide ne construit pas d'exécuteur");
+    };
+    assert!(
+        error.to_string().contains("disparu"),
+        "l'erreur nomme la dépendance inconnue : {error}"
+    );
+}
+
+/// I-1 (second volet) : même sur une spec valide, un état où un stage est
+/// resté non terminal est un échec nommé — jamais un `Done` silencieux.
+#[test]
+fn an_outcome_names_the_stage_that_never_finished() {
+    let mut state = WorkflowState::from_spec(&spec(GATED));
+    state.stages[0].state = StageState::Done;
+
+    let outcome = state.outcome();
+    let WorkflowOutcome::Failed(FailureCause::Error(message)) = outcome else {
+        panic!("un stage resté Pending doit rendre un échec nommé, pas {outcome:?}");
+    };
+    assert!(message.contains("deploie"), "{message}");
+}
+
+/// I-2 : `approve`/`deny` distinguent trois cas. `true` pour un stage mort ou
+/// inexistant ferait afficher « approuvé » sur un stage que personne ne lira.
+#[tokio::test]
+async fn a_decision_on_a_dead_or_unknown_stage_is_refused() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = fixture.executor(spec(GATED), Arc::clone(&runner)).await;
+    let handle = executor.handle();
+    let run = tokio::spawn(executor.run());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(handle.approve("inconnu"), GateVerdict::UnknownStage);
+    assert_eq!(handle.deny("deploie"), GateVerdict::Applied);
+    run.await.unwrap().unwrap();
+
+    assert_eq!(
+        handle.approve("deploie"),
+        GateVerdict::Settled,
+        "un stage terminal ne prend plus de décision"
+    );
+    assert_eq!(
+        handle.approve("annonce"),
+        GateVerdict::Settled,
+        "un stage emporté par la cascade non plus"
+    );
+    assert_eq!(
+        fixture.payloads("gate_decision").await.len(),
+        1,
+        "seule la décision réellement consommée est journalisée"
+    );
+}
+
+/// I-3 : une gate sans approbateur attend sans borne — `cancel()` est la
+/// sortie. Le stage gaté part en `Cancelled`, sa descendance avec, et le
+/// journal se referme (`workflow_done` + `turn_end`).
+#[tokio::test]
+async fn cancelling_a_waiting_gate_ends_the_workflow_with_a_closed_journal() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = fixture.executor(spec(GATED), Arc::clone(&runner)).await;
+    let handle = executor.handle();
+    let run = tokio::spawn(executor.run());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        handle.snapshot().stage("deploie").unwrap().state,
+        StageState::Waiting
+    );
+    handle.cancel();
+
+    let state = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("cancel() réveille l'attente de gate")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(state.outcome(), WorkflowOutcome::Cancelled);
+    assert_eq!(state.stage("build").unwrap().state, StageState::Done);
+    assert_eq!(state.stage("deploie").unwrap().state, StageState::Cancelled);
+    assert_eq!(state.stage("annonce").unwrap().state, StageState::Cancelled);
+    assert_eq!(
+        state.stage("deploie").unwrap().agents[0].state,
+        AgentState::Cancelled,
+        "les agents d'un stage annulé ne restent pas Pending dans la vue"
+    );
+    assert_eq!(
+        runner.started(),
+        vec!["build.compile".to_string()],
+        "aucun agent ne part au-delà de la gate annulée"
+    );
+
+    let kinds = fixture.kinds().await;
+    assert!(
+        kinds.contains(&"workflow_done".to_string())
+            && kinds.last() == Some(&"turn_end".to_string()),
+        "un workflow annulé referme son tour : {kinds:?}"
+    );
+    assert!(
+        fixture.payloads("gate_decision").await.is_empty(),
+        "une gate annulée n'a pris aucune décision"
+    );
+}
+
+/// I-3 : annulation pendant qu'un agent tourne — il est coupé, l'état le dit,
+/// et le stage suivant ne démarre pas.
+#[tokio::test]
+async fn cancelling_an_in_flight_agent_cuts_it_and_stops_the_dag() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new().with("build.compile", Script::Hang));
+    let executor = fixture.executor(spec(GATED), Arc::clone(&runner)).await;
+    let handle = executor.handle();
+    let run = tokio::spawn(executor.run());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    handle.cancel();
+
+    let state = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("cancel() coupe l'agent en vol")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        state.stage("build").unwrap().agents[0].state,
+        AgentState::Cancelled
+    );
+    assert_eq!(state.stage("build").unwrap().state, StageState::Cancelled);
+    assert_eq!(state.stage("deploie").unwrap().state, StageState::Cancelled);
+    assert_eq!(runner.started(), vec!["build.compile".to_string()]);
+}
+
+/// I-3 : annulation avant qu'un stage `Pending` démarre — le garde d'entrée de
+/// `run_stage` refuse de le lancer.
+#[tokio::test]
+async fn a_stage_that_has_not_started_is_cancelled_at_its_gate_of_entry() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = fixture.executor(spec(GATED), Arc::clone(&runner)).await;
+    let handle = executor.handle();
+    handle.cancel();
+
+    let state = tokio::time::timeout(Duration::from_secs(5), executor.run())
+        .await
+        .expect("un workflow annulé avant de partir ne bloque pas")
+        .unwrap();
+
+    assert_eq!(state.outcome(), WorkflowOutcome::Cancelled);
+    assert!(
+        runner.started().is_empty(),
+        "aucun agent ne part sur un workflow déjà annulé : {:?}",
+        runner.started()
+    );
+}
+
+/// I-4 : la cause d'un stage ne dépend pas du rang de ses agents dans le
+/// document. Le même couple (agent annulé, agent hors budget) doit donner le
+/// même état de stage dans les deux ordres de déclaration.
+#[tokio::test]
+async fn a_stage_state_is_aggregated_by_precedence_not_by_declaration_order() {
+    async fn outcome_of(first: &str, second: &str) -> StageState {
+        let yaml = format!(
+            r#"
+name: ordre
+stages:
+  - name: melange
+    budgets:
+      max_tokens: 100
+    agents:
+      - name: {first}
+        prompt: fais
+      - name: {second}
+        prompt: fais
+"#
+        );
+        let fixture = Fixture::new().await;
+        let runner = Arc::new(
+            FixtureRunner::new()
+                .with("melange.suspendu", Script::Hang)
+                .with("melange.gourmand", Script::Burn { tokens: 150 }),
+        );
+        let executor = fixture.executor(spec(&yaml), Arc::clone(&runner)).await;
+        let state = tokio::time::timeout(Duration::from_secs(5), executor.run())
+            .await
+            .expect("le budget partagé coupe le stage")
+            .unwrap();
+        state.stage("melange").unwrap().state.clone()
+    }
+
+    let budget_first = outcome_of("gourmand", "suspendu").await;
+    let budget_last = outcome_of("suspendu", "gourmand").await;
+
+    assert_eq!(
+        budget_first,
+        StageState::Failed(FailureCause::Budget(BudgetLimit::Tokens))
+    );
+    assert_eq!(
+        budget_last, budget_first,
+        "Failed l'emporte sur Cancelled quel que soit l'ordre YAML"
+    );
+}
+
+/// I-5 : deux stages sans lien partent **ensemble** — la propriété centrale de
+/// l'ordonnanceur. Le losange `racine → {a, b} → jointure` la met à l'épreuve :
+/// les deux branches doivent être démarrées avant qu'aucune ne finisse, et
+/// leurs events s'entrelacent sans que le curseur, adressé par clé, s'en
+/// trouve gêné.
+#[tokio::test]
+async fn two_unlinked_stages_run_concurrently_and_their_events_stay_addressable() {
+    const DIAMOND: &str = r#"
+name: losange
+stages:
+  - name: racine
+    agents:
+      - name: seed
+        prompt: sème
+  - name: gauche
+    depends_on: [racine]
+    agents:
+      - name: a
+        prompt: a
+  - name: droite
+    depends_on: [racine]
+    agents:
+      - name: b
+        prompt: b
+  - name: jointure
+    depends_on: [gauche, droite]
+    agents:
+      - name: join
+        prompt: joins
+        inputs:
+          gauche: "{{gauche.a.output}}"
+          droite: "{{droite.b.output}}"
+"#;
+
+    let fixture = Fixture::new().await;
+    // Les deux branches se rendez-vous : aucune ne peut finir avant que
+    // l'autre soit partie. Le test échoue par timeout si elles sont
+    // séquentielles.
+    let both_started = Arc::new(tokio::sync::Barrier::new(2));
+    let runner = Arc::new(
+        FixtureRunner::new()
+            .with("gauche.a", Script::Rendezvous(Arc::clone(&both_started)))
+            .with("droite.b", Script::Rendezvous(Arc::clone(&both_started))),
+    );
+    let executor = fixture.executor(spec(DIAMOND), Arc::clone(&runner)).await;
+
+    let state = tokio::time::timeout(Duration::from_secs(5), executor.run())
+        .await
+        .expect("les deux branches du losange tournent en parallèle")
+        .unwrap();
+
+    assert_eq!(state.outcome(), WorkflowOutcome::Done);
+    let started = runner.started();
+    assert_eq!(started.first().map(String::as_str), Some("racine.seed"));
+    assert_eq!(started.last().map(String::as_str), Some("jointure.join"));
+
+    // Les events des deux branches sont entrelacés dans le journal, mais le
+    // curseur les rend par clé : l'ordre d'arrivée n'a aucun effet.
+    let cursor = EventCursor::load(&fixture.session_manager, &fixture.session_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        cursor
+            .workflow_artifacts
+            .get(&("gauche".to_string(), "a".to_string()))
+            .map(String::as_str),
+        Some("[a]")
+    );
+    assert_eq!(
+        cursor
+            .workflow_artifacts
+            .get(&("droite".to_string(), "b".to_string()))
+            .map(String::as_str),
+        Some("[b]")
+    );
+    assert_eq!(
+        runner.prompt_of("jointure.join").as_deref(),
+        Some("droite=[b];gauche=[a]"),
+        "la jointure reçoit les sorties des deux branches"
+    );
+}
+
+/// Invariant des index : une session parente ne porte qu'un workflow. La clé
+/// de gate est un nom de stage — un second run sur la même session écraserait
+/// les décisions du premier.
+#[tokio::test]
+async fn a_session_refuses_a_second_workflow() {
+    let fixture = Fixture::new().await;
+    let first = fixture.open_recorder("premier").await.unwrap();
+
+    let Err(error) = fixture.open_recorder("second").await else {
+        panic!("une session ne porte qu'un workflow");
+    };
+    assert!(
+        error.to_string().contains("premier"),
+        "l'erreur nomme le workflow déjà attaché : {error}"
+    );
+    assert_eq!(first.turn_seq(), 2, "le premier garde son tour");
+}
+
+/// I-6 : le tour du workflow est **revendiqué** par un `turn_start`, sous
+/// l'index unique d'allocation. Un tour d'agent qui a déjà pris ce numéro fait
+/// perdre la course franchement, au lieu de laisser deux tours écrire sous le
+/// même `turn_seq`.
+#[tokio::test]
+async fn the_workflow_turn_is_claimed_against_a_concurrent_allocation() {
+    let fixture = Fixture::new().await;
+    fixture
+        .session_manager
+        .append_event(
+            &fixture.session_id,
+            2,
+            "turn_start",
+            r#"{"query_preview":"agent"}"#,
+        )
+        .await
+        .unwrap();
+
+    let recorder = fixture.open_recorder("après").await.unwrap();
+
+    assert!(
+        recorder.turn_seq() > 2,
+        "le workflow prend un tour libre, pas celui de l'agent : {}",
+        recorder.turn_seq()
+    );
+}
+
+/// I-7 : le rejeu d'un parent sert les sorties du journal et ne lance **aucun**
+/// sous-agent. Sans ce runner, un rejeu relancerait de vrais agents, produirait
+/// d'autres sorties, et les entrées substituées des descendants divergeraient.
+#[tokio::test]
+async fn a_replayed_workflow_serves_its_agent_outputs_from_the_log() {
+    let recorded = Fixture::new().await;
+    let runner = Arc::new(
+        FixtureRunner::new().with("collecte.lint", Script::Fail("disque plein".to_string())),
+    );
+    let executor = recorded
+        .executor(spec(FAN_OUT_THEN_JOIN), Arc::clone(&runner))
+        .await;
+    let recorded_state = executor.run().await.unwrap();
+
+    let cursor = EventCursor::load(&recorded.session_manager, &recorded.session_id)
+        .await
+        .unwrap();
+
+    let replayed = Fixture::new().await;
+    // Un runner vivant qui refuserait de tourner : s'il est sollicité, le test
+    // le voit. C'est la garantie « zéro sous-agent réel au rejeu ».
+    let live = Arc::new(FixtureRunner::new());
+    let executor = WorkflowExecutor::replaying(
+        cursor.workflow.clone().unwrap().spec,
+        Arc::new(ReplayRunner::from_cursor(&cursor)),
+        Arc::new(ReplayGates::from_cursor(&cursor)),
+        cursor.workflow_recipes.clone(),
+        replayed.recorder().await,
+        replayed.session_id.clone(),
+        replayed.working_dir.clone(),
+    )
+    .unwrap();
+
+    let state = tokio::time::timeout(Duration::from_secs(5), executor.run())
+        .await
+        .expect("le rejeu ne dépend d'aucun agent vivant")
+        .unwrap();
+
+    assert!(
+        live.started().is_empty(),
+        "aucun agent réel ne doit partir au rejeu"
+    );
+    assert_eq!(
+        state.topology(),
+        recorded_state.topology(),
+        "le rejeu reproduit l'état enregistré, échec d'agent compris"
+    );
+    assert_eq!(
+        state.stage("collecte").unwrap().state,
+        StageState::Failed(FailureCause::Error("disque plein".to_string())),
+        "un échec enregistré se rejoue en échec, pas en succès"
+    );
+}
+
+/// I-7 (second volet) : une sortie purgée par la rétention ne se remplace pas
+/// par du vide — le rejeu échoue avec une cause nommée plutôt que de
+/// substituer une chaîne absente dans le prompt d'un descendant.
+#[tokio::test]
+async fn a_purged_artifact_fails_the_replay_instead_of_substituting_nothing() {
+    let recorded = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = recorded
+        .executor(spec(FAN_OUT_THEN_JOIN), Arc::clone(&runner))
+        .await;
+    executor.run().await.unwrap();
+
+    let mut cursor = EventCursor::load(&recorded.session_manager, &recorded.session_id)
+        .await
+        .unwrap();
+    cursor.workflow_artifacts.clear();
+
+    let replayed = Fixture::new().await;
+    let executor = WorkflowExecutor::replaying(
+        cursor.workflow.clone().unwrap().spec,
+        Arc::new(ReplayRunner::from_cursor(&cursor)),
+        Arc::new(ReplayGates::from_cursor(&cursor)),
+        cursor.workflow_recipes.clone(),
+        replayed.recorder().await,
+        replayed.session_id.clone(),
+        replayed.working_dir.clone(),
+    )
+    .unwrap();
+
+    let state = tokio::time::timeout(Duration::from_secs(5), executor.run())
+        .await
+        .expect("un journal amputé ne fait pas attendre le rejeu")
+        .unwrap();
+
+    let StageState::Failed(FailureCause::Error(message)) =
+        state.stage("collecte").unwrap().state.clone()
+    else {
+        panic!("une sortie purgée doit nommer sa cause");
+    };
+    assert!(message.contains("purgée"), "{message}");
+    assert_eq!(
+        state.stage("synthese").unwrap().state,
+        StageState::Cancelled
+    );
+}
+
+/// I-8 : le tour du workflow est visible au plan de rejeu. Sans lui, `kaji
+/// replay` d'une session de workflow rendait un plan vide et sortait vert sans
+/// avoir rien rejoué.
+#[tokio::test]
+async fn the_workflow_turn_is_visible_to_the_replay_plan() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = fixture
+        .executor(spec(FAN_OUT_THEN_JOIN), Arc::clone(&runner))
+        .await;
+    executor.run().await.unwrap();
+
+    let events = fixture
+        .session_manager
+        .session_events(&fixture.session_id)
+        .await
+        .unwrap();
+    let plan = crate::replay::plan::replay_plan(&events, None);
+
+    assert_eq!(plan.len(), 1);
+    let (turn_seq, planned) = &plan[0];
+    assert_eq!(*turn_seq, 2);
+    let crate::replay::plan::PlannedTurn::Workflow(name) = planned else {
+        panic!("le tour de workflow doit être planifié comme tel, pas sauté");
+    };
+    assert_eq!(name, "revue");
+}
+
+/// I-8 (second volet) : un workflow tué laisse sa borne ouverte, donc le
+/// curseur refuse le journal au lieu de le rejouer à moitié.
+#[tokio::test]
+async fn a_killed_workflow_is_detected_as_truncated() {
+    let fixture = Fixture::new().await;
+    let recorder = fixture.recorder().await;
+    recorder.workflow_started(&spec(FAN_OUT_THEN_JOIN)).await;
+    recorder.stage_started("collecte", Gate::Auto).await;
+    // Pas de `workflow_done` : le processus est mort en plein stage.
+
+    let Err(error) = EventCursor::load(&fixture.session_manager, &fixture.session_id).await else {
+        panic!("un workflow tronqué ne se charge pas");
+    };
+    assert_eq!(
+        error.downcast_ref::<crate::replay::cursor::ReplayUnavailable>(),
+        Some(&crate::replay::cursor::ReplayUnavailable::TruncatedAt(2))
+    );
+}
+
+/// I-9 : le contenu d'une recette entre dans le prompt de l'agent. Il est
+/// journalisé à l'exécution, puis servi au rejeu — un fichier édité entre les
+/// deux ne change pas ce que le rejeu voit.
+#[tokio::test]
+async fn a_recipe_is_journalled_then_served_from_the_log() {
+    let fixture = Fixture::new().await;
+    let recipe_path = fixture._data_dir.path().join("revue.yaml");
+    std::fs::write(
+        &recipe_path,
+        "version: 1.0.0\ntitle: revue\ndescription: revue\nprompt: version enregistrée\n",
+    )
+    .unwrap();
+
+    let yaml = format!(
+        r#"
+name: recette
+stages:
+  - name: revue
+    agents:
+      - name: lecteur
+        recipe: {}
+"#,
+        recipe_path.display()
+    );
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = fixture.executor(spec(&yaml), Arc::clone(&runner)).await;
+    executor.run().await.unwrap();
+
+    let cursor = EventCursor::load(&fixture.session_manager, &fixture.session_id)
+        .await
+        .unwrap();
+    let recorded = cursor
+        .workflow_recipes
+        .get(&recipe_path.to_string_lossy().to_string())
+        .expect("le contenu de la recette est journalisé");
+    assert!(
+        recorded.content.contains("version enregistrée"),
+        "{}",
+        recorded.content
+    );
+
+    // Le fichier change ; le rejeu doit continuer à voir la version du journal.
+    std::fs::write(
+        &recipe_path,
+        "version: 1.0.0\ntitle: revue\ndescription: revue\nprompt: version éditée\n",
+    )
+    .unwrap();
+
+    let replayed = Fixture::new().await;
+    let executor = WorkflowExecutor::replaying(
+        cursor.workflow.clone().unwrap().spec,
+        Arc::new(ReplayRunner::from_cursor(&cursor)),
+        Arc::new(ReplayGates::from_cursor(&cursor)),
+        cursor.workflow_recipes.clone(),
+        replayed.recorder().await,
+        replayed.session_id.clone(),
+        replayed.working_dir.clone(),
+    )
+    .unwrap();
+    executor.run().await.unwrap();
+
+    let replayed_cursor = EventCursor::load(&replayed.session_manager, &replayed.session_id)
+        .await
+        .unwrap();
+    assert!(
+        replayed_cursor.workflow_recipes.is_empty(),
+        "un rejeu ne relit pas le disque, donc ne rejournalise aucune recette"
+    );
 }

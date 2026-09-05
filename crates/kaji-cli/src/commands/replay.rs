@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use kaji::agents::{Agent, AgentEvent, SessionConfig};
 use kaji::conversation::message::Message;
@@ -27,6 +27,9 @@ use kaji::replay::provider::ReplayProvider;
 use kaji::replay::retention::retention_days;
 use kaji::replay::source::ReplaySource;
 use kaji::session::session_manager::SessionType;
+use kaji::session::SessionManager;
+use kaji::workflow::events::WorkflowRecorder;
+use kaji::workflow::{ReplayGates, ReplayRunner, WorkflowExecutor};
 use kaji_providers::model::ModelConfig;
 use rmcp::model::Role;
 
@@ -65,7 +68,7 @@ pub async fn handle_replay_subcommand(
     let plan = replay_plan(&events, until);
     if !plan
         .iter()
-        .any(|(_, planned)| matches!(planned, PlannedTurn::Replay(_)))
+        .any(|(_, planned)| matches!(planned, PlannedTurn::Replay(_) | PlannedTurn::Workflow(_)))
     {
         println!("kaji replay : aucun tour à rejouer dans « {session_id} »");
         return Ok(());
@@ -120,10 +123,40 @@ pub async fn handle_replay_subcommand(
     let mut skipped = 0;
     let mut tolerated = 0;
     for (turn_seq, planned) in plan {
-        let PlannedTurn::Replay(user_message) = planned else {
-            skipped += 1;
-            println!("[tour {turn_seq}] aucun message user enregistré — tour sauté");
-            continue;
+        let user_message = match planned {
+            PlannedTurn::Replay(user_message) => user_message,
+            // Un tour d'orchestration ne se rejoue pas par un message : son
+            // DAG est redéroulé sur le journal, sans qu'aucun sous-agent réel
+            // ne parte.
+            PlannedTurn::Workflow(workflow) => {
+                match replay_workflow(
+                    Arc::clone(&session_manager),
+                    &cursor,
+                    &derived.id,
+                    source.working_dir.clone(),
+                    &workflow,
+                    lenient,
+                )
+                .await
+                {
+                    Ok(lines) => {
+                        replayed += 1;
+                        for line in lines {
+                            println!("[tour {turn_seq}] {line}");
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("kaji replay : divergence au tour {turn_seq} — {error}");
+                        std::process::exit(EXIT_DIVERGENCE);
+                    }
+                }
+                continue;
+            }
+            PlannedTurn::Skipped => {
+                skipped += 1;
+                println!("[tour {turn_seq}] aucun message user enregistré — tour sauté");
+                continue;
+            }
         };
 
         position.begin_turn(turn_seq);
@@ -174,6 +207,60 @@ fn replay_summary(replayed: usize, skipped: usize, divergences: usize) -> String
         ));
     }
     summary
+}
+
+/// Rejoue le tour d'orchestration : le DAG repart, mais ses gates, ses
+/// recettes et les sorties de ses agents sont servies par le journal
+/// (`ReplayGates`, `ReplayRunner`) — aucun sous-agent, aucun appel LLM. L'état
+/// final est comparé à celui qu'a figé `workflow_done` : c'est ce qui rend
+/// « rejoué sans divergence » vérifiable plutôt que déclaratif.
+async fn replay_workflow(
+    session_manager: Arc<SessionManager>,
+    cursor: &EventCursor,
+    derived_session_id: &str,
+    working_dir: std::path::PathBuf,
+    workflow: &str,
+    lenient: bool,
+) -> Result<Vec<String>> {
+    let started = cursor
+        .workflow
+        .clone()
+        .ok_or_else(|| anyhow!("workflow « {workflow} » sans payload workflow_started"))?;
+
+    let recorder =
+        WorkflowRecorder::open(session_manager, derived_session_id.to_string(), workflow).await?;
+    let executor = WorkflowExecutor::replaying(
+        started.spec,
+        Arc::new(ReplayRunner::from_cursor(cursor)),
+        Arc::new(ReplayGates::from_cursor(cursor).lenient(lenient)),
+        cursor.workflow_recipes.clone(),
+        recorder,
+        derived_session_id.to_string(),
+        working_dir,
+    )?;
+
+    let state = executor.run().await?;
+    let mut lines = vec![format!(
+        "workflow « {workflow} » rejoué — {}",
+        state.outcome().label()
+    )];
+    match &cursor.workflow_final {
+        Some(recorded) if recorded.topology() != state.topology() => {
+            return Err(anyhow!(
+                "état du workflow « {workflow} » différent de l'enregistrement — \
+                 enregistré {:?}, rejoué {:?}",
+                recorded.topology(),
+                state.topology()
+            ))
+        }
+        Some(_) => lines.push(format!(
+            "workflow « {workflow} » identique à l'enregistrement"
+        )),
+        None => lines.push(format!(
+            "workflow « {workflow} » sans état final enregistré : rien à comparer"
+        )),
+    }
+    Ok(lines)
 }
 
 /// Rejoue un tour jusqu'à son terme et rend chaque message produit sous forme
