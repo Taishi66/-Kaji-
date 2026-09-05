@@ -25,6 +25,7 @@ use kaji::providers::base::{stream_from_single_message, MessageStream, Provider}
 use kaji::replay::cursor::EventCursor;
 use kaji::replay::idgen::SessionIdGen;
 use kaji::replay::mode::ReplayMode;
+use kaji::replay::plan::{replay_plan, PlannedTurn};
 use kaji::replay::provider::ReplayProvider;
 use kaji::replay::source::ReplaySource;
 use kaji::session::session_manager::{SessionEvent, SessionType, DB_NAME, SESSIONS_FOLDER};
@@ -34,14 +35,13 @@ use kaji_providers::errors::ProviderError;
 use kaji_providers::model::ModelConfig;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ContentBlock, Implementation, InitializeResult,
-    ProtocolVersion, Role, ServerCapabilities, ServerInfo, Tool,
+    ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use rmcp::{object, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use serde_json::Value;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -135,19 +135,35 @@ impl ServerHandler for ProbeServer {
     }
 }
 
+/// Deux serveurs MCP distincts, comme une session réelle en a plusieurs :
+/// l'ordre dans lequel leurs outils entrent dans la requête hachée venait d'une
+/// itération de `HashMap`, invisible avec une extension unique.
 struct ProbeFixture {
     url: String,
-    handle: JoinHandle<()>,
+    second_url: String,
+    handles: Vec<JoinHandle<()>>,
 }
 
 impl Drop for ProbeFixture {
     fn drop(&mut self) {
-        self.handle.abort();
+        for handle in &self.handles {
+            handle.abort();
+        }
     }
 }
 
 impl ProbeFixture {
     async fn new() -> Self {
+        let (url, first) = Self::serve().await;
+        let (second_url, second) = Self::serve().await;
+        Self {
+            url,
+            second_url,
+            handles: vec![first, second],
+        }
+    }
+
+    async fn serve() -> (String, JoinHandle<()>) {
         let service = StreamableHttpService::new(
             || Ok::<_, std::io::Error>(ProbeServer),
             LocalSessionManager::default().into(),
@@ -159,7 +175,7 @@ impl ProbeFixture {
         let handle = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        Self { url, handle }
+        (url, handle)
     }
 }
 
@@ -357,13 +373,17 @@ fn session_config(id: &str) -> SessionConfig {
     }
 }
 
+/// Monté comme `Agent::new()` le fait pour `kaji replay` : le nommage de
+/// session **actif**, donc l'appel LLM hors boucle qu'il déclenche. Le doré
+/// tiendrait sans lui — et ne verrait plus le `call_idx` volé qu'il vole quand
+/// rien ne le gate au rejeu.
 fn new_agent(session_manager: &Arc<SessionManager>, data_dir: &TempDir) -> Agent {
     Agent::with_config(AgentConfig::new(
         Arc::clone(session_manager),
         Arc::new(PermissionManager::new(data_dir.path().join("config"))),
         None,
         KajiMode::Auto,
-        true,
+        false,
         KajiPlatform::KajiCli,
     ))
 }
@@ -453,6 +473,17 @@ async fn record_fixture_switching(
         .await?;
     agent
         .add_extension(
+            ExtensionConfig::streamable_http(
+                "probe2",
+                &probe.second_url,
+                "second instrumented probe",
+                30_u64,
+            ),
+            &session.id,
+        )
+        .await?;
+    agent
+        .add_extension(
             ExtensionConfig::Frontend {
                 name: "golden-frontend".to_string(),
                 description: "frontend fixture".to_string(),
@@ -510,24 +541,17 @@ async fn recorded_turn_context_blocks(fixture: &Fixture) -> Result<Vec<String>> 
         .unwrap_or_default())
 }
 
-/// Le message qui a ouvert chaque tour, tel qu'enregistré — même extraction
-/// que celle du CLI `kaji replay` (`commands/replay.rs`, `user_turns`).
+/// Le plan du CLI `kaji replay`, appliqué au journal du doré : la fonction de
+/// production elle-même (`kaji::replay::plan`), pas une réimplémentation — un
+/// tour que le plan sauterait doit être sauté ici aussi.
 fn recorded_turns(events: &[SessionEvent]) -> Vec<(i64, Message)> {
-    let mut opened: HashSet<i64> = HashSet::new();
-    let mut turns = Vec::new();
-    for event in events {
-        if event.kind != "message" {
-            continue;
-        }
-        let Ok(message) = serde_json::from_str::<Message>(&event.payload_json) else {
-            continue;
-        };
-        if !matches!(message.role, Role::User) || !opened.insert(event.turn_seq) {
-            continue;
-        }
-        turns.push((event.turn_seq, message));
-    }
-    turns
+    replay_plan(events, None)
+        .into_iter()
+        .filter_map(|(turn_seq, planned)| match planned {
+            PlannedTurn::Replay(message) => Some((turn_seq, message)),
+            PlannedTurn::Skipped => None,
+        })
+        .collect()
 }
 
 /// La forme du journal v2 : chaque kind rejouable avec la clé sous laquelle le

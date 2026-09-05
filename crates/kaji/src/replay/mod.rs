@@ -4,6 +4,7 @@ pub mod hashing;
 pub mod idgen;
 pub mod manifest;
 pub mod mode;
+pub mod plan;
 pub mod provider;
 pub mod record;
 pub mod retention;
