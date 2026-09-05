@@ -7,7 +7,7 @@
 //! publics pour les payloads d'événements et d'IPC — l'entrée utilisateur, elle,
 //! passe toujours par [`WorkflowSpec::from_yaml`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::ops::Range;
@@ -98,6 +98,9 @@ pub enum WorkflowSpecError {
     DuplicateStageName {
         name: String,
     },
+    StageNameContainsDot {
+        name: String,
+    },
     StageWithoutAgents {
         stage: String,
     },
@@ -116,6 +119,10 @@ pub enum WorkflowSpecError {
     DuplicateAgentName {
         stage: String,
         name: String,
+    },
+    AgentNameContainsDot {
+        stage: String,
+        agent: String,
     },
     AgentSourceMissing {
         stage: String,
@@ -183,6 +190,10 @@ impl fmt::Display for WorkflowSpecError {
             WorkflowSpecError::DuplicateStageName { name } => {
                 write!(f, "deux stages portent le nom « {name} »")
             }
+            WorkflowSpecError::StageNameContainsDot { name } => write!(
+                f,
+                "le nom de stage « {name} » contient un point, interdit dans les identifiants"
+            ),
             WorkflowSpecError::StageWithoutAgents { stage } => {
                 write!(f, "le stage « {stage} » ne déclare aucun agent")
             }
@@ -201,6 +212,10 @@ impl fmt::Display for WorkflowSpecError {
             WorkflowSpecError::DuplicateAgentName { stage, name } => write!(
                 f,
                 "deux agents du stage « {stage} » portent le nom « {name} »"
+            ),
+            WorkflowSpecError::AgentNameContainsDot { stage, agent } => write!(
+                f,
+                "le nom de l'agent « {agent} » du stage « {stage} » contient un point, interdit dans les identifiants"
             ),
             WorkflowSpecError::AgentSourceMissing { stage, agent } => write!(
                 f,
@@ -259,7 +274,7 @@ impl fmt::Display for WorkflowSpecError {
                 referenced_stage,
             } => write!(
                 f,
-                "l'entrée « {input} » de « {stage}.{agent} » référence « {referenced_stage} », qui n'est pas un stage antérieur"
+                "l'entrée « {input} » de « {stage}.{agent} » référence « {referenced_stage} », qui n'est pas un ancêtre (via depends_on)"
             ),
             WorkflowSpecError::NonPositiveBudget {
                 stage,
@@ -303,6 +318,11 @@ impl WorkflowSpec {
             if stage.name.trim().is_empty() {
                 return Err(WorkflowSpecError::EmptyStageName { index });
             }
+            if stage.name.contains('.') {
+                return Err(WorkflowSpecError::StageNameContainsDot {
+                    name: stage.name.clone(),
+                });
+            }
             if seen_stages.insert(&stage.name, index).is_some() {
                 return Err(WorkflowSpecError::DuplicateStageName {
                     name: stage.name.clone(),
@@ -316,8 +336,8 @@ impl WorkflowSpec {
             self.validate_dependencies(stage, &seen_stages)?;
         }
 
-        self.validate_input_references(&seen_stages)?;
-        self.validate_acyclic(&seen_stages)
+        self.validate_acyclic(&seen_stages)?;
+        self.validate_input_references(&seen_stages)
     }
 
     pub fn stage(&self, name: &str) -> Option<&Stage> {
@@ -345,10 +365,21 @@ impl WorkflowSpec {
         Ok(())
     }
 
+    /// Une entrée `{{stage.agent.output}}` n'est valide que si `stage` est un
+    /// ancêtre transitif via `depends_on` — la topologie du DAG fait foi, pas la
+    /// position dans la liste : un `depends_on` déclaré après son stage dans le
+    /// document reste légal (voir `validate_dependencies`), donc un stage doit
+    /// pouvoir consommer la sortie de la dépendance même qu'il déclare. Appelée
+    /// après `validate_acyclic`, donc l'ascendance se calcule sans risque de
+    /// boucle infinie sur un cycle.
     fn validate_input_references(
         &self,
         indexes: &BTreeMap<&str, usize>,
     ) -> Result<(), WorkflowSpecError> {
+        let ancestors: Vec<HashSet<usize>> = (0..self.stages.len())
+            .map(|index| self.transitive_dependencies(index, indexes))
+            .collect();
+
         for (index, stage) in self.stages.iter().enumerate() {
             for agent in &stage.agents {
                 for (input, template) in &agent.inputs {
@@ -369,7 +400,7 @@ impl WorkflowSpec {
                                 referenced: target.stage,
                             });
                         };
-                        if target_index >= index {
+                        if !ancestors[index].contains(&target_index) {
                             return Err(WorkflowSpecError::InputReferenceNotEarlier {
                                 stage: stage.name.clone(),
                                 agent: agent.name.clone(),
@@ -395,6 +426,25 @@ impl WorkflowSpec {
             }
         }
         Ok(())
+    }
+
+    fn transitive_dependencies(
+        &self,
+        start: usize,
+        indexes: &BTreeMap<&str, usize>,
+    ) -> HashSet<usize> {
+        let mut reachable = HashSet::new();
+        let mut stack = vec![start];
+        while let Some(node) = stack.pop() {
+            for dependency in &self.stages[node].depends_on {
+                if let Some(&dependency_index) = indexes.get(dependency.as_str()) {
+                    if reachable.insert(dependency_index) {
+                        stack.push(dependency_index);
+                    }
+                }
+            }
+        }
+        reachable
     }
 
     /// DFS itérative tricolore : un arc vers un stage encore sur la pile ferme un
@@ -470,6 +520,12 @@ impl Stage {
                     index,
                 });
             }
+            if agent.name.contains('.') {
+                return Err(WorkflowSpecError::AgentNameContainsDot {
+                    stage: self.name.clone(),
+                    agent: agent.name.clone(),
+                });
+            }
             if seen.contains(&agent.name.as_str()) {
                 return Err(WorkflowSpecError::DuplicateAgentName {
                     stage: self.name.clone(),
@@ -509,7 +565,7 @@ impl Stage {
 impl AgentSource {
     fn is_empty(&self) -> bool {
         match self {
-            AgentSource::Recipe(path) => path.as_os_str().is_empty(),
+            AgentSource::Recipe(path) => path.to_string_lossy().trim().is_empty(),
             AgentSource::Prompt(text) => text.trim().is_empty(),
         }
     }

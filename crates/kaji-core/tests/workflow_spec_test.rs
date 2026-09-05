@@ -142,6 +142,83 @@ stages:
 }
 
 #[test]
+fn a_stage_can_consume_the_output_of_a_dependency_declared_after_it_in_the_list() {
+    let yaml = r#"
+name: revue
+stages:
+  - name: aval
+    depends_on: [amont]
+    agents:
+      - name: u
+        prompt: p
+        inputs:
+          x: "{{amont.deux.output}}"
+  - name: amont
+    agents:
+      - name: deux
+        prompt: deux
+"#;
+
+    assert!(WorkflowSpec::from_yaml(yaml).is_ok());
+}
+
+#[test]
+fn a_reference_to_a_stage_that_is_not_an_ancestor_is_rejected_even_if_earlier_in_the_list() {
+    let yaml = r#"
+name: revue
+stages:
+  - name: x
+    agents:
+      - name: u
+        prompt: p
+  - name: y
+    agents:
+      - name: v
+        prompt: p
+        inputs:
+          z: "{{x.u.output}}"
+"#;
+
+    match WorkflowSpec::from_yaml(yaml) {
+        Err(WorkflowSpecError::InputReferenceNotEarlier {
+            stage,
+            referenced_stage,
+            ..
+        }) => {
+            assert_eq!(stage, "y");
+            assert_eq!(referenced_stage, "x");
+        }
+        other => panic!("référence vers un non-ancêtre attendue, obtenu {other:?}"),
+    }
+}
+
+#[test]
+fn a_reference_to_an_indirect_ancestor_through_the_dependency_chain_is_valid() {
+    let yaml = r#"
+name: revue
+stages:
+  - name: a
+    agents:
+      - name: u
+        prompt: p
+  - name: b
+    depends_on: [a]
+    agents:
+      - name: v
+        prompt: p
+  - name: c
+    depends_on: [b]
+    agents:
+      - name: w
+        prompt: p
+        inputs:
+          x: "{{a.u.output}}"
+"#;
+
+    assert!(WorkflowSpec::from_yaml(yaml).is_ok());
+}
+
+#[test]
 fn a_diamond_of_dependencies_is_a_valid_dag() {
     let yaml = r#"
 name: revue
@@ -348,7 +425,7 @@ fn every_rejection_names_its_own_cause() {
         ),
         (
             "référence vers un agent inconnu",
-            "name: revue\nstages:\n  - name: a\n    agents:\n      - name: u\n        prompt: p\n  - name: b\n    agents:\n      - name: v\n        prompt: p\n        inputs:\n          x: \"{{a.absent.output}}\"\n",
+            "name: revue\nstages:\n  - name: a\n    agents:\n      - name: u\n        prompt: p\n  - name: b\n    depends_on: [a]\n    agents:\n      - name: v\n        prompt: p\n        inputs:\n          x: \"{{a.absent.output}}\"\n",
             |e| matches!(e, WorkflowSpecError::UnknownInputAgent { referenced_agent, .. } if referenced_agent == "absent"),
         ),
         (
@@ -360,6 +437,21 @@ fn every_rejection_names_its_own_cause() {
             "référence vers son propre stage",
             "name: revue\nstages:\n  - name: a\n    agents:\n      - name: u\n        prompt: p\n      - name: w\n        prompt: p\n        inputs:\n          x: \"{{a.u.output}}\"\n",
             |e| matches!(e, WorkflowSpecError::InputReferenceNotEarlier { stage, referenced_stage, .. } if stage == "a" && referenced_stage == "a"),
+        ),
+        (
+            "nom de stage avec un point",
+            "name: revue\nstages:\n  - name: \"stage.deux\"\n    agents:\n      - name: u\n        prompt: p\n",
+            |e| matches!(e, WorkflowSpecError::StageNameContainsDot { name } if name == "stage.deux"),
+        ),
+        (
+            "nom d'agent avec un point",
+            "name: revue\nstages:\n  - name: a\n    agents:\n      - name: \"agent.deux\"\n        prompt: p\n",
+            |e| matches!(e, WorkflowSpecError::AgentNameContainsDot { stage, agent } if stage == "a" && agent == "agent.deux"),
+        ),
+        (
+            "recipe fait d'espaces",
+            "name: revue\nstages:\n  - name: a\n    agents:\n      - name: u\n        recipe: \"   \"\n",
+            |e| matches!(e, WorkflowSpecError::EmptyAgentSource { stage, agent } if stage == "a" && agent == "u"),
         ),
         (
             "budget négatif",
