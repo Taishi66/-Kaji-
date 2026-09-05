@@ -1,0 +1,22 @@
+//! Exécution d'un workflow déclaratif (S3) : ordonnanceur DAG au-dessus du
+//! primitif de spawn de summon, journalisé en kinds v2 sur la session parente.
+//!
+//! La spec YAML et sa validation vivent dans `kaji_core::workflow` ; ce module
+//! ne consomme qu'une spec **déjà validée**.
+
+pub mod artifacts;
+pub mod events;
+pub mod executor;
+pub mod gate;
+pub mod runner;
+pub mod state;
+
+#[cfg(test)]
+mod tests;
+
+pub use executor::{WorkflowExecutor, WorkflowHandle};
+pub use gate::{GateDecision, GateSource, LiveGates, ReplayGates};
+pub use runner::{AgentRunRequest, AgentRunner, SubagentRunner};
+pub use state::{
+    AgentState, AgentStatus, BudgetLimit, FailureCause, StageState, StageStatus, WorkflowState,
+};

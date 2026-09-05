@@ -259,6 +259,8 @@ mod tests {
             condense_summaries: HashMap::new(),
             tool_pair_summaries: HashMap::new(),
             approvals: HashMap::new(),
+            gate_decisions: HashMap::new(),
+            workflow_artifacts: HashMap::new(),
         })
     }
 

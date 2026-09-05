@@ -1600,6 +1600,8 @@ mod tests {
                 })
                 .collect(),
             approvals: std::collections::HashMap::new(),
+            gate_decisions: std::collections::HashMap::new(),
+            workflow_artifacts: std::collections::HashMap::new(),
         }
     }
 

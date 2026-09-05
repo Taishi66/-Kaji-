@@ -6,6 +6,11 @@
 //! plutôt qu'un message serde opaque. `Serialize` est dérivé sur les types
 //! publics pour les payloads d'événements et d'IPC — l'entrée utilisateur, elle,
 //! passe toujours par [`WorkflowSpec::from_yaml`].
+//!
+//! `Deserialize` est dérivé en regard de `Serialize`, pour relire une spec
+//! **déjà validée** depuis un payload que kaji a lui-même écrit (l'événement
+//! `workflow_started` du journal v2). Il court-circuite la couche brute et donc
+//! la validation : ne jamais le brancher sur de l'entrée utilisateur.
 
 use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
@@ -15,13 +20,13 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowSpec {
     pub name: String,
     pub stages: Vec<Stage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stage {
     pub name: String,
     pub agents: Vec<AgentSpec>,
@@ -56,7 +61,7 @@ pub struct Budgets {
     pub max_duration_s: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSpec {
     pub name: String,
     pub source: AgentSource,
@@ -64,7 +69,7 @@ pub struct AgentSpec {
     pub inputs: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentSource {
     Recipe(PathBuf),

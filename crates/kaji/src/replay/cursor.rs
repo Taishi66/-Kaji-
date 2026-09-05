@@ -20,6 +20,8 @@ use crate::permission::Permission;
 use crate::replay::manifest::ToolManifest;
 use crate::session::session_manager::SessionEvent;
 use crate::session::SessionManager;
+use crate::workflow::events::{GATE_DECISION, WORKFLOW_ARTIFACT};
+use crate::workflow::gate::GateDecision;
 
 /// Pourquoi une session ne peut pas être rejouée. Chaque cas a sa réponse
 /// utilisateur propre — le CLI de rejeu (Task 11) les traduit ; aucune n'est
@@ -99,6 +101,15 @@ pub struct EventCursor {
     /// tourner. Rejouées telles quelles, jamais redemandées à l'utilisateur
     /// (spec S4).
     pub approvals: HashMap<(i64, String), bool>,
+    /// Les décisions des gates de workflow, par nom de stage. Même règle que
+    /// les approbations d'outils : servies au rejeu, jamais redemandées. Un
+    /// stage n'ouvre sa gate qu'une fois par exécution et une session parente
+    /// ne porte qu'un workflow, donc le nom du stage suffit comme clé.
+    pub gate_decisions: HashMap<String, GateDecision>,
+    /// Les sorties d'agents du workflow, par `(stage, agent)`. Purgeable (c'est
+    /// le seul payload volumineux de la famille) : absent d'un journal
+    /// tronqué par la rétention.
+    pub workflow_artifacts: HashMap<(String, String), String>,
 }
 
 /// Ce qu'un appel retrouve dans un index adressé par `(turn_seq, call_idx)` :
@@ -186,6 +197,8 @@ impl EventCursor {
             condense_summaries: HashMap::new(),
             tool_pair_summaries: HashMap::new(),
             approvals: HashMap::new(),
+            gate_decisions: HashMap::new(),
+            workflow_artifacts: HashMap::new(),
         };
 
         // Les deux moitiés d'un échange arrivent dans des events séparés :
@@ -335,6 +348,29 @@ impl EventCursor {
                         (turn_seq(event, &payload), request_id.to_string()),
                         permission,
                     );
+                }
+                GATE_DECISION => {
+                    let (Some(stage), Some(decision)) = (
+                        payload.get("stage").and_then(Value::as_str),
+                        payload.get("decision").and_then(|decision| {
+                            serde_json::from_value::<GateDecision>(decision.clone()).ok()
+                        }),
+                    ) else {
+                        continue;
+                    };
+                    cursor.gate_decisions.insert(stage.to_string(), decision);
+                }
+                WORKFLOW_ARTIFACT => {
+                    let (Some(stage), Some(agent), Some(output)) = (
+                        payload.get("stage").and_then(Value::as_str),
+                        payload.get("agent").and_then(Value::as_str),
+                        payload.get("output").and_then(Value::as_str),
+                    ) else {
+                        continue;
+                    };
+                    cursor
+                        .workflow_artifacts
+                        .insert((stage.to_string(), agent.to_string()), output.to_string());
                 }
                 _ => {}
             }

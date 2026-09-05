@@ -231,6 +231,8 @@ mod tests {
                 ((2, "call-allowed".to_string()), true),
                 ((2, "call-denied".to_string()), false),
             ]),
+            gate_decisions: HashMap::new(),
+            workflow_artifacts: HashMap::new(),
         }
     }
 

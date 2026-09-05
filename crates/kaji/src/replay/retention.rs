@@ -2,11 +2,12 @@
 //!
 //! Le journal mêle deux natures d'events. La structure d'un tour — bornes,
 //! messages, usage, approbations, checkpoints, notifications MCP,
-//! remplacements d'historique, `log_meta`, `condense_triggered` — est
+//! remplacements d'historique, `log_meta`, `condense_triggered`, et la
+//! topologie d'un workflow avec ses décisions de gates — est
 //! l'historique de la session : permanente, et petite. Les payloads du rejeu
 //! — requêtes et réponses LLM, résultats d'outils, bloc mémoire, manifeste
 //! d'outils, bloc turn-context, résumés de compaction et de paires d'outils,
-//! lectures d'horloge — ne
+//! lectures d'horloge, sorties d'agents de workflow — ne
 //! servent qu'à rejouer ce tour à l'identique ; ce sont eux
 //! qui pèsent, et eux seuls que la rétention efface.
 //!
@@ -30,7 +31,7 @@ pub const RETENTION_DAYS_KEY: &str = "KAJI_REPLAY_RETENTION_DAYS";
 
 /// Les kinds effacés par la rétention. Tout kind absent de cette liste est
 /// permanent — la purge ne le voit jamais.
-pub const PURGEABLE_KINDS: [&str; 10] = [
+pub const PURGEABLE_KINDS: [&str; 11] = [
     "llm_request",
     "llm_response",
     "toolshim_message",
@@ -41,6 +42,9 @@ pub const PURGEABLE_KINDS: [&str; 10] = [
     "condense_summary",
     "tool_pair_summary",
     "clock_reads",
+    // Les six autres kinds de workflow sont structurels donc permanents ;
+    // celui-ci porte la sortie complète d'un agent.
+    crate::workflow::events::WORKFLOW_ARTIFACT,
 ];
 
 const MS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
