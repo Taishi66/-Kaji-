@@ -6,6 +6,8 @@
 use crate::tui::app::{RoledLine, RoledSpan};
 use kaji::agents::ContextBreakdown;
 use kaji::context_mgmt::condense::CondenseTotals;
+use kaji::metrics::budget::{BudgetLevel, BudgetStatus};
+use kaji::metrics::{BurnReport, MetricsReport, MetricsRow, MetricsWindow};
 use kaji::session::{UsageAggregate, UsageWindows};
 
 const GAUGE_WIDTH: usize = 16;
@@ -254,6 +256,279 @@ fn budget_gauge_line(window_label: &str, budget: Budget, agg: &UsageAggregate) -
         bar_span,
         RoledSpan::text(detail),
     ]
+}
+
+/// Vues de `/cost`. `Windows` est la vue historique (session / 5 h / 7 j) ;
+/// les autres tapent dans le ledger via `kaji::metrics`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostView {
+    Windows,
+    Models,
+    Day,
+    Week,
+    Month,
+    Cache,
+    Projection,
+}
+
+impl CostView {
+    /// `None` quand l'argument ne nomme aucune vue — l'appelant affiche
+    /// l'usage plutôt que de retomber silencieusement sur la vue par défaut.
+    pub fn parse(arg: &str) -> Option<Self> {
+        let trimmed = arg.trim();
+        if trimmed.is_empty() {
+            return Some(CostView::Windows);
+        }
+        match trimmed.to_lowercase().as_str() {
+            "modèles" | "modeles" | "models" | "modèle" | "modele" | "model" => {
+                Some(CostView::Models)
+            }
+            "jour" | "day" => Some(CostView::Day),
+            "semaine" | "week" => Some(CostView::Week),
+            "mois" | "month" => Some(CostView::Month),
+            "cache" => Some(CostView::Cache),
+            "projection" | "proj" => Some(CostView::Projection),
+            _ => None,
+        }
+    }
+
+    /// Fenêtre du ledger interrogée par la vue. `Projection` n'en a pas : le
+    /// burn report porte ses propres bornes.
+    pub fn window(self) -> Option<MetricsWindow> {
+        match self {
+            CostView::Windows | CostView::Projection => None,
+            CostView::Models => Some(MetricsWindow::Last7d),
+            CostView::Day => Some(MetricsWindow::Day),
+            CostView::Week => Some(MetricsWindow::Week),
+            CostView::Month | CostView::Cache => Some(MetricsWindow::Month),
+        }
+    }
+
+    pub fn usage() -> &'static str {
+        "usage : /cost [modèles|jour|semaine|mois|cache|projection]"
+    }
+}
+
+fn cost_str(cost: Option<f64>) -> String {
+    match cost {
+        Some(c) => format!("${c:.2}"),
+        None => "n/a".to_string(),
+    }
+}
+
+/// Rend un tableau en lignes de texte nu : en-tête, filet, corps. Partagé par
+/// le bloc TUI (qui restyle chaque ligne) et `kaji metrics --format table`
+/// (qui les imprime telles quelles), pour que les deux surfaces ne divergent
+/// jamais sur les colonnes.
+pub fn render_table(headers: &[&str], rows: &[Vec<String>], right_align: &[bool]) -> Vec<String> {
+    let widths = column_widths(headers, rows);
+    let header_cells: Vec<String> = headers.iter().map(|h| (*h).to_string()).collect();
+    let header_row = format_row(&header_cells, &widths, right_align);
+    let rule_width = header_row.chars().count().saturating_sub(1);
+
+    let mut lines = vec![header_row, format!(" {}", "─".repeat(rule_width))];
+    for row in rows {
+        lines.push(format_row(row, &widths, right_align));
+    }
+    lines
+}
+
+const METRICS_HEADERS: [&str; 6] = ["clé", "↑ entrée", "↓ sortie", "total", "coût", "appels"];
+const METRICS_ALIGN: [bool; 6] = [false, true, true, true, true, true];
+
+const CACHE_HEADERS: [&str; 6] = ["clé", "↑ entrée", "cache lu", "hit", "coût", "économisé"];
+const CACHE_ALIGN: [bool; 6] = [false, true, true, true, true, true];
+
+/// Lignes du tableau d'agrégats — clé, tokens, coût, appels — totaux inclus
+/// en dernière ligne dès qu'il y a plus d'un groupe.
+pub fn metrics_rows(report: &MetricsReport) -> Vec<Vec<String>> {
+    let row_cells = |row: &MetricsRow| {
+        vec![
+            truncate(&row.key, 40),
+            fmt_tokens(tok(row.input_tokens)),
+            fmt_tokens(tok(row.output_tokens)),
+            fmt_tokens(tok(row.total_tokens)),
+            cost_str(row.cost),
+            row.entries.to_string(),
+        ]
+    };
+    let mut rows: Vec<Vec<String>> = report.rows.iter().map(row_cells).collect();
+    if report.rows.len() > 1 {
+        rows.push(row_cells(&report.totals));
+    }
+    rows
+}
+
+/// Lignes du tableau cache — la colonne `économisé` est un plancher : les
+/// groupes sans tarif connu comptent pour zéro.
+pub fn cache_rows(report: &MetricsReport) -> Vec<Vec<String>> {
+    let row_cells = |row: &MetricsRow| {
+        vec![
+            truncate(&row.key, 40),
+            fmt_tokens(tok(row.input_tokens)),
+            fmt_tokens(tok(row.cache_read_tokens)),
+            format!("{} %", (row.cache_hit_rate() * 100.0).round() as i64),
+            cost_str(row.cost),
+            cost_str(row.cache_savings),
+        ]
+    };
+    let mut rows: Vec<Vec<String>> = report.rows.iter().map(row_cells).collect();
+    if report.rows.len() > 1 {
+        rows.push(row_cells(&report.totals));
+    }
+    rows
+}
+
+pub fn metrics_headers(cache: bool) -> (&'static [&'static str], &'static [bool]) {
+    if cache {
+        (&CACHE_HEADERS, &CACHE_ALIGN)
+    } else {
+        (&METRICS_HEADERS, &METRICS_ALIGN)
+    }
+}
+
+fn styled_table(headers: &[&str], rows: &[Vec<String>], right_align: &[bool]) -> Vec<RoledLine> {
+    let mut lines = Vec::new();
+    for (index, text) in render_table(headers, rows, right_align)
+        .into_iter()
+        .enumerate()
+    {
+        lines.push(match index {
+            0 => vec![RoledSpan::table_header(text)],
+            1 => vec![RoledSpan::border_inactive(text)],
+            _ => vec![RoledSpan::text(text)],
+        });
+    }
+    lines
+}
+
+/// Bloc `/cost <vue>` pour toute vue tabulaire (modèles, jour, semaine, mois,
+/// cache).
+pub fn metrics_table_lines(view: CostView, report: &MetricsReport) -> Vec<RoledLine> {
+    let cache = view == CostView::Cache;
+    let (headers, align) = metrics_headers(cache);
+    let rows = if cache {
+        cache_rows(report)
+    } else {
+        metrics_rows(report)
+    };
+
+    let title = if cache {
+        format!(
+            "/cost cache — {} (par {})",
+            report.window.label(),
+            report.dimension.label()
+        )
+    } else {
+        format!(
+            "/cost {} — par {}",
+            report.window.label(),
+            report.dimension.label()
+        )
+    };
+
+    let mut lines = vec![vec![RoledSpan::title(title)], vec![RoledSpan::plain("")]];
+    if report.rows.is_empty() {
+        lines.push(vec![RoledSpan::dim("aucune consommation sur la fenêtre")]);
+        return lines;
+    }
+    lines.extend(styled_table(headers, &rows, align));
+
+    if cache {
+        if let Some(full) = report.totals.cost_uncached() {
+            lines.push(vec![RoledSpan::dim(format!(
+                "sans cache : ${full:.2} — le cache a épargné {}",
+                cost_str(report.totals.cache_savings)
+            ))]);
+        } else {
+            lines.push(vec![RoledSpan::dim(
+                "économie chiffrable seulement pour les modèles tarifés",
+            )]);
+        }
+    }
+    lines
+}
+
+/// Bloc `/cost projection` : burn du jour et de la semaine, dépense du mois,
+/// projection de fin de mois et jauges de budget.
+pub fn projection_lines(burn: &BurnReport) -> Vec<RoledLine> {
+    let projection = &burn.projection;
+    let mut lines = vec![
+        vec![RoledSpan::title("/cost projection — mois en cours")],
+        vec![RoledSpan::plain("")],
+    ];
+
+    let rows = vec![
+        vec!["aujourd'hui".to_string(), format!("${:.2}", burn.today)],
+        vec!["semaine".to_string(), format!("${:.2}", burn.week)],
+        vec![
+            format!(
+                "mois (J{}/{})",
+                projection.elapsed_days, projection.days_in_month
+            ),
+            format!("${:.2}", burn.month),
+        ],
+        vec![
+            "rythme".to_string(),
+            format!("${:.2} / jour", projection.daily_rate),
+        ],
+        vec![
+            "projection fin de mois".to_string(),
+            format!("${:.2}", projection.month_end),
+        ],
+    ];
+    lines.extend(styled_table(&["", "USD"], &rows, &[false, true]));
+
+    if projection.elapsed_days < 2 {
+        lines.push(vec![RoledSpan::dim(
+            "projection extrapolée d'un seul jour — indicative",
+        )]);
+    }
+
+    for status in &burn.budgets {
+        lines.push(budget_status_line(status));
+    }
+    lines
+}
+
+fn budget_span(level: BudgetLevel, bar: String) -> RoledSpan {
+    match level {
+        BudgetLevel::Over | BudgetLevel::High => RoledSpan::accent(bar),
+        _ => RoledSpan::gold(bar),
+    }
+}
+
+/// Jauge d'un budget mensuel, quel que soit son niveau.
+pub fn budget_status_line(status: &BudgetStatus) -> RoledLine {
+    let percent = (status.ratio * 100.0).round() as i64;
+    vec![
+        RoledSpan::dim(format!(" budget {} ", status.scope)),
+        budget_span(status.level, gauge(status.ratio, GAUGE_WIDTH)),
+        RoledSpan::text(format!(
+            "  {percent} %  (${:.2} / ${:.2} ce mois)",
+            status.spent, status.limit
+        )),
+    ]
+}
+
+/// Avertissements de budget : une ligne par seuil franchi, aucune sinon.
+/// Jamais un arrêt — le user garde la main.
+pub fn budget_warning_lines(statuses: &[BudgetStatus]) -> Vec<RoledLine> {
+    statuses
+        .iter()
+        .filter(|status| status.breached())
+        .map(|status| {
+            let threshold = status.level.threshold().unwrap_or(100);
+            let percent = (status.ratio * 100.0).round() as i64;
+            vec![
+                budget_span(status.level, format!("budget {} ", status.scope)),
+                RoledSpan::text(format!(
+                    "— {threshold} % franchi : ${:.2} / ${:.2} ce mois ({percent} %)",
+                    status.spent, status.limit
+                )),
+            ]
+        })
+        .collect()
 }
 
 /// Ligne de synthèse condense — `None` si aucun résultat d'outil n'a jamais
@@ -753,5 +1028,199 @@ mod tests {
         let name_cell = data_row.trim_start().split("  ").next().unwrap();
         assert_eq!(name_cell.chars().count(), DOCKER_COL_CAPS[0]);
         assert!(name_cell.ends_with('…'));
+    }
+
+    fn metrics_row(key: &str, input: i64, cache_read: i64, cost: Option<f64>) -> MetricsRow {
+        MetricsRow {
+            key: key.to_string(),
+            input_tokens: input,
+            output_tokens: 100,
+            total_tokens: input + 100,
+            cache_read_tokens: cache_read,
+            cache_write_tokens: 0,
+            entries: 2,
+            cost,
+            cache_savings: cost.map(|_| 0.25),
+        }
+    }
+
+    fn fixture_report(window: MetricsWindow) -> MetricsReport {
+        let rows = vec![
+            metrics_row("claude-sonnet", 10_000, 4_000, Some(1.50)),
+            metrics_row("claude-haiku", 2_000, 0, Some(0.10)),
+        ];
+        let totals = MetricsRow {
+            key: "total".to_string(),
+            input_tokens: 12_000,
+            output_tokens: 200,
+            total_tokens: 12_200,
+            cache_read_tokens: 4_000,
+            cache_write_tokens: 0,
+            entries: 4,
+            cost: Some(1.60),
+            cache_savings: Some(0.50),
+        };
+        MetricsReport {
+            window,
+            dimension: kaji::metrics::MetricsDimension::Model,
+            start: 0,
+            end: 1,
+            rows,
+            totals,
+        }
+    }
+
+    #[test]
+    fn cost_view_parses_the_six_named_views_and_rejects_the_rest() {
+        assert_eq!(CostView::parse(""), Some(CostView::Windows));
+        assert_eq!(CostView::parse("modèles"), Some(CostView::Models));
+        assert_eq!(CostView::parse("models"), Some(CostView::Models));
+        assert_eq!(CostView::parse("jour"), Some(CostView::Day));
+        assert_eq!(CostView::parse("Semaine"), Some(CostView::Week));
+        assert_eq!(CostView::parse("mois"), Some(CostView::Month));
+        assert_eq!(CostView::parse("cache"), Some(CostView::Cache));
+        assert_eq!(CostView::parse("proj"), Some(CostView::Projection));
+        assert_eq!(CostView::parse("bidule"), None);
+    }
+
+    #[test]
+    fn cost_view_windows_match_their_calendar_span() {
+        assert_eq!(CostView::Windows.window(), None);
+        assert_eq!(CostView::Projection.window(), None);
+        assert_eq!(CostView::Models.window(), Some(MetricsWindow::Last7d));
+        assert_eq!(CostView::Day.window(), Some(MetricsWindow::Day));
+        assert_eq!(CostView::Week.window(), Some(MetricsWindow::Week));
+        assert_eq!(CostView::Month.window(), Some(MetricsWindow::Month));
+        assert_eq!(CostView::Cache.window(), Some(MetricsWindow::Month));
+    }
+
+    #[test]
+    fn metrics_table_lines_render_one_row_per_key_plus_totals() {
+        let lines = metrics_table_lines(CostView::Month, &fixture_report(MetricsWindow::Month));
+        let text = plain_lines(&lines);
+        assert_eq!(text[0], "/cost mois — par modèle");
+        assert!(text[2].contains("↑ entrée"), "en-tête : {}", text[2]);
+        assert!(text[4].contains("claude-sonnet") && text[4].contains("$1.50"));
+        assert!(text[5].contains("claude-haiku"));
+        assert!(
+            text[6].contains("total") && text[6].contains("$1.60"),
+            "ligne de totaux : {}",
+            text[6]
+        );
+    }
+
+    #[test]
+    fn metrics_table_lines_report_an_empty_window_instead_of_an_empty_table() {
+        let mut report = fixture_report(MetricsWindow::Day);
+        report.rows.clear();
+        let text = plain_lines(&metrics_table_lines(CostView::Day, &report));
+        assert_eq!(text[2], "aucune consommation sur la fenêtre");
+    }
+
+    #[test]
+    fn cache_view_shows_hit_rate_and_the_full_price_footer() {
+        let text = plain_lines(&metrics_table_lines(
+            CostView::Cache,
+            &fixture_report(MetricsWindow::Month),
+        ));
+        assert!(text[0].starts_with("/cost cache — mois"));
+        assert!(text[2].contains("hit"), "colonnes cache : {}", text[2]);
+        // 4 000 lus sur 10 000 d'entrée.
+        assert!(text[4].contains("40 %"), "taux de hit : {}", text[4]);
+        assert!(
+            text.last().unwrap().contains("sans cache : $2.10"),
+            "pied de page : {:?}",
+            text.last()
+        );
+    }
+
+    #[test]
+    fn cache_view_says_so_when_no_model_is_priced() {
+        let mut report = fixture_report(MetricsWindow::Month);
+        report.totals.cache_savings = None;
+        for row in &mut report.rows {
+            row.cache_savings = None;
+        }
+        let text = plain_lines(&metrics_table_lines(CostView::Cache, &report));
+        assert_eq!(
+            text.last().unwrap(),
+            "économie chiffrable seulement pour les modèles tarifés"
+        );
+    }
+
+    fn fixture_burn(daily: Vec<f64>, budgets: Vec<BudgetStatus>) -> BurnReport {
+        let projection = kaji::metrics::projection::project_month_end(&daily, 30);
+        BurnReport {
+            today: *daily.last().unwrap_or(&0.0),
+            week: daily.iter().sum(),
+            month: daily.iter().sum(),
+            daily,
+            projection,
+            budgets,
+        }
+    }
+
+    #[test]
+    fn projection_view_lists_burn_then_the_month_end_estimate() {
+        let text = plain_lines(&projection_lines(&fixture_burn(vec![2.0; 10], Vec::new())));
+        assert_eq!(text[0], "/cost projection — mois en cours");
+        assert!(text.iter().any(|l| l.contains("mois (J10/30)")));
+        assert!(
+            text.iter().any(|l| l.contains("$60.00")),
+            "projection : {text:?}"
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("indicative")),
+            "10 jours écoulés : pas d'avertissement"
+        );
+    }
+
+    #[test]
+    fn projection_view_flags_a_single_day_extrapolation() {
+        let text = plain_lines(&projection_lines(&fixture_burn(vec![3.0], Vec::new())));
+        assert!(text.iter().any(|l| l.contains("indicative")));
+    }
+
+    #[test]
+    fn projection_view_appends_a_gauge_per_declared_budget() {
+        let burn = fixture_burn(
+            vec![10.0; 5],
+            vec![
+                BudgetStatus::new("global", 100.0, 50.0),
+                BudgetStatus::new("anthropic", 40.0, 50.0),
+            ],
+        );
+        let text = plain_lines(&projection_lines(&burn));
+        assert!(text.iter().any(|l| l.contains("budget global")));
+        assert!(text
+            .iter()
+            .any(|l| l.contains("budget anthropic") && l.contains("125 %")));
+    }
+
+    #[test]
+    fn budget_warnings_fire_only_on_breached_thresholds() {
+        let statuses = [
+            BudgetStatus::new("global", 100.0, 10.0),
+            BudgetStatus::new("half", 100.0, 55.0),
+            BudgetStatus::new("high", 100.0, 85.0),
+            BudgetStatus::new("over", 100.0, 130.0),
+        ];
+        let text = plain_lines(&budget_warning_lines(&statuses));
+        assert_eq!(text.len(), 3, "le budget à 10 % ne dit rien : {text:?}");
+        assert!(text[0].contains("half") && text[0].contains("50 % franchi"));
+        assert!(text[1].contains("high") && text[1].contains("80 % franchi"));
+        assert!(text[2].contains("over") && text[2].contains("100 % franchi"));
+    }
+
+    #[test]
+    fn render_table_pads_columns_to_the_widest_cell() {
+        let rows = vec![
+            vec!["a".to_string(), "1".to_string()],
+            vec!["longue".to_string(), "22".to_string()],
+        ];
+        let lines = render_table(&["clé", "n"], &rows, &[false, true]);
+        assert_eq!(lines.len(), 4, "en-tête, filet, 2 lignes");
+        assert!(lines[1].contains('─'));
+        assert!(lines[2].starts_with(" a      "), "padding : {:?}", lines[2]);
     }
 }

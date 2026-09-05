@@ -1,6 +1,7 @@
 use crate::tui::editors::{self, EditMode, EditorSpec, EditorState, Launch, LaunchContext};
 use crate::tui::gitstatus::GitStatus;
 use crate::tui::icons::IconSet;
+use crate::tui::report;
 use crate::tui::theme::SpanRole;
 use crate::tui::ui::sanitize_for_display;
 use crate::tui::{diff, forge, theme};
@@ -389,7 +390,9 @@ pub enum Action {
     /// carried mode to the agent and persists it.
     Mode(KajiMode),
     Help,
-    Cost,
+    /// `/cost` seul ou `/cost <vue>` — la vue est déjà résolue, l'event loop
+    /// n'a plus qu'à interroger le ledger.
+    Cost(report::CostView),
     Context,
     Docker,
     Checkpoints,
@@ -510,8 +513,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/cost",
-        desc: "affiche l'usage tokens/coût (session, 5 h, 7 j) — budgets optionnels via KAJI_BUDGET_5H / KAJI_BUDGET_7J",
-        run: |_| Action::Cost,
+        desc: "usage tokens/coût — `/cost [modèles|jour|semaine|mois|cache|projection]`, budgets via KAJI_BUDGET_5H / KAJI_BUDGET_7J / KAJI_BUDGET_MONTHLY_USD",
+        run: |_| Action::Cost(report::CostView::Windows),
     },
     Command {
         name: "/context",
@@ -579,6 +582,12 @@ fn theme_command_arg(text: &str) -> Option<&str> {
 /// session from being forwarded to it as a plain message.
 fn goal_command_arg(text: &str) -> Option<&str> {
     slash_command_arg(text, "/goal")
+}
+
+/// `/cost` seul EST dans `COMMANDS` (sans arg = les fenêtres session/5 h/7 j),
+/// donc la palette l'autocomplète ; avec une vue il atterrit ici.
+fn cost_command_arg(text: &str) -> Option<&str> {
+    slash_command_arg(text, "/cost")
 }
 
 /// `/edit` alone IS in `COMMANDS` (arg-less = son usage), so the palette can
@@ -3160,6 +3169,15 @@ impl App {
                     if let Some(arg) = goal_command_arg(&text) {
                         let arg = arg.to_string();
                         return self.run_goal_command(&arg);
+                    }
+                    if let Some(arg) = cost_command_arg(&text) {
+                        return match report::CostView::parse(arg) {
+                            Some(view) => Action::Cost(view),
+                            None => {
+                                self.push_system(report::CostView::usage());
+                                Action::None
+                            }
+                        };
                     }
                     if let Some(arg) = theme_command_arg(&text) {
                         return self.run_theme_command(arg);
@@ -6566,8 +6584,56 @@ mod tests {
         for c in "/cost".chars() {
             app.on_event(&key(KeyCode::Char(c)));
         }
-        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::Cost);
+        assert_eq!(
+            app.on_event(&key(KeyCode::Enter)),
+            Action::Cost(report::CostView::Windows)
+        );
         assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn slash_cost_with_a_view_carries_it_in_the_action() {
+        for (typed, expected) in [
+            ("/cost modèles", report::CostView::Models),
+            ("/cost mois", report::CostView::Month),
+            ("/cost cache", report::CostView::Cache),
+            ("/cost projection", report::CostView::Projection),
+        ] {
+            let mut app = App::new(None);
+            for c in typed.chars() {
+                app.on_event(&key(KeyCode::Char(c)));
+            }
+            assert_eq!(
+                app.on_event(&key(KeyCode::Enter)),
+                Action::Cost(expected),
+                "{typed}"
+            );
+        }
+    }
+
+    #[test]
+    fn slash_cost_with_an_unknown_view_shows_the_usage_line() {
+        let mut app = App::new(None);
+        for c in "/cost bidule".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
+        assert!(
+            app.chat
+                .last()
+                .is_some_and(|line| line.text.contains("usage : /cost")),
+            "dernière ligne : {:?}",
+            app.chat.last().map(|l| &l.text)
+        );
+    }
+
+    /// `/costume` ne doit pas être lu comme un `/cost` dont la vue serait
+    /// `ume` — même garde de mot entier que les autres commandes à argument.
+    #[test]
+    fn cost_command_arg_keeps_cost_a_whole_word() {
+        assert_eq!(cost_command_arg("/cost"), Some(""));
+        assert_eq!(cost_command_arg("/cost mois"), Some("mois"));
+        assert_eq!(cost_command_arg("/costume"), None);
     }
 
     #[test]

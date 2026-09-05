@@ -2,6 +2,7 @@ use crate::config::paths::Paths;
 use crate::config::KajiMode;
 use crate::conversation::message::{Message, MessageUsage, TokenState};
 use crate::conversation::Conversation;
+use crate::metrics::{LedgerBucket, MetricsDimension};
 use crate::providers::base::CostSource;
 use crate::providers::base::Provider;
 use crate::recipe::Recipe;
@@ -24,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use tracing::{info, warn};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 17;
+pub const CURRENT_SCHEMA_VERSION: i32 = 18;
 pub const SESSIONS_FOLDER: &str = "sessions";
 pub const DB_NAME: &str = "sessions.db";
 const MILLISECOND_TIMESTAMP_THRESHOLD: i64 = 10_000_000_000;
@@ -535,6 +536,29 @@ impl SessionManager {
     /// depuis `since_epoch_secs`. Lecture pure, aucun effet de bord.
     pub async fn usage_since(&self, since_epoch_secs: i64) -> Result<UsageAggregate> {
         self.storage.usage_since(since_epoch_secs).await
+    }
+
+    /// Groupes bruts du ledger sur `[start, end)`. Lecture pure, consommée
+    /// par `crate::metrics`.
+    pub async fn metrics_buckets(
+        &self,
+        dimension: MetricsDimension,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<LedgerBucket>> {
+        self.storage.metrics_buckets(dimension, start, end).await
+    }
+
+    pub async fn usage_ledger_costs_between(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<(i64, Option<f64>)>> {
+        self.storage.usage_ledger_costs_between(start, end).await
+    }
+
+    pub async fn usage_cost_between(&self, start: i64, end: i64) -> Result<f64> {
+        self.storage.usage_cost_between(start, end).await
     }
 
     /// Fenêtres d'usage pour `/cost` : session courante, dernières 5 h et
@@ -1054,16 +1078,21 @@ async fn insert_usage_ledger_row(
     sqlx::query(
         r#"
         INSERT INTO usage_ledger (
-            session_id, created_timestamp, model,
+            session_id, created_timestamp, model, provider,
             input_tokens, output_tokens, total_tokens,
             cache_read_tokens, cache_write_tokens,
             cost, cost_source, is_compaction
         )
-        VALUES (?, strftime('%s','now'), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (
+            ?, strftime('%s','now'), ?,
+            (SELECT provider_name FROM sessions WHERE id = ?),
+            ?, ?, ?, ?, ?, ?, ?, ?
+        )
         "#,
     )
     .bind(session_id)
     .bind(model)
+    .bind(session_id)
     .bind(usage.input_tokens)
     .bind(usage.output_tokens)
     .bind(usage.total_tokens)
@@ -1228,6 +1257,7 @@ impl SessionStorage {
                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
                 created_timestamp INTEGER NOT NULL,
                 model TEXT,
+                provider TEXT,
                 input_tokens INTEGER,
                 output_tokens INTEGER,
                 total_tokens INTEGER,
@@ -1280,6 +1310,11 @@ impl SessionStorage {
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_usage_ledger_session ON usage_ledger(session_id)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_usage_ledger_created ON usage_ledger(created_timestamp)",
         )
         .execute(&mut *tx)
         .await?;
@@ -1802,6 +1837,29 @@ impl SessionStorage {
                 sqlx::query(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_turn_alloc \
                      ON session_events(session_id, turn_seq) WHERE kind = 'turn_start'",
+                )
+                .execute(&mut **tx)
+                .await?;
+            }
+            18 => {
+                // Le ledger portait déjà le modèle mais pas le provider, alors
+                // que `sessions.provider_name` peut changer en cours de
+                // session : sans dénormalisation, une ligne ancienne se verrait
+                // attribuer le provider courant. Les lignes antérieures restent
+                // à NULL et sont rattachées à la lecture par COALESCE.
+                let has_provider = sqlx::query_scalar::<_, i32>(
+                    "SELECT COUNT(*) FROM pragma_table_info('usage_ledger') WHERE name = 'provider'",
+                )
+                .fetch_one(&mut **tx)
+                .await?
+                    > 0;
+                if !has_provider {
+                    sqlx::query("ALTER TABLE usage_ledger ADD COLUMN provider TEXT")
+                        .execute(&mut **tx)
+                        .await?;
+                }
+                sqlx::query(
+                    "CREATE INDEX IF NOT EXISTS idx_usage_ledger_created ON usage_ledger(created_timestamp)",
                 )
                 .execute(&mut **tx)
                 .await?;
@@ -2428,12 +2486,12 @@ impl SessionStorage {
         sqlx::query(
             r#"
             INSERT INTO usage_ledger (
-                session_id, created_timestamp,
+                session_id, created_timestamp, provider,
                 input_tokens, output_tokens, total_tokens,
                 cache_read_tokens, cache_write_tokens,
                 cost, cost_source
             )
-            SELECT s.id, strftime('%s','now'),
+            SELECT s.id, strftime('%s','now'), s.provider_name,
                    MAX(COALESCE(s.accumulated_input_tokens, 0) - l.input_sum, 0),
                    MAX(COALESCE(s.accumulated_output_tokens, 0) - l.output_sum, 0),
                    MAX(COALESCE(s.accumulated_total_tokens, 0) - l.total_sum, 0),
@@ -2610,6 +2668,125 @@ impl SessionStorage {
             total_tokens: row.2.unwrap_or(0),
             cost: row.3,
         })
+    }
+
+    /// Groupes bruts d'une fenêtre `[start, end)`, ventilés par la dimension
+    /// demandée **et** par (provider, modèle) — le second couple ne sert pas
+    /// de clé d'affichage, il porte le tarif utilisé pour chiffrer l'économie
+    /// de cache.
+    ///
+    /// `provider` vient de la ligne quand elle en porte un (schéma ≥ v18) et
+    /// retombe sur celui de la session pour les lignes antérieures.
+    async fn metrics_buckets(
+        &self,
+        dimension: MetricsDimension,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<LedgerBucket>> {
+        let key_expr = match dimension {
+            MetricsDimension::Model => "COALESCE(u.model, '(inconnu)')",
+            MetricsDimension::Provider => "COALESCE(u.provider, s.provider_name, '(inconnu)')",
+            MetricsDimension::Session => "u.session_id",
+            MetricsDimension::Project => "COALESCE(s.working_dir, '')",
+        };
+
+        let query = format!(
+            r#"
+            SELECT {key_expr} AS bucket_key,
+                   COALESCE(u.provider, s.provider_name) AS bucket_provider,
+                   u.model AS bucket_model,
+                   COALESCE(SUM(u.input_tokens), 0),
+                   COALESCE(SUM(u.output_tokens), 0),
+                   COALESCE(SUM(u.total_tokens), 0),
+                   COALESCE(SUM(u.cache_read_tokens), 0),
+                   COALESCE(SUM(u.cache_write_tokens), 0),
+                   SUM(u.cost),
+                   COUNT(*)
+            FROM usage_ledger u
+            LEFT JOIN sessions s ON s.id = u.session_id
+            WHERE u.created_timestamp >= ? AND u.created_timestamp < ?
+            GROUP BY bucket_key, bucket_provider, bucket_model
+            "#
+        );
+
+        let pool = self.pool().await?;
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<String>,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                Option<f64>,
+                i64,
+            ),
+        >(&query)
+        .bind(start)
+        .bind(end)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| LedgerBucket {
+                key: match dimension {
+                    MetricsDimension::Project => crate::metrics::project_key(Some(&row.0)),
+                    _ => row.0,
+                },
+                provider: row.1,
+                model: row.2,
+                input_tokens: row.3,
+                output_tokens: row.4,
+                total_tokens: row.5,
+                cache_read_tokens: row.6,
+                cache_write_tokens: row.7,
+                cost: row.8,
+                entries: row.9,
+            })
+            .collect())
+    }
+
+    /// Lignes `(timestamp, coût)` d'une fenêtre — le découpage en jours locaux
+    /// se fait côté Rust, pas via `date(..., 'localtime')` dont le fuseau
+    /// dépend de l'environnement du process SQLite.
+    async fn usage_ledger_costs_between(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<(i64, Option<f64>)>> {
+        let pool = self.pool().await?;
+        let rows = sqlx::query_as::<_, (i64, Option<f64>)>(
+            r#"
+            SELECT created_timestamp, cost
+            FROM usage_ledger
+            WHERE created_timestamp >= ? AND created_timestamp < ?
+            ORDER BY created_timestamp
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn usage_cost_between(&self, start: i64, end: i64) -> Result<f64> {
+        let pool = self.pool().await?;
+        let total = sqlx::query_scalar::<_, Option<f64>>(
+            r#"
+            SELECT SUM(cost) FROM usage_ledger
+            WHERE created_timestamp >= ? AND created_timestamp < ?
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(pool)
+        .await?;
+        Ok(total.unwrap_or(0.0))
     }
 
     #[allow(clippy::disallowed_methods)] // eventlog
@@ -5236,6 +5413,325 @@ mod tests {
         assert_eq!(aggregate.input_tokens, 50);
         assert_eq!(aggregate.output_tokens, 10);
         assert_eq!(aggregate.cost, None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_metrics_row(
+        pool: &Pool<Sqlite>,
+        session_id: &str,
+        created_timestamp: i64,
+        model: &str,
+        provider: Option<&str>,
+        input_tokens: i64,
+        cache_read_tokens: i64,
+        cost: Option<f64>,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO usage_ledger (
+                session_id, created_timestamp, model, provider,
+                input_tokens, output_tokens, total_tokens,
+                cache_read_tokens, cache_write_tokens,
+                cost, cost_source, is_compaction
+            )
+            VALUES (?, ?, ?, ?, ?, 10, ?, ?, 0, ?, 'estimated', 0)
+            "#,
+        )
+        .bind(session_id)
+        .bind(created_timestamp)
+        .bind(model)
+        .bind(provider)
+        .bind(input_tokens)
+        .bind(input_tokens + 10)
+        .bind(cache_read_tokens)
+        .bind(cost)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn migration_v18_adds_provider_to_an_existing_usage_ledger() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("sessions").join(DB_NAME);
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+
+        SessionStorage::create_schema(&pool).await.unwrap();
+
+        // Remonte la table à sa forme v17 : ledger sans colonne provider.
+        sqlx::query("ALTER TABLE usage_ledger DROP COLUMN provider")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE schema_version SET version = 17")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (id, name, user_set_name, session_type, working_dir, extension_data, kaji_mode, provider_name)
+             VALUES ('v17_id', 's', 0, 'user', '/tmp', '{}', 'auto', 'anthropic')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO usage_ledger (session_id, created_timestamp, model, input_tokens, output_tokens, total_tokens, cost)
+             VALUES ('v17_id', 1000, 'sonnet', 100, 10, 110, 0.5)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let pool = sm.storage().pool().await.unwrap();
+
+        let has_provider: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('usage_ledger') WHERE name = 'provider'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            has_provider, 1,
+            "migration v18 ajoute usage_ledger.provider"
+        );
+
+        let legacy: Option<String> =
+            sqlx::query_scalar("SELECT provider FROM usage_ledger WHERE session_id = 'v17_id'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(legacy, None, "les lignes existantes ne sont pas réécrites");
+
+        // …mais la lecture les rattache quand même au provider de la session.
+        let buckets = sm
+            .metrics_buckets(MetricsDimension::Provider, 0, 2000)
+            .await
+            .unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].key, "anthropic");
+    }
+
+    #[tokio::test]
+    async fn recorded_usage_denormalises_the_session_provider_onto_the_ledger_row() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let id = new_session(&sm).await;
+        sm.update(&id)
+            .provider_name("anthropic")
+            .apply()
+            .await
+            .unwrap();
+
+        let usage = MessageUsage {
+            input_tokens: Some(120),
+            output_tokens: Some(30),
+            total_tokens: Some(150),
+            cache_read_tokens: Some(80),
+            cache_write_tokens: Some(0),
+            cost: Some(0.25),
+            cost_source: Some(CostSource::Estimated),
+            is_compaction: false,
+            elapsed_ms: None,
+            time_to_first_token_ms: None,
+        };
+        sm.record_usage_metrics(
+            &id,
+            None,
+            Usage::new(Some(120), Some(30), Some(150)),
+            "m",
+            &usage,
+        )
+        .await
+        .unwrap();
+
+        let pool = sm.storage().pool().await.unwrap();
+        let providers: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT provider FROM usage_ledger WHERE session_id = ?")
+                .bind(&id)
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        assert!(
+            providers.iter().all(|p| p.as_deref() == Some("anthropic")),
+            "toutes les lignes portent le provider de la session : {providers:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
+    async fn metrics_buckets_group_by_model_within_the_window() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let id = new_session(&sm).await;
+        let pool = sm.storage().pool().await.unwrap();
+        let now = Utc::now().timestamp();
+
+        seed_metrics_row(
+            pool,
+            &id,
+            now - 100,
+            "sonnet",
+            Some("anthropic"),
+            1_000,
+            400,
+            Some(1.0),
+        )
+        .await;
+        seed_metrics_row(
+            pool,
+            &id,
+            now - 50,
+            "sonnet",
+            Some("anthropic"),
+            500,
+            100,
+            Some(0.5),
+        )
+        .await;
+        seed_metrics_row(
+            pool,
+            &id,
+            now - 20,
+            "haiku",
+            Some("anthropic"),
+            200,
+            0,
+            Some(0.1),
+        )
+        .await;
+        seed_metrics_row(
+            pool,
+            &id,
+            now - 99_999,
+            "opus",
+            Some("anthropic"),
+            9_999,
+            0,
+            Some(9.0),
+        )
+        .await;
+
+        let buckets = sm
+            .metrics_buckets(MetricsDimension::Model, now - 3600, now + 1)
+            .await
+            .unwrap();
+
+        assert_eq!(buckets.len(), 2, "opus est hors fenêtre : {buckets:?}");
+        let sonnet = buckets.iter().find(|b| b.key == "sonnet").unwrap();
+        assert_eq!(sonnet.entries, 2);
+        assert_eq!(sonnet.input_tokens, 1_500);
+        assert_eq!(sonnet.cache_read_tokens, 500);
+        assert!((sonnet.cost.unwrap() - 1.5).abs() < 1e-9);
+        assert_eq!(sonnet.provider.as_deref(), Some("anthropic"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
+    async fn metrics_buckets_by_provider_fall_back_to_the_session_provider() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let id = new_session(&sm).await;
+        sm.update(&id)
+            .provider_name("openai")
+            .apply()
+            .await
+            .unwrap();
+        let pool = sm.storage().pool().await.unwrap();
+        let now = Utc::now().timestamp();
+
+        seed_metrics_row(pool, &id, now - 10, "gpt", None, 100, 0, Some(0.2)).await;
+        seed_metrics_row(
+            pool,
+            &id,
+            now - 5,
+            "sonnet",
+            Some("anthropic"),
+            100,
+            0,
+            Some(0.3),
+        )
+        .await;
+
+        let buckets = sm
+            .metrics_buckets(MetricsDimension::Provider, now - 3600, now + 1)
+            .await
+            .unwrap();
+
+        let keys: Vec<&str> = buckets.iter().map(|b| b.key.as_str()).collect();
+        assert!(
+            keys.contains(&"openai"),
+            "ligne sans provider rattachée à la session : {keys:?}"
+        );
+        assert!(keys.contains(&"anthropic"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
+    async fn metrics_buckets_by_session_and_project_key_on_the_right_column() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let a = new_session(&sm).await;
+        let b = new_session(&sm).await;
+        let pool = sm.storage().pool().await.unwrap();
+        let now = Utc::now().timestamp();
+
+        seed_metrics_row(pool, &a, now - 10, "m", Some("p"), 100, 0, Some(0.2)).await;
+        seed_metrics_row(pool, &b, now - 5, "m", Some("p"), 300, 0, Some(0.4)).await;
+
+        let by_session = sm
+            .metrics_buckets(MetricsDimension::Session, now - 3600, now + 1)
+            .await
+            .unwrap();
+        assert_eq!(by_session.len(), 2);
+        assert!(by_session.iter().any(|bucket| bucket.key == a));
+        assert!(by_session.iter().any(|bucket| bucket.key == b));
+
+        // Les deux sessions partagent `/tmp` comme working_dir.
+        let by_project = sm
+            .metrics_buckets(MetricsDimension::Project, now - 3600, now + 1)
+            .await
+            .unwrap();
+        assert_eq!(by_project.len(), 1, "un seul projet : {by_project:?}");
+        assert_eq!(by_project[0].input_tokens, 400);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test
+    async fn ledger_costs_between_returns_rows_and_the_summed_cost() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let id = new_session(&sm).await;
+        let pool = sm.storage().pool().await.unwrap();
+        let now = Utc::now().timestamp();
+
+        seed_metrics_row(pool, &id, now - 30, "m", Some("p"), 10, 0, Some(1.0)).await;
+        seed_metrics_row(pool, &id, now - 20, "m", Some("p"), 10, 0, None).await;
+        seed_metrics_row(pool, &id, now + 500, "m", Some("p"), 10, 0, Some(5.0)).await;
+
+        let rows = sm
+            .usage_ledger_costs_between(now - 3600, now)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "la borne haute est exclusive : {rows:?}");
+        assert_eq!(rows[1].1, None);
+
+        let total = sm.usage_cost_between(now - 3600, now).await.unwrap();
+        assert!((total - 1.0).abs() < 1e-9);
+        assert_eq!(
+            sm.usage_cost_between(now - 3600, now - 3599).await.unwrap(),
+            0.0,
+            "fenêtre vide : zéro, pas d'erreur"
+        );
     }
 
     #[tokio::test]

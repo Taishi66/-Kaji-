@@ -3,6 +3,7 @@ pub mod doctor;
 pub mod gateway;
 pub mod info;
 pub mod memory;
+pub mod metrics;
 pub mod plugin;
 pub mod recipe;
 pub mod replay;

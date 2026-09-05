@@ -30,6 +30,7 @@ pub mod kaji_apps;
 pub mod logging;
 pub mod mcp_utils;
 pub mod memory_curator;
+pub mod metrics;
 pub mod model_config;
 pub mod oauth;
 #[cfg(feature = "otel")]

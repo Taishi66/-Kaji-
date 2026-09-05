@@ -16,6 +16,9 @@ use kaji_mcp::{AutoVisualiserRouter, ComputerControllerServer, TutorialServer};
 use crate::commands::configure::configure_telemetry_consent_dialog;
 use crate::commands::configure::handle_configure;
 use crate::commands::info::handle_info;
+use crate::commands::metrics::{
+    handle_metrics_subcommand, MetricsDimensionArg, MetricsFormat, MetricsWindowArg,
+};
 use crate::commands::plugin::{handle_plugin_install, handle_plugin_update};
 use crate::commands::recipe::{handle_deeplink, handle_list, handle_open, handle_validate};
 use crate::commands::replay::handle_replay_subcommand;
@@ -1098,6 +1101,30 @@ enum Command {
         lenient: bool,
     },
 
+    /// Agrégats tokens/coûts du ledger d'usage
+    #[command(
+        about = "Report token and cost usage from the local ledger",
+        long_about = "Report token and cost usage from the local usage ledger.\n\n\
+                      Windows are either sliding (5h, 7d) or calendar-local (day, week from \
+                      Monday, month from the 1st). Rows are grouped by model, provider, session \
+                      or project (the git root of the session working dir). The report also \
+                      carries cache hit rate, dollars saved by cache reads, the current burn \
+                      rate and a linear month-end projection. Declare KAJI_BUDGET_MONTHLY_USD \
+                      (and KAJI_BUDGET_MONTHLY_USD_<PROVIDER>) to get budget lines; they warn, \
+                      they never stop a run."
+    )]
+    Metrics {
+        /// Fenêtre agrégée
+        #[arg(long, value_enum, default_value_t = MetricsWindowArg::Day)]
+        window: MetricsWindowArg,
+        /// Dimension de regroupement
+        #[arg(long = "by", value_enum, default_value_t = MetricsDimensionArg::Model)]
+        by: MetricsDimensionArg,
+        /// Sortie lisible ou JSON pour un script
+        #[arg(long, value_enum, default_value_t = MetricsFormat::Table)]
+        format: MetricsFormat,
+    },
+
     /// Manage plugins
     #[command(about = "Manage plugins")]
     Plugin {
@@ -1470,6 +1497,7 @@ fn get_command_name(command: &Option<Command>) -> &'static str {
         Some(Command::Skills { .. }) => "skills",
         Some(Command::Memory { .. }) => "memory",
         Some(Command::Replay { .. }) => "replay",
+        Some(Command::Metrics { .. }) => "metrics",
         Some(Command::Plugin { .. }) => "plugin",
         Some(Command::Term { .. }) => "term",
         #[cfg(feature = "tui")]
@@ -2468,6 +2496,9 @@ pub async fn cli() -> anyhow::Result<()> {
             until,
             lenient,
         }) => handle_replay_subcommand(session_id, until, lenient).await,
+        Some(Command::Metrics { window, by, format }) => {
+            handle_metrics_subcommand(window, by, format).await
+        }
         Some(Command::Plugin { command }) => handle_plugin_subcommand(command),
         Some(Command::Term { command }) => handle_term_subcommand(command).await,
         #[cfg(feature = "tui")]

@@ -17,6 +17,7 @@ activities:
   - Test error boundaries including nested delegation prevention
   - Test the decisional memory round trip (remember, list curated facts, forget)
   - Test the replay CLI surface (unknown session refused, help exits 0)
+  - Test the metrics CLI surface (help exits 0, JSON parses, bad window refused)
   - Generate comprehensive test report
 
 parameters:
@@ -24,7 +25,7 @@ parameters:
     input_type: string
     requirement: optional
     default: "all"
-    description: "Which test phases to run: all, basic, extensions, delegation, reasoning, advanced, memory, replay"
+    description: "Which test phases to run: all, basic, extensions, delegation, reasoning, advanced, memory, replay, metrics"
 
   - key: test_depth
     input_type: string
@@ -111,6 +112,13 @@ instructions: |
   - `/remember` writes a durable fact to disk, spending no model token
   - `kaji memory list --curated` reads the facts back from both scopes
   - Deleting the markdown file is the documented way to forget a fact
+
+  ### Phase 8 — Metrics CLI surface
+  Check the `kaji metrics` command line only — the aggregates themselves are covered by unit
+  tests over a seeded ledger:
+  - `kaji metrics --help` exits 0 and names `--window`, `--by`, `--format`
+  - `--format json` emits parsable JSON even on an empty ledger
+  - an unknown `--window` value is refused by clap
 
   ### Phase 7 — Replay CLI surface
   Check the `kaji replay` command line only — a full replay needs a session recorded by the same
@@ -488,6 +496,35 @@ prompt: |
   enregistrer un tour, puis `kaji replay <session-id>` sur cette session.
 
   Log results to: {{ workspace_dir }}/phase7_replay.md
+  {% endif %}
+
+  {% if test_phases == "all" or "metrics" in test_phases %}
+  ## 炭 PHASE 8: Metrics CLI Surface
+
+  `kaji metrics` relit le `usage_ledger` local — lecture seule, hors boucle agent. Sur une
+  machine fraîche le ledger peut être vide : ce n'est pas un échec, la commande doit sortir 0
+  et le dire.
+
+  ### L'aide sort 0 et nomme les trois options
+  ```
+  kaji metrics --help; echo "exit=$?"
+  ```
+  **Expected**: `exit=0`, et l'aide nomme `--window`, `--by` et `--format`.
+
+  ### Le format JSON est du JSON valide
+  ```
+  kaji metrics --window month --by provider --format json | head -40; echo "exit=$?"
+  ```
+  **Expected**: `exit=0` et une sortie JSON parsable portant au moins les clés `window`,
+  `dimension`, `rows`, `totals` et `burn`. Un ledger vide donne `rows: []`, pas une erreur.
+
+  ### Une fenêtre inconnue est refusée par clap
+  ```
+  kaji metrics --window decade; echo "exit=$?"
+  ```
+  **Expected**: sortie non nulle et un message d'usage listant les valeurs valides.
+
+  Log results to: {{ workspace_dir }}/phase8_metrics.md
   {% endif %}
 
   ## 📊 PHASE 5: Final Report Generation

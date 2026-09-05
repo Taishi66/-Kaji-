@@ -248,7 +248,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
         "/editor" => "choisir l'éditeur/IDE (<cmd> | list | reset | mode)",
         "/spec" => "(F2) panneau SPEC on/off",
         "/think" => "(F3) raisonnement du modèle (思考中)",
-        "/cost" => "usage tokens/coût (session, 5 h, 7 j)",
+        "/cost" => "usage tokens/coût — [modèles|jour|semaine|mois|cache|projection]",
         "/docker" => "conteneurs en cours",
         _ => cmd.desc,
     }
@@ -336,27 +336,75 @@ fn budget_from_env(var: &str) -> Option<report::Budget> {
         .and_then(|v| report::parse_budget(&v))
 }
 
-async fn cost_report(session_manager: &SessionManager, session_id: &str) -> Vec<RoledLine> {
+/// Horloge locale lue hors boucle agent : `/cost` ne fait que relire le
+/// ledger, rien n'entre dans un prompt, donc pas de seam replay à traverser.
+fn now_local() -> chrono::DateTime<chrono::Local> {
+    chrono::Local::now()
+}
+
+async fn cost_report(
+    session_manager: &SessionManager,
+    session_id: &str,
+    view: report::CostView,
+) -> Vec<RoledLine> {
+    let lines = match view {
+        report::CostView::Windows => cost_windows_report(session_manager, session_id).await,
+        report::CostView::Projection => {
+            match kaji::metrics::burn(session_manager, now_local()).await {
+                Ok(burn) => Ok(report::projection_lines(&burn)),
+                Err(e) => Err(e),
+            }
+        }
+        _ => {
+            let window = view.window().expect("les vues tabulaires ont une fenêtre");
+            kaji::metrics::report(
+                session_manager,
+                window,
+                kaji::metrics::MetricsDimension::Model,
+                now_local(),
+            )
+            .await
+            .map(|metrics| report::metrics_table_lines(view, &metrics))
+        }
+    };
+    match lines {
+        Ok(lines) => lines,
+        Err(e) => vec![vec![RoledSpan::dim(format!("erreur /cost : {e}"))]],
+    }
+}
+
+async fn cost_windows_report(
+    session_manager: &SessionManager,
+    session_id: &str,
+) -> anyhow::Result<Vec<RoledLine>> {
     let config = Config::global();
     let provider = config
         .get_kaji_provider()
         .unwrap_or_else(|_| "?".to_string());
     let model = config.get_kaji_model().unwrap_or_else(|_| "?".to_string());
-    match session_manager.usage_windows(session_id).await {
-        Ok(windows) => {
-            let mut lines = report::cost_table_lines(
-                &windows,
-                &provider,
-                &model,
-                budget_from_env("KAJI_BUDGET_5H"),
-                budget_from_env("KAJI_BUDGET_7J"),
-            );
-            if let Some(line) = report::condense_line(&kaji::context_mgmt::condense::totals()) {
-                lines.push(line);
-            }
-            lines
-        }
-        Err(e) => vec![vec![RoledSpan::dim(format!("erreur /cost : {e}"))]],
+    let windows = session_manager.usage_windows(session_id).await?;
+    let mut lines = report::cost_table_lines(
+        &windows,
+        &provider,
+        &model,
+        budget_from_env("KAJI_BUDGET_5H"),
+        budget_from_env("KAJI_BUDGET_7J"),
+    );
+    if let Some(line) = report::condense_line(&kaji::context_mgmt::condense::totals()) {
+        lines.push(line);
+    }
+    if let Ok(burn) = kaji::metrics::burn(session_manager, now_local()).await {
+        lines.extend(report::budget_warning_lines(&burn.budgets));
+    }
+    Ok(lines)
+}
+
+/// Avertissements de budget au démarrage : un seuil déjà franchi doit se voir
+/// sans que le user pense à taper `/cost`. Une seule fois, au boot.
+async fn boot_budget_lines(session_manager: &SessionManager) -> Vec<RoledLine> {
+    match kaji::metrics::burn(session_manager, now_local()).await {
+        Ok(burn) => report::budget_warning_lines(&burn.budgets),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -884,6 +932,10 @@ async fn event_loop(
     if let Some(line) = &disabled_checkpoints {
         app.push_system(&format!("{line} ({})", working_dir.display()));
     }
+    let budget_lines = boot_budget_lines(&session_manager).await;
+    if !budget_lines.is_empty() {
+        app.push_system_lines(budget_lines);
+    }
     if resume {
         apply_interrupted_turn_marker(
             &mut app,
@@ -1082,8 +1134,8 @@ async fn event_loop(
                             ));
                         }
                     }
-                    Action::Cost => {
-                        let report = cost_report(&session_manager, session_id).await;
+                    Action::Cost(view) => {
+                        let report = cost_report(&session_manager, session_id, view).await;
                         app.push_system_lines(report);
                     }
                     Action::Context => {
