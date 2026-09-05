@@ -1,6 +1,6 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{Notify, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Notify};
 
 use crate::lock_or_recover;
 
@@ -54,8 +54,10 @@ impl ProcessHandle {
 
     /// Write bytes to the child's stdin. Errors if stdin was not piped.
     pub async fn write_stdin(&self, data: &[u8]) -> Result<()> {
-        let writer =
-            self.writer.as_ref().ok_or_else(|| anyhow!("stdin was not piped for this process"))?;
+        let writer = self
+            .writer
+            .as_ref()
+            .ok_or_else(|| anyhow!("stdin was not piped for this process"))?;
         writer
             .send(data.to_vec())
             .await

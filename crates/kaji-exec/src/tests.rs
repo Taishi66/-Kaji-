@@ -1,6 +1,6 @@
 use crate::{
-    CommandOptions, ExecRequest, PollRequest, PoolConfig, ProcessPool, StdinRequest, Stream,
-    kill_by_pid, run_with_timeout, subprocess,
+    kill_by_pid, run_with_timeout, subprocess, CommandOptions, ExecRequest, PollRequest,
+    PoolConfig, ProcessPool, StdinRequest, Stream,
 };
 use anyhow::Result;
 use std::time::Duration;
@@ -24,7 +24,10 @@ fn test_pool_config() -> PoolConfig {
 #[tokio::test]
 async fn spawn_captures_tagged_stdout_and_stderr() -> Result<()> {
     let cwd = tempdir()?;
-    let args = vec!["-c".to_string(), "printf 'hello'; printf 'error' >&2".to_string()];
+    let args = vec![
+        "-c".to_string(),
+        "printf 'hello'; printf 'error' >&2".to_string(),
+    ];
 
     let (handle, mut rx) =
         subprocess::spawn(CommandOptions::new("sh", cwd.path()).args(args)).await?;
@@ -54,7 +57,10 @@ async fn spawn_captures_tagged_stdout_and_stderr() -> Result<()> {
 #[tokio::test]
 async fn write_stdin_round_trip() -> Result<()> {
     let cwd = tempdir()?;
-    let args = vec!["-c".to_string(), "read line; printf 'seen:%s' \"$line\"".to_string()];
+    let args = vec![
+        "-c".to_string(),
+        "read line; printf 'seen:%s' \"$line\"".to_string(),
+    ];
 
     let (handle, mut rx) =
         subprocess::spawn(CommandOptions::new("sh", cwd.path()).args(args)).await?;
@@ -82,7 +88,10 @@ async fn spawn_no_stdin_rejects_stdin_writes() -> Result<()> {
 
     let (handle, _) =
         subprocess::spawn(CommandOptions::new("sh", cwd.path()).args(args).no_stdin()).await?;
-    let error = handle.write_stdin(b"input").await.expect_err("stdin should be unavailable");
+    let error = handle
+        .write_stdin(b"input")
+        .await
+        .expect_err("stdin should be unavailable");
 
     assert!(error.to_string().contains("stdin"));
     timeout(Duration::from_secs(5), handle.wait_for_exit()).await?;
@@ -113,7 +122,10 @@ async fn kill_by_pid_stops_process_group_descendants() -> Result<()> {
     let marker = cwd.path().join("process_group_marker");
     let mut command = Command::new("sh");
     command
-        .args(["-c", "(sleep 0.5; printf marker > process_group_marker) & sleep 30"])
+        .args([
+            "-c",
+            "(sleep 0.5; printf marker > process_group_marker) & sleep 30",
+        ])
         .current_dir(cwd.path())
         .kill_on_drop(false);
     unsafe {
@@ -130,7 +142,10 @@ async fn kill_by_pid_stops_process_group_descendants() -> Result<()> {
     timeout(Duration::from_secs(5), child.wait()).await??;
     sleep(Duration::from_millis(800)).await;
 
-    assert!(!marker.exists(), "descendant survived kill_by_pid and wrote {marker:?}");
+    assert!(
+        !marker.exists(),
+        "descendant survived kill_by_pid and wrote {marker:?}"
+    );
     Ok(())
 }
 
@@ -141,7 +156,10 @@ async fn terminate_child_process_group_stops_descendants() -> Result<()> {
     let marker = cwd.path().join("terminate_group_marker");
     let mut command = Command::new("sh");
     command
-        .args(["-c", "(sleep 0.5; printf marker > terminate_group_marker) & sleep 30"])
+        .args([
+            "-c",
+            "(sleep 0.5; printf marker > terminate_group_marker) & sleep 30",
+        ])
         .current_dir(cwd.path())
         .kill_on_drop(false);
     unsafe {
@@ -157,7 +175,10 @@ async fn terminate_child_process_group_stops_descendants() -> Result<()> {
     timeout(Duration::from_secs(5), child.wait()).await??;
     sleep(Duration::from_millis(800)).await;
 
-    assert!(!marker.exists(), "descendant survived group termination and wrote {marker:?}");
+    assert!(
+        !marker.exists(),
+        "descendant survived group termination and wrote {marker:?}"
+    );
     Ok(())
 }
 
@@ -166,13 +187,19 @@ async fn terminate_child_process_group_stops_descendants() -> Result<()> {
 async fn dropping_process_handle_terminates_running_process() -> Result<()> {
     let cwd = tempdir()?;
     let marker = cwd.path().join("drop_marker");
-    let args = vec!["-c".to_string(), "sleep 0.5; printf marker > drop_marker".to_string()];
+    let args = vec![
+        "-c".to_string(),
+        "sleep 0.5; printf marker > drop_marker".to_string(),
+    ];
 
     let (handle, _) = subprocess::spawn(CommandOptions::new("sh", cwd.path()).args(args)).await?;
     drop(handle);
     sleep(Duration::from_millis(800)).await;
 
-    assert!(!marker.exists(), "process survived handle drop and wrote {marker:?}");
+    assert!(
+        !marker.exists(),
+        "process survived handle drop and wrote {marker:?}"
+    );
     Ok(())
 }
 
@@ -180,8 +207,10 @@ async fn dropping_process_handle_terminates_running_process() -> Result<()> {
 #[tokio::test]
 async fn background_file_ipc_pattern() -> Result<()> {
     let cwd = tempdir()?;
-    let args =
-        vec!["-c".to_string(), "for i in 1 2 3; do echo line$i; sleep 0.05; done".to_string()];
+    let args = vec![
+        "-c".to_string(),
+        "for i in 1 2 3; do echo line$i; sleep 0.05; done".to_string(),
+    ];
 
     let (handle, mut rx) =
         subprocess::spawn(CommandOptions::new("sh", cwd.path()).args(args)).await?;
@@ -216,7 +245,10 @@ async fn background_file_ipc_pattern() -> Result<()> {
 #[tokio::test]
 async fn run_with_timeout_collects_output() -> Result<()> {
     let cwd = tempdir()?;
-    let args = vec!["-c".to_string(), "printf 'hello'; printf 'error' >&2".to_string()];
+    let args = vec![
+        "-c".to_string(),
+        "printf 'hello'; printf 'error' >&2".to_string(),
+    ];
 
     let result = run_with_timeout(
         CommandOptions::new("sh", cwd.path()).args(args),
@@ -257,7 +289,10 @@ async fn run_with_timeout_terminates_process() -> Result<()> {
 #[tokio::test]
 async fn run_with_timeout_tracks_stdout_and_stderr_truncation_independently() -> Result<()> {
     let cwd = tempdir()?;
-    let args = vec!["-c".to_string(), "printf 'abcdefghij'; printf 'klmnopqrst' >&2".to_string()];
+    let args = vec![
+        "-c".to_string(),
+        "printf 'abcdefghij'; printf 'klmnopqrst' >&2".to_string(),
+    ];
 
     let result = run_with_timeout(
         CommandOptions::new("sh", cwd.path()).args(args),
@@ -280,17 +315,19 @@ async fn run_with_timeout_tracks_stdout_and_stderr_truncation_independently() ->
 async fn process_pool_supports_background_polling() -> Result<()> {
     let cwd = tempdir()?;
     let pool = ProcessPool::new(test_pool_config());
-    let request = ExecRequest::new(
-        CommandOptions::new("sh", cwd.path())
-            .args(["-c".to_string(), "echo started; sleep 0.4; echo finished".to_string()]),
-    )
+    let request = ExecRequest::new(CommandOptions::new("sh", cwd.path()).args([
+        "-c".to_string(),
+        "echo started; sleep 0.4; echo finished".to_string(),
+    ]))
     .with_yield_time_ms(25);
 
     let initial = pool.exec(request).await?;
     assert!(String::from_utf8_lossy(&initial.output).contains("started"));
     let process_id = initial.process_id.expect("process should still be running");
 
-    let later = pool.poll_output(PollRequest::new(&process_id).with_yield_time_ms(1_000)).await?;
+    let later = pool
+        .poll_output(PollRequest::new(&process_id).with_yield_time_ms(1_000))
+        .await?;
 
     assert!(String::from_utf8_lossy(&later.output).contains("finished"));
     assert_eq!(later.process_id, None);
@@ -311,10 +348,13 @@ async fn process_pool_supports_interactive_stdin() -> Result<()> {
 
     let initial = pool.exec(request).await?;
     assert!(initial.output.is_empty());
-    let process_id = initial.process_id.expect("interactive process should stay alive");
+    let process_id = initial
+        .process_id
+        .expect("interactive process should stay alive");
 
-    let echoed =
-        pool.write_stdin(StdinRequest::new(&process_id, b"ping\n").with_yield_time_ms(500)).await?;
+    let echoed = pool
+        .write_stdin(StdinRequest::new(&process_id, b"ping\n").with_yield_time_ms(500))
+        .await?;
 
     assert!(String::from_utf8_lossy(&echoed.output).contains("seen:ping"));
     assert_eq!(echoed.process_id, Some(process_id.clone()));

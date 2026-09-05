@@ -1,14 +1,14 @@
 use crate::handle::{OutputChunk, ProcessHandle, SpawnedProcess, Stream};
-use crate::{CommandOptions, HeadTailBuffer, lock_or_recover, subprocess};
+use crate::{lock_or_recover, subprocess, CommandOptions, HeadTailBuffer};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tokio::sync::{Mutex, Notify, broadcast};
+use tokio::sync::{broadcast, Mutex, Notify};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{sleep_until, Instant};
 
 const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(50);
 const RECENT_PROTECTION_COUNT: usize = 8;
@@ -43,7 +43,11 @@ pub struct ExecRequest {
 
 impl ExecRequest {
     pub fn new(command: CommandOptions) -> Self {
-        Self { command, yield_time_ms: 0, max_output_bytes: None }
+        Self {
+            command,
+            yield_time_ms: 0,
+            max_output_bytes: None,
+        }
     }
 
     pub fn with_yield_time_ms(mut self, yield_time_ms: u64) -> Self {
@@ -66,7 +70,11 @@ pub struct PollRequest<'a> {
 
 impl<'a> PollRequest<'a> {
     pub fn new(process_id: &'a str) -> Self {
-        Self { process_id, yield_time_ms: 0, max_output_bytes: None }
+        Self {
+            process_id,
+            yield_time_ms: 0,
+            max_output_bytes: None,
+        }
     }
 
     pub fn with_yield_time_ms(mut self, yield_time_ms: u64) -> Self {
@@ -90,7 +98,12 @@ pub struct StdinRequest<'a> {
 
 impl<'a> StdinRequest<'a> {
     pub fn new(process_id: &'a str, input: &'a [u8]) -> Self {
-        Self { process_id, input, yield_time_ms: 0, max_output_bytes: None }
+        Self {
+            process_id,
+            input,
+            yield_time_ms: 0,
+            max_output_bytes: None,
+        }
     }
 
     pub fn with_yield_time_ms(mut self, yield_time_ms: u64) -> Self {
@@ -190,11 +203,21 @@ impl ProcessPool {
             self.inner.config.max_output_bytes,
         );
 
-        self.inner.entries.lock().await.insert(process_id.clone(), Arc::clone(&entry));
+        self.inner
+            .entries
+            .lock()
+            .await
+            .insert(process_id.clone(), Arc::clone(&entry));
         drop(_spawn_guard);
 
-        self.interact(&entry, &process_id, None, request.yield_time_ms, request.max_output_bytes)
-            .await
+        self.interact(
+            &entry,
+            &process_id,
+            None,
+            request.yield_time_ms,
+            request.max_output_bytes,
+        )
+        .await
     }
 
     pub async fn poll_output(&self, request: PollRequest<'_>) -> Result<ExecResponse, ExecError> {
@@ -226,7 +249,9 @@ impl ProcessPool {
     pub async fn kill(&self, process_id: &str) -> Result<(), ExecError> {
         let removed = self.inner.entries.lock().await.remove(process_id);
         let Some(entry) = removed else {
-            return Err(ExecError::UnknownProcess { process_id: process_id.to_string() });
+            return Err(ExecError::UnknownProcess {
+                process_id: process_id.to_string(),
+            });
         };
 
         shutdown_entry(entry, true);
@@ -234,8 +259,14 @@ impl ProcessPool {
     }
 
     pub async fn terminate_all(&self) {
-        let removed =
-            self.inner.entries.lock().await.drain().map(|(_, entry)| entry).collect::<Vec<_>>();
+        let removed = self
+            .inner
+            .entries
+            .lock()
+            .await
+            .drain()
+            .map(|(_, entry)| entry)
+            .collect::<Vec<_>>();
         for entry in removed {
             shutdown_entry(entry, true);
         }
@@ -264,8 +295,9 @@ impl ProcessPool {
             return Err(ExecError::StdinClosed);
         }
 
-        let response =
-            self.collect_locked(entry, process_id, yield_time_ms, max_output_bytes).await;
+        let response = self
+            .collect_locked(entry, process_id, yield_time_ms, max_output_bytes)
+            .await;
 
         if response.process_id.is_none() {
             self.remove_if_same(process_id, entry, false).await;
@@ -324,8 +356,11 @@ impl ProcessPool {
 
         entry.touch();
         let exit_code = entry.handle.exit_code();
-        let process_id =
-            if entry.handle.has_exited() { None } else { Some(process_id.to_string()) };
+        let process_id = if entry.handle.has_exited() {
+            None
+        } else {
+            Some(process_id.to_string())
+        };
 
         ExecResponse {
             output: output.to_bytes(),
@@ -343,7 +378,9 @@ impl ProcessPool {
             .await
             .get(process_id)
             .cloned()
-            .ok_or_else(|| ExecError::UnknownProcess { process_id: process_id.to_string() })
+            .ok_or_else(|| ExecError::UnknownProcess {
+                process_id: process_id.to_string(),
+            })
     }
 
     async fn ensure_capacity(&self) -> Result<(), ExecError> {
@@ -394,7 +431,10 @@ impl ProcessPool {
     }
 
     fn next_process_id(&self) -> String {
-        self.inner.next_process_id.fetch_add(1, Ordering::Relaxed).to_string()
+        self.inner
+            .next_process_id
+            .fetch_add(1, Ordering::Relaxed)
+            .to_string()
     }
 
     fn normalize_output_bytes(&self, max_output_bytes: Option<usize>) -> usize {
@@ -404,10 +444,16 @@ impl ProcessPool {
     }
 
     fn normalize_yield_ms(&self, yield_time_ms: u64) -> u64 {
-        let yield_time_ms =
-            if yield_time_ms == 0 { self.inner.config.default_yield_ms } else { yield_time_ms };
+        let yield_time_ms = if yield_time_ms == 0 {
+            self.inner.config.default_yield_ms
+        } else {
+            yield_time_ms
+        };
 
-        yield_time_ms.clamp(self.inner.config.default_yield_ms, self.inner.config.max_yield_ms)
+        yield_time_ms.clamp(
+            self.inner.config.default_yield_ms,
+            self.inner.config.max_yield_ms,
+        )
     }
 
     async fn take_expired_entries(&self) -> Vec<Arc<ProcessEntry>> {
@@ -420,7 +466,10 @@ impl ProcessPool {
             .map(|(process_id, _)| process_id.clone())
             .collect::<Vec<_>>();
 
-        expired_ids.into_iter().filter_map(|process_id| entries.remove(&process_id)).collect()
+        expired_ids
+            .into_iter()
+            .filter_map(|process_id| entries.remove(&process_id))
+            .collect()
     }
 }
 
@@ -493,7 +542,11 @@ fn eviction_candidate(entries: &HashMap<String, Arc<ProcessEntry>>) -> Option<St
     let mut candidates = entries
         .iter()
         .map(|(process_id, entry)| {
-            (process_id.clone(), entry.last_used(), entry.handle.has_exited())
+            (
+                process_id.clone(),
+                entry.last_used(),
+                entry.handle.has_exited(),
+            )
         })
         .collect::<Vec<_>>();
 
@@ -513,7 +566,11 @@ fn eviction_candidate(entries: &HashMap<String, Arc<ProcessEntry>>) -> Option<St
     let protected = RECENT_PROTECTION_COUNT.min(candidates.len().saturating_sub(1));
     let unprotected_end = candidates.len().saturating_sub(protected);
 
-    candidates.into_iter().take(unprotected_end).next().map(|(process_id, _, _)| process_id)
+    candidates
+        .into_iter()
+        .take(unprotected_end)
+        .next()
+        .map(|(process_id, _, _)| process_id)
 }
 
 fn shutdown_entry(entry: Arc<ProcessEntry>, terminate: bool) {

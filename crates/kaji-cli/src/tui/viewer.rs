@@ -6,7 +6,7 @@
 //! log opened by accident costs one bounded read, exactly like the @-mention
 //! attachments (`mentions::render_file_from`).
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use std::io::Read;
 use std::path::Path;
 

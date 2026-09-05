@@ -4,11 +4,11 @@ use crate::tui::forge::{ForgeStatus, ForgeTask};
 use crate::tui::viewer::{self, Viewer};
 use crate::tui::{gitstatus, markdown, statusbar, theme};
 use kaji_core::sdd::StageStatus;
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::Frame;
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let root = Layout::default()
@@ -1508,8 +1508,8 @@ mod tests {
 
     #[test]
     fn palette_renders_filtered_commands_above_the_input() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let mut app = App::new(None);
         for c in "/s".chars() {
@@ -1530,8 +1530,8 @@ mod tests {
 
     #[test]
     fn palette_is_absent_without_slash_input_and_without_matches() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         for input in ["", "hello", "/xyz"] {
             let mut app = App::new(None);
@@ -1559,8 +1559,8 @@ mod tests {
     /// can't pass by construction.
     #[test]
     fn line_wrapped_rows_matches_ratatui_actual_wrap_for_cjk_text() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let text = "鍛冶".repeat(5); // 10 CJK chars, 20 cells wide
         let line = Line::from(text.clone());
@@ -1746,8 +1746,8 @@ mod tests {
     /// `Line` of that block.
     #[test]
     fn streaming_agent_line_carries_the_blade_cursor() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let _theme = theme::test_guard();
         let mut app = App::new(None);
@@ -1792,8 +1792,8 @@ mod tests {
     /// Buffer du chat seul dessiné dans une grille 80×20 — ce que le terminal
     /// affiche, pas les `Line` construites.
     fn drawn_chat(app: &App) -> ratatui::buffer::Buffer {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("test backend terminal");
@@ -1974,8 +1974,8 @@ mod tests {
 
     #[test]
     fn blade_cursor_absent_once_turn_has_finished() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let mut app = App::new(None);
         app.begin_turn();
@@ -1996,8 +1996,8 @@ mod tests {
 
     #[test]
     fn blade_cursor_absent_for_tool_line() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let mut app = App::new(None);
         app.begin_turn();
@@ -2020,8 +2020,8 @@ mod tests {
 
     #[test]
     fn blade_cursor_absent_for_thinking_line() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let mut app = App::new(None);
         app.begin_turn();
@@ -2042,8 +2042,8 @@ mod tests {
 
     #[test]
     fn blade_cursor_absent_for_system_line() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let mut app = App::new(None);
         app.begin_turn();
@@ -2071,8 +2071,8 @@ mod tests {
     /// would move these numbers, not just their relative order.
     #[test]
     fn draw_chat_records_a_row_offset_for_every_user_turn() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let mut app = App::new(None);
         app.push_system("intro");
@@ -2104,8 +2104,8 @@ mod tests {
 
     #[test]
     fn draw_chat_clears_stale_user_turn_rows_when_no_user_lines_remain() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let mut app = App::new(None);
         app.user_turn_rows.borrow_mut().push(7);
@@ -2134,8 +2134,8 @@ mod tests {
     /// column, masking the very bug this test targets.
     #[test]
     fn palette_does_not_panic_nor_overflow_on_a_narrow_terminal() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let mut app = App::new(None);
         for c in "/s".chars() {
@@ -2252,8 +2252,8 @@ mod tests {
     /// would actually see on screen.
     #[test]
     fn approval_modal_renders_hostile_command_with_visible_markers() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let mut app = App::new(None);
         let hostile_prompt = "Exécuter `echo ok\t\u{200B}rm -rf /`\u{202E} ?".to_string();
@@ -2302,8 +2302,8 @@ mod tests {
     /// rather than unknowingly approving a truncated view of the command.
     #[test]
     fn approval_modal_marks_truncation_explicitly_instead_of_clipping_silently() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let mut app = App::new(None);
         let long_prompt = format!("rm -rf {}", "x".repeat(2000));
@@ -2338,8 +2338,8 @@ mod tests {
         detail: bool,
         size: (u16, u16),
     ) -> String {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let mut app = App::new(None);
         let msg = Message::assistant().with_action_required(
@@ -2533,8 +2533,8 @@ mod tests {
 
     #[test]
     fn the_header_carries_the_live_goal_but_drops_it_once_finished() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let mut app = App::new(None);
         app.goal_set("les tests passent", 10);
@@ -2573,8 +2573,8 @@ mod tests {
     }
 
     fn rendered(app: &App, width: u16, height: u16) -> String {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test backend terminal");
@@ -2993,8 +2993,8 @@ mod tests {
     /// Couleur de la bordure droite du volet forge, prise sur la colonne la
     /// plus à droite du cadre.
     fn border_row_fg(app: &App) -> ratatui::style::Color {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let backend = TestBackend::new(130, 24);
         let mut terminal = Terminal::new(backend).expect("test backend terminal");
@@ -3167,8 +3167,8 @@ mod tests {
     /// enough to survive the pane's own 48-column ceiling uncut.
     #[test]
     fn the_explorer_status_line_names_its_keys() {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let (mut app, dir) = app_on_a_project("README.md", "x");
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -3388,8 +3388,8 @@ mod tests {
     }
 
     fn drawn_at(width: u16, height: u16, render: impl FnOnce(&mut Frame)) -> String {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test backend terminal");

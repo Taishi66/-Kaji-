@@ -6,12 +6,12 @@ use crate::tui::ui::sanitize_for_display;
 use crate::tui::{diff, forge, theme};
 use kaji::agents::{AgentEvent, SUBAGENT_TOOL_REQUEST_TYPE};
 use kaji::config::KajiMode;
-use kaji::conversation::Conversation;
 use kaji::conversation::message::{
     ActionRequiredData, Message, MessageContentBlock, SystemNotificationType,
 };
-use kaji::permission::Permission;
+use kaji::conversation::Conversation;
 use kaji::permission::grants::{derive_grant_spec, is_shell_tool};
+use kaji::permission::Permission;
 use kaji::providers::base::ProviderUsage;
 use kaji_core::goal::{self, GoalOutcome, GoalPhase, GoalState, GoalStep, Verdict};
 use kaji_core::sdd::{SddPass, SpecDoc};
@@ -4002,11 +4002,10 @@ mod tests {
         }
         let action = app.on_event(&key(KeyCode::Enter));
         assert_eq!(action, Action::None);
-        assert!(
-            app.chat
-                .iter()
-                .any(|l| l.text.contains("termine ou annule le tour"))
-        );
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains("termine ou annule le tour")));
     }
 
     #[test]
@@ -4488,14 +4487,13 @@ mod tests {
             dir.path().to_path_buf(),
         ));
         assert!(!app.finder_indexing());
-        assert!(
-            app.finder
-                .as_ref()
-                .unwrap()
-                .results
-                .iter()
-                .any(|p| p == "README.md")
-        );
+        assert!(app
+            .finder
+            .as_ref()
+            .unwrap()
+            .results
+            .iter()
+            .any(|p| p == "README.md"));
     }
 
     /// Viewer open on a 200-line file, with the geometry `draw_viewer` would
@@ -4654,13 +4652,12 @@ mod tests {
         app.open_viewer("src/tui/");
         assert!(app.viewer.is_none());
         assert_eq!(app.focus, Focus::Composer);
-        assert!(
-            app.chat
-                .last()
-                .expect("ligne système")
-                .text
-                .contains("lecture impossible")
-        );
+        assert!(app
+            .chat
+            .last()
+            .expect("ligne système")
+            .text
+            .contains("lecture impossible"));
     }
 
     #[test]
@@ -4773,26 +4770,24 @@ mod tests {
     fn slash_edit_on_a_directory_refuses_instead_of_launching_an_editor() {
         let (mut app, _dir) = app_with_mention_fixture();
         assert_eq!(submit(&mut app, "/edit src"), Action::None);
-        assert!(
-            app.chat
-                .last()
-                .expect("ligne système")
-                .text
-                .contains("dossier, pas un fichier")
-        );
+        assert!(app
+            .chat
+            .last()
+            .expect("ligne système")
+            .text
+            .contains("dossier, pas un fichier"));
     }
 
     #[test]
     fn slash_edit_alone_shows_its_usage() {
         let mut app = App::new(None);
         assert_eq!(submit(&mut app, "/edit"), Action::None);
-        assert!(
-            app.chat
-                .last()
-                .expect("ligne système")
-                .text
-                .contains("usage : /edit")
-        );
+        assert!(app
+            .chat
+            .last()
+            .expect("ligne système")
+            .text
+            .contains("usage : /edit"));
     }
 
     #[test]
@@ -4801,13 +4796,12 @@ mod tests {
         app.turn_active = true;
 
         assert_eq!(app.on_event(&key(KeyCode::Char('e'))), Action::None);
-        assert!(
-            app.chat
-                .last()
-                .expect("ligne système")
-                .text
-                .contains("un tour est en cours")
-        );
+        assert!(app
+            .chat
+            .last()
+            .expect("ligne système")
+            .text
+            .contains("un tour est en cours"));
     }
 
     /// Mid-turn, the blanket Enter guard queues everything as steering — a
@@ -4820,13 +4814,12 @@ mod tests {
 
         assert_eq!(submit(&mut app, "/edit README.md"), Action::None);
         assert_eq!(app.steer_len(), 0);
-        assert!(
-            app.chat
-                .last()
-                .expect("ligne système")
-                .text
-                .contains("un tour est en cours")
-        );
+        assert!(app
+            .chat
+            .last()
+            .expect("ligne système")
+            .text
+            .contains("un tour est en cours"));
     }
 
     fn editor_state(ids: &[&str]) -> EditorState {
@@ -5100,14 +5093,13 @@ mod tests {
         app.explorer = Some(crate::tui::explorer::ExplorerState::new(
             dir.path().to_path_buf(),
         ));
-        assert!(
-            !app.explorer
-                .as_ref()
-                .unwrap()
-                .nodes
-                .iter()
-                .any(|n| n.name == "new.txt")
-        );
+        assert!(!app
+            .explorer
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .any(|n| n.name == "new.txt"));
 
         std::fs::write(dir.path().join("new.txt"), "x").unwrap();
         app.on_event(&key(KeyCode::Char('r')));
@@ -5936,12 +5928,11 @@ mod tests {
         app.start_pass();
         assert!(app.gate_open);
         assert_eq!(app.pass.current(), Some(kaji_core::sdd::SddStage::Gate));
-        assert!(
-            !app.pass
-                .stages()
-                .iter()
-                .any(|(_, status)| *status == kaji_core::sdd::StageStatus::Failed)
-        );
+        assert!(!app
+            .pass
+            .stages()
+            .iter()
+            .any(|(_, status)| *status == kaji_core::sdd::StageStatus::Failed));
     }
 
     #[test]
@@ -5956,11 +5947,10 @@ mod tests {
         assert_eq!(app.driver, PassDriver::Idle);
         assert!(app.pass.drifted());
         assert!(app.validate_buffer.is_empty());
-        assert!(
-            app.chat
-                .iter()
-                .any(|l| l.text.contains("échec du démarrage"))
-        );
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains("échec du démarrage")));
     }
 
     #[test]
@@ -6014,11 +6004,10 @@ mod tests {
         assert_eq!(agent_lines.len(), 2);
         assert_eq!(agent_lines[0].text, "Bon");
         assert_eq!(agent_lines[1].text, "jour");
-        assert!(
-            app.chat
-                .iter()
-                .any(|l| matches!(l.sender, Sender::System) && l.text.contains("outil"))
-        );
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| matches!(l.sender, Sender::System) && l.text.contains("outil")));
     }
 
     #[test]
@@ -6401,11 +6390,10 @@ mod tests {
         app.apply_agent_event(&AgentEvent::Message(resp_msg));
 
         assert!(!app.chat.iter().any(|l| l.text.contains(&running)));
-        assert!(
-            app.chat
-                .iter()
-                .any(|l| l.text.contains('✓') && l.text.contains("shell"))
-        );
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains('✓') && l.text.contains("shell")));
         assert!(!app.chat.iter().any(|l| l.tool.is_some()));
     }
 
@@ -6426,11 +6414,10 @@ mod tests {
         );
         app.apply_agent_event(&AgentEvent::Message(resp_msg));
 
-        assert!(
-            app.chat
-                .iter()
-                .any(|l| l.text.contains('✗') && l.text.contains("compile"))
-        );
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains('✗') && l.text.contains("compile")));
     }
 
     #[test]
@@ -6854,13 +6841,12 @@ mod tests {
         app.kaji_mode = from;
         assert_eq!(app.on_event(&key(KeyCode::BackTab)), Action::Mode(expected));
         assert_eq!(app.kaji_mode, expected, "the badge must switch immediately");
-        assert!(
-            app.chat
-                .last()
-                .expect("system line pushed")
-                .text
-                .contains(&mode_line(expected))
-        );
+        assert!(app
+            .chat
+            .last()
+            .expect("system line pushed")
+            .text
+            .contains(&mode_line(expected)));
     }
 
     /// Le kanji seul ne se traduit pas : le changement de mode déplie le mot à
@@ -6966,11 +6952,10 @@ mod tests {
         }
         assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
         assert!(app.show_thinking);
-        assert!(
-            app.chat
-                .iter()
-                .any(|l| matches!(l.sender, Sender::System) && l.text.contains("思考中"))
-        );
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| matches!(l.sender, Sender::System) && l.text.contains("思考中")));
 
         for c in "/think".chars() {
             app.on_event(&key(KeyCode::Char(c)));
@@ -6993,11 +6978,10 @@ mod tests {
     fn thinking_block_is_dropped_when_show_thinking_is_off() {
         let mut app = App::new(None);
         agent_thinks(&mut app, "m1", "raisonnement caché");
-        assert!(
-            !app.chat
-                .iter()
-                .any(|l| matches!(l.sender, Sender::Thinking))
-        );
+        assert!(!app
+            .chat
+            .iter()
+            .any(|l| matches!(l.sender, Sender::Thinking)));
     }
 
     #[test]
@@ -7761,11 +7745,10 @@ mod tests {
         assert_eq!(action, Action::None);
         assert!(app.steer_queue.is_empty(), "ni file de steering");
         assert!(app.goal.is_none());
-        assert!(
-            app.chat
-                .iter()
-                .any(|l| l.text.contains("tour est en cours"))
-        );
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains("tour est en cours")));
     }
 
     #[test]
@@ -7935,13 +7918,12 @@ mod tests {
         assert_eq!(app.forge.view, forge::ForgeView::Auto);
         assert!(!app.forge.visible());
         assert_eq!(app.focus, Focus::Composer);
-        assert!(
-            app.chat
-                .last()
-                .expect("une ligne système")
-                .text
-                .contains("forge : aucune tâche")
-        );
+        assert!(app
+            .chat
+            .last()
+            .expect("une ligne système")
+            .text
+            .contains("forge : aucune tâche"));
     }
 
     #[test]
@@ -8134,14 +8116,13 @@ mod tests {
         )]);
         app.focus = Focus::Forge;
         app.on_event(&key(KeyCode::Enter));
-        assert!(
-            !app.viewer
-                .as_ref()
-                .expect("fiche")
-                .lines
-                .join("\n")
-                .contains("outil")
-        );
+        assert!(!app
+            .viewer
+            .as_ref()
+            .expect("fiche")
+            .lines
+            .join("\n")
+            .contains("outil"));
 
         app.apply_agent_event(&logging_notification(serde_json::json!({
             "type": SUBAGENT_TOOL_REQUEST_TYPE,
@@ -8293,13 +8274,12 @@ mod tests {
         app.on_event(&key(KeyCode::Char('x')));
 
         assert!(app.pending_forge_cancel.is_none());
-        assert!(
-            app.chat
-                .last()
-                .expect("une ligne système")
-                .text
-                .contains("déjà terminée")
-        );
+        assert!(app
+            .chat
+            .last()
+            .expect("une ligne système")
+            .text
+            .contains("déjà terminée"));
     }
 
     #[test]

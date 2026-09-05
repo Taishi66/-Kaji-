@@ -16,17 +16,17 @@ pub mod viewer;
 
 use anyhow::{Context, Result};
 use app::{Action, App, PassDriver, RoledLine, RoledSpan, ToolApprovalRequest};
-use futures::StreamExt;
 use futures::stream::BoxStream;
+use futures::StreamExt;
 use kaji::agents::{Agent, AgentEvent, SessionConfig};
 use kaji::checkpoint::{CheckpointId, CheckpointStore};
-use kaji::checkpoint_restore::{RestoreOutcome, restore_checkpoint};
+use kaji::checkpoint_restore::{restore_checkpoint, RestoreOutcome};
 use kaji::config::{Config, KajiMode};
 use kaji::conversation::message::Message;
 use kaji::permission::permission_confirmation::PrincipalType;
 use kaji::permission::{Permission, PermissionConfirmation};
-use kaji::session::SessionManager;
 use kaji::session::session_manager::{InterruptedTurn, SessionEvent};
+use kaji::session::SessionManager;
 use kaji_core::sdd::SpecDoc;
 use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{
@@ -35,14 +35,14 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use std::future::Future;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use theme::SpanRole;
 use tokio::sync::mpsc;
@@ -1970,11 +1970,10 @@ mod tests {
         assert!(!app.show_thinking);
         seed_chat(&mut app, &conversation);
 
-        assert!(
-            !app.chat
-                .iter()
-                .any(|l| matches!(l.sender, Sender::Thinking))
-        );
+        assert!(!app
+            .chat
+            .iter()
+            .any(|l| matches!(l.sender, Sender::Thinking)));
     }
 
     #[test]
@@ -1989,11 +1988,10 @@ mod tests {
 
         seed_chat(&mut app, &conversation);
 
-        assert!(
-            app.chat
-                .iter()
-                .any(|l| l.text.contains('✓') && l.text.contains("shell"))
-        );
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains('✓') && l.text.contains("shell")));
         assert!(!app.chat.iter().any(|l| l.tool.is_some()));
     }
 
@@ -2006,11 +2004,10 @@ mod tests {
         seed_chat(&mut app, &conversation);
 
         assert!(!app.chat.iter().any(|l| l.tool.is_some()));
-        assert!(
-            app.chat
-                .iter()
-                .any(|l| l.text.contains("interrompu") && l.text.contains("shell"))
-        );
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.text.contains("interrompu") && l.text.contains("shell")));
     }
 
     /// Finding 1: a session interrupted mid-approval persists its
@@ -2086,11 +2083,10 @@ mod tests {
         let mut app = App::new(None);
         apply_interrupted_turn_marker(&mut app, sm.last_turn_is_interrupted(&sid).await);
 
-        assert!(
-            app.chat
-                .iter()
-                .any(|l| l.sender == Sender::System && l.text.contains("tour interrompu"))
-        );
+        assert!(app
+            .chat
+            .iter()
+            .any(|l| l.sender == Sender::System && l.text.contains("tour interrompu")));
     }
 
     #[tokio::test]
@@ -2536,8 +2532,8 @@ mod tests {
     /// which keeps column offsets in the returned strings matching terminal
     /// columns 1:1.
     fn rendered_rows(app: &App) -> Vec<String> {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let backend = TestBackend::new(120, 60);
         let mut terminal = Terminal::new(backend).expect("test backend terminal");
@@ -2555,8 +2551,8 @@ mod tests {
     }
 
     fn welcome_line_fg(app: &App, needle: &str) -> ratatui::style::Color {
-        use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
         let backend = TestBackend::new(120, 60);
         let mut terminal = Terminal::new(backend).expect("test backend terminal");

@@ -1,10 +1,10 @@
 use crate::handle::{
-    ChildTerminator, OUTPUT_CHANNEL_CAPACITY, OutputChunk, ProcessHandle, STDIN_CHANNEL_CAPACITY,
-    SpawnedProcess, Stream,
+    ChildTerminator, OutputChunk, ProcessHandle, SpawnedProcess, Stream, OUTPUT_CHANNEL_CAPACITY,
+    STDIN_CHANNEL_CAPACITY,
 };
 use crate::process_group;
-use crate::{HeadTailBuffer, OutputReceiver, lock_or_recover};
-use anyhow::{Context, Result, anyhow};
+use crate::{lock_or_recover, HeadTailBuffer, OutputReceiver};
+use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{Notify, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Notify};
 use tokio::time::Instant;
 
 const EXIT_OUTPUT_GRACE: Duration = Duration::from_millis(50);
@@ -71,7 +71,10 @@ impl CommandOptions {
         K: Into<String>,
         V: Into<String>,
     {
-        self.env.extend(envs.into_iter().map(|(key, value)| (key.into(), value.into())));
+        self.env.extend(
+            envs.into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
         self
     }
 
@@ -193,11 +196,23 @@ pub async fn spawn(options: CommandOptions) -> Result<SpawnedProcess> {
     let mut child = command
         .spawn()
         .with_context(|| format!("failed to spawn process `{}`", options.program))?;
-    let pid = child.id().ok_or_else(|| anyhow!("spawned process is missing a pid"))?;
+    let pid = child
+        .id()
+        .ok_or_else(|| anyhow!("spawned process is missing a pid"))?;
 
-    let writer = if with_stdin { child.stdin.take().map(spawn_stdin_writer) } else { None };
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("failed to capture stdout"))?;
-    let stderr = child.stderr.take().ok_or_else(|| anyhow!("failed to capture stderr"))?;
+    let writer = if with_stdin {
+        child.stdin.take().map(spawn_stdin_writer)
+    } else {
+        None
+    };
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture stderr"))?;
 
     let (output_tx, output_rx) = broadcast::channel(OUTPUT_CHANNEL_CAPACITY);
     let exit_code = Arc::new(StdMutex::new(None));
@@ -262,7 +277,10 @@ where
             match reader.read(&mut buffer).await {
                 Ok(0) => return,
                 Ok(n) => {
-                    let chunk = OutputChunk { stream, data: buffer[..n].to_vec() };
+                    let chunk = OutputChunk {
+                        stream,
+                        data: buffer[..n].to_vec(),
+                    };
                     let _ = output_tx.send(chunk);
                 }
                 Err(_) => return,

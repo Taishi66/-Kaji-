@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use ratatui::style::{Color, Modifier, Style};
 use std::sync::atomic::{AtomicUsize, Ordering};
 

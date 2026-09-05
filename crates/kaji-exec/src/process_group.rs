@@ -55,7 +55,11 @@ pub fn detach_from_tty() -> io::Result<()> {
 /// Intended for use in `pre_exec` so the child becomes the group leader.
 pub fn set_process_group() -> io::Result<()> {
     let result = unsafe { libc::setpgid(0, 0) };
-    if result == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(not(unix))]

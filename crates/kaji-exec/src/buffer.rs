@@ -83,7 +83,11 @@ impl HeadTailBuffer {
     }
 
     pub fn to_bytes_with_omission_marker(&self, marker: &[u8]) -> Vec<u8> {
-        let marker_bytes = if self.omitted_bytes > 0 { marker.len() } else { 0 };
+        let marker_bytes = if self.omitted_bytes > 0 {
+            marker.len()
+        } else {
+            0
+        };
         let mut out = Vec::with_capacity(self.retained_bytes() + marker_bytes);
         self.append_retained_to(&mut out, Some(marker));
 
