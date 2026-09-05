@@ -29,10 +29,22 @@
 //! même chemin, avec les mêmes règles de blocage et de timeout.
 //!
 //! Ce que le modèle finit par lire d'un hook — la sortie standard injectée dans
-//! le prompt, la décision d'un `pre_tool_use` — est de l'état externe : c'est
-//! journalisé sous le kind `hook_output` et **servi au rejeu**. Un
-//! [`HookManager`] monté avec [`HookManager::with_replay`] ne lance jamais de
-//! processus (spec S6, `docs/superpowers/specs/2026-09-05-p3-vision-web-workflows-mission-control-design.md`).
+//! le prompt, la décision d'un `pre_tool_use` ou d'un `stop` — est de l'état
+//! externe : c'est journalisé sous le kind `hook_output`. Un [`HookManager`]
+//! monté avec [`HookManager::with_replay`] ne lance jamais de processus (spec
+//! S6, `docs/superpowers/specs/2026-09-05-p3-vision-web-workflows-mission-control-design.md`).
+//!
+//! **Ce qui est servi au rejeu, et ce qui ne l'est pas.** Les décisions le
+//! sont : un `pre_tool_use` ou un `stop` qui a bloqué à l'enregistrement bloque
+//! au rejeu, sur une machine qui n'a pas le hook. Les sorties injectées dans le
+//! prompt, elles, ne le sont **pas** : le message du journal les porte déjà
+//! (`Agent::apply_prompt_hooks` réécrit avant la persistance), donc les
+//! réappliquer les dupliquerait. Elles restent journalisées pour
+//! l'observabilité — savoir ce qu'un hook avait produit ce jour-là — et le
+//! rejeu se contente de les lire. Corollaire : une ligne `hook_output` de
+//! sortie n'appartient pas nécessairement à un tour rejouable (un tour qui
+//! n'émet aucun `AgentEvent::Message` en laisse une derrière lui) — elle est
+//! inerte, jamais réinjectée, et purgée avec le reste du journal.
 
 pub mod config;
 
@@ -190,6 +202,28 @@ struct RawHookAction {
     timeout: Option<u64>,
 }
 
+/// D'où vient une règle — et donc sous quel contrat de blocage elle tourne.
+///
+/// La sémantique S6 (`pre_tool_use` : tout exit non nul bloque, un timeout
+/// aussi) appartient aux hooks que l'utilisateur a écrits dans sa config. Un
+/// hook de plugin a été écrit contre le contrat Open-Plugins — exit 2 ou
+/// `{"decision":"block"}` — et le lui changer rétroactivement transformerait
+/// son erreur interne (dépendance absente, fichier manquant) en blocage
+/// d'outil.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleSource {
+    Plugin,
+    Config,
+    ProjectConfig,
+}
+
+impl RuleSource {
+    /// Vrai pour les règles qui suivent le contrat de blocage S6.
+    fn blocks_on_any_failure(&self) -> bool {
+        matches!(self, RuleSource::Config | RuleSource::ProjectConfig)
+    }
+}
+
 /// A loaded, plugin-bound hook rule ready to execute.
 #[derive(Debug, Clone)]
 struct LoadedRule {
@@ -197,6 +231,7 @@ struct LoadedRule {
     plugin_root: PathBuf,
     matcher: Option<Regex>,
     actions: Vec<LoadedAction>,
+    source: RuleSource,
 }
 
 #[derive(Debug, Clone)]
@@ -320,7 +355,9 @@ impl HookManager {
     pub fn load(project_root: Option<&Path>, use_login_shell_path: bool) -> Self {
         let plugins = discover_enabled_plugins(project_root);
         let mut manager = Self::from_plugins(plugins, use_login_shell_path);
-        manager.add_config_rules(project_root);
+        if config_hooks_enabled() {
+            manager.add_config_rules(project_root);
+        }
         manager
     }
 
@@ -333,7 +370,7 @@ impl HookManager {
     /// suites d'acceptation S6, qui n'ont pas de plugin à découvrir.
     pub fn from_entries(entries: Vec<config::HookEntry>, root: &Path, source: &str) -> Self {
         let mut manager = Self::default();
-        manager.extend_from_entries(entries, root, source);
+        manager.extend_from_entries(entries, root, source, RuleSource::Config);
         manager
     }
 
@@ -347,13 +384,29 @@ impl HookManager {
 
     fn add_config_rules(&mut self, project_root: Option<&Path>) {
         let user_root = crate::config::paths::Paths::config_dir();
-        self.extend_from_entries(config::user_entries(), &user_root, "user");
+        self.extend_from_entries(
+            config::user_entries(),
+            &user_root,
+            "user",
+            RuleSource::Config,
+        );
         if let Some(root) = project_root {
-            self.extend_from_entries(config::project_entries(project_root), root, "project");
+            self.extend_from_entries(
+                config::project_entries(project_root),
+                root,
+                "project",
+                RuleSource::ProjectConfig,
+            );
         }
     }
 
-    fn extend_from_entries(&mut self, entries: Vec<config::HookEntry>, root: &Path, source: &str) {
+    fn extend_from_entries(
+        &mut self,
+        entries: Vec<config::HookEntry>,
+        root: &Path,
+        source: &str,
+        rule_source: RuleSource,
+    ) {
         for entry in entries {
             let Some(event) = HookEvent::from_name(&entry.event) else {
                 warn!(event = %entry.event, source, "hook ignoré : événement inconnu");
@@ -377,6 +430,7 @@ impl HookManager {
                     command: entry.command.clone(),
                     timeout: entry.timeout(),
                 }],
+                source: rule_source,
             });
         }
     }
@@ -451,6 +505,7 @@ impl HookManager {
         payload: &str,
         timeout: Duration,
     ) -> Result<std::process::Output> {
+        announce_project_hook(rule);
         let span = tracing::info_span!(
             target: "kaji::hooks",
             "execute_hook",
@@ -543,14 +598,15 @@ impl HookManager {
     /// Like [`Self::emit`], but stops at the first rule that denies the event
     /// and returns the denial.
     ///
-    /// Sur `pre_tool_use` la règle S6 s'applique : **toute** sortie non nulle
-    /// bloque l'appel, stderr en devient la raison rendue au modèle, et un
-    /// timeout bloque aussi ([`TIMEOUT_DENIAL`]) — fail-closed, parce qu'un
-    /// garde-fou qui n'a pas pu répondre n'est pas un garde-fou qui a dit oui.
-    /// Sur les autres événements (`Stop`) le contrat plugins tient : seuls
-    /// l'exit 2 avec la raison sur stderr et
+    /// Sur `pre_tool_use`, et pour les seules règles issues de la config, la
+    /// règle S6 s'applique : **toute** sortie non nulle bloque l'appel, stderr
+    /// en devient la raison rendue au modèle, et un timeout bloque aussi
+    /// ([`TIMEOUT_DENIAL`]) — fail-closed, parce qu'un garde-fou qui n'a pas pu
+    /// répondre n'est pas un garde-fou qui a dit oui. Partout ailleurs — les
+    /// autres événements (`Stop`), et **tous** les hooks de plugins — le
+    /// contrat Open-Plugins tient : seuls l'exit 2 avec la raison sur stderr et
     /// `{"decision":"block","reason":"..."}` sur stdout bloquent, tout le reste
-    /// est laissé passer.
+    /// est laissé passer (voir [`RuleSource`]).
     ///
     /// La décision est journalisée sous `hook_output` et **servie au rejeu** :
     /// `addr` en est la clé (l'id d'appel d'outil, vide pour un événement de
@@ -582,12 +638,15 @@ impl HookManager {
             }
         };
 
-        let fail_closed = event == HookEvent::PreToolUse;
-
         for rule in rules {
             if !Self::matches(rule, &ctx) {
                 continue;
             }
+
+            // Le contrat de blocage se lit par règle, pas par événement : un
+            // `pre_tool_use` de plugin garde le contrat sous lequel il a été
+            // écrit, seuls les hooks de config suivent la sémantique S6.
+            let fail_closed = event == HookEvent::PreToolUse && rule.source.blocks_on_any_failure();
 
             for action in &rule.actions {
                 let LoadedAction::Command { command, timeout } = action;
@@ -644,7 +703,9 @@ impl HookManager {
     /// tour doit partir même quand `shosoin-context` est cassé.
     ///
     /// La sortie entre dans le prompt : elle est journalisée sous `hook_output`
-    /// et servie telle quelle au rejeu, sans jamais relancer la commande.
+    /// pour l'observabilité. Au rejeu, c'est le message enregistré qui la porte
+    /// — cette fonction ne relance jamais la commande, et son appelant ne
+    /// réapplique pas ce qu'elle rend (voir la doc du module).
     pub async fn emit_capturing(
         &self,
         event: HookEvent,
@@ -732,6 +793,43 @@ pub fn append_tool_feedback(
             .push(rmcp::model::ContentBlock::text(feedback));
         call_result
     })
+}
+
+/// Le consentement `KAJI_PROJECT_HOOKS` se donne une fois et s'oublie ensuite.
+/// La première exécution d'un hook du dépôt le rappelle, pour que « ce dépôt
+/// exécute son propre shell chez moi » reste un fait visible six mois plus tard.
+fn announce_project_hook(rule: &LoadedRule) {
+    static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+    if rule.source != RuleSource::ProjectConfig {
+        return;
+    }
+    ANNOUNCED.call_once(|| {
+        info!(
+            path = %rule.plugin_root.join(config::PROJECT_HOOKS_FILE).display(),
+            "hooks du dépôt actifs : premier hook projet exécuté de cette session",
+        );
+    });
+}
+
+/// Les hooks déclarés en config ne sont montés que dans le binaire kaji.
+///
+/// [`HookManager::load`] lit `Config::global()`, c'est-à-dire le
+/// `config.yaml` réel de la machine : sans cette porte, une suite de tests qui
+/// construit un `Agent` exécuterait les hooks de la personne qui la lance, et
+/// un `post_tool_use` configuré ferait tomber des assertions sans rapport.
+/// Les plugins découverts, eux, étaient déjà là avant S6.
+static CONFIG_HOOKS_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Autorise [`HookManager::load`] à monter les hooks de config. Appelé une fois
+/// par le binaire kaji, au démarrage — jamais par une bibliothèque ni par un
+/// test.
+pub fn enable_config_hooks() {
+    CONFIG_HOOKS_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn config_hooks_enabled() -> bool {
+    CONFIG_HOOKS_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn deny_reason(output: &std::process::Output, any_non_zero: bool) -> Option<String> {
@@ -831,6 +929,7 @@ fn load_hooks_file(
                 plugin_root: plugin_root.to_path_buf(),
                 matcher,
                 actions,
+                source: RuleSource::Plugin,
             });
         }
     }
@@ -1089,6 +1188,116 @@ mod tests {
                 reason: "say something first".into(),
                 plugin: "p".into(),
             }
+        );
+    }
+
+    /// La sémantique S6 « tout exit non nul bloque » appartient aux hooks que
+    /// l'utilisateur a déclarés en config. Un `PreToolUse` de plugin écrit
+    /// contre le contrat historique — exit 1 sur une erreur interne, dépendance
+    /// absente — passait avant ce commit et doit continuer de passer.
+    #[tokio::test]
+    async fn a_non_zero_exit_blocks_a_config_hook_but_not_a_plugin_hook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = write_plugin(
+            tmp.path(),
+            "p",
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"exit 1"}]}]}}"#,
+        );
+        let plugin = make_manager(vec![DiscoveredPlugin {
+            name: "p".into(),
+            root,
+            scope: PluginScope::User,
+        }]);
+        assert_eq!(
+            plugin
+                .emit_blocking(
+                    HookEvent::PreToolUse,
+                    HookContext::new(HookEvent::PreToolUse, "s"),
+                    None,
+                    "",
+                )
+                .await,
+            HookDecision::Allow,
+            "un plugin garde son contrat : seul l'exit 2 bloque",
+        );
+
+        let configured = HookManager::from_entries(
+            vec![config::HookEntry {
+                event: "pre_tool_use".into(),
+                command: "echo refuse >&2; exit 1".into(),
+                matcher: None,
+                timeout_s: None,
+            }],
+            tmp.path(),
+            "user",
+        );
+        assert_eq!(
+            configured
+                .emit_blocking(
+                    HookEvent::PreToolUse,
+                    HookContext::new(HookEvent::PreToolUse, "s"),
+                    None,
+                    "",
+                )
+                .await,
+            HookDecision::Deny {
+                reason: "refuse".into(),
+                plugin: "user".into(),
+            },
+        );
+    }
+
+    /// Même partage pour le timeout : fail-closed est la règle S6, pas celle
+    /// des plugins — un hook de plugin lent bloquerait un appel d'outil sans
+    /// avoir jamais été écrit contre ce contrat.
+    #[tokio::test]
+    async fn a_timeout_fails_closed_only_for_a_config_hook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = write_plugin(
+            tmp.path(),
+            "p",
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"sleep 30","timeout":1}]}]}}"#,
+        );
+        let plugin = make_manager(vec![DiscoveredPlugin {
+            name: "p".into(),
+            root,
+            scope: PluginScope::User,
+        }]);
+        assert_eq!(
+            plugin
+                .emit_blocking(
+                    HookEvent::PreToolUse,
+                    HookContext::new(HookEvent::PreToolUse, "s"),
+                    None,
+                    "",
+                )
+                .await,
+            HookDecision::Allow,
+        );
+
+        let configured = HookManager::from_entries(
+            vec![config::HookEntry {
+                event: "pre_tool_use".into(),
+                command: "sleep 30".into(),
+                matcher: None,
+                timeout_s: Some(1),
+            }],
+            tmp.path(),
+            "user",
+        );
+        assert_eq!(
+            configured
+                .emit_blocking(
+                    HookEvent::PreToolUse,
+                    HookContext::new(HookEvent::PreToolUse, "s"),
+                    None,
+                    "",
+                )
+                .await,
+            HookDecision::Deny {
+                reason: TIMEOUT_DENIAL.into(),
+                plugin: "user".into(),
+            },
         );
     }
 

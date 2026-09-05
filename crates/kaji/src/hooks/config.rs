@@ -1,10 +1,19 @@
 //! Les hooks déclarés par l'utilisateur, hors plugins.
 //!
 //! Deux sources, fusionnées dans cet ordre : la clé `hooks` de la config user
-//! (`config.yaml`, couches système → user → locale via [`Config::get_param`])
 //! puis `.kaji/hooks.yaml` à la racine du projet. Le projet vient après, donc
 //! ses règles tournent après celles de l'utilisateur ; aucune ne remplace
 //! l'autre — les hooks s'additionnent, comme les règles d'un plugin.
+//!
+//! Les couches que la clé `hooks` traverse sont exactement celles de
+//! [`Config`] : `/etc/kaji/config.yaml`, puis les fichiers de
+//! `KAJI_ADDITIONAL_CONFIG_FILES`, puis `~/.config/kaji/config.yaml`. **Il
+//! n'existe aucune couche projet** — c'est ce qui empêche un dépôt cloné de se
+//! donner le consentement à lui-même. La clé est lue par
+//! [`Config::get_param_from_files`] et non `get_param` : ce dernier lirait la
+//! variable d'environnement `HOOKS` avant les fichiers, ce qui rouvrirait la
+//! porte que le gate ci-dessous ferme. Une `HOOKS=` posée est ignorée, avec un
+//! `warn!`.
 //!
 //! **Les hooks projet sont inactifs par défaut.** Le fichier vit dans le dépôt :
 //! un `git clone` suffirait sinon à faire exécuter du shell au premier `kaji`
@@ -94,7 +103,14 @@ fn truthy(value: &serde_yaml::Value) -> bool {
 /// erreur ; une clé mal formée est signalée puis ignorée — une config de hooks
 /// cassée ne doit pas empêcher kaji de démarrer.
 pub fn user_entries() -> Vec<HookEntry> {
-    match Config::global().get_param::<Vec<HookEntry>>(USER_HOOKS_KEY) {
+    if std::env::var(USER_HOOKS_KEY.to_uppercase()).is_ok() {
+        warn!(
+            "variable d'environnement `{}` ignorée : les hooks se déclarent en config.yaml ou \
+             .kaji/hooks.yaml, jamais par l'environnement",
+            USER_HOOKS_KEY.to_uppercase()
+        );
+    }
+    match Config::global().get_param_from_files::<Vec<HookEntry>>(USER_HOOKS_KEY) {
         Ok(entries) => entries,
         Err(crate::config::ConfigError::NotFound(_)) => Vec::new(),
         Err(error) => {
@@ -200,6 +216,20 @@ mod tests {
             1,
             "KAJI_PROJECT_HOOKS=1 les active"
         );
+    }
+
+    /// Les hooks se déclarent par fichiers. `get_param` lirait `HOOKS` en
+    /// majuscules avant les fichiers : un `.envrc`, un `docker-compose.yml` ou
+    /// un `Makefile` du dépôt aurait donc ouvert une seconde porte vers `sh -c`
+    /// sans jamais toucher au gate `KAJI_PROJECT_HOOKS`.
+    #[test]
+    fn an_env_hooks_key_declares_nothing() {
+        let env_key = USER_HOOKS_KEY.to_uppercase();
+        let _guard = env_lock::lock_env([(
+            env_key.as_str(),
+            Some(r#"[{"event":"session_start","command":"echo pwned"}]"#),
+        )]);
+        assert!(user_entries().is_empty());
     }
 
     #[test]

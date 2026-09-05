@@ -491,6 +491,57 @@ fn prepend_hook_output(mut message: Message, prelude: &[String]) -> Message {
     message
 }
 
+/// La racine du projet courant : le premier ancêtre du répertoire de travail
+/// qui porte un `.git`, sinon le répertoire lui-même. `.kaji/hooks.yaml` vit à
+/// la racine du dépôt ; le chercher dans le seul `current_dir` le rendrait
+/// invisible dès qu'on lance `kaji` depuis un sous-répertoire, ce qui n'est pas
+/// ce que « racine du projet » veut dire.
+fn project_root_from_cwd() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let root = cwd
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+        .unwrap_or(&cwd);
+    Some(root.to_path_buf())
+}
+
+/// Le tour est-il une commande plutôt qu'un prompt ? Mêmes prédicats que ceux
+/// dont dépendent les deux boucles — `execute_commands` côté legacy,
+/// `ops_slash_command` / `ops_bang_shell` côté machine à états — pour que la
+/// question « les hooks de prompt s'appliquent-ils ? » et la question « est-ce
+/// une commande ? » ne puissent pas répondre différemment.
+fn is_command_prompt(prompt: &str) -> bool {
+    crate::agents::execute_commands::parse_slash_command(prompt).is_some()
+        || super::state_machine::bang_shell_command(prompt).is_some()
+}
+
+/// `session_start` appartient à la session qu'un utilisateur ouvre lui-même.
+///
+/// Un sous-agent — `summon`, recette, orchestrateur — tourne dans une session
+/// neuve à chaque invocation : y tirer le hook préfixerait sa sortie au prompt
+/// de tâche écrit par l'appelant, et multiplierait son coût en tokens par le
+/// fan-out. Même raison pour une session `Hidden` ou planifiée, qu'aucun
+/// utilisateur n'ouvre.
+fn opens_a_user_session(session: &Session) -> bool {
+    use crate::session::session_manager::SessionType;
+
+    if !matches!(
+        session.session_type,
+        SessionType::User | SessionType::Terminal | SessionType::Gateway | SessionType::Acp
+    ) {
+        return false;
+    }
+    session
+        .conversation
+        .as_ref()
+        .map(|conversation| {
+            conversation.messages().iter().all(|message| {
+                !message.is_agent_visible() || message.agent_visible_content().content.is_empty()
+            })
+        })
+        .unwrap_or(true)
+}
+
 fn attach_turn_usage(
     messages: &mut Conversation,
     usage: &ProviderUsage,
@@ -591,7 +642,7 @@ impl Agent {
                 inspection_session_manager,
             ),
             hook_manager: crate::hooks::HookManager::load(
-                std::env::current_dir().ok().as_deref(),
+                project_root_from_cwd().as_deref(),
                 use_login_shell_path,
             ),
             #[cfg(test)]
@@ -809,65 +860,71 @@ impl Agent {
             .await;
     }
 
-    /// Le tour ouvre-t-il la session ? Vrai tant qu'aucun message n'a de
-    /// contenu visible par l'agent — même prédicat que la boucle legacy
-    /// employait pour `SessionStart`, remonté dans l'enveloppe partagée. Le
-    /// coût de la lecture n'est payé que quand un hook `session_start` existe.
-    async fn opens_the_session(&self, session_id: &str) -> bool {
-        match self
-            .config
-            .session_manager
-            .get_session(session_id, true)
-            .await
-        {
-            Ok(session) => session
-                .conversation
-                .as_ref()
-                .map(|conversation| {
-                    conversation.messages().iter().all(|message| {
-                        !message.is_agent_visible()
-                            || message.agent_visible_content().content.is_empty()
-                    })
-                })
-                .unwrap_or(true),
-            Err(error) => {
-                warn!(
-                    ?error,
-                    session_id, "hooks: session illisible — session_start non émis"
-                );
-                false
-            }
-        }
-    }
-
     /// Applique les hooks qui écrivent devant le prompt : `session_start` au
-    /// premier tour, puis `user_prompt_submit`. Leur sortie standard est
-    /// préfixée au message de l'utilisateur, dans cet ordre.
+    /// premier tour d'une session que l'utilisateur ouvre lui-même, puis
+    /// `user_prompt_submit`. Leur sortie standard est préfixée au message de
+    /// l'utilisateur, dans cet ordre.
     ///
-    /// En rejeu, `HookManager` sert ces sorties depuis le journal
-    /// (`hook_output`) et n'exécute rien : le prompt reconstruit est le même
-    /// sur une machine où les hooks n'existent pas.
+    /// Trois choses n'y passent jamais :
+    ///
+    /// - **le rejeu** : le message du journal est canonique, il porte déjà la
+    ///   réécriture. Réappliquer le prélude servi depuis `hook_output` le
+    ///   dupliquerait et ferait diverger `request_hash` ;
+    /// - **les commandes** — `/…` et `!…` : le préfixe pousserait le `/` ou le
+    ///   `!` hors de tête du texte concaténé, sur lequel les deux boucles
+    ///   détectent la commande par préfixe strict. Elles partiraient au modèle
+    ///   comme de la prose, et un `/goal` ne déclencherait jamais son kickoff ;
+    /// - **les sessions qui ne sont pas celles d'un utilisateur** pour
+    ///   `session_start` (voir [`opens_a_user_session`]).
     async fn apply_prompt_hooks(&self, session_id: &str, user_message: Message) -> Message {
         use crate::hooks::{HookContext, HookEvent};
 
-        let replaying = self.is_replay();
-        let prompt = agent_visible_message_text(&user_message);
-        if prompt.is_empty() {
+        if self.is_replay() {
+            if let Some(replay) = self.replay_source() {
+                for event in [HookEvent::SessionStart, HookEvent::UserPromptSubmit] {
+                    if let Some(output) = replay.hook_output(event.config_name(), "") {
+                        debug!(
+                            %event,
+                            bytes = output.len(),
+                            "rejeu : sortie de hook journalisée — déjà portée par le message rejoué",
+                        );
+                    }
+                }
+            }
             return user_message;
         }
-        let recorder = self.turn_recorder();
-        let working_dir = self
+
+        let prompt = agent_visible_message_text(&user_message);
+        if prompt.is_empty() || is_command_prompt(&prompt) {
+            return user_message;
+        }
+
+        let wants_session_start = self.hook_manager.has_hooks(HookEvent::SessionStart);
+        let wants_prompt_submit = self.hook_manager.has_hooks(HookEvent::UserPromptSubmit);
+        if !wants_session_start && !wants_prompt_submit {
+            return user_message;
+        }
+
+        let session = match self
             .config
             .session_manager
-            .get_session(session_id, false)
+            .get_session(session_id, wants_session_start)
             .await
-            .map(|session| session.working_dir.to_string_lossy().to_string())
-            .unwrap_or_default();
-
+        {
+            Ok(session) => session,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    session_id, "hooks: session illisible — hooks de prompt non émis"
+                );
+                return user_message;
+            }
+        };
+        let working_dir = session.working_dir.to_string_lossy().to_string();
+        let recorder = self.turn_recorder();
         let mut prelude: Vec<String> = Vec::new();
 
-        let wants_session_start = replaying || self.hook_manager.has_hooks(HookEvent::SessionStart);
-        if wants_session_start && self.opens_the_session(session_id).await {
+        if wants_session_start && opens_a_user_session(&session) {
             let context = HookContext::new(HookEvent::SessionStart, session_id)
                 .with_working_dir(working_dir.clone());
             if let Some(output) = self
@@ -879,7 +936,7 @@ impl Agent {
             }
         }
 
-        if replaying || self.hook_manager.has_hooks(HookEvent::UserPromptSubmit) {
+        if wants_prompt_submit {
             let context = HookContext::new(HookEvent::UserPromptSubmit, session_id)
                 .with_message(prompt)
                 .with_working_dir(working_dir);
@@ -893,6 +950,24 @@ impl Agent {
         }
 
         prepend_hook_output(user_message, &prelude)
+    }
+
+    /// Le hook de fin de tour, au même endroit que la borne qu'il accompagne :
+    /// un seul site pour les deux boucles. Sa sortie n'entre nulle part — rien
+    /// à journaliser, rien à servir au rejeu, et le manager de rejeu ne
+    /// l'exécute pas.
+    async fn emit_turn_end_hook(
+        hooks: &crate::hooks::HookManager,
+        session_id: &str,
+        working_dir: &str,
+    ) {
+        hooks
+            .emit(
+                crate::hooks::HookEvent::TurnEnd,
+                crate::hooks::HookContext::new(crate::hooks::HookEvent::TurnEnd, session_id)
+                    .with_working_dir(working_dir.to_string()),
+            )
+            .await;
     }
 
     fn stop_hook_context(
@@ -922,18 +997,25 @@ impl Agent {
             .await;
     }
 
+    /// `prior_blocks` adresse la décision au journal : un hook `stop` peut
+    /// refuser plusieurs fois dans le même tour, et chaque évaluation sauf la
+    /// dernière est un refus — le nombre de refus déjà rendus identifie donc
+    /// l'évaluation en cours, à l'enregistrement comme au rejeu, sans compteur
+    /// à tenir. Sans cette clé la décision ne serait pas servie, le rejeu
+    /// s'arrêterait un tour plus tôt et rien ne le signalerait.
     pub(crate) async fn emit_stop_hook_blocking(
         &self,
         session_id: &str,
         last_assistant_message: &str,
         working_dir: &str,
+        prior_blocks: u32,
     ) -> crate::hooks::HookDecision {
         self.hook_manager
             .emit_blocking(
                 crate::hooks::HookEvent::Stop,
                 Self::stop_hook_context(session_id, last_assistant_message, working_dir),
-                None,
-                "",
+                self.turn_recorder().as_ref(),
+                &prior_blocks.to_string(),
             )
             .await
     }
@@ -2215,10 +2297,10 @@ impl Agent {
                 std::time::Duration::from_secs(retry_timeout),
                 std::time::Duration::from_secs(on_failure_timeout),
             )),
-            Arc::new(StopHookOperation::new(
-                self.hook_manager.clone(),
-                stop_hook_block_cap,
-            )),
+            Arc::new(
+                StopHookOperation::new(self.hook_manager.clone(), stop_hook_block_cap)
+                    .with_turn_recorder(self.turn_recorder()),
+            ),
             Arc::new(ExitOnErrorOperation),
         ];
         let inference = Arc::new(
@@ -2657,6 +2739,18 @@ impl Agent {
             .current_date_timestamp()
             .to_string()];
         let turn_end_hooks = self.hook_manager.clone();
+        // Un hook de fin de tour a besoin de savoir où il tourne, comme tous
+        // les autres. La lecture n'est payée que s'il en existe un.
+        let turn_end_working_dir = if turn_end_hooks.has_hooks(crate::hooks::HookEvent::TurnEnd) {
+            self.config
+                .session_manager
+                .get_session(&session_id, false)
+                .await
+                .map(|session| session.working_dir.to_string_lossy().to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let checkpoint_store = self.checkpoint_store.clone();
         // Skip the session lookup entirely when no store is wired — true for
         // every non-TUI `build_session` caller and most tests — rather than
@@ -2733,6 +2827,16 @@ impl Agent {
                                 warn!(?append_error, "event log append failed for turn_end");
                             }
                         }
+                        // Le hook de fin de tour accompagne la borne, pas le
+                        // succès : un tour en erreur est une fin de tour, et un
+                        // hook qui compte les tours ou libère une ressource
+                        // raterait sinon exactement les cas qui comptent.
+                        Self::emit_turn_end_hook(
+                            &turn_end_hooks,
+                            &session_id,
+                            &turn_end_working_dir,
+                        )
+                        .await;
                         err?;
                     }
                     None => {
@@ -2747,20 +2851,12 @@ impl Agent {
                                 warn!(?error, "event log append failed for turn_end");
                             }
                         }
-                        // Le hook de fin de tour, au même endroit que la borne
-                        // qu'il accompagne : un seul site pour les deux
-                        // boucles. Sa sortie n'entre nulle part — rien à
-                        // journaliser, rien à servir au rejeu, et le manager
-                        // de rejeu ne l'exécute pas.
-                        turn_end_hooks
-                            .emit(
-                                crate::hooks::HookEvent::TurnEnd,
-                                crate::hooks::HookContext::new(
-                                    crate::hooks::HookEvent::TurnEnd,
-                                    &session_id,
-                                ),
-                            )
-                            .await;
+                        Self::emit_turn_end_hook(
+                            &turn_end_hooks,
+                            &session_id,
+                            &turn_end_working_dir,
+                        )
+                        .await;
                         break;
                     }
                 }
@@ -3274,7 +3370,7 @@ impl Agent {
                     conversation.push(message);
 
                     match self
-                        .emit_stop_hook_blocking(&session_config.id, &last_assistant_text, &session.working_dir.to_string_lossy())
+                        .emit_stop_hook_blocking(&session_config.id, &last_assistant_text, &session.working_dir.to_string_lossy(), consecutive_stop_hook_blocks)
                         .await
                     {
                         crate::hooks::HookDecision::Allow => {
@@ -4230,7 +4326,7 @@ impl Agent {
 
                 if exit_chat {
                     match self
-                        .emit_stop_hook_blocking(&session_config.id, &last_assistant_text, &session.working_dir.to_string_lossy())
+                        .emit_stop_hook_blocking(&session_config.id, &last_assistant_text, &session.working_dir.to_string_lossy(), consecutive_stop_hook_blocks)
                         .await
                     {
                         crate::hooks::HookDecision::Allow => {
@@ -5606,6 +5702,18 @@ echo start >> "$PLUGIN_ROOT/hook.log"
         hook_manager: crate::hooks::HookManager,
         provider: Arc<dyn crate::providers::base::Provider>,
     ) -> Result<(Agent, String)> {
+        create_test_agent_of_type(data_dir, hook_manager, provider, SessionType::Hidden).await
+    }
+
+    /// `session_start` ne tire que dans une session qu'un utilisateur ouvre
+    /// lui-même : un test de ce hook doit donc en créer une (voir
+    /// [`opens_a_user_session`]).
+    async fn create_test_agent_of_type(
+        data_dir: PathBuf,
+        hook_manager: crate::hooks::HookManager,
+        provider: Arc<dyn crate::providers::base::Provider>,
+        session_type: SessionType,
+    ) -> Result<(Agent, String)> {
         let session_manager = Arc::new(SessionManager::new(data_dir.clone()));
         let permission_manager = Arc::new(PermissionManager::new(data_dir));
         let config = AgentConfig::new(
@@ -5622,7 +5730,7 @@ echo start >> "$PLUGIN_ROOT/hook.log"
             .create_session(
                 PathBuf::default(),
                 "test".to_string(),
-                SessionType::Hidden,
+                session_type,
                 KajiMode::Auto,
             )
             .await?;
@@ -5760,8 +5868,13 @@ echo start >> "$PLUGIN_ROOT/hook.log"
     async fn session_start_hook_emits_once_for_first_reply_turn() -> Result<()> {
         let env = SessionStartHookTestEnv::new()?;
         let provider = Arc::new(CountingTextProvider::new());
-        let (agent, session_id) =
-            create_test_agent(env.data_dir(), env.hook_manager(), provider.clone()).await?;
+        let (agent, session_id) = create_test_agent_of_type(
+            env.data_dir(),
+            env.hook_manager(),
+            provider.clone(),
+            SessionType::User,
+        )
+        .await?;
 
         run_stop_hook_test_turn(&agent, &session_id, "first").await?;
         run_stop_hook_test_turn(&agent, &session_id, "second").await?;
@@ -5778,8 +5891,13 @@ echo start >> "$PLUGIN_ROOT/hook.log"
         let env = SessionStartHookTestEnv::new()?;
         let provider = Arc::new(CountingTextProvider::new());
         let hook_manager = env.hook_manager();
-        let (agent, session_id) =
-            create_test_agent(env.data_dir(), hook_manager, provider.clone()).await?;
+        let (agent, session_id) = create_test_agent_of_type(
+            env.data_dir(),
+            hook_manager,
+            provider.clone(),
+            SessionType::User,
+        )
+        .await?;
         let session_config = SessionConfig {
             id: session_id.clone(),
             schedule_id: None,

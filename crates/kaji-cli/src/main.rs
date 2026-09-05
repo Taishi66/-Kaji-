@@ -49,6 +49,11 @@ fn apply_profile_from_argv() {
 async fn run() -> Result<()> {
     apply_profile_from_argv();
 
+    // Les hooks déclarés en config n'existent que dans ce binaire : une suite
+    // de tests qui construit un `Agent` ne doit jamais exécuter les hooks de la
+    // machine qui la lance (`kaji::hooks::enable_config_hooks`).
+    kaji::hooks::enable_config_hooks();
+
     if let Err(e) = kaji_cli::logging::setup_logging(None) {
         eprintln!("Warning: Failed to initialize logging: {}", e);
     }

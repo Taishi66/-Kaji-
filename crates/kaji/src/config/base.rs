@@ -774,6 +774,19 @@ impl Config {
             return Ok(serde_json::from_value(value)?);
         }
 
+        self.get_param_from_files(key)
+    }
+
+    /// Comme [`Self::get_param`], mais **sans** le détour par la variable
+    /// d'environnement en majuscules : la valeur ne peut venir que des fichiers
+    /// de config. Pour les clés dont une valeur posée en environnement serait
+    /// une porte d'exécution (`hooks`) — un `.envrc`, un `docker-compose.yml`
+    /// ou un `Makefile` du dépôt cloné suffirait à la poser, alors qu'aucune
+    /// couche de config n'est ouverte au projet.
+    pub fn get_param_from_files<T: for<'de> Deserialize<'de>>(
+        &self,
+        key: &str,
+    ) -> Result<T, ConfigError> {
         let values = self.load()?;
         let value = values
             .get(key)

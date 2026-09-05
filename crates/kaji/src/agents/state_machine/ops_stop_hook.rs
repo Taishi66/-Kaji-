@@ -1,5 +1,7 @@
 //! Lets stop hooks accept or block a completed assistant turn.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -10,6 +12,7 @@ use crate::agents::state_machine::operation::{
 use crate::conversation::message::{Message, SystemNotificationType};
 use crate::conversation::Conversation;
 use crate::hooks::{HookContext, HookDecision, HookEvent, HookManager};
+use crate::replay::record::TurnRecorder;
 use crate::session::Session;
 
 pub(super) const DENIED: &str = "denied";
@@ -45,6 +48,7 @@ fn block_cap_warning(plugin: &str, cap: u32) -> Message {
 pub struct StopHookOperation {
     hook_manager: HookManager,
     block_cap: u32,
+    turn_recorder: Option<Arc<TurnRecorder>>,
 }
 
 impl StopHookOperation {
@@ -52,7 +56,13 @@ impl StopHookOperation {
         Self {
             hook_manager,
             block_cap,
+            turn_recorder: None,
         }
+    }
+
+    pub fn with_turn_recorder(mut self, turn_recorder: Option<Arc<TurnRecorder>>) -> Self {
+        self.turn_recorder = turn_recorder;
+        self
     }
 }
 
@@ -78,19 +88,28 @@ impl Operation for StopHookOperation {
             .unwrap_or_default();
 
         let context = HookContext::new(HookEvent::Stop, &session.id)
-            .with_last_assistant_message(last_assistant_text);
+            .with_last_assistant_message(last_assistant_text)
+            .with_working_dir(session.working_dir.to_string_lossy().to_string());
+        // La clé sous laquelle le journal range cette décision — même
+        // convention que la boucle legacy (`Agent::emit_stop_hook_blocking`) :
+        // le nombre de refus déjà rendus dans ce tour identifie l'évaluation.
+        let prior_blocks = messages
+            .iter()
+            .filter(|message| self.message_meta(message, DENIED).is_some())
+            .count() as u32;
         match self
             .hook_manager
-            .emit_blocking(HookEvent::Stop, context, None, "")
+            .emit_blocking(
+                HookEvent::Stop,
+                context,
+                self.turn_recorder.as_ref(),
+                &prior_blocks.to_string(),
+            )
             .await
         {
             HookDecision::Allow => yielded(),
             HookDecision::Deny { reason, plugin } => {
-                let blocks = messages
-                    .iter()
-                    .filter(|message| self.message_meta(message, DENIED).is_some())
-                    .count() as u32
-                    + 1;
+                let blocks = prior_blocks + 1;
                 if blocks > self.block_cap {
                     let warning = block_cap_warning(&plugin, self.block_cap);
                     let warning = emit.message(warning).await;
