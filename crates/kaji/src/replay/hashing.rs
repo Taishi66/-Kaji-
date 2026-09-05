@@ -183,6 +183,35 @@ mod tests {
         );
     }
 
+    /// Vision (S1) : une image attachée entre dans la requête, donc dans son
+    /// hash. Sans ça un rejeu strict accepterait un tour dont l'image aurait
+    /// changé — la garantie « rejoué à l'identique » ne tiendrait plus dès
+    /// que le message est multimodal.
+    #[test]
+    fn an_attached_image_is_part_of_the_request_hash() {
+        let text_only = vec![Message::user().with_text("décris ça")];
+        let with_image = vec![Message::user()
+            .with_text("décris ça")
+            .with_image("aGVsbG8=", "image/png")];
+        let other_image = vec![Message::user()
+            .with_text("décris ça")
+            .with_image("d29ybGQ=", "image/png")];
+        let other_mime = vec![Message::user()
+            .with_text("décris ça")
+            .with_image("aGVsbG8=", "image/webp")];
+
+        let hash = |messages: &[Message]| request_hash("system", messages, &[]);
+        assert_ne!(hash(&text_only), hash(&with_image));
+        assert_ne!(hash(&with_image), hash(&other_image));
+        assert_ne!(hash(&with_image), hash(&other_mime));
+        assert_eq!(
+            hash(&with_image),
+            hash(&[Message::user()
+                .with_text("décris ça")
+                .with_image("aGVsbG8=", "image/png")])
+        );
+    }
+
     /// Cross-check against the prior art this normalization was lifted from:
     /// `TestProvider::hash_input` keys its recorded scenarios on the same
     /// stripped view of the messages. The two hashes are deliberately

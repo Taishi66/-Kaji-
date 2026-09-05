@@ -994,16 +994,16 @@ async fn event_loop(
                     }
                     Action::Submit(text) => {
                         app.push_user(&text);
-                        let expanded = mentions::expand_mentions(&text, &working_dir);
-                        pending = Some(begin_setup(&mut app, agent, &session_config, &expanded, &mut cancel));
+                        let message = user_message(&mut app, &text, &working_dir);
+                        pending = Some(begin_setup(&mut app, agent, &session_config, message, &mut cancel));
                     }
                     Action::StartPass => app.start_pass(),
                     // Goal session (item 5 ante): the first work turn starts
                     // here, every following one from `turn_end` — the same
                     // chaining the SDD pass uses.
                     Action::GoalSet(condition) => {
-                        if let Some(prompt) = goal_work_prompt(&mut app, &condition, &working_dir) {
-                            pending = Some(begin_setup(&mut app, agent, &session_config, &prompt, &mut cancel));
+                        if let Some(message) = goal_work_message(&mut app, &condition, &working_dir) {
+                            pending = Some(begin_setup(&mut app, agent, &session_config, message, &mut cancel));
                         }
                     }
                     Action::GoalStatus => app.push_goal_status(),
@@ -1024,7 +1024,8 @@ async fn event_loop(
                     Action::GateApprove => {
                         if let Some(prompt) = app.gate_approve() {
                             app.push_system("Exec : envoi de la SPEC à l'agent");
-                            pending = Some(begin_setup(&mut app, agent, &session_config, &prompt, &mut cancel));
+                            let message = Message::user().with_text(&prompt);
+                            pending = Some(begin_setup(&mut app, agent, &session_config, message, &mut cancel));
                         }
                     }
                     Action::GateReject => app.gate_reject(),
@@ -1242,7 +1243,8 @@ async fn event_loop(
                         cancel = None;
                         teardown_turn(&mut app);
                         if let Some(prompt) = app.turn_end() {
-                            pending = Some(begin_setup(&mut app, agent, &session_config, &prompt, &mut cancel));
+                            let message = Message::user().with_text(&prompt);
+                            pending = Some(begin_setup(&mut app, agent, &session_config, message, &mut cancel));
                         } else if flush_steer_queue(
                             &mut app,
                             agent,
@@ -1373,9 +1375,9 @@ async fn event_loop(
 /// re-expanding the condition every iteration would attach the same file over
 /// and over. The goal keeps the raw condition — it is what `/goal` reports and
 /// what the evaluator is asked about.
-fn goal_work_prompt(app: &mut App, condition: &str, working_dir: &Path) -> Option<String> {
+fn goal_work_message(app: &mut App, condition: &str, working_dir: &Path) -> Option<Message> {
     let prompt = app.goal_set(condition, goal_max_iterations())?;
-    Some(mentions::expand_mentions(&prompt, working_dir))
+    Some(user_message(app, &prompt, working_dir))
 }
 
 /// `KAJI_GOAL_MAX_ITERATIONS` — backstop of the unsupervised loop, distinct
@@ -1419,17 +1421,35 @@ fn begin_setup<'a>(
     app: &mut App,
     agent: &'a Agent,
     session_config: &SessionConfig,
-    prompt: &str,
+    message: Message,
     cancel: &mut Option<CancellationToken>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'a>>> + 'a>> {
     app.status = "démarrage du tour…".to_string();
     app.turn_pending = true;
     app.reset_turn_visibility();
     let token = CancellationToken::new();
-    let message = Message::user().with_text(prompt);
     let fut = agent.reply(message, session_config.clone(), Some(token.clone()));
     *cancel = Some(token);
     Box::pin(fut)
+}
+
+/// Expands the mentions of a submitted line into the message the provider
+/// receives (S1): text attachments stay inline, image mentions become
+/// multimodal content blocks. Everything the composer decided about images
+/// lands in the transcript here — a placeholder line per attached image, an
+/// error line per refusal — so what left with the message is visible without
+/// reading the message.
+fn user_message(app: &mut App, text: &str, working_dir: &Path) -> Message {
+    let expansion = mentions::expand_mentions(text, working_dir);
+    let mut message = Message::user().with_text(&expansion.text);
+    for image in &expansion.images {
+        app.push_system(&image.placeholder());
+        message = message.with_image(image.data.clone(), image.mime.clone());
+    }
+    for notice in &expansion.notices {
+        app.push_error(notice);
+    }
+    message
 }
 
 /// Consumes the resolved setup future: on success, stores the stream and
@@ -1488,8 +1508,8 @@ fn flush_steer_queue<'a>(
         return false;
     };
     app.push_user(&text);
-    let expanded = mentions::expand_mentions(&text, working_dir);
-    *pending = Some(begin_setup(app, agent, session_config, &expanded, cancel));
+    let message = user_message(app, &text, working_dir);
+    *pending = Some(begin_setup(app, agent, session_config, message, cancel));
     true
 }
 
@@ -2345,6 +2365,103 @@ mod tests {
         assert_eq!(session_working_dir(&sm, &sid).await, project);
     }
 
+    /// Fixture image: eight bytes of PNG header, enough for a real base64
+    /// payload without carrying a picture into the repo.
+    const PNG_FIXTURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    /// S1 — `@capture.png` leaves the text alone and rides as multimodal
+    /// content, with a placeholder line so the transcript shows what left.
+    #[test]
+    fn an_image_mention_becomes_multimodal_content_and_a_placeholder_line() {
+        use base64::Engine as _;
+        use kaji::conversation::message::MessageContentBlock;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("capture.png"), PNG_FIXTURE).unwrap();
+        let mut app = App::new(None);
+
+        let message = user_message(&mut app, "décris @capture.png", dir.path());
+
+        assert_eq!(message.as_concat_text(), "décris @capture.png");
+        let images: Vec<_> = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                MessageContentBlock::Image(image) => Some(image),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(
+            base64::prelude::BASE64_STANDARD
+                .decode(&images[0].data)
+                .unwrap(),
+            PNG_FIXTURE
+        );
+        assert!(
+            app.chat
+                .iter()
+                .any(|line| line.text.contains("画 capture.png (8 o)")),
+            "{:?}",
+            app.chat.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+    }
+
+    /// Cap dépassé : la ligne d'erreur part dans le chat, l'image n'est pas
+    /// attachée, et le message lui-même est envoyé tel quel.
+    #[test]
+    fn a_refused_image_leaves_the_message_intact_and_says_why() {
+        use kaji::conversation::message::MessageContentBlock;
+
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.png", "b.png", "c.png", "d.png"] {
+            std::fs::write(dir.path().join(name), PNG_FIXTURE).unwrap();
+        }
+        let mut app = App::new(None);
+
+        let message = user_message(&mut app, "@a.png @b.png @c.png @d.png", dir.path());
+
+        assert_eq!(
+            message
+                .content
+                .iter()
+                .filter(|block| matches!(block, MessageContentBlock::Image(_)))
+                .count(),
+            3
+        );
+        assert_eq!(message.as_concat_text(), "@a.png @b.png @c.png @d.png");
+        assert!(
+            app.chat
+                .iter()
+                .any(|line| line.text.contains("d.png") && line.text.contains("non attachée")),
+            "{:?}",
+            app.chat.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+    }
+
+    /// Le `Tab` du finder n'a pas de chemin à lui : il pose `@chemin` dans le
+    /// composer, donc une image suit exactement la même expansion qu'une
+    /// mention tapée.
+    #[test]
+    fn the_finder_attach_gesture_feeds_the_same_image_path() {
+        use kaji::conversation::message::MessageContentBlock;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("capture.png"), PNG_FIXTURE).unwrap();
+        let mut app = App::new(None);
+        app.attach_mention("capture.png");
+
+        let submitted = app.input.trim().to_string();
+        let message = user_message(&mut app, &submitted, dir.path());
+
+        assert_eq!(submitted, "@capture.png");
+        assert!(message
+            .content
+            .iter()
+            .any(|block| matches!(block, MessageContentBlock::Image(_))));
+    }
+
     /// `/goal corriger @notes.md` must reach the agent with the file attached,
     /// exactly like the same text submitted as a message — while the goal
     /// itself keeps the raw condition it reports and evaluates.
@@ -2354,10 +2471,11 @@ mod tests {
         std::fs::write(dir.path().join("notes.md"), "corps du fichier").unwrap();
         let mut app = App::new(None);
 
-        let prompt = goal_work_prompt(&mut app, "corriger @notes.md", dir.path())
-            .expect("prompt de travail");
+        let message = goal_work_message(&mut app, "corriger @notes.md", dir.path())
+            .expect("message de travail");
 
-        assert!(prompt.contains("corps du fichier"), "{prompt}");
+        let text = message.as_concat_text();
+        assert!(text.contains("corps du fichier"), "{text}");
         assert_eq!(
             app.goal.as_ref().expect("un but").condition,
             "corriger @notes.md"

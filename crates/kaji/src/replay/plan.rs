@@ -111,6 +111,37 @@ mod tests {
         message_payload(Role::Assistant, text)
     }
 
+    /// Vision (S1) : le payload `message` porte le `Message` entier, donc une
+    /// image attachée traverse le journal et revient telle quelle. C'est ce
+    /// qui rend un tour multimodal rejouable sans relire le fichier d'origine
+    /// — le disque a pu bouger depuis.
+    #[test]
+    fn replays_a_turn_whose_message_carries_an_image() {
+        let recorded = Message::new(
+            Role::User,
+            0,
+            vec![
+                MessageContentBlock::text("décris ça"),
+                MessageContentBlock::image("aGVsbG8=", "image/png"),
+            ],
+        );
+        let payload = serde_json::to_string(&recorded).expect("a message always serializes");
+        let turns = user_turns(&[event(1, "message", &payload)]);
+
+        assert_eq!(turns.len(), 1);
+        let image = turns[0]
+            .1
+            .content
+            .iter()
+            .find_map(|block| match block {
+                MessageContentBlock::Image(image) => Some(image),
+                _ => None,
+            })
+            .expect("le bloc image survit à l'aller-retour du journal");
+        assert_eq!(image.data, "aGVsbG8=");
+        assert_eq!(image.mime_type, "image/png");
+    }
+
     #[test]
     fn extracts_the_opening_user_message_of_each_turn() {
         let events = vec![

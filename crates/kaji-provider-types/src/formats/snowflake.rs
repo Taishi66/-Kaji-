@@ -9,6 +9,8 @@ use rmcp::object;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
+const IMAGE_UNSUPPORTED: &str = "[Image content removed - not supported by Snowflake]";
+
 /// Convert internal Message format to Snowflake's API message specification
 pub fn format_messages(messages: &[Message]) -> Vec<Value> {
     let mut snowflake_messages = Vec::new();
@@ -73,7 +75,16 @@ pub fn format_messages(messages: &[Message]) -> Vec<Value> {
                 MessageContentBlock::RedactedThinking(_redacted) => {
                     // Skip redacted thinking for now
                 }
-                MessageContentBlock::Image(_) => continue, // Snowflake doesn't support image content yet
+                // Snowflake has no image content type: say so in the text
+                // rather than dropping the block, so a model asked about an
+                // attached image answers about a missing image instead of
+                // hallucinating one it never received.
+                MessageContentBlock::Image(_) => {
+                    if !text_content.is_empty() {
+                        text_content.push('\n');
+                    }
+                    text_content.push_str(IMAGE_UNSUPPORTED);
+                }
                 MessageContentBlock::FrontendToolRequest(_tool_request) => {
                     // Skip frontend tool requests
                 }
@@ -374,6 +385,23 @@ mod tests {
     use crate::conversation::message::Message;
     use rmcp::object;
     use serde_json::json;
+
+    /// Snowflake n'a pas de type image : le bloc doit laisser une trace dans
+    /// le texte, pas disparaitre — sinon un message vision arrive au modele
+    /// ampute sans que personne ne le sache.
+    #[test]
+    fn an_attached_image_is_reported_not_dropped() {
+        let messages = vec![Message::user()
+            .with_text("decris ca")
+            .with_image("aGVsbG8=", "image/png")];
+
+        let formatted = format_messages(&messages);
+
+        assert_eq!(formatted.len(), 1);
+        let content = formatted[0]["content"].as_str().expect("texte");
+        assert!(content.contains("decris ca"), "{content}");
+        assert!(content.contains(IMAGE_UNSUPPORTED), "{content}");
+    }
 
     #[test]
     fn test_parse_text_response() -> Result<()> {

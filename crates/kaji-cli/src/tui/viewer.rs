@@ -80,7 +80,9 @@ pub fn read_limit_label() -> String {
     human_size(READ_LIMIT as u64)
 }
 
-fn human_size(bytes: u64) -> String {
+/// Shared with the composer's image attachments (`mentions`), so a file's
+/// weight reads the same whether the viewer announces it or a `画` line does.
+pub(crate) fn human_size(bytes: u64) -> String {
     const KO: u64 = 1024;
     const MO: u64 = KO * KO;
     if bytes >= MO {

@@ -244,6 +244,9 @@ pub const THINKING_GLYPH: &str = "思";
 /// le compte de celles qui tournent.
 pub const FORGE_GLYPH: &str = "炉";
 pub const SUBAGENT_GLYPH: &str = "遣";
+/// Une image attachée au message : le terminal n'en rend rien en v1, la ligne
+/// de chat porte le glyphe, le nom et le poids.
+pub const IMAGE_GLYPH: &str = "画";
 /// Sépare le lieu de la branche sur la barre d'état — une seule cellule, à la
 /// différence des glyphes ci-dessus.
 pub const PLACE_SEPARATOR: &str = "⟩";
@@ -432,6 +435,7 @@ mod tests {
             THINKING_GLYPH,
             FORGE_GLYPH,
             SUBAGENT_GLYPH,
+            IMAGE_GLYPH,
         ] {
             assert_eq!(ratatui::text::Span::raw(glyph).width(), 2, "{glyph}");
         }

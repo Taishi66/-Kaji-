@@ -9,12 +9,19 @@
 //!   `event_loop`, plus direct directory listings for `~/`, absolute, `./`,
 //!   `../` fragments — those hit a single `read_dir` and stay inline;
 //! - expansion: [`expand_mentions`] rewrites the submitted text, appending
-//!   `<attached-file>` / `<attached-directory>` blocks. The chat line keeps
-//!   the text as typed — only the model-bound message carries the payload.
+//!   `<attached-file>` / `<attached-directory>` blocks, and lifts image
+//!   mentions out of the text into [`MentionImage`] attachments the caller
+//!   turns into multimodal message content (S1). The chat line keeps the text
+//!   as typed — only the model-bound message carries the payload.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use base64::Engine as _;
+
+use crate::tui::theme;
+use crate::tui::viewer::human_size;
 
 pub(crate) const INDEX_TTL: Duration = Duration::from_secs(60);
 const MAX_INDEX_ENTRIES: usize = 20_000;
@@ -23,6 +30,18 @@ const MAX_LISTING_SCAN: usize = 500;
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_BYTES: usize = 256 * 1024;
 const MAX_DIR_ENTRIES: usize = 200;
+/// Caps S1 : au-delà, l'image n'est pas attachée et le message part quand
+/// même — ce sont les deux limites qu'un provider vision fait respecter de
+/// toute façon, appliquées avant de charger quoi que ce soit en mémoire.
+const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_IMAGES: usize = 3;
+const IMAGE_MIMES: [(&str, &str); 5] = [
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("webp", "image/webp"),
+    ("gif", "image/gif"),
+];
 
 struct IndexedPath {
     /// Project-relative, directories with a trailing `/`.
@@ -238,15 +257,54 @@ pub(crate) fn resolve(raw: &str, base: &Path) -> PathBuf {
     }
 }
 
+/// An image mention resolved into provider-ready content: base64 payload plus
+/// its mime type, as `MessageContentBlock::Image` wants them. `bytes` is the
+/// file's size on disk, not the encoded length — it's what the placeholder
+/// line reports, and what the caps are measured against.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MentionImage {
+    pub name: String,
+    pub mime: String,
+    pub data: String,
+    pub bytes: u64,
+}
+
+impl MentionImage {
+    /// The chat line standing in for the image: the terminal renders nothing
+    /// of the picture itself in v1, so the transcript says what left with the
+    /// message.
+    pub fn placeholder(&self) -> String {
+        format!(
+            "{} {} ({})",
+            theme::IMAGE_GLYPH,
+            self.name,
+            human_size(self.bytes)
+        )
+    }
+}
+
+/// What a submitted line expands into: the model-bound text, the images
+/// lifted out of it, and the lines explaining every image that was refused.
+#[derive(Debug, Default)]
+pub struct MentionExpansion {
+    pub text: String,
+    pub images: Vec<MentionImage>,
+    pub notices: Vec<String>,
+}
+
 /// Rewrites the submitted text: every `@path` that resolves to an existing
 /// file or directory (relative to `cwd`, with `~/` expansion) gets its
-/// payload appended as an attachment block. Unresolvable mentions are left
-/// as-is — the agent can still act on the raw path. Every block is rendered
-/// under the budget still left, so the total never exceeds
-/// `MAX_TOTAL_BYTES`.
-pub fn expand_mentions(text: &str, cwd: &Path) -> String {
+/// payload appended as an attachment block. A mention whose extension is an
+/// image format leaves the text alone and becomes an attachment instead.
+/// Unresolvable mentions are left as-is — the agent can still act on the raw
+/// path. Every block is rendered under the budget still left, so the total
+/// never exceeds `MAX_TOTAL_BYTES`; images have their own caps and never
+/// borrow from that budget.
+pub fn expand_mentions(text: &str, cwd: &Path) -> MentionExpansion {
     let mut attachments = String::new();
     let mut total = 0usize;
+    let mut images = Vec::new();
+    let mut notices = Vec::new();
     for token in text.split_whitespace() {
         let Some(raw) = token.strip_prefix('@') else {
             continue;
@@ -254,10 +312,19 @@ pub fn expand_mentions(text: &str, cwd: &Path) -> String {
         if raw.is_empty() {
             continue;
         }
-        if total >= MAX_TOTAL_BYTES {
-            break;
-        }
         let path = resolve(raw, cwd);
+        if let Some(mime) = image_mime(&path) {
+            if path.is_file() {
+                match load_image(&path, mime, images.len()) {
+                    Ok(image) => images.push(image),
+                    Err(notice) => notices.push(notice),
+                }
+                continue;
+            }
+        }
+        if total >= MAX_TOTAL_BYTES {
+            continue;
+        }
         let remaining = MAX_TOTAL_BYTES - total;
         let block = if path.is_file() {
             render_file(raw, &path, MAX_FILE_BYTES.min(remaining))
@@ -271,10 +338,68 @@ pub fn expand_mentions(text: &str, cwd: &Path) -> String {
             attachments.push_str(&block);
         }
     }
-    if attachments.is_empty() {
-        return text.to_string();
+    let text = if attachments.is_empty() {
+        text.to_string()
+    } else {
+        format!("{text}\n{attachments}")
+    };
+    MentionExpansion {
+        text,
+        images,
+        notices,
     }
-    format!("{text}\n{attachments}")
+}
+
+/// The mime type an image mention would carry, from its extension alone —
+/// the routing decision has to be made before the file is opened, and a
+/// provider reads the mime we declare, not the bytes' magic number.
+fn image_mime(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_lowercase();
+    IMAGE_MIMES
+        .iter()
+        .find(|(candidate, _)| *candidate == extension)
+        .map(|(_, mime)| *mime)
+}
+
+/// Loads an image mention under the S1 caps. The size is read from the
+/// metadata first: a mistyped `@video.png` of three gigabytes costs a `stat`,
+/// not three gigabytes of RAM. Refusals come back as the line the composer
+/// shows, so the message itself still goes out.
+fn load_image(path: &Path, mime: &str, already_attached: usize) -> Result<MentionImage, String> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    if already_attached >= MAX_IMAGES {
+        return Err(refused(
+            &name,
+            &format!("{MAX_IMAGES} images maximum par message"),
+        ));
+    }
+    let bytes = std::fs::metadata(path)
+        .map_err(|e| refused(&name, &e.to_string()))?
+        .len();
+    if bytes > MAX_IMAGE_BYTES {
+        return Err(refused(
+            &name,
+            &format!(
+                "{} dépasse la limite de {} par image",
+                human_size(bytes),
+                human_size(MAX_IMAGE_BYTES)
+            ),
+        ));
+    }
+    let raw = std::fs::read(path).map_err(|e| refused(&name, &e.to_string()))?;
+    Ok(MentionImage {
+        name,
+        mime: mime.to_string(),
+        data: base64::prelude::BASE64_STANDARD.encode(&raw),
+        bytes,
+    })
+}
+
+fn refused(name: &str, reason: &str) -> String {
+    format!("{} {name} — non attachée : {reason}", theme::IMAGE_GLYPH)
 }
 
 /// Reads at most `budget` bytes — a multi-GB log mentioned by accident costs
@@ -403,7 +528,7 @@ mod tests {
     fn expand_mentions_embeds_file_contents() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "hello kaji").unwrap();
-        let out = expand_mentions("lis @a.txt stp", dir.path());
+        let out = expand_mentions("lis @a.txt stp", dir.path()).text;
         assert!(out.contains("lis @a.txt stp"));
         assert!(out.contains("<attached-file path=\"a.txt\">"));
         assert!(out.contains("hello kaji"));
@@ -415,7 +540,7 @@ mod tests {
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
         std::fs::write(sub.join("b.rs"), "fn b() {}").unwrap();
-        let out = expand_mentions("@sub/", dir.path());
+        let out = expand_mentions("@sub/", dir.path()).text;
         assert!(out.contains("<attached-directory path=\"sub/\">"));
         assert!(out.contains("b.rs"));
     }
@@ -423,7 +548,7 @@ mod tests {
     #[test]
     fn expand_mentions_leaves_unknown_paths_untouched() {
         let dir = tempfile::tempdir().unwrap();
-        let out = expand_mentions("regarde @nope/rien.txt", dir.path());
+        let out = expand_mentions("regarde @nope/rien.txt", dir.path()).text;
         assert_eq!(out, "regarde @nope/rien.txt");
     }
 
@@ -431,7 +556,7 @@ mod tests {
     fn expand_mentions_skips_binary_files() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("bin.dat"), [0u8, 159, 146, 150]).unwrap();
-        let out = expand_mentions("@bin.dat", dir.path());
+        let out = expand_mentions("@bin.dat", dir.path()).text;
         assert!(out.contains("binary file — content skipped"));
     }
 
@@ -535,11 +660,158 @@ mod tests {
             std::fs::write(sub.join(format!("entry-{i:0>60}.txt")), "z").unwrap();
         }
         let text = "@big0.txt @big1.txt @big2.txt @last.txt @sub/";
-        let out = expand_mentions(text, dir.path());
+        let out = expand_mentions(text, dir.path()).text;
         let attachments = out.len() - text.len() - 1;
         assert!(attachments <= MAX_TOTAL_BYTES, "{attachments}");
         assert!(out.contains("<attached-directory path=\"sub/\">"));
         assert!(out.contains("… (listing truncated)"));
+    }
+
+    /// Les octets d'en-tête des formats v1 — la reconnaissance se fait sur
+    /// l'extension, mais des fixtures aux bons nombres magiques gardent les
+    /// tests honnêtes vis-à-vis de ce qu'un provider recevrait vraiment.
+    const PNG: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    fn write_png(dir: &Path, name: &str) {
+        std::fs::write(dir.join(name), PNG).unwrap();
+    }
+
+    #[test]
+    fn image_mentions_attach_instead_of_inlining() {
+        use base64::Engine as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_png(dir.path(), "capture.png");
+        let out = expand_mentions("regarde @capture.png stp", dir.path());
+        assert_eq!(out.text, "regarde @capture.png stp");
+        assert!(out.notices.is_empty(), "{:?}", out.notices);
+        assert_eq!(out.images.len(), 1);
+        let image = &out.images[0];
+        assert_eq!(image.name, "capture.png");
+        assert_eq!(image.mime, "image/png");
+        assert_eq!(image.bytes, PNG.len() as u64);
+        assert_eq!(
+            base64::prelude::BASE64_STANDARD
+                .decode(&image.data)
+                .unwrap(),
+            PNG
+        );
+    }
+
+    #[test]
+    fn image_mentions_cover_the_v1_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.png", "b.jpg", "c.jpeg", "d.webp", "e.gif", "f.PNG"] {
+            std::fs::write(dir.path().join(name), PNG).unwrap();
+        }
+        let mimes: Vec<String> = ["a.png", "b.jpg", "c.jpeg", "d.webp", "e.gif", "f.PNG"]
+            .iter()
+            .map(|name| {
+                let out = expand_mentions(&format!("@{name}"), dir.path());
+                assert_eq!(out.images.len(), 1, "{name}: {out:?}");
+                out.images[0].mime.clone()
+            })
+            .collect();
+        assert_eq!(
+            mimes,
+            [
+                "image/png",
+                "image/jpeg",
+                "image/jpeg",
+                "image/webp",
+                "image/gif",
+                "image/png",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_non_image_extension_still_inlines_its_text() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.md"), "du texte").unwrap();
+        let out = expand_mentions("@notes.md", dir.path());
+        assert!(out.images.is_empty());
+        assert!(out.text.contains("<attached-file path=\"notes.md\">"));
+        assert!(out.text.contains("du texte"));
+    }
+
+    #[test]
+    fn a_message_carries_at_most_three_images() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.png", "b.png", "c.png", "d.png"] {
+            write_png(dir.path(), name);
+        }
+        let out = expand_mentions("@a.png @b.png @c.png @d.png", dir.path());
+        assert_eq!(out.images.len(), MAX_IMAGES);
+        assert_eq!(out.notices.len(), 1, "{:?}", out.notices);
+        assert!(out.notices[0].contains("d.png"), "{}", out.notices[0]);
+        assert!(out.notices[0].contains('3'), "{}", out.notices[0]);
+        assert!(!out.images.iter().any(|image| image.name == "d.png"));
+    }
+
+    #[test]
+    fn an_image_over_the_size_cap_is_refused_and_the_rest_of_the_message_goes_out() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("enorme.png"),
+            vec![0u8; (MAX_IMAGE_BYTES + MAX_IMAGE_BYTES / 10) as usize],
+        )
+        .unwrap();
+        let out = expand_mentions("compare @enorme.png à ça", dir.path());
+        assert!(out.images.is_empty());
+        assert_eq!(out.text, "compare @enorme.png à ça");
+        assert_eq!(out.notices.len(), 1, "{:?}", out.notices);
+        assert!(out.notices[0].contains("enorme.png"), "{}", out.notices[0]);
+        assert!(out.notices[0].contains("5.5 Mo"), "{}", out.notices[0]);
+        assert!(
+            out.notices[0].contains("limite de 5.0 Mo"),
+            "{}",
+            out.notices[0]
+        );
+    }
+
+    /// La borne est inclusive : une image pile à la limite passe, la même
+    /// plus un octet est refusée — sinon « 5 Mo » n'aurait pas de sens.
+    #[test]
+    fn the_size_cap_is_inclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pile.png"),
+            vec![0u8; MAX_IMAGE_BYTES as usize],
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("un-de-trop.png"),
+            vec![0u8; MAX_IMAGE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let out = expand_mentions("@pile.png", dir.path());
+        assert_eq!(out.images.len(), 1, "{:?}", out.notices);
+        let out = expand_mentions("@un-de-trop.png", dir.path());
+        assert!(out.images.is_empty());
+        assert_eq!(out.notices.len(), 1);
+    }
+
+    #[test]
+    fn images_never_eat_the_text_attachment_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("gros.png"), vec![0u8; 400 * 1024]).unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "contenu texte").unwrap();
+        let out = expand_mentions("@gros.png @notes.txt", dir.path());
+        assert_eq!(out.images.len(), 1);
+        assert!(out.text.contains("contenu texte"), "{}", out.text);
+        assert!(out.text.len() < MAX_TOTAL_BYTES);
+    }
+
+    #[test]
+    fn the_placeholder_names_the_file_and_its_size() {
+        let image = MentionImage {
+            name: "capture.png".to_string(),
+            mime: "image/png".to_string(),
+            data: String::new(),
+            bytes: 1_258_291,
+        };
+        assert_eq!(image.placeholder(), "画 capture.png (1.2 Mo)");
     }
 
     #[test]
