@@ -1039,6 +1039,59 @@ async fn assert_edited_subdirectory_hints_do_not_move_the_replay(
     Ok(())
 }
 
+/// Le hint du sous-répertoire n'est pas seulement *lu* du disque : sa lecture
+/// est aussi le **déclencheur** de la réassemblée (`load_subdirectory_hints`
+/// rend `true` quand elle a trouvé du neuf). Supprimer le fichier entre
+/// l'enregistrement et le rejeu ne change donc pas le contenu servi — il
+/// supprime l'appel qui le portait, et le prompt du tour reste celui
+/// d'ouverture.
+async fn assert_deleted_subdirectory_hints_do_not_move_the_replay(
+    state_machine: Option<&str>,
+) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?} subdir supprimé");
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env(state_machine, &memory_dir);
+
+    let probe = ProbeFixture::new().await;
+    let fixture = record_fixture_with(&probe, model_config()).await?;
+    let before = replay_once(&fixture, &label).await?;
+    assert!(
+        before
+            .prompts
+            .iter()
+            .any(|prompt| prompt.contains(RECORDED_SUB_HINT)),
+        "{label}: le hint du sous-répertoire est bien dans un prompt, sinon le test ne prouve rien"
+    );
+
+    std::fs::remove_file(fixture.working_dir.join(SUB_DIR).join(AGENTS_MD))?;
+
+    let after = replay_once(&fixture, &label).await?;
+    assert_eq!(
+        before.transcript.rendered(),
+        after.transcript.rendered(),
+        "{label}: un hint de sous-répertoire supprimé après l'enregistrement ne déplace pas le rejeu"
+    );
+    assert!(
+        after
+            .prompts
+            .iter()
+            .any(|prompt| prompt.contains(RECORDED_SUB_HINT)),
+        "{label}: le rejeu sert le hint de sous-répertoire du journal, fichier disparu ou non"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn deleted_subdirectory_hints_do_not_move_the_replay_on_the_legacy_loop() -> Result<()> {
+    assert_deleted_subdirectory_hints_do_not_move_the_replay(None).await
+}
+
+#[tokio::test]
+async fn deleted_subdirectory_hints_do_not_move_the_replay_on_the_state_machine_loop() -> Result<()>
+{
+    assert_deleted_subdirectory_hints_do_not_move_the_replay(Some("1")).await
+}
+
 #[tokio::test]
 async fn edited_subdirectory_hints_do_not_move_the_replay_on_the_legacy_loop() -> Result<()> {
     assert_edited_subdirectory_hints_do_not_move_the_replay(None).await

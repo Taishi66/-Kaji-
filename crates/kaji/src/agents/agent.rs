@@ -3846,11 +3846,20 @@ impl Agent {
                 }
 
                 {
-                    let has_new_hints = self
-                        .prompt_manager
-                        .lock()
-                        .await
-                        .load_subdirectory_hints(&working_dir);
+                    // Lire le disque ne servirait pas qu'à *remplir* les hints,
+                    // il déciderait de la réassemblée elle-même : un fichier
+                    // supprimé depuis l'enregistrement supprimerait l'appel qui
+                    // les portait, un fichier ajouté en créerait un. Le rejeu
+                    // suit donc le journal, qui porte un manifeste devant
+                    // exactement les appels réassemblés.
+                    let has_new_hints = match self.replay_source() {
+                        Some(source) => source.reassembled_before_current_call(),
+                        None => self
+                            .prompt_manager
+                            .lock()
+                            .await
+                            .load_subdirectory_hints(&working_dir),
+                    };
                     if has_new_hints && !tools_updated {
                         (tools, toolshim_tools, system_prompt, _) =
                             self.prepare_tools_and_prompt(&session_config.id, &session.working_dir).await?;

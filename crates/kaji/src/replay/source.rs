@@ -74,6 +74,18 @@ impl ReplaySource {
         .cloned()
     }
 
+    /// Vrai quand le journal porte un manifeste pour l'appel exact que la
+    /// boucle s'apprête à faire, c'est-à-dire quand l'enregistrement a
+    /// réassemblé son prompt devant cet appel-là. C'est cette présence — et non
+    /// les fichiers de hints d'aujourd'hui — qui décide de la réassemblée au
+    /// rejeu : un fichier supprimé depuis l'enregistrement supprimerait sinon
+    /// l'appel qui les portait, un fichier ajouté en créerait un.
+    pub fn reassembled_before_current_call(&self) -> bool {
+        self.cursor
+            .tool_manifests
+            .contains_key(&(self.turn(), self.position.call()))
+    }
+
     /// La réponse que la post-passe `toolshim` a rendue pour l'appel que la
     /// boucle s'apprête à faire. À lire avant `Provider::stream`, qui consomme
     /// l'index d'appel. Absente ⇒ session sans `toolshim`, ou journal antérieur
