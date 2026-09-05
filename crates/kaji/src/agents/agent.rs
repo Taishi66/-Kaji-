@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -497,38 +497,62 @@ fn prepend_hook_output(mut message: Message, prelude: &[String]) -> Message {
 /// invisible dès qu'on lance `kaji` depuis un sous-répertoire, ce qui n'est pas
 /// ce que « racine du projet » veut dire.
 fn project_root_from_cwd() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    let root = cwd
-        .ancestors()
+    Some(project_root(
+        &std::env::current_dir().ok()?,
+        dirs::home_dir().as_deref(),
+    ))
+}
+
+/// La remontée s'arrête sous `home` : un `$HOME` versionné — des dotfiles, un
+/// répertoire de repos lui-même sous git — ferait sinon passer son
+/// `.kaji/hooks.yaml` pour celui du projet courant, depuis n'importe quel
+/// répertoire de la machine.
+fn project_root(cwd: &Path, home: Option<&Path>) -> PathBuf {
+    cwd.ancestors()
+        .take_while(|ancestor| home != Some(ancestor))
         .find(|ancestor| ancestor.join(".git").exists())
-        .unwrap_or(&cwd);
-    Some(root.to_path_buf())
+        .unwrap_or(cwd)
+        .to_path_buf()
 }
 
-/// Le tour est-il une commande plutôt qu'un prompt ? Mêmes prédicats que ceux
-/// dont dépendent les deux boucles — `execute_commands` côté legacy,
-/// `ops_slash_command` / `ops_bang_shell` côté machine à états — pour que la
-/// question « les hooks de prompt s'appliquent-ils ? » et la question « est-ce
-/// une commande ? » ne puissent pas répondre différemment.
-fn is_command_prompt(prompt: &str) -> bool {
-    crate::agents::execute_commands::parse_slash_command(prompt).is_some()
-        || super::state_machine::bang_shell_command(prompt).is_some()
+/// Le tour est-il un `!…`, que les deux boucles routent au shell plutôt qu'au
+/// modèle ? Même prédicat qu'elles — `execute_commands` côté legacy,
+/// `ops_bang_shell` côté machine à états.
+fn is_bang_command(prompt: &str) -> bool {
+    super::state_machine::bang_shell_command(prompt).is_some()
 }
 
-/// `session_start` appartient à la session qu'un utilisateur ouvre lui-même.
+/// Le tour est-il une commande que kaji sait exécuter ? `parse_slash_command`
+/// ne suffirait pas : il rend `Some` pour tout texte commençant par `/`, y
+/// compris un chemin absolu ou un collage, que les deux boucles finissent par
+/// envoyer au modèle tel quel. Les hooks de prompt doivent voir ces entrées-là
+/// — seule une commande réellement montée (interne, recette ou skill) leur
+/// échappe. Le répertoire de travail de la session est ce qui découvre les
+/// commandes de skill.
+fn is_known_command(prompt: &str, working_dir: &Path) -> bool {
+    crate::agents::execute_commands::is_known_slash_command(prompt, Some(working_dir))
+}
+
+/// Les hooks de prompt appartiennent à la session d'un utilisateur.
 ///
 /// Un sous-agent — `summon`, recette, orchestrateur — tourne dans une session
-/// neuve à chaque invocation : y tirer le hook préfixerait sa sortie au prompt
+/// neuve à chaque invocation : y tirer un hook préfixerait sa sortie au prompt
 /// de tâche écrit par l'appelant, et multiplierait son coût en tokens par le
 /// fan-out. Même raison pour une session `Hidden` ou planifiée, qu'aucun
 /// utilisateur n'ouvre.
-fn opens_a_user_session(session: &Session) -> bool {
+fn is_a_user_session(session: &Session) -> bool {
     use crate::session::session_manager::SessionType;
 
-    if !matches!(
+    matches!(
         session.session_type,
         SessionType::User | SessionType::Terminal | SessionType::Gateway | SessionType::Acp
-    ) {
+    )
+}
+
+/// `session_start` ne tire qu'au premier tour agent-visible d'une telle
+/// session : c'est l'ouverture qu'il accompagne, pas chaque prompt.
+fn opens_a_user_session(session: &Session) -> bool {
+    if !is_a_user_session(session) {
         return false;
     }
     session
@@ -865,17 +889,27 @@ impl Agent {
     /// `user_prompt_submit`. Leur sortie standard est préfixée au message de
     /// l'utilisateur, dans cet ordre.
     ///
-    /// Trois choses n'y passent jamais :
+    /// **Le contrat, côté entrées** : un hook de prompt voit tout ce qui part au
+    /// modèle, et rien d'autre. Ce qui lui échappe :
     ///
     /// - **le rejeu** : le message du journal est canonique, il porte déjà la
     ///   réécriture. Réappliquer le prélude servi depuis `hook_output` le
     ///   dupliquerait et ferait diverger `request_hash` ;
-    /// - **les commandes** — `/…` et `!…` : le préfixe pousserait le `/` ou le
-    ///   `!` hors de tête du texte concaténé, sur lequel les deux boucles
-    ///   détectent la commande par préfixe strict. Elles partiraient au modèle
-    ///   comme de la prose, et un `/goal` ne déclencherait jamais son kickoff ;
-    /// - **les sessions qui ne sont pas celles d'un utilisateur** pour
-    ///   `session_start` (voir [`opens_a_user_session`]).
+    /// - **les commandes réellement montées** — une commande interne, une
+    ///   recette, un skill, un `!…` : le préfixe pousserait le `/` ou le `!`
+    ///   hors de tête du texte concaténé, sur lequel les deux boucles détectent
+    ///   la commande par préfixe strict. Elles partiraient au modèle comme de la
+    ///   prose, et un `/goal` ne déclencherait jamais son kickoff. Un `/` qui ne
+    ///   nomme aucune commande — chemin absolu, collage, faute de frappe — part
+    ///   au modèle : il traverse donc les hooks comme le prompt qu'il est
+    ///   (voir [`is_known_command`]) ;
+    /// - **les sessions qui ne sont pas celles d'un utilisateur** (voir
+    ///   [`is_a_user_session`]), et pour `session_start` seul, les tours qui
+    ///   n'ouvrent pas la session (voir [`opens_a_user_session`]).
+    ///
+    /// Angle mort connu : une commande qui démarre un tour — `/goal x` — échappe
+    /// aux hooks puis rend la session non-ouvrante ; `session_start` ne tirera
+    /// plus jamais pour cette session-là.
     async fn apply_prompt_hooks(&self, session_id: &str, user_message: Message) -> Message {
         use crate::hooks::{HookContext, HookEvent};
 
@@ -895,7 +929,7 @@ impl Agent {
         }
 
         let prompt = agent_visible_message_text(&user_message);
-        if prompt.is_empty() || is_command_prompt(&prompt) {
+        if prompt.is_empty() || is_bang_command(&prompt) {
             return user_message;
         }
 
@@ -920,6 +954,10 @@ impl Agent {
                 return user_message;
             }
         };
+        if !is_a_user_session(&session) || is_known_command(&prompt, &session.working_dir) {
+            return user_message;
+        }
+
         let working_dir = session.working_dir.to_string_lossy().to_string();
         let recorder = self.turn_recorder();
         let mut prelude: Vec<String> = Vec::new();
@@ -4993,6 +5031,32 @@ mod tests {
     use rmcp::model::Tool;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    /// Un `$HOME` versionné — des dotfiles sous git — ne doit pas devenir « le
+    /// projet » de tout répertoire non versionné de la machine : son
+    /// `.kaji/hooks.yaml` s'appliquerait partout.
+    #[test]
+    fn a_versioned_home_never_becomes_the_project_root() {
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join(".git")).unwrap();
+        let repo = home.path().join("workspace/repo");
+        let deep = repo.join("crates/kaji");
+        std::fs::create_dir_all(deep.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+        assert_eq!(
+            project_root(&repo.join("crates"), Some(home.path())),
+            repo,
+            "la racine reste le dépôt le plus proche sous le home"
+        );
+        let unversioned = home.path().join("scratch");
+        std::fs::create_dir_all(&unversioned).unwrap();
+        assert_eq!(
+            project_root(&unversioned, Some(home.path())),
+            unversioned,
+            "sans dépôt sous le home, le répertoire courant est sa propre racine"
+        );
+    }
 
     #[test]
     fn recipe_history_excludes_turn_context_events() {

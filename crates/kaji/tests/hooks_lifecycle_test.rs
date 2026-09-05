@@ -204,19 +204,21 @@ impl Script {
         )
     }
 
-    /// Un hook qui bloque la première fois puis laisse passer — le `stop` réel,
-    /// qui refuse une fin de tour tant qu'une condition n'est pas remplie.
-    /// Exit 2 : le contrat historique des hooks bloquants, inchangé.
-    fn denying_once(&self, name: &str, reason: &str) -> String {
-        let flag = self.dir.path().join("blocked-once");
+    /// Un hook qui bloque ses `times` premières exécutions puis laisse passer —
+    /// le `stop` réel, qui refuse une fin de tour tant qu'une condition n'est
+    /// pas remplie. Exit 2 : le contrat historique des hooks bloquants.
+    fn denying_first(&self, name: &str, reason: &str, times: usize) -> String {
+        let counter = self.dir.path().join(format!("{name}.blocked"));
         self.write(
             name,
             &format!(
                 "#!/bin/sh\necho ran >> \"{witness}\"\n\
-                 if [ -f \"{flag}\" ]; then exit 0; fi\n\
-                 touch \"{flag}\"\necho '{reason}' >&2\nexit 2\n",
+                 blocked=$(cat \"{counter}\" 2>/dev/null || echo 0)\n\
+                 if [ \"$blocked\" -ge {times} ]; then exit 0; fi\n\
+                 echo $((blocked + 1)) > \"{counter}\"\n\
+                 echo '{reason}' >&2\nexit 2\n",
                 witness = self.witness().display(),
-                flag = flag.display(),
+                counter = counter.display(),
             ),
         )
     }
@@ -274,11 +276,17 @@ impl Fixture {
     /// un test qui joue une commande dont l'exécution peut échouer les ignore
     /// lui-même.
     async fn turn(&self, prompt: &str) -> Result<()> {
+        self.turn_within(prompt, DEFAULT_MAX_TURNS).await
+    }
+
+    /// Un tour dont la borne est relevée : un `stop` qui refuse plusieurs fois
+    /// consomme un tour par refus, et la borne par défaut les couperait.
+    async fn turn_within(&self, prompt: &str, max_turns: u32) -> Result<()> {
         drain(
             self.agent
                 .reply(
                     Message::user().with_text(prompt),
-                    session_config(&self.session_id),
+                    session_config_within(&self.session_id, max_turns),
                     None,
                 )
                 .await?,
@@ -358,19 +366,34 @@ async fn drain(stream: impl futures::Stream<Item = Result<AgentEvent>>) -> Resul
     Ok(events)
 }
 
+const DEFAULT_MAX_TURNS: u32 = 3;
+
 fn session_config(id: &str) -> SessionConfig {
+    session_config_within(id, DEFAULT_MAX_TURNS)
+}
+
+fn session_config_within(id: &str, max_turns: u32) -> SessionConfig {
     SessionConfig {
         id: id.to_string(),
         schedule_id: None,
-        max_turns: Some(3),
+        max_turns: Some(max_turns),
         retry_config: None,
     }
 }
 
 /// Une session enregistrée avec `hooks` montés, un tour joué sur `prompt`.
 async fn record(hooks: HookManager, prompt: &str, probe: Option<&ProbeFixture>) -> Result<Fixture> {
+    record_within(hooks, prompt, probe, DEFAULT_MAX_TURNS).await
+}
+
+async fn record_within(
+    hooks: HookManager,
+    prompt: &str,
+    probe: Option<&ProbeFixture>,
+    max_turns: u32,
+) -> Result<Fixture> {
     let fixture = fixture(hooks, SessionType::User, probe).await?;
-    fixture.turn(prompt).await?;
+    fixture.turn_within(prompt, max_turns).await?;
     Ok(fixture)
 }
 
@@ -777,22 +800,49 @@ async fn a_recorded_session_replays_on_a_machine_without_the_hooks() -> Result<(
 /// « Replay v2 » interdit.
 #[tokio::test]
 async fn a_stop_hook_denial_is_journaled_and_served_at_replay() -> Result<()> {
+    a_stop_hook_replays_its_denials(1).await
+}
+
+/// Deux refus puis un accord. Chaque décision est adressée par le nombre de
+/// blocages qui la précèdent — `"0"`, `"1"`, puis `"2"` que le journal ne porte
+/// pas. Un adressage cassé se verrait ici et nulle part ailleurs : servir la
+/// même clé deux fois rendrait un refus de trop, la lire trop tôt en rendrait
+/// un de moins, et dans les deux cas le compte d'appels LLM du rejeu diverge.
+#[tokio::test]
+async fn two_stop_hook_denials_replay_in_order_then_the_turn_ends() -> Result<()> {
+    a_stop_hook_replays_its_denials(2).await
+}
+
+async fn a_stop_hook_replays_its_denials(denials: usize) -> Result<()> {
     for state_machine in LOOPS {
-        let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+        let label = format!("KAJI_STATE_MACHINE={state_machine:?}, refus={denials}");
         let memory_dir = tempfile::tempdir()?;
         let _guard = env(state_machine, &memory_dir);
 
         let script = Script::new();
         let hooks = manager(
-            vec![entry("stop", script.denying_once("stop.sh", STOP_REASON))],
+            vec![entry(
+                "stop",
+                script.denying_first("stop.sh", STOP_REASON, denials),
+            )],
             script.dir.path(),
         );
-        let fixture = record(hooks, PROMPT, None).await?;
+        let max_turns = denials as u32 + 2;
+        let fixture = record_within(hooks, PROMPT, None, max_turns).await?;
         let runs_at_record = script.runs();
-        assert_eq!(runs_at_record, 2, "{label}: refus puis passage");
-        assert!(
-            fixture.conversation_text().await?.contains(STOP_REASON),
-            "{label}: le refus est rendu au modèle à l'enregistrement"
+        assert_eq!(
+            runs_at_record,
+            denials + 1,
+            "{label}: un passage du hook par refus, puis celui qui laisse finir"
+        );
+        assert_eq!(
+            fixture
+                .conversation_text()
+                .await?
+                .matches(STOP_REASON)
+                .count(),
+            denials,
+            "{label}: chaque refus est rendu au modèle à l'enregistrement"
         );
 
         let cursor =
@@ -832,7 +882,11 @@ async fn a_stop_hook_denial_is_journaled_and_served_at_replay() -> Result<()> {
             position.begin_turn(turn_seq);
             drain(
                 agent
-                    .reply(user_message, session_config(&replayed.id), None)
+                    .reply(
+                        user_message,
+                        session_config_within(&replayed.id, max_turns),
+                        None,
+                    )
                     .await?,
             )
             .await?;
@@ -854,9 +908,10 @@ async fn a_stop_hook_denial_is_journaled_and_served_at_replay() -> Result<()> {
             .map(Message::as_concat_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(
-            rendered.contains(STOP_REASON),
-            "{label}: le rejeu rejoue le blocage, pas une fin de tour anticipée : {rendered}"
+        assert_eq!(
+            rendered.matches(STOP_REASON).count(),
+            denials,
+            "{label}: le rejeu rejoue chaque blocage, ni un de plus ni un de moins : {rendered}"
         );
     }
     Ok(())
@@ -866,15 +921,17 @@ async fn a_stop_hook_denial_is_journaled_and_served_at_replay() -> Result<()> {
 // Ce qui échappe aux hooks de prompt
 // ---------------------------------------------------------------------------
 
-/// Une commande n'est pas un prompt : `apply_prompt_hooks` la reconnaît avant
-/// d'appeler quoi que ce soit, donc ni `session_start` ni `user_prompt_submit`
-/// ne tournent — sinon le préfixe pousserait le `/` ou le `!` hors de tête et
-/// la commande partirait au modèle comme de la prose.
+/// Une commande connue n'est pas un prompt : `apply_prompt_hooks` la reconnaît
+/// avant d'appeler quoi que ce soit, donc ni `session_start` ni
+/// `user_prompt_submit` ne tournent — sinon le préfixe pousserait le `/` ou le
+/// `!` hors de tête et la commande partirait au modèle comme de la prose.
+/// `Please compact this conversation` est un des déclencheurs qui valent
+/// `/compact` : il échappe aux hooks comme la commande qu'il devient.
 #[tokio::test]
-async fn a_slash_command_and_a_bang_escape_the_prompt_hooks() -> Result<()> {
+async fn a_known_command_and_a_bang_escape_the_prompt_hooks() -> Result<()> {
     for state_machine in LOOPS {
         let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
-        for command in ["/status", "!ls"] {
+        for command in ["/status", "!ls", "Please compact this conversation"] {
             let memory_dir = tempfile::tempdir()?;
             let _guard = env(state_machine, &memory_dir);
 
@@ -910,36 +967,90 @@ async fn a_slash_command_and_a_bang_escape_the_prompt_hooks() -> Result<()> {
     Ok(())
 }
 
-/// `session_start` appartient à la session que l'utilisateur ouvre. Un
-/// sous-agent tourne dans une session neuve à chaque invocation : y tirer le
-/// hook préfixerait le dump de contexte au prompt de tâche écrit par
-/// l'orchestrateur, et multiplierait son coût par le fan-out.
+/// La contrepartie : tout ce qui commence par `/` sans être une commande connue
+/// part au modèle, donc doit voir les hooks. Un chemin absolu, un collage
+/// multi-ligne, une commande qui n'existe pas : trois entrées que le préfixe
+/// `starts_with('/')` capturait, et qui atteignaient le modèle sans le contrat
+/// que `user_prompt_submit` est là pour injecter.
 #[tokio::test]
-async fn session_start_stays_out_of_subagent_and_hidden_sessions() -> Result<()> {
-    for session_type in [SessionType::SubAgent, SessionType::Hidden] {
-        let memory_dir = tempfile::tempdir()?;
-        let _guard = env(None, &memory_dir);
+async fn an_unknown_slash_and_a_paste_reach_the_prompt_hooks() -> Result<()> {
+    for state_machine in LOOPS {
+        let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+        for prompt in [
+            "/Users/moi/code/agent.rs regarde ça",
+            "/commande-qui-nexiste-pas fais un truc",
+            "/* bloc collé */\nligne deux du collage",
+        ] {
+            let memory_dir = tempfile::tempdir()?;
+            let _guard = env(state_machine, &memory_dir);
 
-        let script = Script::new();
-        let hooks = manager(
-            vec![entry(
-                "session_start",
-                script.emitting("ctx.sh", SESSION_CONTEXT),
-            )],
-            script.dir.path(),
-        );
-        let fixture = fixture(hooks, session_type, None).await?;
-        fixture.turn(PROMPT).await?;
+            let script = Script::new();
+            let hooks = manager(
+                vec![entry(
+                    "user_prompt_submit",
+                    script.emitting("rewrite.sh", PROMPT_PREFIX),
+                )],
+                script.dir.path(),
+            );
+            let fixture = fixture(hooks, SessionType::User, None).await?;
+            fixture.turn(prompt).await?;
 
-        assert_eq!(
-            script.runs(),
-            0,
-            "{session_type:?}: session_start ne tire pas hors des sessions user"
-        );
-        assert!(
-            !fixture.turn_prompt().contains(SESSION_CONTEXT),
-            "{session_type:?}: le prompt de tâche reste celui de l'appelant"
-        );
+            assert_eq!(
+                script.runs(),
+                1,
+                "{label}: `{prompt}` est un prompt, le hook tourne"
+            );
+            assert!(
+                fixture.prompts().contains(PROMPT_PREFIX),
+                "{label}: `{prompt}` atteint le modèle avec le contrat injecté"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Les hooks de prompt appartiennent à la session que l'utilisateur ouvre. Un
+/// sous-agent tourne dans une session neuve à chaque invocation : y tirer
+/// `session_start` préfixerait le dump de contexte au prompt de tâche écrit par
+/// l'orchestrateur, et `user_prompt_submit` réécrirait ce prompt à chaque
+/// branche du fan-out.
+#[tokio::test]
+async fn prompt_hooks_stay_out_of_subagent_scheduled_and_hidden_sessions() -> Result<()> {
+    for state_machine in LOOPS {
+        let label = format!("KAJI_STATE_MACHINE={state_machine:?}");
+        for session_type in [
+            SessionType::SubAgent,
+            SessionType::Scheduled,
+            SessionType::Hidden,
+        ] {
+            let memory_dir = tempfile::tempdir()?;
+            let _guard = env(state_machine, &memory_dir);
+
+            let script = Script::new();
+            let hooks = manager(
+                vec![
+                    entry("session_start", script.emitting("ctx.sh", SESSION_CONTEXT)),
+                    entry(
+                        "user_prompt_submit",
+                        script.emitting("rewrite.sh", PROMPT_PREFIX),
+                    ),
+                ],
+                script.dir.path(),
+            );
+            let fixture = fixture(hooks, session_type, None).await?;
+            fixture.turn(PROMPT).await?;
+
+            assert_eq!(
+                script.runs(),
+                0,
+                "{label}, {session_type:?}: aucun hook de prompt hors des sessions user"
+            );
+            let seen = fixture.prompts();
+            assert!(
+                !seen.contains(SESSION_CONTEXT) && !seen.contains(PROMPT_PREFIX),
+                "{label}, {session_type:?}: le prompt de tâche reste celui de l'appelant"
+            );
+        }
     }
     Ok(())
 }

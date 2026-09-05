@@ -36,15 +36,26 @@
 //!
 //! **Ce qui est servi au rejeu, et ce qui ne l'est pas.** Les décisions le
 //! sont : un `pre_tool_use` ou un `stop` qui a bloqué à l'enregistrement bloque
-//! au rejeu, sur une machine qui n'a pas le hook. Les sorties injectées dans le
-//! prompt, elles, ne le sont **pas** : le message du journal les porte déjà
-//! (`Agent::apply_prompt_hooks` réécrit avant la persistance), donc les
-//! réappliquer les dupliquerait. Elles restent journalisées pour
-//! l'observabilité — savoir ce qu'un hook avait produit ce jour-là — et le
-//! rejeu se contente de les lire. Corollaire : une ligne `hook_output` de
-//! sortie n'appartient pas nécessairement à un tour rejouable (un tour qui
-//! n'émet aucun `AgentEvent::Message` en laisse une derrière lui) — elle est
-//! inerte, jamais réinjectée, et purgée avec le reste du journal.
+//! au rejeu, sur une machine qui n'a pas le hook. Le feedback d'un
+//! `post_tool_use` l'est aussi, et il est réappliqué : le `tool_result`
+//! journalisé est brut, enregistré en amont de l'ajout du feedback. Les sorties
+//! préfixées au prompt, elles, sont servies mais **jamais réappliquées** : le
+//! message du journal les porte déjà (`Agent::apply_prompt_hooks` réécrit avant
+//! la persistance), donc les remettre devant les dupliquerait. Elles restent
+//! journalisées pour l'observabilité — savoir ce qu'un hook avait produit ce
+//! jour-là. Corollaire : une ligne `hook_output` de prompt n'appartient pas
+//! nécessairement à un tour rejouable (un tour qui n'émet aucun
+//! `AgentEvent::Message` en laisse une derrière lui) — elle est inerte, jamais
+//! réinjectée, et purgée avec le reste du journal.
+//!
+//! **Ce que les hooks de prompt voient.** `session_start` et
+//! `user_prompt_submit` s'appliquent à ce qui part au modèle : tout prompt
+//! d'une session utilisateur, y compris un texte qui commence par `/` sans
+//! nommer de commande — chemin absolu, collage, faute de frappe. Leur échappent
+//! les commandes réellement montées (interne, recette, skill), les `!…` routés
+//! au shell, et les sessions qui ne sont pas celles d'un utilisateur —
+//! sous-agent, recette, tour planifié, session `Hidden`. Le contrat complet est
+//! sur `Agent::apply_prompt_hooks`.
 
 pub mod config;
 
@@ -157,8 +168,10 @@ impl HookEvent {
             .find(|event| event.name() == name || event.config_name() == name)
     }
 
-    /// Vrai pour les événements dont la sortie standard entre dans le prompt —
-    /// et qui sont donc journalisés puis servis au rejeu.
+    /// Vrai pour les événements dont la sortie standard finit sous les yeux du
+    /// modèle — devant le prompt, ou derrière un résultat d'outil. Ils sont donc
+    /// journalisés puis servis au rejeu ; ce que l'appelant en fait alors est
+    /// documenté sur [`HookManager::emit_capturing`].
     fn injects_output(&self) -> bool {
         matches!(
             self,
@@ -505,7 +518,7 @@ impl HookManager {
         payload: &str,
         timeout: Duration,
     ) -> Result<std::process::Output> {
-        announce_project_hook(rule);
+        announce_project_hook(rule, session_id);
         let span = tracing::info_span!(
             target: "kaji::hooks",
             "execute_hook",
@@ -702,10 +715,21 @@ impl HookManager {
     /// fail-open : injecter du contexte est un service, pas un garde-fou, et le
     /// tour doit partir même quand `shosoin-context` est cassé.
     ///
-    /// La sortie entre dans le prompt : elle est journalisée sous `hook_output`
-    /// pour l'observabilité. Au rejeu, c'est le message enregistré qui la porte
-    /// — cette fonction ne relance jamais la commande, et son appelant ne
-    /// réapplique pas ce qu'elle rend (voir la doc du module).
+    /// La sortie est journalisée sous `hook_output`, et au rejeu cette fonction
+    /// la sert depuis le journal au lieu de relancer la commande. Ce que
+    /// l'appelant en fait alors dépend de ce que le journal porte déjà, et les
+    /// deux appelants sont à l'opposé l'un de l'autre :
+    ///
+    /// - `session_start` et `user_prompt_submit` : l'événement `message` est
+    ///   persisté **après** réécriture ([`crate::agents::Agent`],
+    ///   `apply_prompt_hooks`), donc le message rejoué porte déjà le prélude.
+    ///   L'appelant ne réapplique rien — le refaire le dupliquerait et ferait
+    ///   diverger `request_hash` ;
+    /// - `post_tool_use` : l'événement `tool_result` est enregistré **avant**
+    ///   l'ajout du feedback (`ExtensionManager::dispatch_tool_call` tire en
+    ///   amont), donc le résultat rejoué est brut. L'appelant réapplique, par
+    ///   [`append_tool_feedback`] — sans quoi le rejeu perdrait le feedback que
+    ///   le modèle avait lu.
     pub async fn emit_capturing(
         &self,
         event: HookEvent,
@@ -715,7 +739,7 @@ impl HookManager {
     ) -> Option<String> {
         debug_assert!(
             event.injects_output(),
-            "seuls les événements dont la sortie entre dans le prompt sont capturés"
+            "seuls les événements dont la sortie finit sous les yeux du modèle sont capturés"
         );
         if let Some(replay) = &self.replay {
             return replay.hook_output(event.config_name(), addr);
@@ -798,17 +822,29 @@ pub fn append_tool_feedback(
 /// Le consentement `KAJI_PROJECT_HOOKS` se donne une fois et s'oublie ensuite.
 /// La première exécution d'un hook du dépôt le rappelle, pour que « ce dépôt
 /// exécute son propre shell chez moi » reste un fait visible six mois plus tard.
-fn announce_project_hook(rule: &LoadedRule) {
-    static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+///
+/// Une fois par session, pas par processus : un TUI, un `serve` ou une gateway
+/// vivent des jours et servent des sessions successives — l'annoncer une seule
+/// fois pour toutes contredirait « de cette session ».
+fn announce_project_hook(rule: &LoadedRule, session_id: &str) {
     if rule.source != RuleSource::ProjectConfig {
         return;
     }
-    ANNOUNCED.call_once(|| {
-        info!(
-            path = %rule.plugin_root.join(config::PROJECT_HOOKS_FILE).display(),
-            "hooks du dépôt actifs : premier hook projet exécuté de cette session",
-        );
-    });
+    static ANNOUNCED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(std::sync::Mutex::default);
+
+    let first_of_this_session = ANNOUNCED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(session_id.to_string());
+    if !first_of_this_session {
+        return;
+    }
+    info!(
+        path = %rule.plugin_root.join(config::PROJECT_HOOKS_FILE).display(),
+        session.id = %session_id,
+        "hooks du dépôt actifs : premier hook projet exécuté de cette session",
+    );
 }
 
 /// Les hooks déclarés en config ne sont montés que dans le binaire kaji.
