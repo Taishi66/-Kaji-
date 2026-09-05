@@ -45,12 +45,24 @@ Objectif produit : combler les 3 gaps majeurs face à Claude Code/Codex (vision,
 
 Rendu d'image inline terminal (kitty/sixel) ; dashboard web (P4, mêmes events WS) ; rejeu orchestré de l'arbre workflow complet ; robots.txt ; provider-native search là où l'intégration n'est pas triviale.
 
-## S5 — Télémétrie tokens/coûts (ajout user 2026-09-05)
+## S5 — Télémétrie tokens/coûts (ajout user 2026-09-05, recadré : natif kaji, pas d'export)
 
-Objectif : « un Prometheus dans kaji » — savoir exactement combien de tokens/[$] partent, **par modèle**, par session, par jour/semaine/mois. Fondation existante : `usage_ledger` (SQL), `SessionManager::usage_windows/usage_since`, `/cost` (session + fenêtres 5 h/7 j).
+Objectif recadré par le user : un **suivi poussé de la consommation intégré à kaji** — kaji sera l'outil majeur quand les abonnements disparaîtront et qu'il ne restera que les clés API : chaque token compte en argent réel. Prometheus n'était qu'un exemple, PAS un livrable — tout vit dans kaji. Fondation : `usage_ledger` (SQL), `usage_windows/usage_since`, `/cost`.
 
-- **Dimension modèle** : chaque ligne du ledger porte (ou gagne, migration) `provider` + `model` ; agrégats `GROUP BY model` sur toute fenêtre.
-- **Fenêtres calendaire** : jour/semaine/mois (locale) en plus des fenêtres glissantes — requêtes SQL, pas de nouvelle table.
-- **Surfaces** : `/cost` gagne des vues `jour|semaine|mois|modèles` (tableaux thème actif) ; CLI `kaji metrics [--window day|week|month] [--by model|session] [--format json|table]` pour scripts.
-- **Export Prometheus** : endpoint `/metrics` (format exposition texte) sur le serveur HTTP existant (`kaji serve`) + mode one-shot `kaji metrics --prometheus` (textfile collector node_exporter) — compteurs `kaji_tokens_total{model,provider,direction=input|output}`, `kaji_cost_dollars_total{model}`, `kaji_sessions_total`. Zéro dépendance lourde : le format d'exposition est du texte.
-- Branche le stack Grafana perso existant (route CLAUDE.md « Prometheus Grafana dashboard perso ») — kaji expose, Grafana dessine.
+- **Dimensions** : par modèle, par provider, par session, par projet (`working_dir` racine git), par jour/semaine/mois calendaires (locale) en plus des fenêtres glissantes 5 h/7 j.
+- **Économie du cache** : les colonnes `cache_read/cache_write` existantes remontent en 1re classe — taux de hit, $ économisés vs $ pleins — c'est LE levier de coût en régime clés API.
+- **Burn rate & projection** : coût du jour/de la semaine en cours + projection fin de mois par régression simple ; affiché dans `/cost` et disponible en JSON.
+- **Budgets** : `KAJI_BUDGET_MONTHLY_USD` (global et par provider, config) → ligne d'avertissement TUI aux seuils 50/80/100 % (pattern quota-awareness ccusage du user), jamais un hard-stop.
+- **Surfaces** : `/cost` gagne les vues `modèles | jour | semaine | mois | cache | projection` (tableaux thème actif) ; CLI `kaji metrics [--window ...] [--by model|provider|session|project] [--format json|table]` pour scripts et cron.
+- **Non-but** : exporteur Prometheus/OTel (un `--format json` suffit à qui veut brancher autre chose plus tard).
+
+## S6 — Hooks de cycle de vie (ajout user 2026-09-05, « oui » Task 10)
+
+Objectif : le dernier bloqueur du remplacement complet de Claude Code — l'outillage perso (rtk-rewrite, adhd-contract, shosoin-context) vit dans les hooks. kaji gagne des hooks shell aux mêmes points de vie, sémantique compatible dans l'esprit.
+
+- **Événements v1** : `session_start`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `turn_end`, `session_end`.
+- **Config** : `hooks:` dans la config user + `.kaji/hooks.yaml` par projet (merge user→projet) ; chaque hook = `{event, command, timeout_s (défaut 10), matcher?}` (matcher = nom d'outil pour pre/post_tool_use).
+- **Contrat d'exécution** : payload JSON sur stdin (event, session_id, tool_name/args le cas échéant, prompt) ; exit 0 → stdout injecté (contexte pour session_start/user_prompt_submit, feedback pour post_tool_use) ; exit ≠ 0 sur `pre_tool_use` → **appel bloqué**, stderr = raison montrée au modèle ; `user_prompt_submit` peut réécrire (stdout remplace/annote le prompt — c'est le cas rtk). Timeout → hook ignoré + ligne système (fail-open sauf pre_tool_use : fail-closed documenté).
+- **Règle replay (AGENTS.md)** : tout stdout de hook qui entre dans le prompt est de l'état externe → journalisé (kind `hook_output`, adressage par tour/appel) et **servi au rejeu sans ré-exécuter les hooks** — un rejeu n'exécute jamais de commande hook.
+- **Parité** : sites partagés ou double application legacy/SM, prouvée par tests.
+- **Tests d'acceptation** (les 3 usages réels) : un hook session_start qui injecte du contexte ; un user_prompt_submit qui préfixe le prompt ; un pre_tool_use qui bloque `shell` sur un pattern et laisse passer le reste.

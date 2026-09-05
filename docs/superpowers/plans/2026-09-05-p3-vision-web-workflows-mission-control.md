@@ -48,6 +48,10 @@ Doré workflow : record run 2-stages → `kaji replay` de la session parente (ga
 
 Review (Sonnet ; **Opus T1 + finale**), fix rounds bornés, commit ; `just install` + push en fin de séquence ; notes vault (Règle 12) ; ledger `.superpowers/sdd/2026-09-05-p3/progress.md` (créer au 1er dispatch, 1re ligne = chemin de ce plan).
 
-## Task 9 — Télémétrie tokens (S5)
+## Task 9 — Télémétrie tokens native (S5)
 
-Vérifier le schéma `usage_ledger` (le modèle est-il déjà par ligne ? sinon migration additive) ; agrégats par modèle + fenêtres calendaires jour/semaine/mois ; `/cost` vues `modèles|jour|semaine|mois` ; CLI `kaji metrics` (json/table) ; export Prometheus : `/metrics` sur `kaji serve` + `--prometheus` one-shot (format exposition texte, zéro dépendance). Tests : agrégats sur ledger fixture, format exposition conforme, fenêtres calendaires aux bornes (minuit, lundi, 1er du mois). Commit `feat(metrics): tokens/coûts par modèle, fenêtres calendaires, export Prometheus`.
+Vérifier le schéma `usage_ledger` (modèle/provider par ligne ? sinon migration additive ; `working_dir` joignable via sessions) ; agrégats par modèle/provider/session/projet + fenêtres calendaires jour/semaine/mois ; économie du cache en 1re classe (taux de hit, $ économisés) ; burn rate + projection fin de mois ; budgets `KAJI_BUDGET_MONTHLY_USD` (global + par provider) → avertissement TUI 50/80/100 % ; `/cost` vues `modèles|jour|semaine|mois|cache|projection` ; CLI `kaji metrics` (json/table). PAS d'exporteur Prometheus (non-but S5). Tests : agrégats sur ledger fixture, bornes calendaires (minuit, lundi, 1er), projection sur série connue, seuils de budget. Commit `feat(metrics): suivi natif tokens/coûts — modèle, projet, calendrier, cache, budgets`.
+
+## Task 10 — Hooks de cycle de vie (S6)
+
+Create `crates/kaji/src/hooks/` : config (user + `.kaji/hooks.yaml`, merge), runner (spawn shell, stdin JSON, timeout, capture stdout/stderr), branchement aux 6 événements (sites partagés legacy/SM ou double application prouvée) ; `pre_tool_use` exit ≠ 0 bloque l'appel (stderr → modèle) ; kind v2 `hook_output` capturé + servi (jamais de ré-exécution au rejeu). Sécurité : les commandes viennent de la config du USER (même modèle de confiance que la config existante) — pas d'escalade nouvelle, mais review Opus quand même (surface d'injection stdin/stdout). Tests : les 3 cas d'acceptation S6 + timeout fail-open/closed + replay servi. Commit `feat(hooks): hooks de cycle de vie — session/prompt/tool/turn, rejouables`.
