@@ -288,11 +288,25 @@ impl Transcript {
     }
 
     fn rendered(&self) -> String {
+        self.rendered_lines().join("\n")
+    }
+
+    /// La même transcription, triée. Deux résultats d'outils d'un même tour
+    /// s'exécutent en parallèle : leur ordre d'arrivée varie d'un
+    /// enregistrement à l'autre, indépendamment du rejeu. Une comparaison
+    /// enregistrement/rejeu s'en tient donc au contenu — la ligne porte déjà
+    /// son tour, donc le tri garde les tours séparés.
+    fn rendered_stable(&self) -> String {
+        let mut lines = self.rendered_lines();
+        lines.sort();
+        lines.join("\n")
+    }
+
+    fn rendered_lines(&self) -> Vec<String> {
         self.lines
             .iter()
             .map(|line| format!("{}|{}|{}|{}", line.turn, line.kind, line.key, line.content))
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect()
     }
 }
 
@@ -397,6 +411,17 @@ async fn record_fixture(probe: &ProbeFixture) -> Result<Fixture> {
 }
 
 async fn record_fixture_with(probe: &ProbeFixture, model_config: ModelConfig) -> Result<Fixture> {
+    record_fixture_switching(probe, model_config, None).await
+}
+
+/// `switched` est adopté à partir du deuxième tour. `update_provider` écrase le
+/// `ModelConfig` de la ligne `sessions` : après l'enregistrement, seul le
+/// dernier y survit, alors que le premier tour a été assemblé sous l'autre.
+async fn record_fixture_switching(
+    probe: &ProbeFixture,
+    model_config: ModelConfig,
+    switched: Option<ModelConfig>,
+) -> Result<Fixture> {
     seed_memory();
 
     let data_dir = tempfile::tempdir()?;
@@ -443,6 +468,13 @@ async fn record_fixture_with(probe: &ProbeFixture, model_config: ModelConfig) ->
     let mut transcript = Transcript::default();
     for (index, query) in QUERIES.iter().enumerate() {
         let turn_seq = index as i64 + 1;
+        if turn_seq == 2 {
+            if let Some(switched) = switched.clone() {
+                agent
+                    .update_provider(Arc::new(FixtureProvider), switched, &session.id)
+                    .await?;
+            }
+        }
         for message in drain(&agent, &session.id, Message::user().with_text(*query)).await? {
             transcript.push(turn_seq, &message);
         }
@@ -864,21 +896,25 @@ async fn assert_the_turn_context_comes_from_the_log(state_machine: Option<&str>)
     Ok(())
 }
 
-/// Remplace le bloc journalisé du tout premier appel par une marque
-/// reconnaissable, sans passer par la boucle.
-async fn rewrite_first_turn_context(fixture: &Fixture) -> Result<()> {
+async fn journal_pool(fixture: &Fixture) -> Result<sqlx::SqlitePool> {
     let db_path = fixture
         .data_dir
         .path()
         .join("data")
         .join(SESSIONS_FOLDER)
         .join(DB_NAME);
-    let pool = sqlx::SqlitePool::connect_with(
+    Ok(sqlx::SqlitePool::connect_with(
         sqlx::sqlite::SqliteConnectOptions::new()
             .filename(db_path)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
     )
-    .await?;
+    .await?)
+}
+
+/// Remplace le bloc journalisé du tout premier appel par une marque
+/// reconnaissable, sans passer par la boucle.
+async fn rewrite_first_turn_context(fixture: &Fixture) -> Result<()> {
+    let pool = journal_pool(fixture).await?;
     let payload = serde_json::json!({
         "turn_seq": 1,
         "call_idx": 0,
@@ -1101,6 +1137,126 @@ async fn a_toolshim_session_replays_identically_on_the_legacy_loop() -> Result<(
 #[tokio::test]
 async fn a_toolshim_session_replays_identically_on_the_state_machine_loop() -> Result<()> {
     assert_a_toolshim_session_replays_identically(Some("1")).await
+}
+
+/// Le `ModelConfig` vit dans la ligne `sessions`, donc en un seul exemplaire :
+/// changer de modèle en cours de session écrase celui sous lequel les premiers
+/// tours ont été assemblés. Restaurer celui de la session ferait alors rejouer
+/// le tour 1 sous la config du tour 3. La valeur du tour se lit dans son
+/// manifeste.
+async fn assert_a_mid_session_model_change_replays_per_turn(
+    state_machine: Option<&str>,
+) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?} model-switch");
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env(state_machine, &memory_dir);
+
+    let probe = ProbeFixture::new().await;
+    let fixture =
+        record_fixture_switching(&probe, model_config(), Some(toolshim_model_config())).await?;
+
+    let replayed = replay_once(&fixture, &label).await?;
+    let first = replayed.prompts.first().expect("un prompt au tour 1");
+    let last = replayed.prompts.last().expect("un prompt au dernier tour");
+    assert!(
+        !first.contains(TOOLSHIM_PROMPT_MARKER),
+        "{label}: le tour 1 se rejoue sous la config qu'il avait, sans toolshim"
+    );
+    assert!(
+        last.contains(TOOLSHIM_PROMPT_MARKER),
+        "{label}: les tours suivants se rejouent sous la config adoptée en cours de route"
+    );
+    assert_eq!(
+        fixture.transcript.rendered_stable(),
+        replayed.transcript.rendered_stable(),
+        "{label}: un changement de modèle en cours de session se rejoue à l'identique"
+    );
+    Ok(())
+}
+
+/// Un journal enregistré avant que la config du tour y entre : ses manifestes
+/// n'ont pas de champ `model_config`. Le rejeu doit retomber sur celui de la
+/// session enregistrée, c'est-à-dire se comporter comme avant.
+async fn assert_a_log_without_turn_model_config_still_replays(
+    state_machine: Option<&str>,
+) -> Result<()> {
+    let label = format!("KAJI_STATE_MACHINE={state_machine:?} journal d'avant");
+    let memory_dir = tempfile::tempdir()?;
+    let _guard = env(state_machine, &memory_dir);
+
+    let probe = ProbeFixture::new().await;
+    let fixture = record_fixture_with(&probe, toolshim_model_config()).await?;
+    strip_manifest_model_config(&fixture).await?;
+
+    let replayed = replay_once(&fixture, &label).await?;
+    assert!(
+        replayed
+            .prompts
+            .iter()
+            .all(|prompt| prompt.contains(TOOLSHIM_PROMPT_MARKER)),
+        "{label}: la config vient de la session, comme avant le champ"
+    );
+    assert_eq!(
+        fixture.transcript.rendered_stable(),
+        replayed.transcript.rendered_stable(),
+        "{label}: un journal d'avant se rejoue toujours"
+    );
+    Ok(())
+}
+
+/// Efface le champ `model_config` de tous les manifestes journalisés : la forme
+/// exacte d'un journal antérieur au champ, `#[serde(default)]` compris.
+async fn strip_manifest_model_config(fixture: &Fixture) -> Result<()> {
+    let pool = journal_pool(fixture).await?;
+    let rows = sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, payload_json FROM session_events \
+         WHERE session_id = ? AND kind = 'tool_manifest'",
+    )
+    .bind(&fixture.session_id)
+    .fetch_all(&pool)
+    .await?;
+    let mut stripped = 0;
+    for (id, payload) in rows {
+        let mut manifest = serde_json::from_str::<serde_json::Value>(&payload)?;
+        let removed = manifest
+            .as_object_mut()
+            .and_then(|object| object.remove("model_config"));
+        if removed.is_none() {
+            continue;
+        }
+        stripped += 1;
+        sqlx::query("UPDATE session_events SET payload_json = ? WHERE id = ?")
+            .bind(manifest.to_string())
+            .bind(id)
+            .execute(&pool)
+            .await?;
+    }
+    pool.close().await;
+    assert!(
+        stripped > 0,
+        "le journal portait bien la config du tour — sinon le test ne prouve rien"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_log_without_turn_model_config_still_replays_on_the_legacy_loop() -> Result<()> {
+    assert_a_log_without_turn_model_config_still_replays(None).await
+}
+
+#[tokio::test]
+async fn a_log_without_turn_model_config_still_replays_on_the_state_machine_loop() -> Result<()> {
+    assert_a_log_without_turn_model_config_still_replays(Some("1")).await
+}
+
+#[tokio::test]
+async fn a_mid_session_model_change_replays_per_turn_on_the_legacy_loop() -> Result<()> {
+    assert_a_mid_session_model_change_replays_per_turn(None).await
+}
+
+#[tokio::test]
+async fn a_mid_session_model_change_replays_per_turn_on_the_state_machine_loop() -> Result<()> {
+    assert_a_mid_session_model_change_replays_per_turn(Some("1")).await
 }
 
 #[tokio::test]

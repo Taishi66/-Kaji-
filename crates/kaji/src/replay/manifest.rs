@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use kaji_providers::model::ModelConfig;
 use rmcp::model::Tool;
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +54,56 @@ pub struct ToolManifest {
     /// build : un `git pull` entre l'enregistrement et le rejeu le change.
     #[serde(default)]
     pub hints: Option<String>,
+    /// Ce que le `ModelConfig` de l'appel a changé au prompt et à la liste
+    /// d'outils. `None` pour un journal antérieur à ce champ : le rejeu retombe
+    /// alors sur le `ModelConfig` de la session enregistrée.
+    #[serde(default)]
+    pub model_config: Option<TurnModelConfig>,
+}
+
+/// Les champs du `ModelConfig` qui entrent dans la requête hachée ou dans les
+/// seuils du tour. Le `ModelConfig` complet vit dans la ligne `sessions`, donc
+/// en un seul exemplaire : un changement de modèle en cours de session écrase
+/// celui sous lequel les tours précédents ont été assemblés. Journaliser ces
+/// champs par appel rend chaque tour rejouable sous sa propre config.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TurnModelConfig {
+    #[serde(default)]
+    pub toolshim: bool,
+    #[serde(default)]
+    pub toolshim_model: Option<String>,
+    #[serde(default)]
+    pub context_limit: Option<usize>,
+}
+
+impl TurnModelConfig {
+    pub fn of(model_config: &ModelConfig) -> Self {
+        Self {
+            toolshim: model_config.toolshim,
+            toolshim_model: model_config.toolshim_model.clone(),
+            context_limit: model_config.context_limit,
+        }
+    }
+
+    fn applied_to(&self, base: &ModelConfig) -> ModelConfig {
+        ModelConfig {
+            toolshim: self.toolshim,
+            toolshim_model: self.toolshim_model.clone(),
+            context_limit: self.context_limit,
+            ..base.clone()
+        }
+    }
+}
+
+impl ToolManifest {
+    /// La config sous laquelle assembler l'appel : celle du journal quand il la
+    /// porte, celle de `base` sinon.
+    pub fn model_config_over(&self, base: &ModelConfig) -> ModelConfig {
+        match &self.model_config {
+            Some(turn) => turn.applied_to(base),
+            None => base.clone(),
+        }
+    }
 }
 
 /// Le manifeste du tour : servi depuis le journal en rejeu, journalisé sinon.

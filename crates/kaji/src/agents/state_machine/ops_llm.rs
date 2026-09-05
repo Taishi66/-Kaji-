@@ -13,7 +13,7 @@ use crate::conversation::message::{InferenceMetadata, Message, MessageContent};
 use crate::conversation::{effective_role, Conversation, EffectiveRole};
 use crate::providers::base::{Provider, ProviderUsage};
 use crate::replay::idgen::{default_idgen, IdGen};
-use crate::replay::manifest::ToolManifest;
+use crate::replay::manifest::{ToolManifest, TurnModelConfig};
 use crate::replay::record::{next_llm_call, TurnRecorder};
 use crate::replay::source::ReplaySource;
 use crate::session::Session;
@@ -493,10 +493,12 @@ impl Inference for InferenceRunner<'_> {
                     tools,
                     prompt_parts: input.prompt_parts,
                     hints: crate::agents::prompt_manager::hints_block(&session.working_dir),
+                    model_config: Some(TurnModelConfig::of(&self.model_config)),
                     ..ToolManifest::default()
                 },
             )
             .await;
+            let model_config = manifest.model_config_over(&self.model_config);
             let (tools, prompt_parts, hints) =
                 (manifest.tools, manifest.prompt_parts, manifest.hints);
             let system_prompt = self
@@ -535,7 +537,7 @@ impl Inference for InferenceRunner<'_> {
                 crate::agents::reply_parts::prepare_tools_for_provider(
                     tools,
                     system_prompt,
-                    &self.model_config,
+                    &model_config,
                 );
             let mut available_tools = tools
                 .iter()
@@ -568,9 +570,9 @@ impl Inference for InferenceRunner<'_> {
 
             let context_limit = self
                 .provider
-                .get_context_limit(&self.model_config)
+                .get_context_limit(&model_config)
                 .await
-                .unwrap_or_else(|_| self.model_config.context_limit());
+                .unwrap_or_else(|_| model_config.context_limit());
             let turn = messages_since_kickoff(conversation)?;
             let turn_start = turn
                 .first()
@@ -606,7 +608,7 @@ impl Inference for InferenceRunner<'_> {
             let (record, call_ctx) = next_llm_call(self.turn_recorder().as_ref());
             let stream = crate::agents::reply_parts::stream_response_from_provider(
                 self.provider.clone(),
-                self.model_config.clone(),
+                model_config.clone(),
                 &session.id,
                 &system_prompt,
                 conversation_for_provider.messages(),
@@ -626,7 +628,7 @@ impl Inference for InferenceRunner<'_> {
                 }
             };
 
-            let requested_model = self.model_config.model_name.clone();
+            let requested_model = model_config.model_name.clone();
             let inference = self
                 .provider
                 .fetch_model_info(&requested_model)

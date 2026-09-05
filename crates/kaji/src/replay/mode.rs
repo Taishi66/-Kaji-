@@ -29,6 +29,11 @@ pub struct ReplayMode {
     /// requête hachée. En inventer un rendrait toute session toolshim
     /// irrejouable dès le tour 1, appel 0. `None` pour une session sans config
     /// persistée — le rejeu garde alors celui que l'appelant a monté.
+    ///
+    /// C'est la base, pas le dernier mot : le manifeste de chaque appel porte
+    /// les champs qui entrent dans le prompt et le hash
+    /// (`replay::manifest::TurnModelConfig`) et les recouvre, parce que la
+    /// ligne `sessions` n'en garde qu'un exemplaire — celui du dernier tour.
     pub model_config: Option<ModelConfig>,
 }
 

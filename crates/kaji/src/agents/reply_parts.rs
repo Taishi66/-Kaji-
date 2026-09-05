@@ -25,7 +25,7 @@ use crate::providers::toolshim::{
 #[cfg(test)]
 use crate::replay::idgen::default_idgen;
 use crate::replay::idgen::IdGen;
-use crate::replay::manifest::ToolManifest;
+use crate::replay::manifest::{ToolManifest, TurnModelConfig};
 use crate::replay::record::RecordSink;
 use kaji_providers::conversation::token_usage::{CostSource, ProviderStats, ProviderUsage, Usage};
 use kaji_providers::model::ModelConfig;
@@ -271,6 +271,8 @@ impl Agent {
         // de laisser le tracker du `PromptManager` réinjecter ceux d'aujourd'hui.
         let subdirectory_hints = self.prompt_manager.lock().await.subdirectory_hints();
 
+        let session_model_config = self.model_config_for_session(session_id).await?;
+
         let manifest = crate::replay::manifest::turn_tool_manifest(
             recorder.as_ref(),
             self.replay_source().as_ref(),
@@ -283,9 +285,11 @@ impl Agent {
                 code_execution_active,
                 frontend_instructions: self.frontend_instructions.lock().await.clone(),
                 hints: crate::agents::prompt_manager::hints_block(working_dir),
+                model_config: Some(TurnModelConfig::of(&session_model_config)),
             },
         )
         .await;
+        let model_config = manifest.model_config_over(&session_model_config);
         let ToolManifest {
             tools,
             prompt_parts,
@@ -295,9 +299,8 @@ impl Agent {
             code_execution_active,
             frontend_instructions,
             hints,
+            model_config: _,
         } = manifest;
-
-        let model_config = self.model_config_for_session(session_id).await?;
 
         let kaji_mode = *self.current_kaji_mode.lock().await;
 

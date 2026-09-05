@@ -1268,6 +1268,8 @@ impl Agent {
         // Un tour rejoué assemble sous le `ModelConfig` de la session
         // enregistrée : la session dérivée du rejeu ne porte que le placeholder
         // du CLI, et `toolshim`/`context_limit` entrent dans la requête hachée.
+        // Les appels d'un tour recouvrent ensuite ces champs avec ceux de leur
+        // manifeste — la session n'en garde qu'un exemplaire, le dernier.
         if let Some(model_config) = self
             .replay_mode
             .as_ref()
