@@ -11,6 +11,7 @@ pub mod summarize;
 pub mod summon;
 pub mod todo;
 pub mod tom;
+pub mod web;
 
 use std::collections::HashMap;
 
@@ -202,6 +203,19 @@ pub static PLATFORM_EXTENSIONS: Lazy<HashMap<&'static str, PlatformExtensionDef>
                 unprefixed_tools: false,
                 hidden: false,
                 client_factory: |ctx| Some(Box::new(tom::TomClient::new(ctx).unwrap())),
+            },
+        );
+
+        map.insert(
+            web::EXTENSION_NAME,
+            PlatformExtensionDef {
+                name: web::EXTENSION_NAME,
+                display_name: "Web",
+                description: "Search the web and fetch pages, with an SSRF guard on every hop",
+                default_enabled: true,
+                unprefixed_tools: true,
+                hidden: false,
+                client_factory: |ctx| Some(Box::new(web::WebClient::new(ctx).unwrap())),
             },
         );
 
