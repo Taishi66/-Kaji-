@@ -435,6 +435,32 @@ pub struct SessionEvent {
     pub payload_json: String,
 }
 
+/// Ce qu'une revendication de `turn_start` **exclusif** a donné
+/// (`claim_exclusive_turn_start`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnClaim {
+    /// Le tour est revendiqué : le `turn_start` est écrit.
+    Claimed,
+    /// La session porte déjà un `turn_start` marqué du champ exclusif, avec
+    /// cette valeur. Le demandeur est refusé — chercher un autre tour ne
+    /// lèverait pas l'exclusivité.
+    AlreadyExclusive(String),
+    /// Un autre écrivain tenait déjà ce `turn_seq` : l'index unique
+    /// `idx_session_events_turn_alloc` a tranché, le demandeur peut réessayer
+    /// plus loin.
+    TurnTaken,
+}
+
+/// La valeur d'un champ texte d'un payload d'événement, `None` si le payload
+/// n'est pas un objet JSON, si le champ manque ou s'il n'est pas une chaîne.
+fn payload_string_field(payload_json: &str, field: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(payload_json)
+        .ok()?
+        .get(field)?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Résultat de `last_turn_is_interrupted` : le dernier tour de la session a
 /// un `turn_start` sans `turn_end` correspondant (crash/kill/annulation).
 #[derive(Debug, Clone)]
@@ -823,6 +849,24 @@ impl SessionManager {
     /// Journalise l'événement `log_meta` (une fois par session) — idempotent.
     pub async fn append_log_meta_if_absent(&self, session_id: &str) -> Result<()> {
         self.storage.append_log_meta_if_absent(session_id).await
+    }
+
+    /// Revendique `turn_seq` pour un `turn_start` dont le payload porte
+    /// `exclusive_field`, et refuse la session si elle porte déjà un
+    /// `turn_start` marqué du même champ. Voir
+    /// [`SessionStorage::claim_exclusive_turn_start`] : le refus et l'écriture
+    /// tiennent dans une seule transaction, sinon deux appelants concurrents
+    /// s'attachent tous les deux à la même session.
+    pub async fn claim_exclusive_turn_start(
+        &self,
+        session_id: &str,
+        turn_seq: i64,
+        exclusive_field: &str,
+        payload_json: &str,
+    ) -> Result<TurnClaim> {
+        self.storage
+            .claim_exclusive_turn_start(session_id, turn_seq, exclusive_field, payload_json)
+            .await
     }
 
     /// Marque la session comme non rejouable exactement (`replayable = 0`).
@@ -2833,6 +2877,68 @@ impl SessionStorage {
                 .await?;
         tx.commit().await?;
         Ok(max_turn_seq.map_or(1, |seq| seq + 1))
+    }
+
+    /// Revendique `turn_seq` pour un `turn_start` exclusif : le refus (« la
+    /// session porte déjà un tour marqué de ce champ ») et l'INSERT tiennent
+    /// dans **une seule** transaction `BEGIN IMMEDIATE`. Séparés, deux
+    /// appelants concurrents lisent tous les deux « libre » et s'attachent
+    /// tous les deux à la même session, chacun sur son tour — le TOCTOU que
+    /// le seul index unique ne ferme pas, puisqu'il ne contraint que le
+    /// couple (session, turn_seq).
+    ///
+    /// Le **numéro** de tour, lui, reste arbitré par
+    /// `idx_session_events_turn_alloc` : un écrivain qui alloue hors
+    /// transaction (la boucle agent) peut avoir pris celui-ci entre-temps, et
+    /// c'est alors [`TurnClaim::TurnTaken`], à réessayer plus loin.
+    #[allow(clippy::disallowed_methods)] // eventlog
+    async fn claim_exclusive_turn_start(
+        &self,
+        session_id: &str,
+        turn_seq: i64,
+        exclusive_field: &str,
+        payload_json: &str,
+    ) -> Result<TurnClaim> {
+        let pool = self.pool().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+
+        let claimed: Vec<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM session_events WHERE session_id = ? AND kind = 'turn_start'",
+        )
+        .bind(session_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        if let Some(existing) = claimed
+            .iter()
+            .find_map(|payload| payload_string_field(payload, exclusive_field))
+        {
+            return Ok(TurnClaim::AlreadyExclusive(existing));
+        }
+
+        let insert = sqlx::query(
+            r#"
+            INSERT INTO session_events (session_id, turn_seq, ts_ms, kind, payload_json)
+            VALUES (?, ?, ?, 'turn_start', ?)
+            "#,
+        )
+        .bind(session_id)
+        .bind(turn_seq)
+        .bind(Utc::now().timestamp_millis())
+        .bind(payload_json)
+        .execute(&mut *tx)
+        .await;
+
+        match insert {
+            Ok(_) => {
+                tx.commit().await?;
+                Ok(TurnClaim::Claimed)
+            }
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                Ok(TurnClaim::TurnTaken)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Journalise `log_meta` (kaji_version, schema_version, idgen_seed) une

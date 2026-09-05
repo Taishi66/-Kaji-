@@ -52,8 +52,14 @@ struct Shared {
 
 /// D'où vient le contenu d'une recette référencée par la spec : du disque en
 /// exécution vivante — et il est alors journalisé —, du journal au rejeu.
+///
+/// `Disk` mémoïse ce qu'il a lu : un chemin référencé par N agents est lu et
+/// journalisé **une** fois, pas N. Sans quoi un stage de 5 agents sur la même
+/// recette écrirait 5 copies de son contenu au journal — sur un kind créé
+/// précisément parce que ce payload est volumineux — et pourrait servir deux
+/// versions différentes si le fichier changeait en cours de run.
 enum RecipeSource {
-    Disk,
+    Disk(Mutex<HashMap<String, WorkflowRecipeContent>>),
     Recorded(HashMap<String, WorkflowRecipeContent>),
 }
 
@@ -78,10 +84,12 @@ impl WorkflowHandle {
         self.decide(stage, GateDecision::Deny)
     }
 
-    /// Trois verdicts et non un booléen : « ce workflow prend des décisions
-    /// vivantes » ne dit pas si la décision servira, et une décision posée sur
-    /// un stage mort ou inexistant ne doit pas s'afficher comme une
-    /// approbation.
+    /// Quatre verdicts et non un booléen : « ce workflow prend des décisions
+    /// vivantes » ne dit pas si la décision servira. Une décision posée sur un
+    /// stage inexistant, mort, ou **sans gate** ne doit pas s'afficher comme
+    /// une approbation — `run_stage` ne consomme une décision que sur un stage
+    /// `gate: approve`. Le refus de terminalité passe avant celui de gate : un
+    /// stage fini est réglé, qu'il ait eu une gate ou non.
     fn decide(&self, stage: &str, decision: GateDecision) -> GateVerdict {
         let snapshot = self.snapshot();
         let Some(status) = snapshot.stage(stage) else {
@@ -93,6 +101,9 @@ impl WorkflowHandle {
         if status.state.is_terminal() {
             return GateVerdict::Settled;
         }
+        if status.gate != Gate::Approve {
+            return GateVerdict::NoGate;
+        }
         gates.record(stage, decision);
         GateVerdict::Applied
     }
@@ -100,6 +111,10 @@ impl WorkflowHandle {
     /// La seule sortie d'un workflow suspendu : une gate sans approbateur
     /// attend sans borne, et c'est l'annulation qui la réveille. Elle coupe
     /// aussi les agents en vol et empêche les stages restants de démarrer.
+    ///
+    /// Elle ne libère pas la session parente : le `turn_start` du workflow y
+    /// reste, donc une reprise après annulation passe par une **nouvelle**
+    /// session (voir [`crate::workflow::events::WorkflowRecorderError`]).
     pub fn cancel(&self) {
         self.shared.cancel.cancel();
     }
@@ -133,7 +148,7 @@ impl WorkflowExecutor {
             runner,
             gates,
             Some(live_gates),
-            RecipeSource::Disk,
+            RecipeSource::Disk(Mutex::new(HashMap::new())),
             recorder,
             parent_session_id,
             working_dir,
@@ -443,9 +458,19 @@ impl WorkflowExecutor {
                     .await;
                 AgentState::Done
             }
-            Ok(Err(error)) => self
-                .interruption(overspent)
-                .unwrap_or(AgentState::Failed(FailureCause::Error(error))),
+            Ok(Err(error)) => match self.interruption(overspent) {
+                Some(state) => {
+                    warn!(
+                        stage = %stage.name,
+                        agent = %agent.name,
+                        session_id = %session_id,
+                        %error,
+                        "workflow: erreur d'agent masquée par l'interruption en cours"
+                    );
+                    state
+                }
+                None => AgentState::Failed(FailureCause::Error(error)),
+            },
             Err(interrupt) => {
                 cancel.cancel();
                 if tokio::time::timeout(CANCEL_GRACE, &mut run).await.is_err() {
@@ -510,14 +535,24 @@ impl WorkflowExecutor {
                         "recette « {path} » absente du journal : le rejeu ne relit pas le disque"
                     )
                 }),
-            RecipeSource::Disk => {
+            RecipeSource::Disk(read) => {
+                if let Some(recipe) = read.lock().expect("recettes empoisonnées").get(&path) {
+                    return Ok(Some(ResolvedRecipe::from(recipe)));
+                }
                 let file = load_local_recipe_file(&path).map_err(|error| error.to_string())?;
                 let recipe = WorkflowRecipeContent {
-                    path,
+                    path: path.clone(),
                     parent_dir: file.parent_dir.to_string_lossy().to_string(),
                     content: file.content,
                 };
-                self.recorder.recipe(&recipe).await;
+                let first_read = read
+                    .lock()
+                    .expect("recettes empoisonnées")
+                    .insert(path, recipe.clone())
+                    .is_none();
+                if first_read {
+                    self.recorder.recipe(&recipe).await;
+                }
                 Ok(Some(ResolvedRecipe::from(&recipe)))
             }
         }
@@ -658,9 +693,10 @@ impl WorkflowExecutor {
 }
 
 /// L'état d'un stage à partir de celui de ses agents, par précédence
-/// `Failed > Cancelled > Done`. La cause remontée ne dépend pas du rang de
-/// l'agent dans le document : un échec de budget reste nommé même déclaré
-/// après un agent annulé.
+/// `Failed > Cancelled > Done` : un échec reste nommé même déclaré après un
+/// agent annulé. **Entre deux échecs**, en revanche, c'est le premier dans
+/// l'ordre du document qui donne la cause — la cause par agent, elle, vit dans
+/// `WorkflowState.stages[].agents[]`, et c'est elle que les vues affichent.
 fn stage_state(outcomes: &[AgentState]) -> StageState {
     if let Some(cause) = outcomes.iter().find_map(|outcome| match outcome {
         AgentState::Failed(cause) => Some(cause.clone()),

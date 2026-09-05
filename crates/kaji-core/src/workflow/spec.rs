@@ -52,6 +52,16 @@ impl Gate {
     }
 }
 
+/// Les bornes d'un stage. **Les deux champs n'ont pas la même portée**, parce
+/// que les deux grandeurs ne se cumulent pas de la même façon sur un fan-out :
+///
+/// - `max_tokens` est un budget **de stage**, partagé par tous ses agents :
+///   leurs consommations s'additionnent, et le franchissement les coupe
+///   ensemble. Un budget par agent laisserait N agents dépenser N fois la
+///   valeur déclarée.
+/// - `max_duration_s` est armé **par agent** : les agents d'un stage tournent
+///   en parallèle, donc la durée du stage est le `max` de leurs durées, pas
+///   leur somme. La borne par agent est déjà la borne du stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budgets {

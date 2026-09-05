@@ -22,11 +22,13 @@
 //!
 //! Le workflow occupe un `turn_seq` unique sur la session parente, qu'il
 //! **revendique** avec un `turn_start` — l'index unique
-//! `idx_session_events_turn_alloc` est la seule chose qui ferme réellement
-//! l'allocation de tour — et qu'il referme avec un `turn_end` à
-//! `workflow_done`. Un workflow tué laisse donc une borne ouverte, exactement
-//! comme un tour d'agent tué : `last_turn_is_interrupted` le voit, et le
-//! curseur refuse un journal tronqué au lieu de le rejouer à moitié.
+//! `idx_session_events_turn_alloc` ferme l'allocation du numéro, et la
+//! transaction de [`SessionManager::claim_exclusive_turn_start`] ferme
+//! l'exclusivité du workflow sur la session — et qu'il referme avec un
+//! `turn_end` à `workflow_done`. Un workflow tué laisse donc une borne
+//! ouverte, exactement comme un tour d'agent tué : `last_turn_is_interrupted`
+//! le voit, et le curseur refuse un journal tronqué au lieu de le rejouer à
+//! moitié.
 //!
 //! Un agent qui échoue à `prepare` n'a pas de session enfant : il n'émet que
 //! `agent_done`, sans `agent_started` préalable. Les vues se construisent donc
@@ -40,14 +42,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::warn;
 
+use crate::session::session_manager::TurnClaim;
 use crate::session::SessionManager;
 use crate::workflow::gate::GateDecision;
 use crate::workflow::state::{AgentState, WorkflowState};
 
-/// Les bornes de tour du journal v2 : le workflow écrit les mêmes que la
-/// boucle agent, c'est ce qui rend son tour visible à l'allocation, à la
+/// La borne fermante du tour de workflow. L'ouvrante — le `turn_start` — est
+/// écrite par [`SessionManager::claim_exclusive_turn_start`], qui la revendique
+/// sous l'index unique d'allocation. Le workflow pose donc les mêmes bornes que
+/// la boucle agent : c'est ce qui rend son tour visible à l'allocation, à la
 /// détection de troncature et au plan de rejeu.
-const TURN_START: &str = "turn_start";
 const TURN_END: &str = "turn_end";
 
 pub const WORKFLOW_STARTED: &str = "workflow_started";
@@ -91,7 +95,12 @@ pub fn workflow_of_turn_start(payload_json: &str) -> Option<String> {
 /// Pourquoi un workflow ne peut pas s'attacher à une session.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkflowRecorderError {
-    #[error("la session « {0} » porte déjà le workflow « {1} » : une session parente n'en porte qu'un (les gates y sont adressées par nom de stage)")]
+    /// La marque d'un workflow est son `turn_start`, et il reste au journal
+    /// **même annulé** : reprendre un workflow après `cancel()` demande donc
+    /// une nouvelle session, jamais un second tour sur celle-ci (les gates y
+    /// sont adressées par nom de stage, un second run écraserait les
+    /// décisions du premier).
+    #[error("la session « {0} » porte déjà le workflow « {1} » : une session parente n'en porte qu'un, même annulé — relancer demande une nouvelle session")]
     AlreadyCarriesAWorkflow(String, String),
 
     #[error("impossible de revendiquer un tour sur la session « {0} » après {1} tentatives : un autre écrivain alloue en boucle")]
@@ -138,9 +147,10 @@ pub struct WorkflowArtifact {
     pub output: String,
 }
 
-/// Le contenu d'une recette référencée par la spec, résolu une fois au début
-/// de l'exécution. Le *chemin* seul ne suffit pas : le fichier peut changer
-/// entre l'enregistrement et le rejeu, et il entre dans le prompt de l'agent.
+/// Le contenu d'une recette référencée par la spec, lu **une fois par
+/// chemin** — à sa première référence — puis servi tel quel aux autres agents
+/// du même run. Le *chemin* seul ne suffit pas : le fichier peut changer entre
+/// l'enregistrement et le rejeu, et il entre dans le prompt de l'agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRecipeContent {
     pub path: String,
@@ -172,19 +182,25 @@ pub struct WorkflowRecorder {
     turn_seq: i64,
 }
 
-/// Combien de fois `open` réessaie une allocation de tour perdue au profit
-/// d'un autre écrivain de la session. Chaque perte fait avancer `MAX(turn_seq)`
-/// d'au moins un : quelques tentatives suffisent, et une boucle infinie
-/// masquerait un écrivain fou.
+/// Combien de fois `open` réessaie un **numéro** de tour perdu au profit d'un
+/// autre écrivain de la session (jamais une exclusivité perdue : celle-là est
+/// définitive). Chaque perte fait avancer `MAX(turn_seq)` d'au moins un :
+/// quelques tentatives suffisent, et une boucle infinie masquerait un écrivain
+/// fou.
 const TURN_CLAIM_ATTEMPTS: u32 = 8;
 
 impl WorkflowRecorder {
-    /// Pose `log_meta`, refuse un second workflow sur la session, puis
-    /// **revendique** son `turn_seq` par un `turn_start` : `next_turn_seq`
-    /// seul ne ferme pas l'allocation (son `BEGIN IMMEDIATE` commite avant
-    /// l'INSERT), c'est l'index unique `idx_session_events_turn_alloc` qui la
-    /// ferme. Un tour d'agent qui alloue en même temps perd donc la course
-    /// franchement, au lieu d'écrire ses events sous le même numéro.
+    /// Pose `log_meta`, puis **revendique** son tour par un `turn_start` écrit
+    /// d'abord : c'est l'écriture qui tranche, pas une lecture préalable.
+    /// [`SessionManager::claim_exclusive_turn_start`] refuse la session dans la
+    /// même transaction que l'INSERT, donc deux `open()` concurrents ne peuvent
+    /// pas s'attacher tous les deux — le perdant est **refusé**
+    /// (`AlreadyCarriesAWorkflow`), jamais poussé sur le tour suivant.
+    ///
+    /// Le seul cas qui fait réessayer est un tour **d'agent** qui a pris le
+    /// numéro visé entre `next_turn_seq` et l'INSERT (la boucle agent alloue
+    /// hors transaction) : le workflow va alors chercher un tour libre plus
+    /// loin, au lieu d'écrire ses events sous un numéro déjà tenu.
     pub async fn open(
         session_manager: Arc<SessionManager>,
         session_id: String,
@@ -193,12 +209,6 @@ impl WorkflowRecorder {
         session_manager
             .append_log_meta_if_absent(&session_id)
             .await?;
-
-        if let Some(existing) = existing_workflow(&session_manager, &session_id).await? {
-            return Err(
-                WorkflowRecorderError::AlreadyCarriesAWorkflow(session_id, existing).into(),
-            );
-        }
 
         let payload = serde_json::json!({
             "query_preview": format!("workflow « {workflow} »"),
@@ -209,18 +219,23 @@ impl WorkflowRecorder {
         for _ in 0..TURN_CLAIM_ATTEMPTS {
             let turn_seq = session_manager.next_turn_seq(&session_id).await?;
             match session_manager
-                .append_event(&session_id, turn_seq, TURN_START, &payload)
-                .await
+                .claim_exclusive_turn_start(&session_id, turn_seq, TURN_WORKFLOW_FIELD, &payload)
+                .await?
             {
-                Ok(()) => {
+                TurnClaim::Claimed => {
                     return Ok(Self {
                         session_manager,
                         session_id,
                         turn_seq,
                     })
                 }
-                Err(error) if is_turn_taken(&error) => continue,
-                Err(error) => return Err(error),
+                TurnClaim::AlreadyExclusive(existing) => {
+                    return Err(WorkflowRecorderError::AlreadyCarriesAWorkflow(
+                        session_id, existing,
+                    )
+                    .into())
+                }
+                TurnClaim::TurnTaken => continue,
             }
         }
 
@@ -360,30 +375,4 @@ impl WorkflowRecorder {
             warn!(%error, session_id = %self.session_id, "workflow: turn_end non écrit — le tour restera « interrompu »");
         }
     }
-}
-
-/// Le nom du workflow déjà porté par la session, s'il y en a un. La marque est
-/// le `turn_start` d'orchestration : il est écrit avant tout le reste et sous
-/// index unique, donc c'est lui — pas `workflow_started` — qui témoigne d'un
-/// workflow attaché.
-async fn existing_workflow(
-    session_manager: &SessionManager,
-    session_id: &str,
-) -> Result<Option<String>> {
-    Ok(session_manager
-        .session_events(session_id)
-        .await?
-        .iter()
-        .filter(|event| event.kind == TURN_START)
-        .find_map(|event| workflow_of_turn_start(&event.payload_json)))
-}
-
-fn is_turn_taken(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<sqlx::Error>()
-        .and_then(|error| match error {
-            sqlx::Error::Database(database) => Some(database.is_unique_violation()),
-            _ => None,
-        })
-        .unwrap_or(false)
 }

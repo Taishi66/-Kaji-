@@ -5,9 +5,12 @@
 //!
 //! Codes de sortie : `0` rejeu mené à son terme — y compris avec des
 //! divergences tolérées par `--lenient`, signalées tour par tour et comptées
-//! en fin de rejeu, le mode existant justement pour les auditer ; `2`
-//! divergence fatale pendant un tour (hash de requête en strict, clé absente
-//! ou chunk illisible dans les deux modes), `3` journal tronqué au chargement
+//! en fin de rejeu, le mode existant justement pour les auditer — y compris
+//! une topologie de workflow différente de l'enregistrement ; `2` divergence
+//! fatale pendant un tour (hash de requête ou topologie de workflow en strict,
+//! clé absente ou chunk illisible dans les deux modes ; un tour de workflow
+//! que le journal ne permet pas de redérouler y sort aussi, sous un autre
+//! message), `3` journal tronqué au chargement
 //! (dernier tour sans `turn_end`, sans `--until` suffisamment bas pour
 //! l'éviter), `4` session non disponible pour le rejeu (pré-v2 ou purgée).
 //! Une session introuvable, ou toute autre erreur inattendue, remonte via
@@ -139,14 +142,33 @@ pub async fn handle_replay_subcommand(
                 )
                 .await
                 {
-                    Ok(lines) => {
+                    Ok(replay) => {
                         replayed += 1;
-                        for line in lines {
+                        for line in replay.lines {
                             println!("[tour {turn_seq}] {line}");
                         }
+                        match replay.verdict {
+                            TurnVerdict::Faithful => {}
+                            TurnVerdict::Tolerated(divergence) => {
+                                tolerated += 1;
+                                println!("[tour {turn_seq}] divergence tolérée — {divergence}");
+                            }
+                            TurnVerdict::Fatal(divergence) => {
+                                eprintln!(
+                                    "kaji replay : divergence au tour {turn_seq} — {divergence}"
+                                );
+                                std::process::exit(EXIT_DIVERGENCE);
+                            }
+                        }
                     }
+                    // Pas une divergence : le journal n'a pas de quoi
+                    // redérouler le DAG (payload illisible, session dérivée
+                    // qui refuse le workflow). Le rejeu s'arrête là, en le
+                    // disant autrement.
                     Err(error) => {
-                        eprintln!("kaji replay : divergence au tour {turn_seq} — {error}");
+                        eprintln!(
+                            "kaji replay : rejeu du workflow impossible au tour {turn_seq} — {error}"
+                        );
                         std::process::exit(EXIT_DIVERGENCE);
                     }
                 }
@@ -221,7 +243,7 @@ async fn replay_workflow(
     working_dir: std::path::PathBuf,
     workflow: &str,
     lenient: bool,
-) -> Result<Vec<String>> {
+) -> Result<WorkflowReplay> {
     let started = cursor
         .workflow
         .clone()
@@ -244,23 +266,69 @@ async fn replay_workflow(
         "workflow « {workflow} » rejoué — {}",
         state.outcome().label()
     )];
-    match &cursor.workflow_final {
-        Some(recorded) if recorded.topology() != state.topology() => {
-            return Err(anyhow!(
-                "état du workflow « {workflow} » différent de l'enregistrement — \
-                 enregistré {:?}, rejoué {:?}",
-                recorded.topology(),
-                state.topology()
-            ))
-        }
-        Some(_) => lines.push(format!(
-            "workflow « {workflow} » identique à l'enregistrement"
-        )),
-        None => lines.push(format!(
-            "workflow « {workflow} » sans état final enregistré : rien à comparer"
-        )),
+    let verdict = workflow_verdict(cursor.workflow_final.as_ref(), &state, workflow, lenient);
+    if matches!(verdict, TurnVerdict::Faithful) {
+        lines.push(match &cursor.workflow_final {
+            Some(_) => format!("workflow « {workflow} » identique à l'enregistrement"),
+            None => {
+                format!("workflow « {workflow} » sans état final enregistré : rien à comparer")
+            }
+        });
     }
-    Ok(lines)
+    Ok(WorkflowReplay { lines, verdict })
+}
+
+/// Ce qu'un tour de workflow rejoué rend à la boucle : sa transcription, et
+/// l'écart éventuel à l'état figé par `workflow_done`.
+struct WorkflowReplay {
+    lines: Vec<String>,
+    verdict: TurnVerdict,
+}
+
+/// Le sort d'un écart entre l'état rejoué et l'état enregistré.
+enum TurnVerdict {
+    /// Rien à signaler — topologies identiques, ou aucun état enregistré à
+    /// comparer.
+    Faithful,
+    /// Écart compté et signalé, le rejeu continue (`--lenient`).
+    Tolerated(String),
+    /// Écart fatal : le rejeu sort en `EXIT_DIVERGENCE` (mode strict).
+    Fatal(String),
+}
+
+/// Compare la topologie rejouée à celle qu'a figée `workflow_done`, et tranche
+/// selon le mode. `--lenient` existe pour **auditer** les divergences en
+/// sortant vert : une gate absente du journal y refuse son stage, la cascade
+/// suit, et la topologie diverge — la compter comme tolérée est la seule
+/// lecture cohérente avec le mode. Le mode strict, lui, reste fatal.
+///
+/// La comparaison porte sur les noms et les états (`topology()`), jamais sur
+/// `tokens`/`duration_ms` : ce qu'elle prouve est la cohérence de
+/// l'ordonnanceur avec son journal, pas le déterminisme d'un modèle — aucun
+/// agent ne tourne au rejeu.
+fn workflow_verdict(
+    recorded: Option<&kaji::workflow::WorkflowState>,
+    replayed: &kaji::workflow::WorkflowState,
+    workflow: &str,
+    lenient: bool,
+) -> TurnVerdict {
+    let Some(recorded) = recorded else {
+        return TurnVerdict::Faithful;
+    };
+    if recorded.topology() == replayed.topology() {
+        return TurnVerdict::Faithful;
+    }
+    let divergence = format!(
+        "état du workflow « {workflow} » différent de l'enregistrement — \
+         enregistré {:?}, rejoué {:?}",
+        recorded.topology(),
+        replayed.topology()
+    );
+    if lenient {
+        TurnVerdict::Tolerated(divergence)
+    } else {
+        TurnVerdict::Fatal(divergence)
+    }
 }
 
 /// Rejoue un tour jusqu'à son terme et rend chaque message produit sous forme
@@ -416,5 +484,70 @@ mod tests {
         let summary = replay_summary(2, 1, 0);
         assert!(summary.contains("2 tour(s) rejoué(s)"), "{summary}");
         assert!(summary.contains("1 tour(s) sauté(s)"), "{summary}");
+    }
+
+    fn state_with_stage(stage_state: serde_json::Value) -> kaji::workflow::WorkflowState {
+        serde_json::from_value(serde_json::json!({
+            "workflow": "livraison",
+            "stages": [{
+                "name": "deploie",
+                "state": stage_state,
+                "gate": "approve",
+                "agents": [{
+                    "name": "pousse",
+                    "state": "done",
+                    "session_id": null,
+                    "tokens": 0,
+                    "duration_ms": 0,
+                }],
+            }],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_identical_workflow_turn_is_faithful() {
+        let verdict = workflow_verdict(
+            Some(&state_with_stage(serde_json::json!("done"))),
+            &state_with_stage(serde_json::json!("done")),
+            "livraison",
+            false,
+        );
+        assert!(matches!(verdict, TurnVerdict::Faithful));
+    }
+
+    #[test]
+    fn a_workflow_turn_without_a_recorded_state_has_nothing_to_compare() {
+        let verdict = workflow_verdict(
+            None,
+            &state_with_stage(serde_json::json!("done")),
+            "livraison",
+            false,
+        );
+        assert!(matches!(verdict, TurnVerdict::Faithful));
+    }
+
+    /// F-9 : `--lenient` existe pour auditer les divergences en sortant vert.
+    /// Une topologie de workflow différente y est comptée, pas fatale — en
+    /// strict elle reste fatale.
+    #[test]
+    fn a_diverging_workflow_turn_is_tolerated_in_lenient_and_fatal_in_strict() {
+        let recorded = state_with_stage(serde_json::json!("done"));
+        let replayed = state_with_stage(serde_json::json!("cancelled"));
+
+        let TurnVerdict::Tolerated(message) =
+            workflow_verdict(Some(&recorded), &replayed, "livraison", true)
+        else {
+            panic!("--lenient compte la divergence au lieu de sortir en 2");
+        };
+        assert!(message.contains("livraison"), "{message}");
+
+        assert!(
+            matches!(
+                workflow_verdict(Some(&recorded), &replayed, "livraison", false),
+                TurnVerdict::Fatal(_)
+            ),
+            "le mode strict reste fatal"
+        );
     }
 }

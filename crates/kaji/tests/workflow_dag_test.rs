@@ -16,8 +16,8 @@ use kaji::session::session_manager::SessionType;
 use kaji::session::SessionManager;
 use kaji::workflow::events::WorkflowRecorder;
 use kaji::workflow::{
-    AgentRunRequest, AgentRunner, GateDecision, GateVerdict, ReplayGates, ReplayRunner,
-    SubagentRunner, WorkflowExecutor, WorkflowOutcome,
+    AgentRunRequest, AgentRunner, GateDecision, GateVerdict, RecordedOutcome, ReplayGates,
+    ReplayRunner, SubagentRunner, WorkflowExecutor, WorkflowOutcome,
 };
 use kaji_core::workflow::WorkflowSpec;
 use tempfile::TempDir;
@@ -66,6 +66,39 @@ impl AgentRunner for EchoRunner {
             .unwrap()
             .push((request.label(), request.inputs.clone()));
         Ok(format!("[{}]", request.agent))
+    }
+}
+
+/// Le runner de rejeu, doublé d'un témoin de lancement. Branché sur
+/// l'exécuteur — un témoin qu'on garde à côté ne prouve rien —, il note tout
+/// appel à `run`, le seul chemin qui lancerait un vrai sous-agent.
+struct WitnessedReplayRunner {
+    inner: ReplayRunner,
+    launched: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl AgentRunner for WitnessedReplayRunner {
+    async fn prepare(&self, request: &AgentRunRequest) -> Result<String, String> {
+        self.inner.prepare(request).await
+    }
+
+    async fn run(
+        &self,
+        request: AgentRunRequest,
+        session_id: &str,
+        cancel: CancellationToken,
+    ) -> Result<String, String> {
+        self.launched.lock().unwrap().push(request.label());
+        self.inner.run(request, session_id, cancel).await
+    }
+
+    async fn tokens_used(&self, session_id: &str) -> i64 {
+        self.inner.tokens_used(session_id).await
+    }
+
+    async fn recorded_outcome(&self, request: &AgentRunRequest) -> Option<RecordedOutcome> {
+        self.inner.recorded_outcome(request).await
     }
 }
 
@@ -155,13 +188,16 @@ async fn a_recorded_workflow_replays_hermetically_from_its_log() {
     );
 
     // Le rejeu tourne sur `ReplayRunner` : gates, sorties et issues viennent
-    // du journal, aucun sous-agent ne part. Le runner vivant sert de témoin —
-    // s'il est sollicité, le rejeu n'était pas hermétique.
+    // du journal, aucun sous-agent ne part. Le témoin est branché **sur** le
+    // runner du rejeu — s'il est sollicité, le rejeu n'était pas hermétique.
     let replayed = Harness::new().await;
-    let live = Arc::new(EchoRunner::default());
+    let witness = Arc::new(WitnessedReplayRunner {
+        inner: ReplayRunner::from_cursor(&cursor),
+        launched: Mutex::new(Vec::new()),
+    });
     let executor = WorkflowExecutor::replaying(
         cursor.workflow.clone().unwrap().spec,
-        Arc::new(ReplayRunner::from_cursor(&cursor)),
+        Arc::clone(&witness) as Arc<dyn AgentRunner>,
         Arc::new(ReplayGates::from_cursor(&cursor)),
         cursor.workflow_recipes.clone(),
         replayed.recorder("livraison").await,
@@ -184,9 +220,9 @@ async fn a_recorded_workflow_replays_hermetically_from_its_log() {
     // comparaison porte sur la topologie et les états.
     assert_eq!(state.topology(), recorded_state.topology());
     assert!(
-        live.started.lock().unwrap().is_empty(),
+        witness.launched.lock().unwrap().is_empty(),
         "aucun sous-agent réel ne part au rejeu : {:?}",
-        live.started.lock().unwrap()
+        witness.launched.lock().unwrap()
     );
     assert_eq!(
         state

@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::KajiMode;
 use crate::replay::cursor::EventCursor;
-use crate::session::session_manager::SessionType;
+use crate::session::session_manager::{SessionType, TurnClaim};
 use crate::session::SessionManager;
 use crate::workflow::events::{
     WorkflowRecorder, AGENT_DONE, AGENT_STARTED, STAGE_STARTED, WORKFLOW_KINDS, WORKFLOW_STARTED,
@@ -160,6 +160,56 @@ impl AgentRunner for FixtureRunner {
             .get(session_id)
             .copied()
             .unwrap_or(0)
+    }
+}
+
+/// Le runner de rejeu, doublé d'un témoin de lancement. Un témoin qui n'est
+/// pas **branché** sur l'exécuteur ne peut rien prouver : celui-ci sert le
+/// journal comme `ReplayRunner` et note tout appel à `run`, donc l'assertion
+/// « aucun sous-agent réel » tombe si l'exécuteur en lance un.
+struct WitnessedReplayRunner {
+    inner: ReplayRunner,
+    launched: Mutex<Vec<String>>,
+}
+
+impl WitnessedReplayRunner {
+    fn new(inner: ReplayRunner) -> Self {
+        Self {
+            inner,
+            launched: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn launched(&self) -> Vec<String> {
+        self.launched.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentRunner for WitnessedReplayRunner {
+    async fn prepare(&self, request: &AgentRunRequest) -> Result<String, String> {
+        self.inner.prepare(request).await
+    }
+
+    async fn run(
+        &self,
+        request: AgentRunRequest,
+        session_id: &str,
+        cancel: CancellationToken,
+    ) -> Result<String, String> {
+        self.launched.lock().unwrap().push(request.label());
+        self.inner.run(request, session_id, cancel).await
+    }
+
+    async fn tokens_used(&self, session_id: &str) -> i64 {
+        self.inner.tokens_used(session_id).await
+    }
+
+    async fn recorded_outcome(
+        &self,
+        request: &AgentRunRequest,
+    ) -> Option<crate::workflow::runner::RecordedOutcome> {
+        self.inner.recorded_outcome(request).await
     }
 }
 
@@ -733,6 +783,41 @@ async fn a_decision_on_a_dead_or_unknown_stage_is_refused() {
     );
 }
 
+/// I-2 (résidu F-3) : un stage vivant **sans gate** ne prend pas de décision.
+/// `Applied` y enregistrerait une approbation que `run_stage` ne consomme
+/// jamais, et T6 afficherait « décision enregistrée » sur un stage qui n'a
+/// rien à approuver.
+#[tokio::test]
+async fn a_decision_on_a_stage_without_a_gate_is_refused() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new().with("build.compile", Script::Hang));
+    let executor = fixture.executor(spec(GATED), Arc::clone(&runner)).await;
+    let handle = executor.handle();
+    let run = tokio::spawn(executor.run());
+
+    // `build` tourne encore : il n'est ni inconnu ni terminal, seule l'absence
+    // de gate peut le refuser.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        handle.snapshot().stage("build").unwrap().state,
+        StageState::Running
+    );
+    assert_eq!(handle.approve("build"), GateVerdict::NoGate);
+    assert_eq!(handle.deny("build"), GateVerdict::NoGate);
+
+    handle.cancel();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("cancel() coupe l'agent suspendu")
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        fixture.payloads("gate_decision").await.is_empty(),
+        "un stage sans gate n'enregistre aucune décision"
+    );
+}
+
 /// I-3 : une gate sans approbateur attend sans borne — `cancel()` est la
 /// sortie. Le stage gaté part en `Cancelled`, sa descendance avec, et le
 /// journal se referme (`workflow_done` + `turn_end`).
@@ -835,11 +920,84 @@ async fn a_stage_that_has_not_started_is_cancelled_at_its_gate_of_entry() {
     );
 }
 
-/// I-4 : la cause d'un stage ne dépend pas du rang de ses agents dans le
-/// document. Le même couple (agent annulé, agent hors budget) doit donner le
-/// même état de stage dans les deux ordres de déclaration.
+/// I-4 : `Failed` l'emporte sur `Cancelled` quel que soit le rang des agents
+/// dans le document. Le couple est **réel** : un agent qui échoue de sa propre
+/// erreur, un autre coupé par `cancel()` — un stage dont les deux agents
+/// tombent sous le même budget ne teste pas cette précédence, il ne produit
+/// aucun `Cancelled`.
 #[tokio::test]
 async fn a_stage_state_is_aggregated_by_precedence_not_by_declaration_order() {
+    async fn outcome_of(first: &str, second: &str) -> (StageState, Vec<AgentState>) {
+        let yaml = format!(
+            r#"
+name: ordre
+stages:
+  - name: melange
+    agents:
+      - name: {first}
+        prompt: fais
+      - name: {second}
+        prompt: fais
+"#
+        );
+        let fixture = Fixture::new().await;
+        let runner = Arc::new(
+            FixtureRunner::new()
+                .with("melange.suspendu", Script::Hang)
+                .with("melange.casse", Script::Fail("disque plein".to_string())),
+        );
+        let executor = fixture.executor(spec(&yaml), Arc::clone(&runner)).await;
+        let handle = executor.handle();
+        let run = tokio::spawn(executor.run());
+
+        // `casse` a déjà rendu son erreur, `suspendu` attend : l'annulation
+        // n'arrive qu'ensuite, donc l'échec n'est pas imputable à la coupure.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        handle.cancel();
+
+        let state = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("cancel() coupe l'agent suspendu")
+            .unwrap()
+            .unwrap();
+        let stage = state.stage("melange").unwrap();
+        (
+            stage.state.clone(),
+            stage
+                .agents
+                .iter()
+                .map(|agent| agent.state.clone())
+                .collect(),
+        )
+    }
+
+    let (failure_first, agents_first) = outcome_of("casse", "suspendu").await;
+    let (failure_last, agents_last) = outcome_of("suspendu", "casse").await;
+
+    let failed = AgentState::Failed(FailureCause::Error("disque plein".to_string()));
+    assert!(
+        agents_first.contains(&failed) && agents_first.contains(&AgentState::Cancelled),
+        "le couple exercé doit être (Failed, Cancelled) : {agents_first:?}"
+    );
+    assert!(
+        agents_last.contains(&failed) && agents_last.contains(&AgentState::Cancelled),
+        "le couple exercé doit être (Failed, Cancelled) : {agents_last:?}"
+    );
+    assert_eq!(
+        failure_first,
+        StageState::Failed(FailureCause::Error("disque plein".to_string()))
+    );
+    assert_eq!(
+        failure_last, failure_first,
+        "Failed l'emporte sur Cancelled quel que soit l'ordre YAML"
+    );
+}
+
+/// I-4 (second volet) : deux agents coupés par le **même** budget de stage
+/// donnent le même échec nommé dans les deux ordres — la variante que C-1 a
+/// rendue possible, et qui ne dit rien de la précédence `Failed > Cancelled`.
+#[tokio::test]
+async fn a_shared_budget_names_the_same_cause_in_both_declaration_orders() {
     async fn outcome_of(first: &str, second: &str) -> StageState {
         let yaml = format!(
             r#"
@@ -858,7 +1016,7 @@ stages:
         let fixture = Fixture::new().await;
         let runner = Arc::new(
             FixtureRunner::new()
-                .with("melange.suspendu", Script::Hang)
+                .with("melange.sobre", Script::Burn { tokens: 60 })
                 .with("melange.gourmand", Script::Burn { tokens: 150 }),
         );
         let executor = fixture.executor(spec(&yaml), Arc::clone(&runner)).await;
@@ -869,17 +1027,14 @@ stages:
         state.stage("melange").unwrap().state.clone()
     }
 
-    let budget_first = outcome_of("gourmand", "suspendu").await;
-    let budget_last = outcome_of("suspendu", "gourmand").await;
+    let budget_first = outcome_of("gourmand", "sobre").await;
+    let budget_last = outcome_of("sobre", "gourmand").await;
 
     assert_eq!(
         budget_first,
         StageState::Failed(FailureCause::Budget(BudgetLimit::Tokens))
     );
-    assert_eq!(
-        budget_last, budget_first,
-        "Failed l'emporte sur Cancelled quel que soit l'ordre YAML"
-    );
+    assert_eq!(budget_last, budget_first);
 }
 
 /// I-5 : deux stages sans lien partent **ensemble** — la propriété centrale de
@@ -983,11 +1138,11 @@ async fn a_session_refuses_a_second_workflow() {
 }
 
 /// I-6 : le tour du workflow est **revendiqué** par un `turn_start`, sous
-/// l'index unique d'allocation. Un tour d'agent qui a déjà pris ce numéro fait
-/// perdre la course franchement, au lieu de laisser deux tours écrire sous le
-/// même `turn_seq`.
+/// l'index unique d'allocation. La collision est ici réelle — le tour visé est
+/// déjà pris par un tour d'agent — donc c'est bien l'index qui tranche, et le
+/// workflow va chercher un tour libre au lieu d'écrire sous le même numéro.
 #[tokio::test]
-async fn the_workflow_turn_is_claimed_against_a_concurrent_allocation() {
+async fn a_turn_already_taken_is_refused_by_the_index_and_the_workflow_moves_on() {
     let fixture = Fixture::new().await;
     fixture
         .session_manager
@@ -1000,13 +1155,109 @@ async fn the_workflow_turn_is_claimed_against_a_concurrent_allocation() {
         .await
         .unwrap();
 
-    let recorder = fixture.open_recorder("après").await.unwrap();
+    let claim = fixture
+        .session_manager
+        .claim_exclusive_turn_start(
+            &fixture.session_id,
+            2,
+            "workflow",
+            r#"{"query_preview":"workflow","workflow":"après"}"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        claim,
+        TurnClaim::TurnTaken,
+        "le tour 2 appartient au tour d'agent : la revendication perd"
+    );
 
+    let turn_two: Vec<serde_json::Value> = fixture
+        .session_manager
+        .session_events(&fixture.session_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "turn_start" && event.turn_seq == 2)
+        .filter_map(|event| serde_json::from_str(&event.payload_json).ok())
+        .collect();
+    assert_eq!(turn_two.len(), 1, "aucun second turn_start sous le tour 2");
+    assert!(
+        turn_two[0].get("workflow").is_none(),
+        "le tour de l'agent n'a pas été écrasé : {}",
+        turn_two[0]
+    );
+
+    let recorder = fixture.open_recorder("après").await.unwrap();
     assert!(
         recorder.turn_seq() > 2,
         "le workflow prend un tour libre, pas celui de l'agent : {}",
         recorder.turn_seq()
     );
+}
+
+/// F-4 : deux `open()` concurrents sur la même session. L'exclusivité et
+/// l'écriture du `turn_start` tiennent dans une seule transaction : le perdant
+/// est **refusé**, jamais poussé sur le tour suivant — sinon la session
+/// porterait deux workflows, chacun avec son tour, alors que les gates y sont
+/// adressées par nom de stage.
+#[tokio::test]
+async fn two_concurrent_opens_leave_exactly_one_workflow_on_the_session() {
+    let fixture = Fixture::new().await;
+
+    // Le cas exact du TOCTOU : le demandeur a lu « libre », a alloué un tour
+    // encore vacant, et arrive à l'écriture après le workflow gagnant. Le
+    // refus est dans la même transaction que l'INSERT, donc son tour libre ne
+    // le sauve pas.
+    let attached = Fixture::new().await;
+    let _first = attached.open_recorder("premier").await.unwrap();
+    let late = attached
+        .session_manager
+        .claim_exclusive_turn_start(
+            &attached.session_id,
+            3,
+            "workflow",
+            r#"{"query_preview":"workflow","workflow":"second"}"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        late,
+        TurnClaim::AlreadyExclusive("premier".to_string()),
+        "un tour libre ne rattrape pas une session déjà prise"
+    );
+
+    let (left, right) = tokio::join!(
+        fixture.open_recorder("gauche"),
+        fixture.open_recorder("droite")
+    );
+
+    let (winner, loser) = match (left, right) {
+        (Ok(winner), Err(loser)) | (Err(loser), Ok(winner)) => (winner, loser),
+        (Ok(left), Ok(right)) => panic!(
+            "deux workflows attachés à la même session (tours {} et {})",
+            left.turn_seq(),
+            right.turn_seq()
+        ),
+        (Err(left), Err(right)) => panic!("aucun gagnant : {left} / {right}"),
+    };
+    assert!(
+        loser.to_string().contains("porte déjà"),
+        "le perdant est refusé par un nom, pas par un tour de plus : {loser}"
+    );
+
+    let workflow_turns = fixture
+        .session_manager
+        .session_events(&fixture.session_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "turn_start")
+        .filter(|event| {
+            crate::workflow::events::workflow_of_turn_start(&event.payload_json).is_some()
+        })
+        .count();
+    assert_eq!(workflow_turns, 1, "un seul tour de workflow sur la session");
+    assert_eq!(winner.turn_seq(), 2);
 }
 
 /// I-7 : le rejeu d'un parent sert les sorties du journal et ne lance **aucun**
@@ -1028,12 +1279,14 @@ async fn a_replayed_workflow_serves_its_agent_outputs_from_the_log() {
         .unwrap();
 
     let replayed = Fixture::new().await;
-    // Un runner vivant qui refuserait de tourner : s'il est sollicité, le test
-    // le voit. C'est la garantie « zéro sous-agent réel au rejeu ».
-    let live = Arc::new(FixtureRunner::new());
+    // Le runner de rejeu est branché derrière un témoin : tout appel à `run`
+    // — le seul chemin qui lancerait un vrai sous-agent — y laisse une trace.
+    let witness = Arc::new(WitnessedReplayRunner::new(ReplayRunner::from_cursor(
+        &cursor,
+    )));
     let executor = WorkflowExecutor::replaying(
         cursor.workflow.clone().unwrap().spec,
-        Arc::new(ReplayRunner::from_cursor(&cursor)),
+        Arc::clone(&witness) as Arc<dyn AgentRunner>,
         Arc::new(ReplayGates::from_cursor(&cursor)),
         cursor.workflow_recipes.clone(),
         replayed.recorder().await,
@@ -1048,8 +1301,9 @@ async fn a_replayed_workflow_serves_its_agent_outputs_from_the_log() {
         .unwrap();
 
     assert!(
-        live.started().is_empty(),
-        "aucun agent réel ne doit partir au rejeu"
+        witness.launched().is_empty(),
+        "aucun agent réel ne doit partir au rejeu : {:?}",
+        witness.launched()
     );
     assert_eq!(
         state.topology(),
@@ -1223,5 +1477,43 @@ stages:
     assert!(
         replayed_cursor.workflow_recipes.is_empty(),
         "un rejeu ne relit pas le disque, donc ne rejournalise aucune recette"
+    );
+}
+
+/// F-8 : le contenu d'une recette est volumineux — c'est la raison d'être de
+/// son kind purgeable. Un stage de N agents sur la même recette n'en écrit
+/// qu'une copie, et tous voient la **même** version, même si le fichier change
+/// pendant le run.
+#[tokio::test]
+async fn a_recipe_shared_by_several_agents_is_journalled_once() {
+    let fixture = Fixture::new().await;
+    let recipe_path = fixture._data_dir.path().join("partagee.yaml");
+    std::fs::write(
+        &recipe_path,
+        "version: 1.0.0\ntitle: partagée\ndescription: partagée\nprompt: version enregistrée\n",
+    )
+    .unwrap();
+
+    let yaml = format!(
+        r#"
+name: recette
+stages:
+  - name: revue
+    agents:
+      - name: lecteur
+        recipe: {path}
+      - name: relecteur
+        recipe: {path}
+"#,
+        path = recipe_path.display()
+    );
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = fixture.executor(spec(&yaml), Arc::clone(&runner)).await;
+    executor.run().await.unwrap();
+
+    assert_eq!(
+        fixture.payloads("workflow_recipe").await.len(),
+        1,
+        "la recette n'est journalisée qu'une fois, pas une fois par agent"
     );
 }
