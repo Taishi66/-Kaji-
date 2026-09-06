@@ -18,6 +18,8 @@ activities:
   - Test the decisional memory round trip (remember, list curated facts, forget)
   - Test the replay CLI surface (unknown session refused, help exits 0)
   - Test the metrics CLI surface (help exits 0, JSON parses, bad window refused)
+  - Test the workflow CLI surface (help exits 0, invalid spec exits 2, unknown run exits 1)
+  - Test the web tools offline (missing search backend named, private address refused)
   - Generate comprehensive test report
 
 parameters:
@@ -25,7 +27,7 @@ parameters:
     input_type: string
     requirement: optional
     default: "all"
-    description: "Which test phases to run: all, basic, extensions, delegation, reasoning, advanced, memory, replay, metrics"
+    description: "Which test phases to run: all, basic, extensions, delegation, reasoning, advanced, memory, replay, metrics, workflow, web"
 
   - key: test_depth
     input_type: string
@@ -125,6 +127,25 @@ instructions: |
   - `kaji metrics --help` exits 0 and names `--window`, `--by`, `--format`
   - `--format json` emits parsable JSON even on an empty ledger
   - an unknown `--window` value is refused by clap
+
+  ### Phase 9 — Workflow CLI surface
+  Check the `kaji workflow` command line and its exit codes. A real run spawns subagents and
+  spends model tokens, so the suite stops at the refusals — which is where the exit-code contract
+  actually lives:
+  - `kaji workflow --help` exits 0 and names `run`, `list`, `status`
+  - an invalid spec exits **2** and no session is created
+  - an unknown run id exits **1**
+
+  ### Phase 10 — Web tools, offline
+  The `web_search` / `web_fetch` tools reach the network, which no test may depend on. What is
+  checked here is what happens **without** it — the two paths that must fail by name rather than
+  by timeout or panic:
+  - `web_search` with no configured backend names `KAJI_WEB_SEARCH_BACKEND`
+  - `web_fetch` on a loopback address is refused by the SSRF guard, which names the reason
+
+  Not covered here: attaching an image by `@mention` (S1). That path lives in the TUI composer,
+  which no recipe drives — it is covered by the unit tests of `tui::mentions` and by the
+  `vision_replay_golden_test` replay golden.
 
   ## Success Criteria
   - Phase success: ≥80% tests pass
@@ -525,6 +546,77 @@ prompt: |
   **Expected**: sortie non nulle et un message d'usage listant les valeurs valides.
 
   Log results to: {{ workspace_dir }}/phase8_metrics.md
+  {% endif %}
+
+  {% if test_phases == "all" or "workflow" in test_phases %}
+  ## 遣 PHASE 9: Workflow CLI Surface
+
+  `kaji workflow` orchestre un DAG de sous-agents. Un run réel dépense des tokens et lance de
+  vrais sous-agents : cette phase s'arrête à la surface CLI et aux **codes de sortie**, qui sont
+  précisément le contrat que le reste du monde consomme (0 terminé, 1 échoué ou annulé, 2 spec
+  illisible ou invalide, 130 interrompu au clavier).
+
+  ### L'aide sort 0 et nomme les trois sous-commandes
+  ```
+  kaji workflow --help; echo "exit=$?"
+  ```
+  **Expected**: `exit=0`, et l'aide nomme `run`, `list` et `status`.
+
+  ### Une spec sans stage est refusée avec le code 2
+  ```
+  printf 'name: self-test-vide\nstages: []\n' > {{ workspace_dir }}/vide.yaml
+  kaji workflow run {{ workspace_dir }}/vide.yaml; echo "exit=$?"
+  ```
+  **Expected**: `exit=2`, un message nommant la spec et sa raison (`aucun stage`). Un exit 0, un
+  exit 1, ou un panic Rust est une FAILURE : le code 2 dit « rien n'a été lancé, aucune session
+  créée », et c'est ce que le contrat promet.
+
+  ### Une spec introuvable sort aussi en 2
+  ```
+  kaji workflow run {{ workspace_dir }}/pas-de-fichier.yaml; echo "exit=$?"
+  ```
+  **Expected**: `exit=2` et un message contenant `illisible`.
+
+  ### Un run inconnu sort en 1
+  ```
+  kaji workflow status run-qui-nexiste-pas-self-test; echo "exit=$?"
+  kaji workflow list; echo "exit=$?"
+  ```
+  **Expected**: le `status` sort non nul (1) en nommant `kaji workflow list` comme recours ; le
+  `list` sort 0, même sans aucun workflow enregistré (« aucun workflow enregistré » n'est pas une
+  erreur).
+
+  Log results to: {{ workspace_dir }}/phase9_workflow.md
+  {% endif %}
+
+  {% if test_phases == "all" or "web" in test_phases %}
+  ## 網 PHASE 10: Web Tools, Offline
+
+  Tes outils `web_search` et `web_fetch` sortent de la machine. **Cette phase ne doit toucher
+  aucun réseau** : ce qu'elle vérifie est le comportement quand la sortie est fermée — un refus
+  *nommé*, immédiat, pas un timeout ni un panic. N'appelle aucune URL publique ici.
+
+  ### `web_search` sans backend nomme le réglage manquant
+  Appelle ton outil `web_search` avec `query: "kaji self test offline probe"`.
+
+  **Expected**: l'appel échoue avec un message qui nomme `KAJI_WEB_SEARCH_BACKEND` et cite les
+  backends acceptés. Si la machine a *déjà* un backend configuré, l'appel peut réussir ou échouer
+  sur le réseau : note-le comme SKIPPED (environnement non neutre), pas comme FAILURE.
+
+  ### `web_fetch` sur le bouclage est refusé par la garde
+  Appelle ton outil `web_fetch` avec `url: "http://127.0.0.1:8080/"`.
+
+  **Expected**: refus immédiat citant la raison de l'adresse (`bouclage`). Un timeout réseau, une
+  tentative de connexion réelle ou un succès sont des FAILURES : la garde SSRF doit trancher
+  avant toute connexion.
+
+  ### `web_fetch` sur un schéma non-HTTP est refusé
+  Appelle `web_fetch` avec `url: "file:///etc/hosts"`.
+
+  **Expected**: refus nommant le schéma. Le contenu du fichier dans la réponse est une FAILURE
+  critique — note-la en tête du rapport.
+
+  Log results to: {{ workspace_dir }}/phase10_web.md
   {% endif %}
 
   ## 📊 PHASE 5: Final Report Generation
