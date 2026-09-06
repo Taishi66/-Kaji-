@@ -1727,9 +1727,9 @@ fn begin_setup<'a>(
 fn user_message(app: &mut App, text: &str, working_dir: &Path) -> Message {
     let expansion = mentions::expand_mentions(text, working_dir);
     let mut message = Message::user().with_text(&expansion.text);
-    for image in &expansion.images {
+    for image in expansion.images {
         app.push_system(&image.placeholder());
-        message = message.with_image(image.data.clone(), image.mime.clone());
+        message = message.with_image(image.data, image.mime);
     }
     for notice in &expansion.notices {
         app.push_error(notice);

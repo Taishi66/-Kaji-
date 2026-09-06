@@ -13,6 +13,9 @@
 //!   mentions out of the text into [`MentionImage`] attachments the caller
 //!   turns into multimodal message content (S1). The chat line keeps the text
 //!   as typed — only the model-bound message carries the payload.
+//!
+//! S1 n'attache que des images fixes : un GIF animé est refusé ici, avec sa
+//! raison, plutôt que renvoyé bien plus tard par une erreur d'API du provider.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -35,12 +38,13 @@ const MAX_DIR_ENTRIES: usize = 200;
 /// toute façon, appliquées avant de charger quoi que ce soit en mémoire.
 const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_IMAGES: usize = 3;
+const GIF_MIME: &str = "image/gif";
 const IMAGE_MIMES: [(&str, &str); 5] = [
     ("png", "image/png"),
     ("jpg", "image/jpeg"),
     ("jpeg", "image/jpeg"),
     ("webp", "image/webp"),
-    ("gif", "image/gif"),
+    ("gif", GIF_MIME),
 ];
 
 struct IndexedPath {
@@ -390,6 +394,12 @@ fn load_image(path: &Path, mime: &str, already_attached: usize) -> Result<Mentio
         ));
     }
     let raw = std::fs::read(path).map_err(|e| refused(&name, &e.to_string()))?;
+    if mime == GIF_MIME && gif_is_animated(&raw) {
+        return Err(refused(
+            &name,
+            "GIF animé : S1 n'attache que des images fixes — exporter une image du GIF",
+        ));
+    }
     Ok(MentionImage {
         name,
         mime: mime.to_string(),
@@ -400,6 +410,92 @@ fn load_image(path: &Path, mime: &str, already_attached: usize) -> Result<Mentio
 
 fn refused(name: &str, reason: &str) -> String {
     format!("{} {name} — non attachée : {reason}", theme::IMAGE_GLYPH)
+}
+
+/// Un GIF porte-t-il plus d'une image ? S1 n'attache que des GIF fixes, et le
+/// refus doit tomber ici plutôt qu'au provider : local, immédiat, actionnable.
+///
+/// La question se tranche en **marchant les blocs**, jamais en cherchant un
+/// motif dans les octets — les données LZW peuvent contenir n'importe quelle
+/// séquence, y compris celle d'un descripteur d'image. Une structure qu'on
+/// n'arrive pas à marcher rend `false` : on ne refuse que ce qu'on a su
+/// prouver, le provider tranche le reste.
+fn gif_is_animated(bytes: &[u8]) -> bool {
+    let Some(mut cursor) = bytes
+        .strip_prefix(b"GIF87a")
+        .or_else(|| bytes.strip_prefix(b"GIF89a"))
+    else {
+        return false;
+    };
+
+    // Logical screen descriptor : 7 octets dont le champ « packed » en 5e
+    // position, qui annonce la table de couleurs globale et sa taille.
+    let Some((packed, rest)) = cursor.get(4).copied().zip(cursor.get(7..)) else {
+        return false;
+    };
+    cursor = rest;
+    let Some(rest) = skip_color_table(cursor, packed) else {
+        return false;
+    };
+    cursor = rest;
+
+    let mut frames = 0usize;
+    loop {
+        let Some((&block, rest)) = cursor.split_first() else {
+            return false;
+        };
+        cursor = rest;
+        let rest = match block {
+            GIF_TRAILER => return false,
+            GIF_EXTENSION => cursor.get(1..).and_then(skip_sub_blocks),
+            GIF_IMAGE_DESCRIPTOR => {
+                frames += 1;
+                if frames > 1 {
+                    return true;
+                }
+                // 9 octets de descripteur dont le « packed » final, puis la
+                // table locale, la taille de code LZW et les données.
+                cursor
+                    .get(8)
+                    .copied()
+                    .zip(cursor.get(9..))
+                    .and_then(|(packed, rest)| skip_color_table(rest, packed))
+                    .and_then(|rest| rest.get(1..))
+                    .and_then(skip_sub_blocks)
+            }
+            _ => return false,
+        };
+        match rest {
+            Some(rest) => cursor = rest,
+            None => return false,
+        }
+    }
+}
+
+const GIF_EXTENSION: u8 = 0x21;
+const GIF_IMAGE_DESCRIPTOR: u8 = 0x2c;
+const GIF_TRAILER: u8 = 0x3b;
+
+/// Saute la table de couleurs annoncée par un champ « packed » : bit 7 pour sa
+/// présence, bits 0-2 pour sa taille.
+fn skip_color_table(cursor: &[u8], packed: u8) -> Option<&[u8]> {
+    if packed & 0x80 == 0 {
+        return Some(cursor);
+    }
+    cursor.get(3 * (1usize << ((packed & 0x07) + 1))..)
+}
+
+/// Saute une chaîne de sous-blocs — chacun préfixé de sa longueur, la chaîne
+/// close par un bloc vide.
+fn skip_sub_blocks(mut cursor: &[u8]) -> Option<&[u8]> {
+    loop {
+        let (&len, rest) = cursor.split_first()?;
+        cursor = rest;
+        if len == 0 {
+            return Some(cursor);
+        }
+        cursor = cursor.get(usize::from(len)..)?;
+    }
 }
 
 /// Reads at most `budget` bytes — a multi-GB log mentioned by accident costs
@@ -723,6 +819,54 @@ mod tests {
                 "image/png",
             ]
         );
+    }
+
+    /// Un GIF minimal à `frames` images : en-tête, écran logique sans table
+    /// globale, puis une extension de contrôle graphique et un descripteur
+    /// d'image par frame.
+    fn gif(frames: usize) -> Vec<u8> {
+        let mut bytes = b"GIF89a".to_vec();
+        bytes.extend_from_slice(&[0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+        for _ in 0..frames {
+            bytes.extend_from_slice(&[0x21, 0xf9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            bytes.extend_from_slice(&[0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
+            bytes.extend_from_slice(&[0x02, 0x02, 0x4c, 0x01, 0x00]);
+        }
+        bytes.push(0x3b);
+        bytes
+    }
+
+    /// S1 attache « gif (non animé) ». Sans ce refus local, un GIF animé part
+    /// jusqu'au provider et revient en erreur d'API, bien plus tard et sans
+    /// dire quoi faire.
+    #[test]
+    fn an_animated_gif_is_refused_before_it_reaches_the_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("boucle.gif"), gif(2)).unwrap();
+        let out = expand_mentions("@boucle.gif", dir.path());
+        assert!(out.images.is_empty(), "{out:?}");
+        assert_eq!(out.notices.len(), 1);
+        assert!(out.notices[0].contains("boucle.gif"), "{}", out.notices[0]);
+        assert!(out.notices[0].contains("animé"), "{}", out.notices[0]);
+    }
+
+    #[test]
+    fn a_still_gif_is_still_attached() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fixe.gif"), gif(1)).unwrap();
+        let out = expand_mentions("@fixe.gif", dir.path());
+        assert_eq!(out.images.len(), 1, "{out:?}");
+        assert_eq!(out.images[0].mime, GIF_MIME);
+    }
+
+    /// On ne refuse que ce qu'on a su prouver : un fichier `.gif` qu'on
+    /// n'arrive pas à marcher part au provider, qui tranche.
+    #[test]
+    fn an_unparseable_gif_is_left_to_the_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tronque.gif"), b"GIF89a\x01\x00\x01").unwrap();
+        let out = expand_mentions("@tronque.gif", dir.path());
+        assert_eq!(out.images.len(), 1, "{out:?}");
     }
 
     #[test]
