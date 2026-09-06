@@ -110,17 +110,60 @@ pub async fn handle_workflow_run(path: PathBuf, approve_all: bool) -> Result<()>
     );
     let control = gate_control(approve_all, std::io::stdin().is_terminal());
 
+    let mut run = tokio::spawn(executor.run());
+    let drive = drive_run(&handle, &mut run, control, || async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await?;
+
+    let outcome = drive.state.outcome();
+    println!(
+        "kaji workflow : « {} » {}",
+        drive.state.workflow,
+        outcome_label(&outcome)
+    );
+
+    let code = exit_code(&outcome, drive.interrupted);
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+/// Ce qu'un run rend à son appelant : l'état final, et si une interruption
+/// l'a écourté — les deux entrent dans le code de sortie.
+struct DriveOutcome {
+    state: WorkflowState,
+    interrupted: bool,
+}
+
+/// Le pilote d'un run en vol : sonde l'état, imprime ce qui change, tranche
+/// les gates ouvertes, et annule sur interruption.
+///
+/// La source d'interruption est un paramètre — `Ctrl+C` en production, une
+/// source scriptée sous test : `tokio::signal::ctrl_c()` n'est pas armable
+/// depuis un test sans envoyer un vrai signal au binaire de test entier. Elle
+/// est réarmée à chaque tour de boucle, comme le signal l'est.
+async fn drive_run<S, F>(
+    handle: &WorkflowHandle,
+    run: &mut tokio::task::JoinHandle<Result<WorkflowState>>,
+    control: GateControl,
+    interrupts: S,
+) -> Result<DriveOutcome>
+where
+    S: Fn() -> F,
+    F: std::future::Future<Output = ()>,
+{
     let mut previous = handle.snapshot();
     let mut asked: HashSet<String> = HashSet::new();
     let mut interrupted = false;
-    let mut run = tokio::spawn(executor.run());
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let state = loop {
         tokio::select! {
-            finished = &mut run => break finished??,
-            _ = tokio::signal::ctrl_c() => {
+            finished = &mut *run => break finished??,
+            () = interrupts() => {
                 // Le second Ctrl+C ne laisse plus de grâce : le premier a déjà
                 // demandé l'arrêt, et tokio garde la main sur le signal.
                 if interrupted {
@@ -131,27 +174,16 @@ pub async fn handle_workflow_run(path: PathBuf, approve_all: bool) -> Result<()>
                 eprintln!("kaji workflow : annulation demandée — arrêt des agents en vol");
             }
             _ = ticker.tick() => {
-                previous = report_progress(&handle, previous);
+                previous = report_progress(handle, previous);
                 if !interrupted {
-                    decide_pending_gates(&handle, control, &mut asked).await;
+                    decide_pending_gates(handle, control, &mut asked).await;
                 }
             }
         }
     };
 
-    report_progress_against(&handle, &previous, &state);
-    let outcome = state.outcome();
-    println!(
-        "kaji workflow : « {} » {}",
-        state.workflow,
-        outcome_label(&outcome)
-    );
-
-    let code = exit_code(&outcome, interrupted);
-    if code != 0 {
-        std::process::exit(code);
-    }
-    Ok(())
+    report_progress_against(handle, &previous, &state);
+    Ok(DriveOutcome { state, interrupted })
 }
 
 pub async fn handle_workflow_list() -> Result<()> {
@@ -169,13 +201,38 @@ pub async fn handle_workflow_list() -> Result<()> {
 
 pub async fn handle_workflow_status(session_id: String) -> Result<()> {
     let session_manager = SessionManager::instance();
-    let run = find_workflow_run(&session_manager, &session_id)
-        .await?
-        .ok_or_else(|| anyhow!("la session « {session_id} » ne porte pas de workflow"))?;
+    let run = match find_workflow_run(&session_manager, &session_id).await? {
+        Some(run) => run,
+        None => {
+            let known = session_manager
+                .get_session(&session_id, false)
+                .await
+                .is_ok();
+            return Err(anyhow!("{}", missing_run_message(&session_id, known)));
+        }
+    };
     for line in status_report(&run) {
         println!("{line}");
     }
     Ok(())
+}
+
+/// Un identifiant qui ne désigne aucune session et une session qui n'a jamais
+/// lancé de workflow ne se corrigent pas de la même façon : la première invite
+/// à revoir l'identifiant, la seconde dit que la session existe mais n'a rien
+/// à montrer ici.
+fn missing_run_message(session_id: &str, known: bool) -> String {
+    if known {
+        format!(
+            "la session « {session_id} » existe mais n'a jamais lancé de workflow — \
+             `kaji workflow list` donne celles qui en portent un"
+        )
+    } else {
+        format!(
+            "aucune session « {session_id} » — vérifier l'identifiant, \
+             `kaji workflow list` donne ceux des workflows enregistrés"
+        )
+    }
 }
 
 fn read_spec(path: &Path) -> Result<WorkflowSpec> {
@@ -462,7 +519,8 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use kaji::workflow::BudgetLimit;
+    use kaji::workflow::{AgentRunRequest, AgentRunner, BudgetLimit};
+    use tokio_util::sync::CancellationToken;
 
     const SPEC: &str = r#"
 name: revue
@@ -673,6 +731,123 @@ stages:
         assert!(
             report.contains("gate(s) en attente : deploie"),
             "{report}: la gate qui attend une décision doit ressortir"
+        );
+    }
+
+    /// Un identifiant inconnu et une session sans workflow demandent deux
+    /// corrections différentes : le même message pour les deux laisse
+    /// l'utilisateur chercher une faute de frappe qui n'existe pas.
+    #[test]
+    fn a_missing_run_tells_an_unknown_session_apart_from_one_without_a_workflow() {
+        let unknown = missing_run_message("abc123", false);
+        let known = missing_run_message("abc123", true);
+
+        assert_ne!(unknown, known);
+        assert!(unknown.contains("abc123"), "{unknown}");
+        assert!(known.contains("abc123"), "{known}");
+        assert!(
+            unknown.contains("aucune session"),
+            "{unknown}: l'identifiant est à revoir"
+        );
+        assert!(
+            known.contains("existe") && known.contains("jamais lancé"),
+            "{known}: la session existe, elle n'a simplement rien à montrer"
+        );
+    }
+
+    /// Un agent qui ne rend rien tant que son jeton n'est pas tiré : la cible
+    /// d'un test d'interruption, qui doit trouver le workflow encore en vol.
+    struct HangingRunner;
+
+    #[async_trait::async_trait]
+    impl AgentRunner for HangingRunner {
+        async fn prepare(&self, request: &AgentRunRequest) -> Result<String, String> {
+            Ok(format!("fixture_{}", request.label()))
+        }
+
+        async fn run(
+            &self,
+            _request: AgentRunRequest,
+            _session_id: &str,
+            cancel: CancellationToken,
+        ) -> Result<String, String> {
+            cancel.cancelled().await;
+            Err("annulé".to_string())
+        }
+    }
+
+    /// Ctrl+C pendant un run : la boucle annule le workflow en vol, en sort
+    /// avec l'issue `Cancelled`, et retient l'interruption — c'est elle, pas
+    /// l'issue, qui donne le code 130.
+    ///
+    /// L'interruption est injectée : `tokio::signal::ctrl_c()` ne s'arme pas
+    /// depuis un test sans envoyer un vrai `SIGINT` au binaire de test entier.
+    #[tokio::test]
+    async fn ctrl_c_cancels_the_run_in_flight_and_exits_130() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let session_manager = Arc::new(SessionManager::new(data_dir.path().join("data")));
+        let working_dir = data_dir.path().join("workspace");
+        let session = session_manager
+            .create_session(
+                working_dir.clone(),
+                "workflow test".to_string(),
+                SessionType::Hidden,
+                KajiMode::Auto,
+            )
+            .await
+            .unwrap();
+
+        let spec = WorkflowSpec::from_yaml(SPEC).unwrap();
+        let recorder =
+            WorkflowRecorder::open(Arc::clone(&session_manager), session.id.clone(), &spec.name)
+                .await
+                .unwrap();
+        let executor = WorkflowExecutor::new(
+            spec,
+            Arc::new(HangingRunner),
+            recorder,
+            session.id.clone(),
+            working_dir,
+        )
+        .unwrap();
+        let handle = executor.handle();
+        let mut run = tokio::spawn(executor.run());
+
+        // Un seul permis : la boucle réarme la source à chaque tour, et un
+        // second Ctrl+C sortirait du processus de test.
+        let interrupt = Arc::new(tokio::sync::Notify::new());
+        let source = {
+            let interrupt = Arc::clone(&interrupt);
+            move || {
+                let interrupt = Arc::clone(&interrupt);
+                async move { interrupt.notified().await }
+            }
+        };
+
+        let press = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            interrupt.notify_one();
+        });
+        let drive = tokio::time::timeout(
+            Duration::from_secs(10),
+            drive_run(&handle, &mut run, GateControl::Unattended, source),
+        )
+        .await
+        .expect("l'interruption sort de la boucle")
+        .unwrap();
+        press.await.unwrap();
+
+        assert!(drive.interrupted);
+        assert_eq!(drive.state.outcome(), WorkflowOutcome::Cancelled);
+        assert_eq!(
+            drive.state.stages[0].agents[0].state,
+            AgentState::Cancelled,
+            "l'agent en vol est coupé, pas laissé en cours"
+        );
+        assert_eq!(
+            exit_code(&drive.state.outcome(), drive.interrupted),
+            130,
+            "l'interruption prime sur l'issue annulée"
         );
     }
 }

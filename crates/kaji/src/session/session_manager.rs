@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use tracing::{info, warn};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 18;
+pub const CURRENT_SCHEMA_VERSION: i32 = 19;
 pub const SESSIONS_FOLDER: &str = "sessions";
 pub const DB_NAME: &str = "sessions.db";
 const MILLISECOND_TIMESTAMP_THRESHOLD: i64 = 10_000_000_000;
@@ -1381,6 +1381,12 @@ impl SessionStorage {
         )
         .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_session_events_kind \
+             ON session_events(kind, session_id, ts_ms)",
+        )
+        .execute(&mut *tx)
+        .await?;
 
         crate::providers::inventory::create_tables(&mut tx).await?;
 
@@ -1912,6 +1918,18 @@ impl SessionStorage {
                 }
                 sqlx::query(
                     "CREATE INDEX IF NOT EXISTS idx_usage_ledger_created ON usage_ledger(created_timestamp)",
+                )
+                .execute(&mut **tx)
+                .await?;
+            }
+            19 => {
+                // `sessions_with_event_kind` — la surface de `kaji workflow
+                // list` — scannait tout le journal pour un kind rare. Les trois
+                // colonnes couvrent la requête entière : le filtre, le
+                // regroupement et le tri par MIN(ts_ms).
+                sqlx::query(
+                    "CREATE INDEX IF NOT EXISTS idx_session_events_kind \
+                     ON session_events(kind, session_id, ts_ms)",
                 )
                 .execute(&mut **tx)
                 .await?;
@@ -5647,6 +5665,70 @@ mod tests {
             .unwrap();
         assert_eq!(buckets.len(), 1);
         assert_eq!(buckets[0].key, "anthropic");
+    }
+
+    /// La migration est rejouée sur une base qui porte **déjà** l'index — le
+    /// cas d'une base créée par `create_schema`, où le `CREATE INDEX` de v19
+    /// est déjà passé. Elle doit être un non-événement, pas une erreur.
+    #[tokio::test]
+    async fn migration_v19_indexes_the_event_kind_and_replays_without_failing() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("sessions").join(DB_NAME);
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+
+        SessionStorage::create_schema(&pool).await.unwrap();
+
+        // Remonte la base à sa forme v18 : journal sans index sur le kind.
+        sqlx::query("DROP INDEX idx_session_events_kind")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE schema_version SET version = 18")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let pool = sm.storage().pool().await.unwrap();
+
+        let indexed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_session_events_kind'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(indexed, 1, "migration v19 indexe session_events.kind");
+
+        // Rejouée sur une base qui porte déjà l'index : idempotente.
+        let mut tx = pool.begin().await.unwrap();
+        SessionStorage::apply_migration(&mut tx, 19).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let plan = sqlx::query_as::<_, (i64, i64, i64, String)>(
+            "EXPLAIN QUERY PLAN SELECT session_id FROM session_events WHERE kind = 'workflow_started' \
+             GROUP BY session_id ORDER BY MIN(ts_ms) DESC",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, _, _, detail)| detail)
+        .collect::<Vec<_>>()
+        .join(" | ");
+        assert!(
+            plan.contains("idx_session_events_kind"),
+            "{plan}: la lecture par kind passe par l'index, pas par un scan"
+        );
     }
 
     #[tokio::test]

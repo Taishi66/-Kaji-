@@ -1559,6 +1559,131 @@ async fn a_paused_stage_holds_its_agents_until_it_is_resumed() {
     );
 }
 
+/// Une pause n'a pas de borne de temps : `cancel()` est **la** sortie d'un
+/// stage suspendu, comme elle l'est d'une gate sans approbateur. Le stage
+/// retenu part en `Cancelled`, ses agents avec — ils n'ont jamais tourné —,
+/// sa descendance aussi, et le journal se referme.
+#[tokio::test]
+async fn cancelling_a_paused_stage_ends_the_workflow_with_a_closed_journal() {
+    let yaml = r#"
+name: pause
+stages:
+  - name: collecte
+    agents:
+      - name: scan
+        prompt: scanne
+  - name: synthese
+    depends_on: [collecte]
+    agents:
+      - name: redacteur
+        prompt: rédige
+"#;
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = fixture.executor(spec(yaml), Arc::clone(&runner)).await;
+    let handle = executor.handle();
+
+    assert!(handle.pause("collecte"));
+    let run = tokio::spawn(executor.run());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        handle.snapshot().stage("collecte").unwrap().state,
+        StageState::Paused,
+        "l'annulation doit arriver pendant la pause, pas avant"
+    );
+    handle.cancel();
+
+    let state = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("cancel() réveille un stage en pause")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(state.outcome(), WorkflowOutcome::Cancelled);
+    assert_eq!(
+        state.stage("collecte").unwrap().state,
+        StageState::Cancelled
+    );
+    assert_eq!(
+        state.stage("collecte").unwrap().agents[0].state,
+        AgentState::Cancelled,
+        "les agents d'un stage retenu puis annulé ne restent pas Pending"
+    );
+    assert_eq!(
+        state.stage("synthese").unwrap().state,
+        StageState::Cancelled
+    );
+    assert!(
+        runner.started().is_empty(),
+        "aucun agent ne part d'un stage annulé en pause : {:?}",
+        runner.started()
+    );
+
+    let kinds = fixture.kinds().await;
+    assert!(
+        kinds.contains(&"workflow_done".to_string())
+            && kinds.last() == Some(&"turn_end".to_string()),
+        "un workflow annulé en pause referme son tour : {kinds:?}"
+    );
+}
+
+/// Le second point d'arrêt : une pause demandée pendant qu'une gate est
+/// ouverte n'est pas rétroactive sur le premier checkpoint — déjà franchi —,
+/// elle prend effet **après** la décision, avant que le fan-out parte.
+#[tokio::test]
+async fn a_pause_asked_during_a_gate_takes_effect_after_the_decision() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = fixture.executor(spec(GATED), Arc::clone(&runner)).await;
+    let handle = executor.handle();
+    let run = tokio::spawn(executor.run());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        handle.snapshot().stage("deploie").unwrap().state,
+        StageState::Waiting,
+        "la pause doit être posée sur un stage dont la gate est ouverte"
+    );
+    assert!(handle.pause("deploie"));
+    assert_eq!(handle.approve("deploie"), GateVerdict::Applied);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        handle.snapshot().stage("deploie").unwrap().state,
+        StageState::Paused,
+        "la gate approuvée rend la main au point d'arrêt, pas au fan-out"
+    );
+    assert_eq!(
+        runner.started(),
+        vec!["build.compile".to_string()],
+        "l'agent du stage retenu n'est pas parti : {:?}",
+        runner.started()
+    );
+    assert_eq!(
+        fixture.payloads("gate_decision").await.len(),
+        1,
+        "la décision de gate est bien consommée avant la pause"
+    );
+
+    assert!(handle.resume("deploie"));
+    let state = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("resume relâche le stage retenu après sa gate")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(state.outcome(), WorkflowOutcome::Done);
+    assert_eq!(
+        runner.started(),
+        vec![
+            "build.compile".to_string(),
+            "deploie.pousse".to_string(),
+            "annonce.publie".to_string()
+        ]
+    );
+}
+
 /// L'annulation d'un agent est adressée par `(stage, agent)` : elle coupe
 /// celui-là, pas le fan-out ni le workflow.
 #[tokio::test]
