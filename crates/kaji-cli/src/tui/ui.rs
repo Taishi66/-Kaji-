@@ -1150,13 +1150,21 @@ fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
             sanitize_for_display(&viewer.path)
         )
     };
+    // Les touches de sortie sont nommées telles qu'elles agissent : avec un
+    // arbre derrière, `Esc`/`h` y ramènent et `q` seul ferme ; sans arbre les
+    // trois font la même chose.
+    let exits = if app.explorer.is_some() {
+        "Esc/h arbre · q fermer"
+    } else {
+        "Esc/h/q fermer"
+    };
     // `Ctrl+O` is only worth naming while the chat is folded behind the pane —
     // it is what brings it back.
     let focused = app.focus == Focus::Viewer;
     let keys = if focused {
-        "j/k défiler · e éditer · r recharger · a attacher @ · q fermer · Ctrl+O chat"
+        format!("j/k défiler · e éditer · r recharger · a attacher @ · {exits} · Ctrl+O chat")
     } else {
-        "j/k défiler · e éditer · r recharger · a attacher @ · q fermer"
+        format!("j/k défiler · e éditer · r recharger · a attacher @ · {exits}")
     };
     let footer = if viewer.truncated {
         format!(" … tronqué ({} lus) · {keys} ", viewer::read_limit_label())
@@ -3377,6 +3385,23 @@ mod tests {
         assert!(content.contains("hello"), "got:\n{content}");
         assert!(content.contains("┌ message"), "composer, got:\n{content}");
         assert!(content.contains("Ctrl+O chat"), "got:\n{content}");
+    }
+
+    /// Le pied du lecteur est la seule surface qui dit comment en sortir, et il
+    /// nomme les touches telles qu'elles agissent : avec un arbre derrière
+    /// `Esc`/`h` y ramènent et `q` seul ferme, sans arbre les trois ferment.
+    #[test]
+    fn the_reader_footer_names_the_keys_that_get_out_of_it() {
+        let (with_tree, _dir) = app_with_a_focused_viewer(true);
+        let content = rendered(&with_tree, 200, 40);
+        assert!(
+            content.contains("Esc/h arbre · q fermer"),
+            "got:\n{content}"
+        );
+
+        let (alone, _dir) = app_with_a_focused_viewer(false);
+        let content = rendered(&alone, 200, 40);
+        assert!(content.contains("Esc/h/q fermer"), "got:\n{content}");
     }
 
     #[test]

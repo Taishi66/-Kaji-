@@ -1839,6 +1839,17 @@ impl App {
         self.focus = Focus::Composer;
     }
 
+    /// `Esc`/`h` : le lecteur rend le clavier à l'explorateur qui l'a ouvert et
+    /// reste affiché à droite — revenir à l'arbre n'est pas fermer le fichier.
+    /// Sans arbre ouvert il n'y a rien derrière : le lecteur se ferme.
+    fn leave_viewer(&mut self) {
+        if self.explorer.is_some() {
+            self.focus = Focus::Explorer;
+        } else {
+            self.close_viewer();
+        }
+    }
+
     /// Every path that ends up in `$EDITOR` goes through here: `~` expanded,
     /// relative resolved against the session's root, `@path` accepted as the
     /// same thing the composer would attach. A missing file is deliberately
@@ -1998,8 +2009,15 @@ impl App {
                 self.open_finder();
                 return Action::None;
             }
-            KeyCode::Char('q') | KeyCode::Esc if !ctrl => {
+            KeyCode::Char('q') if !ctrl => {
                 self.close_viewer();
+                return Action::None;
+            }
+            // Sortir de ce qu'on lit sans perdre l'arbre d'où on vient : `h`
+            // est le retour de l'explorateur, `Esc` le réflexe. Sans arbre
+            // derrière, il n'y a nulle part où revenir et les deux ferment.
+            KeyCode::Esc | KeyCode::Char('h') if !ctrl => {
+                self.leave_viewer();
                 return Action::None;
             }
             // Les trois touches de fichier ne valent que pour un fichier : sur
@@ -4701,6 +4719,134 @@ mod tests {
         assert_eq!(app.focus, Focus::Composer);
         app.on_event(&key(KeyCode::Char('q')));
         assert_eq!(app.input, "q");
+    }
+
+    /// Un fichier ouvert depuis l'arbre se quitte par où on est entré : `Esc`
+    /// et `h` rendent le clavier à l'explorateur, sur la ligne d'où le fichier
+    /// est parti, et le laissent lisible à droite.
+    #[test]
+    fn esc_and_h_hand_the_keyboard_back_to_the_explorer_that_opened_the_file() {
+        for exit in [KeyCode::Esc, KeyCode::Char('h')] {
+            let (mut app, _dir) = app_with_open_explorer();
+            app.on_event(&key(KeyCode::Char('j')));
+            app.on_event(&key(KeyCode::Enter));
+            assert_eq!(app.focus, Focus::Viewer, "{exit:?}");
+
+            assert_eq!(app.on_event(&key(exit)), Action::None, "{exit:?}");
+
+            assert_eq!(app.focus, Focus::Explorer, "{exit:?}");
+            assert!(app.viewer.is_some(), "le fichier reste lisible : {exit:?}");
+            assert_eq!(
+                app.explorer.as_ref().unwrap().selected().unwrap().path,
+                "README.md",
+                "on revient sur la ligne d'où on est parti : {exit:?}"
+            );
+            assert!(app.input.is_empty(), "{exit:?}");
+
+            app.on_event(&key(KeyCode::Char('k')));
+            assert_eq!(
+                app.explorer.as_ref().unwrap().selected().unwrap().path,
+                "src",
+                "l'arbre a repris ses touches : {exit:?}"
+            );
+        }
+    }
+
+    /// Sans arbre derrière, il n'y a nulle part où revenir : les deux touches
+    /// ferment le lecteur comme `q`.
+    #[test]
+    fn esc_and_h_close_the_viewer_when_no_tree_stands_behind_it() {
+        for exit in [KeyCode::Esc, KeyCode::Char('h')] {
+            let (mut app, _dir) = app_with_open_viewer();
+            assert_eq!(app.on_event(&key(exit)), Action::None, "{exit:?}");
+            assert!(app.viewer.is_none(), "{exit:?}");
+            assert_eq!(app.focus, Focus::Composer, "{exit:?}");
+            app.on_event(&key(KeyCode::Char('h')));
+            assert_eq!(app.input, "h", "{exit:?}");
+        }
+    }
+
+    /// `q` ferme, `Esc`/`h` reviennent : la distinction ne tient que si `q`
+    /// ferme aussi quand l'arbre est ouvert derrière.
+    #[test]
+    fn q_closes_the_viewer_even_with_the_explorer_open() {
+        let (mut app, _dir) = app_with_open_explorer();
+        app.on_event(&key(KeyCode::Char('j')));
+        app.on_event(&key(KeyCode::Enter));
+
+        assert_eq!(app.on_event(&key(KeyCode::Char('q'))), Action::None);
+
+        assert!(app.viewer.is_none());
+        assert!(app.explorer.is_some(), "l'arbre reste ouvert");
+        assert_eq!(app.focus, Focus::Composer);
+    }
+
+    /// Le plein écran passe avant le lecteur : `h` y change de stage et `Esc`
+    /// le referme, sans que le lecteur en dessous ne bouge.
+    #[test]
+    fn the_mission_control_keeps_the_exit_keys_over_a_focused_reader() {
+        let (mut app, _dir) = app_with_open_explorer();
+        app.on_event(&key(KeyCode::Char('j')));
+        app.on_event(&key(KeyCode::Enter));
+        assert_eq!(app.focus, Focus::Viewer);
+        app.open_mission_control();
+
+        app.on_event(&key(KeyCode::Char('h')));
+        assert!(app.mission.open, "h reste au plein écran");
+        assert_eq!(app.focus, Focus::Viewer);
+
+        app.on_event(&key(KeyCode::Esc));
+        assert!(!app.mission.open, "Esc referme le plein écran d'abord");
+        assert_eq!(app.focus, Focus::Viewer, "le lecteur n'a pas bougé");
+        assert!(app.viewer.is_some());
+    }
+
+    /// Une approbation à l'écran garde `Esc` : répondre « retour à l'arbre » à
+    /// une modale laisserait l'outil en attente derrière.
+    #[test]
+    fn an_approval_answers_esc_before_the_reader_leaves_it() {
+        let (mut app, _dir) = app_with_open_explorer();
+        app.on_event(&key(KeyCode::Char('j')));
+        app.on_event(&key(KeyCode::Enter));
+        open_approval(&mut app, "shell", object!({ "command": "cargo test" }));
+
+        assert_eq!(
+            app.on_event(&key(KeyCode::Esc)),
+            Action::ToolAnswer(Permission::DenyOnce)
+        );
+        assert_eq!(
+            app.focus,
+            Focus::Viewer,
+            "la modale n'a pas déplacé le focus"
+        );
+    }
+
+    /// La leçon de Shift+Tab : une touche ajoutée à un focus ne doit rien
+    /// changer aux autres — `h` reste le repli de l'arbre et une lettre au
+    /// composer, et le mode se règle toujours après être sorti du lecteur.
+    #[test]
+    fn the_exit_keys_of_the_reader_leave_the_other_focuses_alone() {
+        let (mut app, _dir) = app_with_open_explorer();
+        app.on_event(&key(KeyCode::Char('l')));
+        app.on_event(&key(KeyCode::Char('h')));
+        assert!(
+            !app.explorer.as_ref().unwrap().nodes[0].expanded,
+            "h replie toujours l'arbre"
+        );
+
+        app.on_event(&key(KeyCode::Char('j')));
+        app.on_event(&key(KeyCode::Enter));
+        app.on_event(&key(KeyCode::Char('h')));
+        assert_eq!(app.focus, Focus::Explorer);
+
+        app.on_event(&key(KeyCode::Char('q')));
+        assert_eq!(app.focus, Focus::Composer);
+        app.on_event(&key(KeyCode::Char('h')));
+        assert_eq!(app.input, "h", "au composer h reste une lettre");
+        assert!(
+            matches!(app.on_event(&key(KeyCode::BackTab)), Action::Mode(_)),
+            "Shift+Tab règle toujours le mode"
+        );
     }
 
     #[test]
