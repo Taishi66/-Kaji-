@@ -1,4 +1,4 @@
-use crate::tui::app::{self, App, ChatLine, Focus, RoledLine, Sender, ToolApprovalRequest};
+use crate::tui::app::{self, App, ChatLine, Focus, Modal, RoledLine, Sender, ToolApprovalRequest};
 use crate::tui::explorer::ExplorerState;
 use crate::tui::forge::{ForgeStatus, ForgeTask};
 use crate::tui::viewer::{self, Viewer};
@@ -145,27 +145,39 @@ fn draw_overlays(frame: &mut Frame, app: &App) {
     draw_theme_picker(frame, app);
     draw_editor_picker(frame, app);
 
-    if app.gate_open {
-        draw_gate_modal(frame);
-    } else if app.pending_restore.is_some() {
-        draw_restore_confirm_modal(frame, app.pending_restore_files_only);
-    } else if let Some(stage) = app.pending_workflow_gate.as_deref() {
-        draw_workflow_gate_modal(frame, stage);
-    } else if let Some((stage, agent)) = app.pending_workflow_cancel.as_ref() {
-        draw_cancel_confirm_modal(frame, &format!("{stage}.{agent}"));
-    } else if let Some(id) = app.pending_forge_cancel.as_deref() {
+    match app.active_modal() {
+        Some(Modal::ToolApproval) => {
+            if let Some(approval) = &app.tool_approval {
+                draw_tool_approval_modal(frame, approval, app.approval_detail.as_deref());
+            }
+        }
+        Some(Modal::Gate) => draw_gate_modal(frame),
+        Some(Modal::Restore) => draw_restore_confirm_modal(frame, app.pending_restore_files_only),
         // Le plein écran cache le chat, où la question était jusqu'ici la
         // seule trace : sans cette modale, `x` sur une lame libre ouvrirait
         // une confirmation invisible qui avale la touche suivante.
-        let label = app
-            .forge
-            .tasks
-            .get(id)
-            .map(|task| task.description.clone())
-            .unwrap_or_else(|| id.to_string());
-        draw_cancel_confirm_modal(frame, &label);
-    } else if let Some(approval) = &app.tool_approval {
-        draw_tool_approval_modal(frame, approval, app.approval_detail.as_deref());
+        Some(Modal::ForgeCancel) => {
+            if let Some(id) = app.pending_forge_cancel.as_deref() {
+                let label = app
+                    .forge
+                    .tasks
+                    .get(id)
+                    .map(|task| task.description.clone())
+                    .unwrap_or_else(|| id.to_string());
+                draw_cancel_confirm_modal(frame, &label);
+            }
+        }
+        Some(Modal::WorkflowCancel) => {
+            if let Some((stage, agent)) = app.pending_workflow_cancel.as_ref() {
+                draw_cancel_confirm_modal(frame, &format!("{stage}.{agent}"));
+            }
+        }
+        Some(Modal::WorkflowGate) => {
+            if let Some(stage) = app.pending_workflow_gate.as_deref() {
+                draw_workflow_gate_modal(frame, stage);
+            }
+        }
+        None => {}
     }
 }
 

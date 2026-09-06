@@ -680,6 +680,34 @@ fn outcome_token(outcome: GoalOutcome) -> &'static str {
     }
 }
 
+/// Les questions y/n qui prennent la main sur l'écran et le clavier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Modal {
+    ToolApproval,
+    Gate,
+    Restore,
+    ForgeCancel,
+    WorkflowCancel,
+    WorkflowGate,
+}
+
+/// La précédence des modales, de la plus prioritaire à la moins — source de
+/// vérité **unique** : [`App::active_modal`] en dérive, et le rendu
+/// ([`crate::tui::ui::draw_overlays`]) comme la saisie ([`App::on_event`])
+/// n'interrogent que lui. Le rendu et la saisie tenaient auparavant deux
+/// listes distinctes, en ordre inverse l'une de l'autre : une confirmation
+/// d'outil arrivée sous une question d'annulation affichait « annuler ? y/n »
+/// et le `y` accordait la permission d'outil. La confirmation d'outil passe
+/// donc en tête — c'est la seule dont une réponse par réflexe ouvre des droits.
+pub const MODAL_PRECEDENCE: [Modal; 6] = [
+    Modal::ToolApproval,
+    Modal::Gate,
+    Modal::Restore,
+    Modal::ForgeCancel,
+    Modal::WorkflowCancel,
+    Modal::WorkflowGate,
+];
+
 pub struct App {
     pub header: String,
     /// Model name shown by the status bar's telemetry — set once at startup by
@@ -3051,12 +3079,28 @@ impl App {
     /// scroll instead of history recall (see `on_event`'s `modal_active`
     /// local).
     pub fn modal_active(&self) -> bool {
-        self.tool_approval.is_some()
-            || self.gate_open
-            || self.pending_restore.is_some()
-            || self.pending_forge_cancel.is_some()
-            || self.pending_workflow_cancel.is_some()
-            || self.pending_workflow_gate.is_some()
+        self.active_modal().is_some()
+    }
+
+    /// La modale qui a la main : la première de [`MODAL_PRECEDENCE`] qui soit
+    /// ouverte. Le rendu et la saisie passent tous deux par ici — c'est ce qui
+    /// garantit que la touche répond à ce que l'écran montre.
+    pub fn active_modal(&self) -> Option<Modal> {
+        MODAL_PRECEDENCE
+            .iter()
+            .copied()
+            .find(|modal| self.modal_is_open(*modal))
+    }
+
+    fn modal_is_open(&self, modal: Modal) -> bool {
+        match modal {
+            Modal::ToolApproval => self.tool_approval.is_some(),
+            Modal::Gate => self.gate_open,
+            Modal::Restore => self.pending_restore.is_some(),
+            Modal::ForgeCancel => self.pending_forge_cancel.is_some(),
+            Modal::WorkflowCancel => self.pending_workflow_cancel.is_some(),
+            Modal::WorkflowGate => self.pending_workflow_gate.is_some(),
+        }
     }
 
     /// Commands whose name starts with the current input, trimmed — empty
@@ -3292,99 +3336,114 @@ impl App {
             }
             _ => {}
         }
-        if self.tool_approval.is_some() {
-            // Chorded letters belong to the bindings below (Ctrl+S flushes the
-            // steer queue, Ctrl+W deletes a word): reading them as answers
-            // would let an unrelated reflex grant a session-wide permission.
-            if key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-            {
+        // La modale qui a la main est celle que `MODAL_PRECEDENCE` désigne —
+        // la même que le rendu dessine. Deux chaînes séparées avaient divergé :
+        // le `y` d'une question d'annulation affichée accordait la permission
+        // d'outil restée dessous.
+        match self.active_modal() {
+            Some(Modal::ToolApproval) => {
+                // Chorded letters belong to the bindings below (Ctrl+S flushes
+                // the steer queue, Ctrl+W deletes a word): reading them as
+                // answers would let an unrelated reflex grant a session-wide
+                // permission.
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
+                    return Action::None;
+                }
+                return match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        Action::ToolAnswer(Permission::AllowOnce)
+                    }
+                    KeyCode::Char('s') | KeyCode::Char('S') => {
+                        Action::ToolAnswer(Permission::AllowSession)
+                    }
+                    KeyCode::Char('a') | KeyCode::Char('A') => {
+                        Action::ToolAnswer(Permission::AlwaysAllow)
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        Action::ToolAnswer(Permission::DenyOnce)
+                    }
+                    KeyCode::Tab => {
+                        self.toggle_approval_detail();
+                        Action::None
+                    }
+                    _ => Action::None,
+                };
+            }
+            Some(Modal::Gate) => {
+                return match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        self.gate_open = false;
+                        Action::GateApprove
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        self.gate_open = false;
+                        Action::GateReject
+                    }
+                    _ => Action::None,
+                };
+            }
+            Some(Modal::Restore) => {
+                return match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => Action::RestoreConfirm,
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::RestoreCancel,
+                    _ => Action::None,
+                };
+            }
+            // Une lame vit sa vie : la question n'attend pas, et tout ce qui
+            // n'est pas un `y` franc la laisse tourner.
+            Some(Modal::ForgeCancel) => {
+                if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                    return Action::ForgeCancel;
+                }
+                self.pending_forge_cancel = None;
                 return Action::None;
             }
-            return match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    Action::ToolAnswer(Permission::AllowOnce)
+            // Même contrat qu'une lame : tout ce qui n'est pas un `y` franc
+            // laisse l'agent tourner.
+            Some(Modal::WorkflowCancel) => {
+                let Some((stage, agent)) = self.pending_workflow_cancel.take() else {
+                    return Action::None;
+                };
+                if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                    return Action::WorkflowCancelAgent { stage, agent };
                 }
-                KeyCode::Char('s') | KeyCode::Char('S') => {
-                    Action::ToolAnswer(Permission::AllowSession)
-                }
-                KeyCode::Char('a') | KeyCode::Char('A') => {
-                    Action::ToolAnswer(Permission::AlwaysAllow)
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    Action::ToolAnswer(Permission::DenyOnce)
-                }
-                KeyCode::Tab => {
-                    self.toggle_approval_detail();
-                    Action::None
-                }
-                _ => Action::None,
-            };
-        }
-        if self.gate_open {
-            return match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.gate_open = false;
-                    Action::GateApprove
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.gate_open = false;
-                    Action::GateReject
-                }
-                _ => Action::None,
-            };
-        }
-        if self.pending_restore.is_some() {
-            return match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => Action::RestoreConfirm,
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::RestoreCancel,
-                _ => Action::None,
-            };
-        }
-        // Une lame vit sa vie : la question n'attend pas, et tout ce qui n'est
-        // pas un `y` franc la laisse tourner.
-        if self.pending_forge_cancel.is_some() {
-            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-                return Action::ForgeCancel;
+                return Action::None;
             }
-            self.pending_forge_cancel = None;
-            return Action::None;
-        }
-        // Même contrat qu'une lame : tout ce qui n'est pas un `y` franc laisse
-        // l'agent tourner.
-        if let Some((stage, agent)) = self.pending_workflow_cancel.take() {
-            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-                return Action::WorkflowCancelAgent { stage, agent };
+            // Une gate, elle, n'a pas de réponse par défaut : `y` approuve,
+            // `n` refuse — les deux sont journalisées —, et Esc renonce à
+            // décider en laissant la porte ouverte plutôt qu'en inventant un
+            // refus.
+            Some(Modal::WorkflowGate) => {
+                let Some(stage) = self.pending_workflow_gate.clone() else {
+                    return Action::None;
+                };
+                return match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        self.pending_workflow_gate = None;
+                        Action::WorkflowGate {
+                            stage,
+                            approve: true,
+                        }
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') => {
+                        self.pending_workflow_gate = None;
+                        Action::WorkflowGate {
+                            stage,
+                            approve: false,
+                        }
+                    }
+                    KeyCode::Esc => {
+                        self.pending_workflow_gate = None;
+                        self.push_mission_notice(&format!("gate « {stage} » laissée ouverte"));
+                        Action::None
+                    }
+                    _ => Action::None,
+                };
             }
-            return Action::None;
-        }
-        // Une gate, elle, n'a pas de réponse par défaut : `y` approuve, `n`
-        // refuse — les deux sont journalisées —, et Esc renonce à décider en
-        // laissant la porte ouverte plutôt qu'en inventant un refus.
-        if let Some(stage) = self.pending_workflow_gate.clone() {
-            return match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.pending_workflow_gate = None;
-                    Action::WorkflowGate {
-                        stage,
-                        approve: true,
-                    }
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.pending_workflow_gate = None;
-                    Action::WorkflowGate {
-                        stage,
-                        approve: false,
-                    }
-                }
-                KeyCode::Esc => {
-                    self.pending_workflow_gate = None;
-                    self.push_mission_notice(&format!("gate « {stage} » laissée ouverte"));
-                    Action::None
-                }
-                _ => Action::None,
-            };
+            None => {}
         }
         match key.code {
             KeyCode::Backspace
@@ -9087,6 +9146,99 @@ mod tests {
         assert_eq!(app.on_event(&key(KeyCode::Esc)), Action::None);
         assert!(app.pending_workflow_gate.is_none());
         assert!(app.mission.open, "Esc referme la question, pas la vue");
+    }
+
+    fn open_modal(app: &mut App, modal: Modal) {
+        match modal {
+            Modal::ToolApproval => open_tool_approval_modal(app),
+            Modal::Gate => app.gate_open = true,
+            Modal::Restore => app.open_restore_confirm("cp-1".to_string(), false),
+            Modal::ForgeCancel => app.pending_forge_cancel = Some("lame-1".to_string()),
+            Modal::WorkflowCancel => {
+                app.pending_workflow_cancel = Some(("collecte".to_string(), "scanner".to_string()))
+            }
+            Modal::WorkflowGate => app.pending_workflow_gate = Some("deploie".to_string()),
+        }
+    }
+
+    /// Ce que l'écran montre quand cette modale a la main.
+    fn modal_needle(modal: Modal) -> &'static str {
+        match modal {
+            Modal::ToolApproval => "confirmation d'outil",
+            Modal::Gate => "approuver la SPEC",
+            Modal::Restore => "restaurer le checkpoint",
+            Modal::ForgeCancel => "lame-1",
+            Modal::WorkflowCancel => "collecte.scanner",
+            Modal::WorkflowGate => "gate « deploie »",
+        }
+    }
+
+    /// Ce que `y` répond quand cette modale a la main.
+    fn modal_yes(modal: Modal) -> Action {
+        match modal {
+            Modal::ToolApproval => Action::ToolAnswer(Permission::AllowOnce),
+            Modal::Gate => Action::GateApprove,
+            Modal::Restore => Action::RestoreConfirm,
+            Modal::ForgeCancel => Action::ForgeCancel,
+            Modal::WorkflowCancel => Action::WorkflowCancelAgent {
+                stage: "collecte".to_string(),
+                agent: "scanner".to_string(),
+            },
+            Modal::WorkflowGate => Action::WorkflowGate {
+                stage: "deploie".to_string(),
+                approve: true,
+            },
+        }
+    }
+
+    fn full_screen(app: &App) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("test backend terminal");
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, app))
+            .expect("draw must succeed against a TestBackend");
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for row in 0..buffer.area.height {
+            for col in 0..buffer.area.width {
+                out.push_str(buffer[(col, row)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// I2 : le rendu et la saisie tiraient leur précédence de deux chaînes
+    /// distinctes, en ordre presque inverse. Une confirmation d'outil arrivée
+    /// sous une question d'annulation affichait « annuler ? y/n » à l'écran
+    /// pendant que le `y` accordait la permission d'outil. Les deux dérivent
+    /// désormais de `MODAL_PRECEDENCE` : à chaque rang, ce que l'écran montre
+    /// est ce que la touche répond.
+    #[test]
+    fn the_screen_and_the_keyboard_agree_on_which_modal_has_the_hand() {
+        let _theme = theme::test_guard();
+
+        for (rank, modal) in MODAL_PRECEDENCE.iter().copied().enumerate() {
+            let mut app = App::new(None);
+            for lower in &MODAL_PRECEDENCE[rank..] {
+                open_modal(&mut app, *lower);
+            }
+
+            assert_eq!(app.active_modal(), Some(modal), "rang {rank}");
+            let screen = full_screen(&app);
+            assert!(
+                screen.contains(modal_needle(modal)),
+                "l'écran doit montrer {modal:?} :\n{screen}"
+            );
+            assert_eq!(
+                app.on_event(&key(KeyCode::Char('y'))),
+                modal_yes(modal),
+                "la touche doit répondre à {modal:?}, celle que l'écran montre"
+            );
+        }
     }
 
     /// Précédence : une question de gate à l'écran passe avant le plein écran,
