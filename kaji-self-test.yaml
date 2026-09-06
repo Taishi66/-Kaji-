@@ -165,6 +165,11 @@ extensions:
     name: summon
   - type: builtin
     name: extensionmanager
+  # Phase 10 appelle `web_search` / `web_fetch` pour vérifier qu'ils **refusent**
+  # proprement hors ligne. Sans cette entrée la liste explicite ci-dessus les
+  # retire de la session et la phase n'a rien à appeler.
+  - type: builtin
+    name: web
 
 prompt: |
   Execute the Kaji Self-Testing Integration Suite in {{ workspace_dir }}.
