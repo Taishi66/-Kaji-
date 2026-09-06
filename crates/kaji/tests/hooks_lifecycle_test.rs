@@ -740,7 +740,7 @@ async fn a_recorded_session_replays_on_a_machine_without_the_hooks() -> Result<(
             .into_iter()
             .filter_map(|(turn_seq, planned)| match planned {
                 PlannedTurn::Replay(message) => Some((turn_seq, message)),
-                PlannedTurn::Skipped => None,
+                PlannedTurn::Workflow(_) | PlannedTurn::Skipped => None,
             })
             .collect();
         assert_eq!(planned.len(), 1, "{label}: un tour enregistré à rejouer");
