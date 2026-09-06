@@ -70,6 +70,15 @@ instructions: |
   - Document everything meticulously
   - Handle errors gracefully - a test failure shouldn't stop the suite
 
+  ## Hard constraint: this suite never touches the network
+  The `web` extension is enabled for the whole session, not just Phase 10 - so from Phase 1 on,
+  `web_search` and `web_fetch` are callable at any moment. They must only ever be called to observe
+  a **refusal** (no backend configured, SSRF guard, non-HTTP scheme), never to reach a real host.
+  A test that depends on a reachable host is not a test, it is a flake: it fails on a plane, in CI
+  without egress, and behind a captive portal. Same rule for `shell`: no `curl`, `wget`, `ping`,
+  `nc`, `git clone`, `pip install`, `npm install` or anything else that leaves the machine. If a
+  check cannot be made without egress, log it SKIPPED and say why - never FAILURE, never attempt it.
+
   ## Test Execution Framework
 
   ### Phase 1: Environment Setup & Basic Tool Validation
