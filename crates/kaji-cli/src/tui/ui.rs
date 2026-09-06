@@ -1311,7 +1311,7 @@ fn draw_workflow_gate_modal(frame: &mut Frame, stage: &str) {
         .title(format!(
             " {} gate « {} » — approuver ? (y/n) ",
             theme::GATE_GLYPH,
-            sanitize_for_display(stage)
+            sanitize_for_display(&stage.replace('\n', "␊"))
         ));
     let paragraph = Paragraph::new(
         "y = approuver   n = refuser (le stage et sa descendance sont annulés)   Esc = laisser la porte ouverte",

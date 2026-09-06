@@ -105,7 +105,9 @@ pub struct MissionState {
     pub paused: HashSet<String>,
     /// La dernière réponse à une action — verdict de gate, refus d'annulation,
     /// issue du run. Le plein écran cache le chat : sans elle, un `g` sur une
-    /// porte fermée serait un non-événement silencieux.
+    /// porte fermée serait un non-événement silencieux. Elle répond à une carte
+    /// précise : naviguer ou fermer la vue l'efface, et le pied retrouve sa
+    /// légende de touches.
     pub notice: Option<String>,
 }
 
@@ -399,9 +401,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
             theme::title(),
         ))
         .title_bottom(match app.mission.notice.as_deref() {
-            Some(notice) => {
-                Line::from(format!(" {} ", sanitize_for_display(notice))).style(theme::accent())
-            }
+            // Une notice porte des noms venus de la spec : `sanitize_for_display`
+            // laisse passer `\n`, qui casserait ce pied d'une seule ligne.
+            Some(notice) => Line::from(format!(
+                " {} ",
+                sanitize_for_display(&notice.replace('\n', "␊"))
+            ))
+            .style(theme::accent()),
             None => Line::from(FOOTER).style(theme::dim()),
         });
 

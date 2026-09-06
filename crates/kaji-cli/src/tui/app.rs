@@ -2218,8 +2218,12 @@ impl App {
         self.clamp_mission_selection();
     }
 
+    /// La notice meurt avec la vue : elle répond à une action précise, et la
+    /// retrouver au pied à la réouverture ferait passer une réponse périmée
+    /// pour l'état courant.
     pub fn close_mission_control(&mut self) {
         self.mission.open = false;
+        self.mission.notice = None;
     }
 
     /// Le snapshot du workflow que la session pilote — `None` quand elle n'en
@@ -2235,6 +2239,18 @@ impl App {
     pub fn push_mission_notice(&mut self, text: &str) {
         self.mission.notice = Some(text.to_string());
         self.push_system(text);
+    }
+
+    /// L'accusé d'une action déclenchée depuis l'une ou l'autre vue : au pied
+    /// du mission-control quand il occupe l'écran, au chat sinon. Une lame
+    /// annulée depuis le plein écran répondait jusqu'ici dans un chat que le
+    /// plateau recouvre — l'action semblait sans effet.
+    pub fn push_action_notice(&mut self, text: &str) {
+        if self.mission.open {
+            self.push_mission_notice(text);
+        } else {
+            self.push_system(text);
+        }
     }
 
     /// `/workflow <fichier>` : le chemin est résolu contre le répertoire de la
@@ -2417,6 +2433,7 @@ impl App {
     /// Changer de stage remet l'œil en tête de colonne : la carte 3 d'un stage
     /// n'a rien à voir avec la carte 3 du suivant.
     fn mission_move_stage(&mut self, delta: isize) {
+        self.mission.notice = None;
         let last = self.mission_columns().saturating_sub(1) as isize;
         let target = self.mission.stage as isize + delta;
         let stage = target.clamp(0, last.max(0)) as usize;
@@ -2427,6 +2444,7 @@ impl App {
     }
 
     fn mission_move_card(&mut self, delta: isize) {
+        self.mission.notice = None;
         let last = self.mission_cards(self.mission.stage).saturating_sub(1) as isize;
         let target = self.mission.card as isize + delta;
         self.mission.card = target.clamp(0, last.max(0)) as usize;
@@ -2564,7 +2582,7 @@ impl App {
             return;
         };
         if task.status != forge::ForgeStatus::Running {
-            self.push_system("forge : tâche déjà terminée");
+            self.push_action_notice("forge : tâche déjà terminée");
             return;
         }
         let question = format!(
@@ -9209,6 +9227,87 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    /// m1 : le plein écran recouvre le chat. Un refus poussé au chat y était
+    /// invisible, et l'action passait pour un non-événement.
+    #[test]
+    fn an_action_answered_under_the_full_screen_lands_in_its_footer() {
+        let mut app = App::new(None);
+        app.forge.tasks.insert(
+            "t1".to_string(),
+            blade("t1", "auditer", forge::ForgeStatus::Done),
+        );
+
+        app.open_mission_control();
+        app.ask_forge_cancel("t1");
+        assert_eq!(
+            app.mission.notice.as_deref(),
+            Some("forge : tâche déjà terminée"),
+            "le pied de la vue doit porter le refus"
+        );
+
+        // Vue fermée, le chat reprend la main — et le pied ne garde rien.
+        app.close_mission_control();
+        app.ask_forge_cancel("t1");
+        assert!(app.mission.notice.is_none());
+        assert!(app
+            .chat
+            .last()
+            .expect("une ligne système")
+            .text
+            .contains("déjà terminée"));
+    }
+
+    /// m2 : la notice répond à une carte précise. Elle ne doit pas survivre au
+    /// déplacement du curseur ni à la fermeture de la vue — le pied récupère sa
+    /// légende de touches.
+    #[test]
+    fn navigating_or_closing_the_board_gives_the_footer_its_legend_back() {
+        let mut app = App::new(None);
+        piloted(&mut app, kaji::workflow::StageState::Running);
+
+        for navigation in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('h'),
+            KeyCode::Char('l'),
+        ] {
+            app.push_mission_notice("stage « deploie » suspendu");
+            app.on_event(&key(navigation));
+            assert!(
+                app.mission.notice.is_none(),
+                "{navigation:?} doit effacer la notice"
+            );
+        }
+
+        app.push_mission_notice("stage « deploie » suspendu");
+        app.close_mission_control();
+        assert!(app.mission.notice.is_none());
+    }
+
+    /// m3 : un nom de stage venu de la spec peut porter un `\n`, que
+    /// `sanitize_for_display` laisse passer — il couperait le titre d'une
+    /// modale en deux et rouvrirait le masquage que l'anti-masquage a fermé.
+    #[test]
+    fn a_newline_in_a_stage_name_never_breaks_a_single_line_frame() {
+        let _theme = theme::test_guard();
+        let mut app = App::new(None);
+        app.pending_workflow_gate = Some("de\nploie".to_string());
+
+        assert!(
+            full_screen(&app).contains("de␊ploie"),
+            "le titre de la gate doit rester sur une ligne"
+        );
+
+        app.pending_workflow_gate = None;
+        app.open_mission_control();
+        app.push_mission_notice("gate « de\nploie » laissée ouverte");
+
+        assert!(
+            full_screen(&app).contains("de␊ploie"),
+            "le pied du plateau doit rester sur une ligne"
+        );
     }
 
     /// I2 : le rendu et la saisie tiraient leur précédence de deux chaînes

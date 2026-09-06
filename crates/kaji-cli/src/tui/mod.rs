@@ -1379,12 +1379,12 @@ async fn event_loop(
                                 .unwrap_or_else(|| id.clone());
                             if agent.cancel_subagent(&id).await {
                                 app.forge.mark_cancelled(&id);
-                                app.push_system(&format!(
+                                app.push_action_notice(&format!(
                                     "{} {description} — annulée",
                                     theme::SUBAGENT_GLYPH
                                 ));
                             } else {
-                                app.push_system("forge : tâche déjà terminée");
+                                app.push_action_notice("forge : tâche déjà terminée");
                             }
                         }
                     }
