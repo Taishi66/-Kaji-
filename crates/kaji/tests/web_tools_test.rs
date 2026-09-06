@@ -355,6 +355,30 @@ fn a_self_closing_skipped_tag_does_not_swallow_the_rest_of_the_page() {
     );
 }
 
+/// Une page qui n'referme jamais sa balise faisait rebalayer tout le reste du
+/// tampon à chaque `<` : au plafond du téléchargement, le tour partait pour des
+/// heures de CPU, hors de la deadline qui ne couvre que le téléchargement. La
+/// borne est large : elle attrape un retour au quadratique, pas une machine
+/// chargée.
+#[test]
+fn a_page_that_never_closes_a_tag_is_extracted_in_bounded_time() {
+    use kaji::agents::platform_extensions::web::guard::MAX_BODY_BYTES;
+
+    for pattern in ["<", "<\""] {
+        let page = pattern.repeat(MAX_BODY_BYTES / pattern.len());
+        let started = std::time::Instant::now();
+        let rendered = html_to_markdown(&page);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "extraction de {} octets de « {pattern} » en {elapsed:?}",
+            page.len()
+        );
+        assert!(!rendered.is_empty(), "le texte de la page est rendu");
+    }
+}
+
 #[test]
 fn the_blocks_are_separated() {
     let markdown = html_to_markdown("<p>un</p><p>deux</p><div>trois</div>");

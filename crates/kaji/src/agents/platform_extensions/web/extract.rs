@@ -77,9 +77,12 @@ impl<'a> Iterator for Tokenizer<'a> {
             }
 
             let Some(end) = tag_end(rest) else {
-                // Un `<` isolé : du texte, pas une balise.
-                self.cursor += 1;
-                return Some(Token::Text("<"));
+                // Un `<` que rien ne referme : du texte, et le reste avec lui.
+                // Reprendre à l'octet suivant ferait rebalayer tout le tampon à
+                // chaque `<` — une page de 2 Mio de `<` occuperait le tour des
+                // heures durant, hors de la deadline du téléchargement.
+                self.cursor += rest.len();
+                return Some(Token::Text(rest));
             };
 
             let inner = slice(rest, 1..end);
