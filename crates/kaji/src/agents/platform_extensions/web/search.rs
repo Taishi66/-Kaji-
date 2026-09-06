@@ -9,6 +9,7 @@
 
 use super::error::WebError;
 use super::fetch::{self, FetchPolicy, USER_AGENT};
+use super::guard::MAX_BODY_BYTES;
 use super::untrusted;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -73,6 +74,11 @@ async fn json(backend: &'static str, request: reqwest::RequestBuilder) -> Result
     json_body(backend, response).await
 }
 
+/// Le corps est lu **borné**, sur le même plafond que `web_fetch` : un backend
+/// est du réseau comme un autre, et `Response::json` bufferise tout ce qu'on lui
+/// envoie. Un corps qui dépasse est refusé plutôt que tronqué — un JSON coupé
+/// n'est pas un JSON, et le parser d'à côté rendrait une erreur de syntaxe là où
+/// la cause est un plafond.
 async fn json_body(backend: &'static str, response: reqwest::Response) -> Result<Value, WebError> {
     let status = response.status();
     if !status.is_success() {
@@ -82,13 +88,23 @@ async fn json_body(backend: &'static str, response: reqwest::Response) -> Result
         });
     }
 
-    response
-        .json::<Value>()
+    let (body, capped) = fetch::read_capped(response, MAX_BODY_BYTES)
         .await
-        .map_err(|error| WebError::BackendPayload {
+        .map_err(|error| WebError::BackendTransport {
             backend,
             detail: error.to_string(),
-        })
+        })?;
+    if capped {
+        return Err(WebError::BackendPayload {
+            backend,
+            detail: format!("réponse au-delà du plafond de {MAX_BODY_BYTES} octets"),
+        });
+    }
+
+    serde_json::from_slice(&body).map_err(|error| WebError::BackendPayload {
+        backend,
+        detail: error.to_string(),
+    })
 }
 
 fn endpoint_with(

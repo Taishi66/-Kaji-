@@ -200,7 +200,11 @@ fn build_client(
         .map_err(|error| WebError::Transport(error.to_string()))
 }
 
-async fn read_capped(
+/// Lit un corps de réponse **en streaming**, borné. `pub(super)` parce que la
+/// recherche web en a le même besoin : `Response::json` bufferise sans limite,
+/// et un backend — surtout une instance SearXNG que l'opérateur configure —
+/// n'est pas plus digne de confiance qu'une page.
+pub(super) async fn read_capped(
     mut response: reqwest::Response,
     max: usize,
 ) -> Result<(Vec<u8>, bool), WebError> {

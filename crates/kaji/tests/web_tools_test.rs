@@ -104,6 +104,17 @@ async fn api() -> Api {
         (axum::http::StatusCode::UNAUTHORIZED, "nope")
     }
 
+    /// Une réponse 200, bien formée, et **énorme** : c'est tout ce qu'il faut à
+    /// un backend pour faire gonfler la mémoire de l'agent si le corps est lu
+    /// sans plafond.
+    async fn flood() -> impl axum::response::IntoResponse {
+        let padding = "x".repeat(4 * 1024 * 1024);
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            format!(r#"{{"results":[],"padding":"{padding}"}}"#),
+        )
+    }
+
     /// Une instance qui renvoie ailleurs : c'est tout ce qu'il faut à un
     /// SearXNG menteur pour désigner une cible que la garde a refusée.
     async fn redirect(
@@ -123,6 +134,7 @@ async fn api() -> Api {
         .route("/search", post(tavily))
         .route("/searxng", get(searxng))
         .route("/refused", get(refused))
+        .route("/flood", get(flood))
         .route("/redirect", get(redirect))
         .with_state(Arc::clone(&queries));
 
@@ -196,6 +208,25 @@ async fn a_backend_http_failure_is_a_named_error() {
         ),
         "erreur nommée : {error}"
     );
+}
+
+/// Le corps d'un backend est du réseau comme un autre : il est lu borné, sur le
+/// même plafond que `web_fetch`. Sans lui, une instance SearXNG — dont l'URL
+/// vient de la configuration, qu'un agent outillé peut écrire — servait un
+/// corps sans fin que `Response::json` bufferisait en entier.
+#[tokio::test]
+async fn a_backend_body_beyond_the_cap_is_refused_instead_of_buffered() {
+    let api = api().await;
+    let backend = SearxngBackend::with_policy(format!("{}/flood", api.base), allowing(&api.base));
+    let error = backend
+        .search("rust", 2)
+        .await
+        .expect_err("un corps au-delà du plafond ne se lit pas");
+    let WebError::BackendPayload { backend, detail } = &error else {
+        panic!("le plafond doit nommer sa cause : {error}");
+    };
+    assert_eq!(*backend, "searxng");
+    assert!(detail.contains("plafond"), "{detail}");
 }
 
 #[test]
