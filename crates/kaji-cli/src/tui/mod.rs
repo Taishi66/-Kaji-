@@ -958,6 +958,27 @@ async fn start_workflow(
     ))
 }
 
+/// Ferme le workflow que la session pilotait avant de rendre la main.
+///
+/// Quitter la TUI droppait son `JoinHandle` : la tâche restait détachée, le
+/// DAG n'était pas annulé et le tour d'orchestration ne se refermait jamais —
+/// ni `workflow_done`, ni `turn_end`. La session gardait alors son `turn_start`
+/// exclusif (un second `/workflow` s'y heurtait) et son journal était tronqué,
+/// donc refusé au rejeu. La sortie annule et attend, comme `kaji workflow run`
+/// le fait sur Ctrl+C, avec la grâce de fermeture de l'exécuteur — plus longue
+/// que sa grâce d'annulation d'agent, qu'elle doit couvrir.
+async fn shutdown_workflow(live: LiveWorkflow) {
+    live.handle.cancel();
+    if tokio::time::timeout(kaji::workflow::SHUTDOWN_GRACE, live.run)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "workflow toujours en vol après la grâce d'annulation — session quittée sans lui"
+        );
+    }
+}
+
 fn workflow_outcome_line(state: &kaji::workflow::WorkflowState) -> String {
     let outcome = match state.outcome() {
         kaji::workflow::WorkflowOutcome::Failed(kaji::workflow::FailureCause::Budget(limit)) => {
@@ -1626,6 +1647,9 @@ async fn event_loop(
         // a goal (a verdict, Esc, a stream error), and journaling from here
         // keeps the write off the keystroke path in all of them.
         persist_goal_events(&session_manager, session_id, &mut app).await;
+    }
+    if let Some(live) = workflow {
+        shutdown_workflow(live).await;
     }
     Ok(())
 }
@@ -2396,6 +2420,111 @@ mod tests {
         apply_interrupted_turn_marker(&mut app, sm.last_turn_is_interrupted(&sid).await);
 
         assert!(!app.chat.iter().any(|l| l.text.contains("tour interrompu")));
+    }
+
+    /// I1 : quitter la TUI (`q`, `Ctrl+C`, terminal fermé) droppait le
+    /// `JoinHandle` du workflow en vol — tâche détachée, DAG jamais annulé,
+    /// donc ni `workflow_done` ni `turn_end`. La session restait porteuse d'un
+    /// `turn_start` exclusif (tout `/workflow` suivant s'y heurtait) et son
+    /// journal, tronqué, était refusé au rejeu. La sortie annule et attend.
+    #[tokio::test]
+    async fn quitting_the_tui_closes_the_journal_of_the_workflow_in_flight() {
+        use kaji::config::KajiMode;
+        use kaji::replay::cursor::EventCursor;
+        use kaji::session::SessionType;
+        use kaji::workflow::{AgentRunRequest, AgentRunner, StageState, WorkflowExecutor};
+        use tokio_util::sync::CancellationToken;
+
+        /// Un agent qui ne rend la main que coupé : sans lui, le DAG finirait
+        /// tout seul et la sortie n'aurait rien à annuler.
+        struct HangingRunner;
+
+        #[async_trait::async_trait]
+        impl AgentRunner for HangingRunner {
+            async fn prepare(&self, _request: &AgentRunRequest) -> Result<String, String> {
+                Ok("enfant".to_string())
+            }
+
+            async fn run(
+                &self,
+                _request: AgentRunRequest,
+                _session_id: &str,
+                cancel: CancellationToken,
+            ) -> Result<String, String> {
+                cancel.cancelled().await;
+                Err("annulé".to_string())
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let session_manager = Arc::new(SessionManager::new(temp_dir.path().join("data")));
+        let session_id = session_manager
+            .create_session(
+                temp_dir.path().to_path_buf(),
+                "s".to_string(),
+                SessionType::User,
+                KajiMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+
+        let spec = kaji_core::workflow::WorkflowSpec::from_yaml(
+            "name: revue\nstages:\n  - name: collecte\n    agents:\n      - name: scanner\n        prompt: scanne\n",
+        )
+        .unwrap();
+        let recorder = kaji::workflow::events::WorkflowRecorder::open(
+            Arc::clone(&session_manager),
+            session_id.clone(),
+            &spec.name,
+        )
+        .await
+        .unwrap();
+        let executor = WorkflowExecutor::new(
+            spec,
+            Arc::new(HangingRunner),
+            recorder,
+            session_id.clone(),
+            temp_dir.path().to_path_buf(),
+        )
+        .unwrap();
+        let live = LiveWorkflow {
+            handle: executor.handle(),
+            run: tokio::spawn(executor.run()),
+        };
+
+        // L'annulation n'a de sens qu'une fois l'agent réellement en vol.
+        for _ in 0..200 {
+            if live.handle.snapshot().stages[0].state == StageState::Running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            live.handle.snapshot().stages[0].state,
+            StageState::Running,
+            "l'agent doit tourner avant qu'on quitte"
+        );
+
+        shutdown_workflow(live).await;
+
+        let events = session_manager.session_events(&session_id).await.unwrap();
+        let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"workflow_done"),
+            "le workflow doit conclure : {kinds:?}"
+        );
+        assert_eq!(
+            kinds.last(),
+            Some(&"turn_end"),
+            "le tour d'orchestration doit se refermer : {kinds:?}"
+        );
+        assert!(
+            EventCursor::load(&session_manager, &session_id)
+                .await
+                .is_ok(),
+            "le journal doit rester rejouable après un Ctrl+C"
+        );
     }
 
     #[test]

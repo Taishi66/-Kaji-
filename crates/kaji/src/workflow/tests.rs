@@ -1488,6 +1488,20 @@ async fn a_killed_workflow_is_detected_as_truncated() {
     );
 }
 
+/// La grâce laissée à un appelant qui ferme le workflow de l'extérieur doit
+/// couvrir celle que l'exécuteur laisse lui-même à un agent sourd à son jeton :
+/// mesuré sur un agent bloqué en appel HTTP, deux grâces égales font partir
+/// l'appelant juste avant `workflow_done`, et le journal reste ouvert.
+#[test]
+fn the_shutdown_grace_outlasts_the_agent_cancel_grace() {
+    assert!(
+        crate::workflow::SHUTDOWN_GRACE > crate::workflow::CANCEL_GRACE,
+        "{:?} doit dépasser {:?}",
+        crate::workflow::SHUTDOWN_GRACE,
+        crate::workflow::CANCEL_GRACE
+    );
+}
+
 /// C1 : la troncature n'est pas qu'une affaire de fin de journal. Un tour de
 /// workflow tué, puis un tour d'agent normalement clos par-dessus, laisse un
 /// trou **au milieu** : le dernier tour est propre, mais le journal est amputé.

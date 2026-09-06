@@ -42,7 +42,15 @@ const TOKEN_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Délai laissé à un agent pour s'arrêter proprement après l'annulation, avant
 /// que l'exécuteur passe à la suite sans lui.
-const CANCEL_GRACE: Duration = Duration::from_secs(5);
+pub const CANCEL_GRACE: Duration = Duration::from_secs(5);
+
+/// Ce qu'un appelant qui ferme le workflow de l'extérieur — la TUI qui quitte —
+/// doit lui laisser. Strictement plus que [`CANCEL_GRACE`] : un agent sourd à
+/// son jeton fait attendre l'exécuteur cette grâce-là **avant** qu'il ne
+/// l'abandonne, et il lui reste ensuite à clore son journal. Attendre la même
+/// durée, c'est partir juste avant `workflow_done` — mesuré en vrai sur un
+/// agent bloqué en appel HTTP.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(CANCEL_GRACE.as_secs() * 2);
 
 struct Shared {
     state: Mutex<WorkflowState>,
