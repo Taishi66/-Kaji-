@@ -121,7 +121,7 @@ chemins. Test : `the_mission_control_swallows_the_pane_chords_and_the_composer`.
 | | |
 |---|---|
 | Fichiers | 1 nouveau (`missioncontrol.rs`), 5 modifiés (`app.rs`, `ui.rs`, `mod.rs`, `gitstatus.rs`, `statusbar.rs`) |
-| Tests ajoutés | 30 (17 missioncontrol, 6 app, 4 ui, 4 gitstatus, 1 statusbar) |
+| Tests ajoutés | 35 (17 missioncontrol, 9 app, 4 ui, 4 gitstatus, 1 statusbar) |
 | `cargo test -p kaji-cli` | 1008 passed, 0 failed, 1 ignored (+ doctest 1) |
 | `cargo clippy -p kaji-cli --all-targets -- -D warnings` | clean |
 | `rustfmt --edition 2021` | clean sur les 6 fichiers |

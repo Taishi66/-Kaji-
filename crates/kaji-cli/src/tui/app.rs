@@ -2202,7 +2202,10 @@ impl App {
 
     /// Un workflow qui perd un stage, une vague de lames qui se range : la
     /// sélection suit le plateau plutôt que de désigner une carte disparue.
-    fn clamp_mission_selection(&mut self) {
+    /// `pub(crate)` : le tick forge de `mod.rs` la rappelle après chaque
+    /// `forge.apply_snapshot`, la seule construction de plateau que l'App ne
+    /// pilote pas elle-même.
+    pub(crate) fn clamp_mission_selection(&mut self) {
         self.mission.stage = self
             .mission
             .stage
@@ -8279,6 +8282,46 @@ mod tests {
 
         assert_eq!(app.mission.stage, 0);
         assert_eq!(app.mission.card, 0);
+    }
+
+    /// Le chemin libre (aucun workflow piloté) tire ses cartes de la forge —
+    /// et le tick forge purge les tâches terminées dès qu'une nouvelle lame
+    /// arrive (`ForgeState::insert` → `retire_finished`). Contrairement au
+    /// chemin workflow, rien ne reclampait la sélection derrière cette purge.
+    #[test]
+    fn a_forge_purge_reclamps_the_mission_selection() {
+        let mut app = app_at_the_forge(vec![
+            blade("a", "auditer", forge::ForgeStatus::Running),
+            blade("b", "relire", forge::ForgeStatus::Running),
+            blade("c", "documenter", forge::ForgeStatus::Running),
+        ]);
+        app.open_mission_control();
+        app.mission.card = 2;
+
+        app.forge.apply_snapshot(vec![
+            snapshot("a", "auditer", SubagentTaskStatus::Completed, 3),
+            snapshot("b", "relire", SubagentTaskStatus::Completed, 3),
+            snapshot("c", "documenter", SubagentTaskStatus::Running, 3),
+        ]);
+        app.clamp_mission_selection();
+
+        app.forge.apply_snapshot(vec![
+            snapshot("c", "documenter", SubagentTaskStatus::Running, 3),
+            snapshot("d", "livrer", SubagentTaskStatus::Running, 3),
+        ]);
+        app.clamp_mission_selection();
+
+        assert_eq!(
+            app.forge.tasks.len(),
+            2,
+            "a et b sont retirées par l'arrivée de d"
+        );
+        assert!(
+            app.mission.card < app.forge.tasks.len(),
+            "carte {} hors bornes sur {} tâches",
+            app.mission.card,
+            app.forge.tasks.len()
+        );
     }
 
     /// Soixante kanji valent cent-vingt cellules : un titre borné en `chars()`

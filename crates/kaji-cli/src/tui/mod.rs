@@ -1015,6 +1015,11 @@ async fn event_loop(
             _ = git_tick.tick() => app.request_git_refresh(),
             _ = forge_tick.tick(), if app.turn_active || !app.forge.tasks.is_empty() || app.forge.visible() || app.mission.open => {
                 app.forge.apply_snapshot(agent.subagent_snapshot().await);
+                // Le tick forge purge les tâches terminées dès qu'une nouvelle
+                // lame arrive (`ForgeState::insert` → `retire_finished`) —
+                // c'est la seule construction de plateau que `apply_workflow_snapshot`
+                // ne couvre pas, donc la sélection ne se reclampe pas toute seule.
+                app.clamp_mission_selection();
                 app.refresh_forge_sheet();
                 // Le ledger n'est interrogé que sous les yeux du
                 // mission-control : c'est la seule vue qui lit l'usage par

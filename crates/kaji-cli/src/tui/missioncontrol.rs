@@ -277,14 +277,22 @@ pub fn visible_columns(width: usize, columns: usize) -> usize {
     fitting.max(1).min(columns)
 }
 
-/// La première colonne rendue : la fenêtre glisse pour tenir la sélection, le
-/// même contrat que le volet forge et l'explorateur.
-pub fn first_column(selected: usize, visible: usize, columns: usize) -> usize {
-    if visible == 0 || columns <= visible {
+/// Le premier élément rendu d'une fenêtre de `visible` emplacements sur
+/// `total` : elle glisse pour tenir `selected` visible, sans jamais le
+/// pousser en tête tant qu'il reste de la place derrière lui. Partagée entre
+/// les colonnes de stages et les cartes d'une colonne — même contrat que le
+/// volet forge et l'explorateur.
+fn sliding_window_start(selected: usize, visible: usize, total: usize) -> usize {
+    if visible == 0 || total <= visible {
         return 0;
     }
-    let last = columns - visible;
+    let last = total - visible;
     selected.saturating_sub(visible.saturating_sub(1)).min(last)
+}
+
+/// La première colonne rendue.
+pub fn first_column(selected: usize, visible: usize, columns: usize) -> usize {
+    sliding_window_start(selected, visible, columns)
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -407,12 +415,7 @@ pub fn column_lines(
     }
 
     let cursor = selected.unwrap_or(0);
-    let first = cursor.saturating_sub(slots.saturating_sub(1)).min(
-        column
-            .cards
-            .len()
-            .saturating_sub(slots.min(column.cards.len())),
-    );
+    let first = sliding_window_start(cursor, slots, column.cards.len());
     for (rank, card) in column.cards.iter().enumerate().skip(first).take(slots) {
         let highlight =
             (Some(rank) == selected).then(|| theme::accent().bg(theme::user_bg_color()));
@@ -973,6 +976,70 @@ mod tests {
         assert_eq!(first_column(2, 2, 6), 1);
         assert_eq!(first_column(5, 2, 6), 4);
         assert_eq!(first_column(3, 6, 6), 0, "tout tient : rien ne glisse");
+    }
+
+    /// `column_lines` fait glisser sa fenêtre de cartes avec la même formule
+    /// que `first_column` fait glisser ses colonnes — testée ici directement
+    /// sur `sliding_window_start`, la fonction que les deux partagent.
+    #[test]
+    fn the_shared_window_handles_head_middle_and_tail() {
+        assert_eq!(sliding_window_start(0, 2, 6), 0, "curseur en tête");
+        assert_eq!(sliding_window_start(3, 2, 6), 2, "curseur au milieu");
+        assert_eq!(sliding_window_start(5, 2, 6), 4, "curseur en queue");
+        assert_eq!(
+            sliding_window_start(2, 6, 3),
+            0,
+            "moins d'éléments que de slots : rien ne glisse"
+        );
+    }
+
+    /// Les cartes d'une colonne glissent comme les colonnes d'un plateau : le
+    /// curseur reste visible, jamais poussé en tête tant qu'il reste des
+    /// cartes en dessous.
+    #[test]
+    fn column_lines_slides_its_card_window_like_the_stage_columns() {
+        let cards: Vec<Card> = (0..5)
+            .map(|rank| Card {
+                name: format!("agent-{rank}"),
+                mark: CardMark::Running,
+                status: "en cours".to_string(),
+                tool: None,
+                usage: None,
+                elapsed_secs: 3,
+            })
+            .collect();
+        let column = Column {
+            name: "libre".to_string(),
+            state: "en cours".to_string(),
+            cards,
+        };
+        let rows = COLUMN_HEADER_ROWS + 2 * CARD_ROWS;
+        let names = |lines: &[Line<'static>]| -> Vec<String> {
+            (0..5)
+                .filter(|rank| {
+                    lines
+                        .iter()
+                        .any(|line| line.to_string().contains(&format!("agent-{rank}")))
+                })
+                .map(|rank| format!("agent-{rank}"))
+                .collect()
+        };
+
+        assert_eq!(
+            names(&column_lines(&column, 40, rows, Some(0))),
+            vec!["agent-0", "agent-1"],
+            "curseur en tête"
+        );
+        assert_eq!(
+            names(&column_lines(&column, 40, rows, Some(2))),
+            vec!["agent-1", "agent-2"],
+            "curseur au milieu"
+        );
+        assert_eq!(
+            names(&column_lines(&column, 40, rows, Some(4))),
+            vec!["agent-3", "agent-4"],
+            "curseur en queue"
+        );
     }
 
     #[test]
