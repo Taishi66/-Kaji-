@@ -2473,16 +2473,25 @@ impl App {
     /// pilote pas elle-même.
     pub(crate) fn clamp_mission_selection(&mut self) {
         let board = missioncontrol::board(self);
-        self.mission.stage = self
+        let stage = self
             .mission
             .stage
             .min(board.columns.len().saturating_sub(1));
         let cards = board
             .columns
-            .get(self.mission.stage)
+            .get(stage)
             .map(|column| column.cards.len())
             .unwrap_or(0);
-        self.mission.card = self.mission.card.min(cards.saturating_sub(1));
+        let card = self.mission.card.min(cards.saturating_sub(1));
+
+        // Le curseur qui bouge tout seul — une lame purgée, une colonne qui
+        // disparaît — laisserait la notice répondre au pied pour une carte
+        // qu'elle ne désigne plus. Un reclamp qui ne déplace rien la garde.
+        if (stage, card) != (self.mission.stage, self.mission.card) {
+            self.mission.notice = None;
+        }
+        self.mission.stage = stage;
+        self.mission.card = card;
     }
 
     /// `Ctrl+O`: composer → explorer → viewer → forge → composer, skipping
@@ -8851,6 +8860,45 @@ mod tests {
             "carte {} hors bornes sur {} tâches",
             app.mission.card,
             app.forge.tasks.len()
+        );
+    }
+
+    /// La notice répond à la carte sous le curseur. Le reclamp automatique
+    /// déplace ce curseur sans passer par la navigation : la réponse resterait
+    /// au pied face à une autre carte.
+    #[test]
+    fn an_automatic_reclamp_that_moves_the_cursor_takes_the_notice_with_it() {
+        let mut app = app_at_the_forge(vec![
+            blade("a", "auditer", forge::ForgeStatus::Running),
+            blade("b", "relire", forge::ForgeStatus::Running),
+            blade("c", "documenter", forge::ForgeStatus::Running),
+        ]);
+        app.open_mission_control();
+        app.mission.card = 2;
+
+        app.push_mission_notice("forge.c — annulation demandée");
+        app.clamp_mission_selection();
+        assert_eq!(
+            app.mission.notice.as_deref(),
+            Some("forge.c — annulation demandée"),
+            "un reclamp qui ne bouge rien ne prend pas la notice"
+        );
+
+        app.forge.apply_snapshot(vec![
+            snapshot("a", "auditer", SubagentTaskStatus::Completed, 3),
+            snapshot("b", "relire", SubagentTaskStatus::Completed, 3),
+            snapshot("c", "documenter", SubagentTaskStatus::Running, 3),
+        ]);
+        app.forge.apply_snapshot(vec![
+            snapshot("c", "documenter", SubagentTaskStatus::Running, 3),
+            snapshot("d", "livrer", SubagentTaskStatus::Running, 3),
+        ]);
+        app.clamp_mission_selection();
+
+        assert!(
+            app.mission.notice.is_none(),
+            "la sélection a bougé sous la notice : {:?}",
+            app.mission.notice
         );
     }
 
