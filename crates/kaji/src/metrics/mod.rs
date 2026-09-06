@@ -380,6 +380,27 @@ mod tests {
         }
     }
 
+    /// `cache_savings` se calcule sur le seul tarif d'entrée, alors que le
+    /// `cost` du ledger vient de `Pricing::estimate_cost`, qui exige entrée
+    /// **et** sortie. Un modèle tarifé en entrée seulement afficherait donc une
+    /// économie chiffrée à côté d'un coût « n/a ». Aucune garde à l'exécution
+    /// pour ça : c'est le catalogue qui porte l'invariant, et c'est ici qu'il
+    /// se vérifie — le jour où une entrée le casse, ce test le dit.
+    #[test]
+    fn the_bundled_catalog_never_prices_input_without_output() {
+        let registry = crate::providers::canonical::CanonicalModelRegistry::bundled().unwrap();
+        let asymmetric: Vec<&str> = registry
+            .all_models()
+            .into_iter()
+            .filter(|model| model.cost.input.is_some() && model.cost.output.is_none())
+            .map(|model| model.name.as_str())
+            .collect();
+        assert!(
+            asymmetric.is_empty(),
+            "modèles tarifés en entrée sans sortie : {asymmetric:?}"
+        );
+    }
+
     fn bucket(key: &str, model: &str, cost: Option<f64>, cache_read: i64) -> LedgerBucket {
         LedgerBucket {
             key: key.to_string(),

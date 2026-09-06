@@ -113,18 +113,18 @@ instructions: |
   - `kaji memory list --curated` reads the facts back from both scopes
   - Deleting the markdown file is the documented way to forget a fact
 
+  ### Phase 7 — Replay CLI surface
+  Check the `kaji replay` command line only — a full replay needs a session recorded by the same
+  binary, which stays a manual verification:
+  - an unknown session id fails with « introuvable » and a non-zero exit
+  - `kaji replay --help` exits 0
+
   ### Phase 8 — Metrics CLI surface
   Check the `kaji metrics` command line only — the aggregates themselves are covered by unit
   tests over a seeded ledger:
   - `kaji metrics --help` exits 0 and names `--window`, `--by`, `--format`
   - `--format json` emits parsable JSON even on an empty ledger
   - an unknown `--window` value is refused by clap
-
-  ### Phase 7 — Replay CLI surface
-  Check the `kaji replay` command line only — a full replay needs a session recorded by the same
-  binary, which stays a manual verification:
-  - an unknown session id fails with « introuvable » and a non-zero exit
-  - `kaji replay --help` exits 0
 
   ## Success Criteria
   - Phase success: ≥80% tests pass
