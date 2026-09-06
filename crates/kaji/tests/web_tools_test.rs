@@ -104,11 +104,26 @@ async fn api() -> Api {
         (axum::http::StatusCode::UNAUTHORIZED, "nope")
     }
 
+    /// Une instance qui renvoie ailleurs : c'est tout ce qu'il faut à un
+    /// SearXNG menteur pour désigner une cible que la garde a refusée.
+    async fn redirect(
+        Query(params): Query<HashMap<String, String>>,
+    ) -> impl axum::response::IntoResponse {
+        (
+            axum::http::StatusCode::FOUND,
+            [(
+                axum::http::header::LOCATION,
+                params.get("to").cloned().unwrap_or_default(),
+            )],
+        )
+    }
+
     let router = axum::Router::new()
         .route("/res/v1/web/search", get(brave))
         .route("/search", post(tavily))
         .route("/searxng", get(searxng))
         .route("/refused", get(refused))
+        .route("/redirect", get(redirect))
         .with_state(Arc::clone(&queries));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -524,6 +539,55 @@ async fn an_internal_searxng_endpoint_is_refused_unless_listed() {
         ),
         "erreur nommée : {error}"
     );
+}
+
+/// La garde ne vaut que si elle est opposable à la connexion : une instance qui
+/// répond `302` vers une adresse refusée ne doit pas être suivie, sinon la
+/// vérification faite sur l'endpoint ne protège que le premier saut.
+#[tokio::test]
+async fn a_searxng_redirect_towards_a_refused_address_is_not_followed() {
+    let elsewhere = api().await;
+    let api = api().await;
+    let backend = SearxngBackend::with_policy(
+        format!("{}/redirect?to={}/searxng", api.base, elsewhere.base),
+        allowing(&api.base),
+    );
+
+    let error = backend
+        .search("rust", 2)
+        .await
+        .expect_err("le saut vers une adresse hors liste est refusé");
+    assert!(
+        matches!(
+            error,
+            WebError::BackendEndpointRefused {
+                backend: "searxng",
+                ..
+            }
+        ),
+        "erreur nommée : {error}"
+    );
+    assert!(
+        elsewhere.queries.lock().unwrap().is_empty(),
+        "la cible du saut n'a jamais été jointe"
+    );
+}
+
+/// L'autre moitié du contrat : un saut que la garde accepte reste suivi.
+#[tokio::test]
+async fn a_legitimate_searxng_redirect_is_followed_after_a_fresh_check() {
+    let api = api().await;
+    let backend = SearxngBackend::with_policy(
+        format!("{}/redirect?to={}/searxng", api.base, api.base),
+        allowing(&api.base),
+    );
+
+    let results = backend
+        .search("rust", 2)
+        .await
+        .expect("le saut validé est suivi");
+    assert_eq!(results.len(), 2);
+    assert_eq!(api.queries.lock().unwrap().len(), 1, "une seule recherche");
 }
 
 // ---------------------------------------------------------------------------

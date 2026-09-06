@@ -8,8 +8,7 @@
 //! `KAJI_WEB_ALLOW_HOSTS` (cf. `guard.rs`).
 
 use super::error::WebError;
-use super::fetch::{FetchPolicy, USER_AGENT};
-use super::guard;
+use super::fetch::{self, FetchPolicy, USER_AGENT};
 use super::untrusted;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -42,15 +41,19 @@ pub trait SearchBackend: Send + Sync + std::fmt::Debug {
     async fn search(&self, query: &str, count: u8) -> Result<Vec<SearchResult>, WebError>;
 }
 
-/// Un seul client pour tous les backends : son pool de connexions n'a rien à
-/// gagner à être reconstruit à chaque appel d'outil, et la découverte du proxy
-/// système coûte plusieurs secondes au premier montage. `no_proxy` aligne la
-/// recherche sur `web_fetch`, où un proxy rendrait la garde SSRF inopérante.
+/// Un seul client pour les deux backends à endpoint constant : son pool de
+/// connexions n'a rien à gagner à être reconstruit à chaque appel d'outil, et la
+/// découverte du proxy système coûte plusieurs secondes au premier montage.
+/// `no_proxy` aligne la recherche sur `web_fetch`, où un proxy rendrait la garde
+/// SSRF inopérante ; `Policy::none()` évite que la clé d'API suive un saut vers
+/// un tiers, `remove_sensitive_headers` de reqwest ne connaissant ni
+/// `X-Subscription-Token` ni le corps JSON de Tavily.
 fn client() -> reqwest::Client {
     static CLIENT: once_cell::sync::Lazy<reqwest::Client> = once_cell::sync::Lazy::new(|| {
         reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(BACKEND_TIMEOUT)
             .build()
             .expect("le client de recherche se construit sans TLS ni proxy à découvrir")
@@ -67,6 +70,10 @@ async fn json(backend: &'static str, request: reqwest::RequestBuilder) -> Result
             detail: error.to_string(),
         })?;
 
+    json_body(backend, response).await
+}
+
+async fn json_body(backend: &'static str, response: reqwest::Response) -> Result<Value, WebError> {
     let status = response.status();
     if !status.is_success() {
         return Err(WebError::BackendHttp {
@@ -215,11 +222,15 @@ impl SearchBackend for TavilyBackend {
     }
 }
 
+/// L'instance vient de la configuration, donc d'un fichier qu'un agent outillé
+/// peut écrire : son trajet emprunte la discipline de `web_fetch` — client
+/// épinglé sur les adresses validées, redirections suivies à la main, chaque
+/// saut repassé par la garde. Un client partagé ne le permettrait pas :
+/// l'épinglage est propre à un saut.
 #[derive(Debug)]
 pub struct SearxngBackend {
     endpoint: String,
     policy: FetchPolicy,
-    client: reqwest::Client,
 }
 
 impl SearxngBackend {
@@ -230,11 +241,7 @@ impl SearxngBackend {
     }
 
     pub fn with_policy(endpoint: String, policy: FetchPolicy) -> Self {
-        Self {
-            endpoint,
-            policy,
-            client: client(),
-        }
+        Self { endpoint, policy }
     }
 
     pub fn endpoint_from_instance(url: &str) -> String {
@@ -255,12 +262,19 @@ impl SearchBackend for SearxngBackend {
             &[("q", query), ("format", "json")],
         )?;
 
-        let target = guard::check_url(&url, &self.policy).map_err(endpoint_refused)?;
-        guard::resolve_target(&target, &self.policy)
-            .await
-            .map_err(endpoint_refused)?;
+        let landing = fetch::get_guarded(&url, &self.policy, |request| {
+            request.header("Accept", "application/json")
+        })
+        .await
+        .map_err(|error| match error {
+            WebError::Transport(detail) => WebError::BackendTransport {
+                backend: "searxng",
+                detail,
+            },
+            refusal => endpoint_refused(refusal),
+        })?;
 
-        let body = json(self.name(), self.client.get(url)).await?;
+        let body = json_body(self.name(), landing.response).await?;
 
         Ok(read_results(body.get("results"), "content", count))
     }

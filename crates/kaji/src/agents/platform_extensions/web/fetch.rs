@@ -44,16 +44,51 @@ pub struct FetchOutcome {
 
 pub async fn fetch_guarded(url: &str, policy: &FetchPolicy) -> Result<FetchOutcome, WebError> {
     let deadline = Instant::now() + policy.timeout;
-    tokio::time::timeout(policy.timeout, follow_redirects(url, policy, deadline))
-        .await
-        .unwrap_or(Err(WebError::DeadlineExceeded(policy.timeout)))
+    tokio::time::timeout(policy.timeout, async {
+        let landing = follow_redirects(url, policy, deadline, |request| {
+            request.header(
+                ACCEPT,
+                "text/html,text/plain,application/json;q=0.9,*/*;q=0.8",
+            )
+        })
+        .await?;
+        read_outcome(landing, policy).await
+    })
+    .await
+    .unwrap_or(Err(WebError::DeadlineExceeded(policy.timeout)))
+}
+
+/// Le trajet gardé, sans lecture du corps : la réponse finale et l'URL qui l'a
+/// servie. La recherche l'emprunte comme `web_fetch`, pour que la garde soit
+/// opposable à la connexion et pas seulement à l'URL de départ.
+pub(super) struct Landing {
+    pub url: Url,
+    pub response: reqwest::Response,
+}
+
+/// Une requête sous garde : chaque saut repasse par `check_url` et
+/// `resolve_target`, et le client d'un saut ne joint que les adresses que ce
+/// saut-là a fait valider. Le plafond de temps vaut pour la chaîne entière.
+pub(super) async fn get_guarded(
+    url: &Url,
+    policy: &FetchPolicy,
+    decorate: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+) -> Result<Landing, WebError> {
+    let deadline = Instant::now() + policy.timeout;
+    tokio::time::timeout(
+        policy.timeout,
+        follow_redirects(url.as_str(), policy, deadline, decorate),
+    )
+    .await
+    .unwrap_or(Err(WebError::DeadlineExceeded(policy.timeout)))
 }
 
 async fn follow_redirects(
     url: &str,
     policy: &FetchPolicy,
     deadline: Instant,
-) -> Result<FetchOutcome, WebError> {
+    decorate: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+) -> Result<Landing, WebError> {
     let mut current =
         Url::parse(url).map_err(|error| WebError::InvalidUrl(format!("{url} — {error}")))?;
     let mut hops = 0usize;
@@ -67,12 +102,7 @@ async fn follow_redirects(
         let addrs = guard::resolve_target(&target, policy).await?;
         let client = build_client(&target, &addrs, policy)?;
 
-        let response = client
-            .get(current.clone())
-            .header(
-                ACCEPT,
-                "text/html,text/plain,application/json;q=0.9,*/*;q=0.8",
-            )
+        let response = decorate(client.get(current.clone()))
             .send()
             .await
             .map_err(|error| WebError::Transport(error.to_string()))?;
@@ -96,29 +126,38 @@ async fn follow_redirects(
             continue;
         }
 
-        if !status.is_success() {
-            return Err(WebError::HttpStatus {
-                url: current.to_string(),
-                status: status.as_u16(),
-            });
-        }
-
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let (bytes, capped) = read_capped(response, policy.max_bytes).await?;
-        let (body, cut) = to_capped_string(bytes, policy.max_bytes);
-
-        return Ok(FetchOutcome {
-            final_url: current.to_string(),
-            status: status.as_u16(),
-            content_type,
-            body,
-            truncated: capped || cut,
+        return Ok(Landing {
+            url: current,
+            response,
         });
     }
+}
+
+async fn read_outcome(landing: Landing, policy: &FetchPolicy) -> Result<FetchOutcome, WebError> {
+    let Landing { url, response } = landing;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(WebError::HttpStatus {
+            url: url.to_string(),
+            status: status.as_u16(),
+        });
+    }
+
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let (bytes, capped) = read_capped(response, policy.max_bytes).await?;
+    let (body, cut) = to_capped_string(bytes, policy.max_bytes);
+
+    Ok(FetchOutcome {
+        final_url: url.to_string(),
+        status: status.as_u16(),
+        content_type,
+        body,
+        truncated: capped || cut,
+    })
 }
 
 /// Aucun nom ne se résout hors de l'épinglage. Les surcharges de
