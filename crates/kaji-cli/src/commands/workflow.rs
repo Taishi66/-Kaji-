@@ -227,7 +227,7 @@ where
                 }
                 interrupted = true;
                 pending = None;
-                handle.cancel();
+                handle.cancel().await;
                 // Réarmée pour le second appui, la boucle étant désormais
                 // sondée en continu : aucune fenêtre d'aveuglement.
                 interrupt.set(interrupts());

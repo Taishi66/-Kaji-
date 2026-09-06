@@ -1,21 +1,23 @@
 //! Les kinds v2 de l'orchestration, écrits sur la session **parente**.
 //!
-//! Six kinds structurels — `workflow_started`, `stage_started`,
-//! `agent_started`, `agent_done`, `gate_decision`, `workflow_done` — décrivent
-//! la topologie et les décisions : petits, permanents, ils sont l'historique du
-//! workflow au même titre que `turn_start`. Un septième, `workflow_artifact`,
-//! porte la sortie complète d'un agent : volumineux, purgeable, tranché du
-//! `agent_done` qui n'en garde que les compteurs
-//! (`replay::retention::PURGEABLE_KINDS`).
+//! Sept kinds structurels — `workflow_started`, `stage_started`,
+//! `agent_started`, `agent_done`, `gate_decision`, `workflow_cancelled`,
+//! `workflow_done` — décrivent la topologie et les décisions : petits,
+//! permanents, ils sont l'historique du workflow au même titre que
+//! `turn_start`. Un huitième, `workflow_artifact`, porte la sortie complète
+//! d'un agent : volumineux, purgeable, tranché du `agent_done` qui n'en garde
+//! que les compteurs (`replay::retention::PURGEABLE_KINDS`).
 //!
-//! Un huitième, `workflow_recipe`, porte le **contenu** des recettes
+//! Un neuvième, `workflow_recipe`, porte le **contenu** des recettes
 //! référencées par la spec : un fichier lu au moment du run est de l'état
 //! externe qui entre dans le prompt d'un agent, donc il est capturé — et
 //! volumineux comme un artefact, donc purgeable lui aussi.
 //!
-//! Trois de ces entrées sont **servies** au rejeu : `gate_decision` (une
-//! approbation humaine, jamais redemandée), `workflow_artifact` +
-//! `agent_done` (la sortie et l'issue de chaque agent, servies par
+//! Quatre de ces entrées sont **servies** au rejeu : `gate_decision` (une
+//! approbation humaine, jamais redemandée), `workflow_cancelled` (l'annulation
+//! d'un opérateur, servie par [`crate::workflow::gate::ReplayGates`] aux gates
+//! qui n'ont pas eu de décision), `workflow_artifact` + `agent_done` (la sortie
+//! et l'issue de chaque agent, servies par
 //! [`crate::workflow::runner::ReplayRunner`] au lieu de relancer un
 //! sous-agent) et `workflow_recipe` (le fichier, servi sans relire le disque).
 //! Les autres décrivent ce qui s'est passé, elles ne le pilotent pas.
@@ -62,11 +64,12 @@ pub const AGENT_DONE: &str = "agent_done";
 pub const GATE_DECISION: &str = "gate_decision";
 pub const WORKFLOW_ARTIFACT: &str = "workflow_artifact";
 pub const WORKFLOW_RECIPE: &str = "workflow_recipe";
+pub const WORKFLOW_CANCELLED: &str = "workflow_cancelled";
 pub const WORKFLOW_DONE: &str = "workflow_done";
 
 /// Les kinds de l'orchestration, dans l'ordre d'apparition d'une exécution.
 /// Exhaustif : un test cloue que le recorder n'en écrit pas d'autre.
-pub const WORKFLOW_KINDS: [&str; 8] = [
+pub const WORKFLOW_KINDS: [&str; 9] = [
     WORKFLOW_STARTED,
     WORKFLOW_RECIPE,
     STAGE_STARTED,
@@ -74,6 +77,7 @@ pub const WORKFLOW_KINDS: [&str; 8] = [
     GATE_DECISION,
     WORKFLOW_ARTIFACT,
     AGENT_DONE,
+    WORKFLOW_CANCELLED,
     WORKFLOW_DONE,
 ];
 
@@ -166,6 +170,18 @@ pub struct WorkflowRecipeContent {
 pub struct GateDecided {
     pub stage: String,
     pub decision: GateDecision,
+}
+
+/// L'annulation d'un opérateur, **datée par sa place dans le journal**.
+/// `workflow_done` dit qu'un run s'est terminé annulé ; il ne dit pas à quel
+/// moment l'annulation est tombée, et un refus de gate suffit d'ailleurs à
+/// figer la même issue. Ce kind-là dit les deux : que quelqu'un a annulé, et
+/// devant quels événements. C'est ce que le rejeu sert aux gates restées sans
+/// décision (règle « Replay v2 » d'AGENTS.md : l'annulation est de l'état
+/// externe qui pilote le run, elle a son kind).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowCancelled {
+    pub workflow: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,6 +384,21 @@ impl WorkflowRecorder {
 
     pub async fn recipe(&self, recipe: &WorkflowRecipeContent) {
         self.append(WORKFLOW_RECIPE, recipe).await;
+    }
+
+    /// Écrite **avant** que le jeton d'annulation ne parte, pour que l'event
+    /// précède au journal toutes les conséquences de l'annulation — les
+    /// `agent_done` des agents coupés, puis `workflow_done`. Écrite après, sa
+    /// place raconterait une annulation tombée plus tard qu'elle ne l'a été, et
+    /// c'est précisément cette place que le rejeu lit.
+    pub async fn workflow_cancelled(&self, workflow: &str) {
+        self.append(
+            WORKFLOW_CANCELLED,
+            &WorkflowCancelled {
+                workflow: workflow.to_string(),
+            },
+        )
+        .await;
     }
 
     /// Ferme le tour en même temps qu'elle fige l'état : `workflow_done` sans

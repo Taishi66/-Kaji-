@@ -18,6 +18,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -56,6 +57,16 @@ struct Shared {
     state: Mutex<WorkflowState>,
     artifacts: Mutex<Artifacts>,
     cancel: CancellationToken,
+    /// Le journal de l'exécution, partagé avec [`WorkflowHandle`] : l'annulation
+    /// s'écrit depuis la prise de contrôle, au moment où elle tombe, pas depuis
+    /// l'exécuteur qui ne la constate qu'ensuite.
+    recorder: Arc<WorkflowRecorder>,
+    workflow: String,
+    /// L'annulation n'est journalisée qu'une fois. Deux appelants peuvent la
+    /// demander ensemble — le Ctrl+C du CLI et l'arrêt de la TUI — et deux
+    /// `workflow_cancelled` diraient deux annulations là où il n'y en a eu
+    /// qu'une.
+    cancel_announced: AtomicBool,
     live_gates: Option<Arc<LiveGates>>,
     pauses: PauseSwitch,
     /// Les stages dont le fan-out est parti : leurs deux points d'arrêt sont
@@ -339,10 +350,23 @@ impl WorkflowHandle {
     /// attend sans borne, et c'est l'annulation qui la réveille. Elle coupe
     /// aussi les agents en vol et empêche les stages restants de démarrer.
     ///
+    /// Elle **se journalise** avant de couper : `workflow_cancelled` date
+    /// l'annulation par sa place dans le flux d'événements, et c'est cette
+    /// place — pas l'issue finale — que le rejeu lit pour savoir quelles gates
+    /// n'ont jamais eu de décision. L'écriture précède la coupure pour que
+    /// l'event précède toutes ses conséquences.
+    ///
     /// Elle ne libère pas la session parente : le `turn_start` du workflow y
     /// reste, donc une reprise après annulation passe par une **nouvelle**
     /// session (voir [`crate::workflow::events::WorkflowRecorderError`]).
-    pub fn cancel(&self) {
+    pub async fn cancel(&self) {
+        if self.shared.cancel_announced.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.shared
+            .recorder
+            .workflow_cancelled(&self.shared.workflow)
+            .await;
         self.shared.cancel.cancel();
     }
 }
@@ -352,7 +376,7 @@ pub struct WorkflowExecutor {
     runner: Arc<dyn AgentRunner>,
     gates: Arc<dyn GateSource>,
     recipes: RecipeSource,
-    recorder: WorkflowRecorder,
+    recorder: Arc<WorkflowRecorder>,
     parent_session_id: String,
     working_dir: PathBuf,
     shared: Arc<Shared>,
@@ -421,10 +445,14 @@ impl WorkflowExecutor {
         working_dir: PathBuf,
     ) -> Result<Self> {
         spec.validate()?;
+        let recorder = Arc::new(recorder);
         let shared = Arc::new(Shared {
             state: Mutex::new(WorkflowState::from_spec(&spec)),
             artifacts: Mutex::new(Artifacts::default()),
             cancel: CancellationToken::new(),
+            recorder: Arc::clone(&recorder),
+            workflow: spec.name.clone(),
+            cancel_announced: AtomicBool::new(false),
             live_gates,
             pauses: PauseSwitch::default(),
             launched: Mutex::new(HashSet::new()),
@@ -567,12 +595,13 @@ impl WorkflowExecutor {
             };
             let decision = match decision {
                 Ok(GateOutcome::Decided(decision)) => decision,
-                // Le journal dit que l'annulation est tombée pendant cette
-                // attente : elle se rejoue comme la vivante, sur tout le
-                // workflow, sinon les stages parallèles finiraient là où
-                // l'enregistrement les a coupés.
+                // Le journal porte une annulation et cette gate n'a jamais eu
+                // de décision : ce stage-là est tombé avec elle. La coupure
+                // s'arrête à lui et à sa descendance — annuler tout le workflow
+                // ici couperait des stages que l'enregistrement a vus aboutir
+                // **avant** que l'annulation ne tombe, et le journal ne dit pas
+                // qu'un rejeu atteint les gates dans le même ordre.
                 Ok(GateOutcome::Cancelled) => {
-                    self.shared.cancel.cancel();
                     self.set_stage(index, StageState::Cancelled);
                     self.cancel_stage_agents(index);
                     return (index, StageState::Cancelled);

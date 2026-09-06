@@ -257,6 +257,7 @@ mod tests {
             workflow_recipes: HashMap::new(),
             workflow: None,
             workflow_final: None,
+            cancelled: false,
             hook_outputs: HashMap::from([
                 (
                     (2, "session_start".to_string(), String::new()),

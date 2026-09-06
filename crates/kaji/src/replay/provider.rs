@@ -265,6 +265,7 @@ mod tests {
             workflow_recipes: HashMap::new(),
             workflow: None,
             workflow_final: None,
+            cancelled: false,
             hook_outputs: HashMap::new(),
         })
     }

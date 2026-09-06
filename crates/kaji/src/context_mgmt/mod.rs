@@ -1606,6 +1606,7 @@ mod tests {
             workflow_recipes: std::collections::HashMap::new(),
             workflow: None,
             workflow_final: None,
+            cancelled: false,
             hook_outputs: std::collections::HashMap::new(),
         }
     }

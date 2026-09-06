@@ -976,7 +976,7 @@ async fn start_workflow(
 /// le fait sur Ctrl+C, avec la grâce de fermeture de l'exécuteur — plus longue
 /// que sa grâce d'annulation d'agent, qu'elle doit couvrir.
 async fn shutdown_workflow(live: LiveWorkflow) {
-    live.handle.cancel();
+    live.handle.cancel().await;
     if tokio::time::timeout(kaji::workflow::SHUTDOWN_GRACE, live.run)
         .await
         .is_err()

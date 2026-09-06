@@ -7,11 +7,12 @@
 //! l'état externe, elle est capturée puis servie.
 //!
 //! Une gate peut aussi n'avoir **aucune** décision au journal : l'annulation du
-//! workflow est tombée pendant qu'elle attendait. Le journal le dit tout de
-//! même, par l'issue que `workflow_done` a figée — le rejeu rejoue alors
-//! l'annulation à ce point plutôt que d'inventer une décision ou de crier à la
-//! divergence. Hors d'un run annulé, une gate absente reste une vraie
-//! divergence.
+//! workflow est tombée pendant qu'elle attendait. Ce qui l'explique est le kind
+//! `workflow_cancelled`, écrit à l'instant où l'annulation tombe — jamais
+//! l'issue figée par `workflow_done`, qu'un simple **refus** de gate suffit à
+//! rendre `Cancelled`. Le stage sans décision rejoue alors son annulation, et
+//! elle s'arrête à lui : c'est l'ordonnanceur qui en cascade la descendance.
+//! Sans ce kind au journal, une gate absente reste une vraie divergence.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -23,7 +24,6 @@ use tokio::sync::watch;
 use tracing::warn;
 
 use crate::replay::cursor::EventCursor;
-use crate::workflow::state::{WorkflowOutcome, WorkflowState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -80,9 +80,9 @@ impl GateVerdict {
 }
 
 /// Ce qu'une source rend au stage qui ouvre sa gate. `Cancelled` n'est pas une
-/// troisième décision : c'est l'absence de décision, expliquée — le workflow a
-/// été annulé pendant l'attente, et le stage doit rejouer cette annulation, pas
-/// en déduire un refus.
+/// troisième décision : c'est l'absence de décision, expliquée par le kind
+/// `workflow_cancelled` du journal — le stage rejoue cette annulation-là, il
+/// n'en déduit pas un refus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateOutcome {
     Decided(GateDecision),
@@ -148,7 +148,7 @@ impl GateSource for LiveGates {
 /// workflow (`kaji workflow run` crée sa session) : le nom suffit comme clé.
 pub struct ReplayGates {
     decisions: HashMap<String, GateDecision>,
-    cancelled_run: bool,
+    cancelled: bool,
     lenient: bool,
 }
 
@@ -156,23 +156,24 @@ impl ReplayGates {
     pub fn new(decisions: HashMap<String, GateDecision>) -> Self {
         Self {
             decisions,
-            cancelled_run: false,
+            cancelled: false,
             lenient: false,
         }
     }
 
-    /// Les gates du journal, plus l'issue qu'il a figée : les deux se lisent
-    /// ensemble, une gate sans décision ne veut pas dire la même chose selon
-    /// que le run s'est terminé annulé ou non.
+    /// Les gates du journal, plus l'annulation qu'il porte ou non : les deux se
+    /// lisent ensemble, une gate sans décision ne veut pas dire la même chose
+    /// selon qu'un opérateur a annulé ce run ou qu'une écriture s'est perdue.
     pub fn from_cursor(cursor: &EventCursor) -> Self {
-        Self::new(cursor.gate_decisions.clone()).after_a_cancelled_run(matches!(
-            cursor.workflow_final.as_ref().map(WorkflowState::outcome),
-            Some(WorkflowOutcome::Cancelled)
-        ))
+        Self::new(cursor.gate_decisions.clone()).after_a_recorded_cancellation(cursor.cancelled)
     }
 
-    pub fn after_a_cancelled_run(mut self, cancelled_run: bool) -> Self {
-        self.cancelled_run = cancelled_run;
+    /// `true` quand le journal porte un `workflow_cancelled`. Rien d'inféré ici :
+    /// l'issue `Cancelled` de `workflow_done` ne vaut pas annulation — un refus
+    /// de gate la produit aussi, et la lire ainsi désarmerait le mode strict sur
+    /// toutes les gates du journal.
+    pub fn after_a_recorded_cancellation(mut self, cancelled: bool) -> Self {
+        self.cancelled = cancelled;
         self
     }
 
@@ -189,7 +190,7 @@ impl GateSource for ReplayGates {
             Some(decision) => Ok(GateOutcome::Decided(*decision)),
             // L'annulation passe avant `lenient` : elle n'est pas une tolérance
             // d'audit, c'est ce que le journal dit qu'il s'est passé.
-            None if self.cancelled_run => Ok(GateOutcome::Cancelled),
+            None if self.cancelled => Ok(GateOutcome::Cancelled),
             // Un rejeu ne peut pas inventer une approbation : en strict il
             // s'arrête, en lenient il refuse le stage et continue plutôt que
             // de laisser tourner des agents que personne n'a approuvés.
@@ -240,12 +241,12 @@ mod tests {
         );
     }
 
-    /// La gate manquante d'un run annulé n'est pas la même chose que la gate
-    /// manquante d'un run abouti : la première est expliquée par le journal,
-    /// la seconde est une divergence.
+    /// La gate manquante d'un journal qui porte une annulation n'est pas la
+    /// même chose que la gate manquante d'un journal qui n'en porte pas : la
+    /// première est expliquée, la seconde est une divergence.
     #[tokio::test]
-    async fn a_gate_missing_from_a_cancelled_run_replays_the_cancellation() {
-        let cancelled = ReplayGates::new(HashMap::new()).after_a_cancelled_run(true);
+    async fn a_gate_missing_after_a_recorded_cancellation_replays_it() {
+        let cancelled = ReplayGates::new(HashMap::new()).after_a_recorded_cancellation(true);
         assert_eq!(
             cancelled.decide("revue").await.unwrap(),
             GateOutcome::Cancelled
@@ -256,19 +257,30 @@ mod tests {
                 .decide("revue")
                 .await
                 .is_err(),
-            "hors annulation, une gate absente reste une divergence"
+            "sans annulation au journal, une gate absente reste une divergence"
         );
     }
 
     /// `--lenient` sert à auditer des divergences en sortant vert. Une
     /// annulation n'en est pas une : elle doit se rejouer telle quelle, sinon
-    /// l'audit lit « gate refusée » là où personne n'a rien refusé.
+    /// l'audit lit « gate refusée » là où personne n'a rien refusé. Sans
+    /// annulation au journal, `--lenient` retrouve son rôle : il dégrade en
+    /// refus au lieu de tolérer silencieusement.
     #[tokio::test]
-    async fn a_cancelled_run_outranks_the_lenient_fallback() {
-        let gates = ReplayGates::new(HashMap::new())
-            .after_a_cancelled_run(true)
+    async fn a_recorded_cancellation_outranks_the_lenient_fallback() {
+        let cancelled = ReplayGates::new(HashMap::new())
+            .after_a_recorded_cancellation(true)
             .lenient(true);
+        assert_eq!(
+            cancelled.decide("revue").await.unwrap(),
+            GateOutcome::Cancelled
+        );
 
-        assert_eq!(gates.decide("revue").await.unwrap(), GateOutcome::Cancelled);
+        let tolerated = ReplayGates::new(HashMap::new()).lenient(true);
+        assert_eq!(
+            tolerated.decide("revue").await.unwrap(),
+            GateOutcome::Decided(GateDecision::Deny),
+            "hors annulation, --lenient dégrade la gate absente en refus"
+        );
     }
 }

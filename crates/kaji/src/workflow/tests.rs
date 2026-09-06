@@ -20,7 +20,8 @@ use crate::replay::cursor::EventCursor;
 use crate::session::session_manager::{SessionType, TurnClaim};
 use crate::session::SessionManager;
 use crate::workflow::events::{
-    WorkflowRecorder, AGENT_DONE, AGENT_STARTED, STAGE_STARTED, WORKFLOW_KINDS, WORKFLOW_STARTED,
+    WorkflowRecorder, AGENT_DONE, AGENT_STARTED, STAGE_STARTED, WORKFLOW_CANCELLED, WORKFLOW_DONE,
+    WORKFLOW_KINDS, WORKFLOW_STARTED,
 };
 use crate::workflow::executor::{PauseVerdict, WorkflowExecutor};
 use crate::workflow::gate::{GateDecision, GateVerdict, ReplayGates};
@@ -339,8 +340,53 @@ stages:
         prompt: publie
 "#;
 
+/// Une gate sans dépendance, à côté d'une branche de deux stages. La gate
+/// s'ouvre donc **tout de suite** alors que la branche met deux stages à
+/// aboutir : c'est le DAG qui sépare « l'annulation est tombée » de « la gate a
+/// été atteinte », les deux instants que le journal doit distinguer.
+const GATE_BESIDE_A_BRANCH: &str = r#"
+name: coupe
+stages:
+  - name: garde
+    gate: approve
+    agents:
+      - name: veille
+        prompt: veille
+  - name: prepare
+    agents:
+      - name: assemble
+        prompt: assemble
+  - name: publie
+    depends_on: [prepare]
+    agents:
+      - name: pousse
+        prompt: pousse
+"#;
+
 fn spec(yaml: &str) -> WorkflowSpec {
     WorkflowSpec::from_yaml(yaml).unwrap()
+}
+
+/// Attend qu'un stage atteigne l'état voulu plutôt que de dormir un temps
+/// choisi au doigt mouillé : c'est ce qui rend l'instant de l'annulation
+/// reproductible d'une machine à l'autre.
+async fn wait_for_stage(handle: &crate::workflow::WorkflowHandle, stage: &str, wanted: StageState) {
+    let poll = async {
+        loop {
+            if handle.snapshot().stage(stage).map(|status| &status.state) == Some(&wanted) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), poll)
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "stage « {stage} » jamais {wanted:?} — vu {:?}",
+                handle.snapshot().stage(stage).map(|s| s.state.clone())
+            )
+        });
 }
 
 #[tokio::test]
@@ -686,7 +732,7 @@ async fn a_cancellation_taken_at_a_waiting_gate_replays_as_a_cancellation() {
     let handle = executor.handle();
     let run = tokio::spawn(executor.run());
     tokio::time::sleep(Duration::from_millis(50)).await;
-    handle.cancel();
+    handle.cancel().await;
     let recorded_state = tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .expect("cancel() réveille l'attente de gate")
@@ -735,6 +781,208 @@ async fn a_cancellation_taken_at_a_waiting_gate_replays_as_a_cancellation() {
         replayed.payloads("gate_decision").await.is_empty(),
         "le rejeu n'invente pas la décision que l'annulation n'a pas prise"
     );
+}
+
+/// D-C1 : l'issue figée par `workflow_done` dit qu'un run a été annulé, jamais
+/// **quand**. Enregistré ici : `prepare` puis `publie` aboutissent, et
+/// l'annulation ne tombe qu'ensuite sur `garde`, restée à sa gate. Au rejeu,
+/// `garde` atteint sa gate la première — elle n'a aucune dépendance — et une
+/// annulation posée à ce moment-là couperait `publie`, que personne n'a coupé.
+///
+/// C'est la position de l'annulation dans le flux d'événements qui tranche, pas
+/// l'issue finale : sans le kind qui la date, le rejeu d'un journal fidèle
+/// diverge.
+#[tokio::test]
+async fn a_cancellation_that_fell_after_a_finished_branch_does_not_cut_it_at_replay() {
+    let recorded = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = recorded
+        .executor(spec(GATE_BESIDE_A_BRANCH), Arc::clone(&runner))
+        .await;
+    let handle = executor.handle();
+    let run = tokio::spawn(executor.run());
+
+    wait_for_stage(&handle, "garde", StageState::Waiting).await;
+    wait_for_stage(&handle, "publie", StageState::Done).await;
+    handle.cancel().await;
+
+    let recorded_state = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("cancel() réveille l'attente de gate")
+        .unwrap()
+        .unwrap();
+    for (stage, wanted) in [
+        ("garde", StageState::Cancelled),
+        ("prepare", StageState::Done),
+        ("publie", StageState::Done),
+    ] {
+        assert_eq!(
+            recorded_state.stage(stage).unwrap().state,
+            wanted,
+            "l'enregistrement fait aboutir la branche avant que l'annulation tombe"
+        );
+    }
+
+    let cursor = EventCursor::load(&recorded.session_manager, &recorded.session_id)
+        .await
+        .unwrap();
+
+    let replayed = Fixture::new().await;
+    let executor = WorkflowExecutor::replaying(
+        spec(GATE_BESIDE_A_BRANCH),
+        Arc::new(ReplayRunner::from_cursor(&cursor)),
+        Arc::new(ReplayGates::from_cursor(&cursor)),
+        cursor.workflow_recipes.clone(),
+        replayed.recorder().await,
+        replayed.session_id.clone(),
+        replayed.working_dir.clone(),
+    )
+    .unwrap();
+
+    let state = tokio::time::timeout(Duration::from_secs(5), executor.run())
+        .await
+        .expect("le rejeu d'une annulation ne s'arrête pas sur la gate")
+        .unwrap();
+
+    assert_eq!(
+        state.topology(),
+        recorded_state.topology(),
+        "une annulation rejouée ne coupe que le stage resté à sa gate et sa descendance"
+    );
+}
+
+/// L'annulation vaut par sa **place** au journal : elle doit précéder tout ce
+/// qu'elle provoque — les `agent_done` des agents qu'elle coupe, puis
+/// `workflow_done`. Écrite après, elle daterait une annulation tombée plus tard
+/// qu'elle ne l'a été, et c'est cette date que le rejeu lit. Écrite deux fois,
+/// elle raconterait deux annulations là où deux appelants — le Ctrl+C du CLI et
+/// l'arrêt de la TUI — n'en ont demandé qu'une.
+#[tokio::test]
+async fn a_cancellation_is_logged_once_and_before_everything_it_causes() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new().with("collecte.scan", Script::Hang));
+    let executor = fixture
+        .executor(spec(FAN_OUT_THEN_JOIN), Arc::clone(&runner))
+        .await;
+    let handle = executor.handle();
+    let run = tokio::spawn(executor.run());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    tokio::join!(handle.cancel(), handle.cancel());
+
+    let state = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("cancel() coupe l'agent suspendu")
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.outcome(), WorkflowOutcome::Cancelled);
+
+    let kinds = fixture.kinds().await;
+    let announced: Vec<usize> = kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, kind)| kind.as_str() == WORKFLOW_CANCELLED)
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        announced.len(),
+        1,
+        "une annulation demandée deux fois n'en fait qu'une au journal : {kinds:?}"
+    );
+    assert!(
+        announced[0] < kinds.iter().rposition(|kind| kind == AGENT_DONE).unwrap(),
+        "l'annulation précède l'issue de l'agent qu'elle coupe : {kinds:?}"
+    );
+    assert!(
+        announced[0] < kinds.iter().position(|kind| kind == WORKFLOW_DONE).unwrap(),
+        "l'annulation précède la clôture du workflow : {kinds:?}"
+    );
+}
+
+/// D-I1 : un simple **refus** de gate fige lui aussi une issue `Cancelled` —
+/// personne n'a pourtant rien annulé. Déduire l'annulation de cette issue
+/// désarmerait le mode strict sur toutes les gates du journal : une gate
+/// réellement absente — recette éditée, écriture perdue — perdrait son erreur
+/// nommée, et `--lenient` son rôle.
+#[tokio::test]
+async fn a_denied_gate_is_not_a_cancellation_and_keeps_the_strict_mode_armed() {
+    let recorded = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = recorded.executor(spec(GATED), Arc::clone(&runner)).await;
+    let handle = executor.handle();
+    let run = tokio::spawn(executor.run());
+    wait_for_stage(&handle, "deploie", StageState::Waiting).await;
+    assert_eq!(handle.deny("deploie"), GateVerdict::Applied);
+
+    let recorded_state = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("un refus laisse le workflow se terminer")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recorded_state.outcome(),
+        WorkflowOutcome::Cancelled,
+        "un refus de gate suffit à figer une issue annulée"
+    );
+
+    let mut cursor = EventCursor::load(&recorded.session_manager, &recorded.session_id)
+        .await
+        .unwrap();
+    assert!(
+        !cursor.cancelled,
+        "aucun opérateur n'a annulé ce run : le kind n'est pas au journal"
+    );
+
+    let replayed = Fixture::new().await;
+    let state = replay_gated(&replayed, &cursor, false).await;
+    assert_eq!(
+        state.topology(),
+        recorded_state.topology(),
+        "le refus se rejoue par sa décision enregistrée, pas par une tolérance"
+    );
+
+    // La décision perdue : la gate redevient absente du journal, sur un run
+    // dont l'issue dit pourtant « annulé ».
+    cursor.gate_decisions.clear();
+
+    let strict = Fixture::new().await;
+    let state = replay_gated(&strict, &cursor, false).await;
+    let StageState::Failed(FailureCause::Error(message)) =
+        state.stage("deploie").unwrap().state.clone()
+    else {
+        panic!(
+            "une gate absente sans annulation est une divergence nommée : {:?}",
+            state.stage("deploie").unwrap().state
+        );
+    };
+    assert!(message.contains("absente du journal"), "{message}");
+
+    let lenient = Fixture::new().await;
+    let state = replay_gated(&lenient, &cursor, true).await;
+    assert_eq!(
+        state.stage("deploie").unwrap().state,
+        StageState::Cancelled,
+        "--lenient reprend son rôle : il dégrade la gate absente en refus"
+    );
+}
+
+/// Rejoue le journal `GATED` sur une session neuve. Le mode est le seul degré
+/// de liberté : le reste vient du curseur, comme en production.
+async fn replay_gated(fixture: &Fixture, cursor: &EventCursor, lenient: bool) -> WorkflowState {
+    let executor = WorkflowExecutor::replaying(
+        spec(GATED),
+        Arc::new(ReplayRunner::from_cursor(cursor)),
+        Arc::new(ReplayGates::from_cursor(cursor).lenient(lenient)),
+        cursor.workflow_recipes.clone(),
+        fixture.recorder().await,
+        fixture.session_id.clone(),
+        fixture.working_dir.clone(),
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), executor.run())
+        .await
+        .expect("un rejeu ne redemande aucune approbation")
+        .unwrap()
 }
 
 #[tokio::test]
@@ -869,7 +1117,7 @@ async fn a_decision_on_a_stage_without_a_gate_is_refused() {
     assert_eq!(handle.approve("build"), GateVerdict::NoGate);
     assert_eq!(handle.deny("build"), GateVerdict::NoGate);
 
-    handle.cancel();
+    handle.cancel().await;
     tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .expect("cancel() coupe l'agent suspendu")
@@ -898,7 +1146,7 @@ async fn cancelling_a_waiting_gate_ends_the_workflow_with_a_closed_journal() {
         handle.snapshot().stage("deploie").unwrap().state,
         StageState::Waiting
     );
-    handle.cancel();
+    handle.cancel().await;
 
     let state = tokio::time::timeout(Duration::from_secs(5), run)
         .await
@@ -944,7 +1192,7 @@ async fn cancelling_an_in_flight_agent_cuts_it_and_stops_the_dag() {
     let run = tokio::spawn(executor.run());
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    handle.cancel();
+    handle.cancel().await;
 
     let state = tokio::time::timeout(Duration::from_secs(5), run)
         .await
@@ -969,7 +1217,7 @@ async fn a_stage_that_has_not_started_is_cancelled_at_its_gate_of_entry() {
     let runner = Arc::new(FixtureRunner::new());
     let executor = fixture.executor(spec(GATED), Arc::clone(&runner)).await;
     let handle = executor.handle();
-    handle.cancel();
+    handle.cancel().await;
 
     let state = tokio::time::timeout(Duration::from_secs(5), executor.run())
         .await
@@ -1017,7 +1265,7 @@ stages:
         // `casse` a déjà rendu son erreur, `suspendu` attend : l'annulation
         // n'arrive qu'ensuite, donc l'échec n'est pas imputable à la coupure.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        handle.cancel();
+        handle.cancel().await;
 
         let state = tokio::time::timeout(Duration::from_secs(5), run)
             .await
@@ -1830,7 +2078,7 @@ async fn a_pause_asked_after_the_fan_out_left_is_refused_by_name() {
         "rien n'est rangé dans la table : la vue n'a pas de pause à annoncer"
     );
 
-    handle.cancel();
+    handle.cancel().await;
     let state = tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .expect("le run se termine sur l'annulation")
@@ -1872,7 +2120,7 @@ stages:
         StageState::Paused,
         "l'annulation doit arriver pendant la pause, pas avant"
     );
-    handle.cancel();
+    handle.cancel().await;
 
     let state = tokio::time::timeout(Duration::from_secs(5), run)
         .await

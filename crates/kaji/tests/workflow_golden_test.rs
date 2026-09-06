@@ -9,9 +9,9 @@
 //! - **refusée** — `gate_decision(Deny)` écrite, le stage tombe et sa
 //!   descendance avec lui ;
 //! - **annulée à la gate** — *rien* n'est écrit, parce qu'il n'y a pas eu de
-//!   décision. C'est l'issue figée par `workflow_done` qui l'explique, et
-//!   c'est ce que le rejeu doit savoir lire : sans ça il réclame une
-//!   approbation que personne n'a donnée et diverge.
+//!   décision. C'est le kind `workflow_cancelled`, daté par sa place au
+//!   journal, qui l'explique, et c'est ce que le rejeu doit savoir lire : sans
+//!   ça il réclame une approbation que personne n'a donnée et diverge.
 //!
 //! Le rejeu tourne sur `ReplayGates` + `ReplayRunner` : aucun sous-agent ne
 //! part, aucune décision vivante n'est acceptée. Un témoin branché **sur** le
@@ -272,7 +272,7 @@ async fn a_dag_with_an_approved_a_denied_and_a_cancelled_gate_replays_without_di
     // plus tôt le remplacerait par une annulation avant démarrage.
     wait_for_stage(&handle, "annonce", StageState::Waiting).await;
     wait_for_stage(&handle, "archive", StageState::Cancelled).await;
-    handle.cancel();
+    handle.cancel().await;
 
     let recorded_state = tokio::time::timeout(DEADLINE, run)
         .await
@@ -317,10 +317,10 @@ async fn a_dag_with_an_approved_a_denied_and_a_cancelled_gate_replays_without_di
         None,
         "une gate annulée ne laisse aucune décision : c'est tout l'écart que le rejeu doit combler"
     );
-    assert_eq!(
-        cursor.workflow_final.as_ref().map(WorkflowState::outcome),
-        Some(WorkflowOutcome::Cancelled),
-        "l'issue figée est la seule chose qui explique la gate manquante"
+    assert!(
+        cursor.cancelled,
+        "le kind workflow_cancelled est la seule chose qui explique la gate manquante — \
+         l'issue figée par workflow_done dirait « annulé » d'un simple refus de gate"
     );
 
     let first = replay_once(&cursor, &spec).await;

@@ -3,7 +3,7 @@
 //! Le journal mêle deux natures d'events. La structure d'un tour — bornes,
 //! messages, usage, approbations, checkpoints, notifications MCP,
 //! remplacements d'historique, `log_meta`, `condense_triggered`, et la
-//! topologie d'un workflow avec ses décisions de gates — est
+//! topologie d'un workflow avec ses décisions de gates et son annulation — est
 //! l'historique de la session : permanente, et petite. Les payloads du rejeu
 //! — requêtes et réponses LLM, résultats d'outils, bloc mémoire, manifeste
 //! d'outils, bloc turn-context, résumés de compaction et de paires d'outils,
@@ -43,7 +43,7 @@ pub const PURGEABLE_KINDS: [&str; 13] = [
     "condense_summary",
     "tool_pair_summary",
     "clock_reads",
-    // Les six autres kinds de workflow sont structurels donc permanents ;
+    // Les sept autres kinds de workflow sont structurels donc permanents ;
     // ces deux-là portent la sortie complète d'un agent et le contenu d'une
     // recette.
     crate::workflow::events::WORKFLOW_ARTIFACT,

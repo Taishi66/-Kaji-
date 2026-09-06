@@ -22,7 +22,7 @@ use crate::session::session_manager::SessionEvent;
 use crate::session::SessionManager;
 use crate::workflow::events::{
     AgentDone, WorkflowDone, WorkflowRecipeContent, WorkflowStarted, AGENT_DONE, GATE_DECISION,
-    WORKFLOW_ARTIFACT, WORKFLOW_DONE, WORKFLOW_RECIPE, WORKFLOW_STARTED,
+    WORKFLOW_ARTIFACT, WORKFLOW_CANCELLED, WORKFLOW_DONE, WORKFLOW_RECIPE, WORKFLOW_STARTED,
 };
 use crate::workflow::gate::GateDecision;
 use crate::workflow::state::WorkflowState;
@@ -127,8 +127,15 @@ pub struct EventCursor {
     pub workflow: Option<WorkflowStarted>,
     /// L'état final enregistré du workflow. Le rejeu compare le sien à
     /// celui-là : sans ce témoin, « rejoué sans divergence » ne serait
-    /// vérifiable contre rien.
+    /// vérifiable contre rien. **Oracle de comparaison uniquement** — rien de ce
+    /// que le rejeu exécute ne s'en déduit, sinon il se mesurerait à sa propre
+    /// entrée.
     pub workflow_final: Option<WorkflowState>,
+    /// Un opérateur a annulé ce run : le journal porte un `workflow_cancelled`.
+    /// C'est ce qui explique une gate restée sans décision, et rien d'autre —
+    /// l'issue `Cancelled` de `workflow_final` ne le dit pas, un simple refus de
+    /// gate la produit aussi.
+    pub cancelled: bool,
     /// Ce que les hooks de cycle de vie ont rendu, par `(turn_seq, event,
     /// addr)` — `addr` est l'id d'appel d'outil pour `pre_tool_use` et
     /// `post_tool_use`, vide pour les événements de tour. Le rejeu les sert et
@@ -243,6 +250,7 @@ impl EventCursor {
             workflow_recipes: HashMap::new(),
             workflow: None,
             workflow_final: None,
+            cancelled: false,
             hook_outputs: HashMap::new(),
         };
 
@@ -461,6 +469,9 @@ impl EventCursor {
                 }
                 WORKFLOW_STARTED => {
                     cursor.workflow = serde_json::from_value::<WorkflowStarted>(payload).ok();
+                }
+                WORKFLOW_CANCELLED => {
+                    cursor.cancelled = true;
                 }
                 WORKFLOW_DONE => {
                     cursor.workflow_final = serde_json::from_value::<WorkflowDone>(payload)
