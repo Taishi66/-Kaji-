@@ -245,6 +245,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
         "/files" => "(Ctrl+P) recherche floue de fichiers",
         "/explorer" => "(Ctrl+E) explorateur de fichiers",
         "/forge" => "(Ctrl+F) volet forge — subagents en cours",
+        "/workflow" => "workflow déclaratif — /workflow <fichier.yaml>",
         "/edit" => "(ou e) éditer un fichier — /edit <chemin>[:ligne]",
         "/editor" => "choisir l'éditeur/IDE (<cmd> | list | reset | mode)",
         "/spec" => "(F2) panneau SPEC on/off",
@@ -904,6 +905,72 @@ async fn agent_usage(
         .collect()
 }
 
+/// Le run que la session TUI pilote : son `WorkflowHandle` — la seule prise
+/// sur les gates, les pauses et les annulations d'agents — et la tâche qui
+/// déroule le DAG.
+///
+/// Le workflow tourne sur la session **courante**, pas sur une session cachée
+/// comme `kaji workflow run` : c'est ce qui met ses events v2 dans le journal
+/// que l'utilisateur rejoue, et ce qui donne au mission-control autre chose
+/// que ses summons libres à montrer. Corollaire : une session ne porte qu'un
+/// workflow (`claim_exclusive_turn_start`), et un second `/workflow` est
+/// refusé par le recorder avec son propre message.
+struct LiveWorkflow {
+    handle: kaji::workflow::WorkflowHandle,
+    run: tokio::task::JoinHandle<Result<kaji::workflow::WorkflowState>>,
+}
+
+/// Ouvre le journal du workflow sur la session courante, puis lance son DAG.
+/// La spec est lue et validée **avant** toute écriture : un YAML illisible ne
+/// laisse pas un tour d'orchestration ouvert derrière lui.
+async fn start_workflow(
+    session_id: &str,
+    working_dir: &Path,
+    path: &Path,
+) -> Result<(LiveWorkflow, String)> {
+    let yaml = std::fs::read_to_string(path)
+        .with_context(|| format!("spec « {} » illisible", path.display()))?;
+    let spec = kaji_core::workflow::WorkflowSpec::from_yaml(&yaml)
+        .with_context(|| format!("spec « {} » invalide", path.display()))?;
+    let name = spec.name.clone();
+
+    let session_manager = Arc::new(SessionManager::instance());
+    let recorder = kaji::workflow::events::WorkflowRecorder::open(
+        Arc::clone(&session_manager),
+        session_id.to_string(),
+        &name,
+    )
+    .await?;
+    let executor = kaji::workflow::WorkflowExecutor::new(
+        spec,
+        Arc::new(kaji::workflow::SubagentRunner::new(session_manager)),
+        recorder,
+        session_id.to_string(),
+        working_dir.to_path_buf(),
+    )?;
+    let handle = executor.handle();
+    Ok((
+        LiveWorkflow {
+            handle,
+            run: tokio::spawn(executor.run()),
+        },
+        name,
+    ))
+}
+
+fn workflow_outcome_line(state: &kaji::workflow::WorkflowState) -> String {
+    let outcome = match state.outcome() {
+        kaji::workflow::WorkflowOutcome::Failed(kaji::workflow::FailureCause::Budget(limit)) => {
+            format!("échoué : budget {} dépassé", limit.field())
+        }
+        kaji::workflow::WorkflowOutcome::Failed(kaji::workflow::FailureCause::Error(error)) => {
+            format!("échoué : {error}")
+        }
+        outcome => outcome.label().to_string(),
+    };
+    format!("workflow « {} » {outcome}", state.workflow)
+}
+
 async fn session_working_dir(session_manager: &SessionManager, session_id: &str) -> PathBuf {
     match session_manager.get_session(session_id, false).await {
         Ok(session) => session.working_dir,
@@ -1003,6 +1070,7 @@ async fn event_loop(
     // repos mais que des lames tournent encore.
     let mut forge_tick = tokio::time::interval(FORGE_REFRESH_INTERVAL);
     forge_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut workflow: Option<LiveWorkflow> = None;
 
     loop {
         terminal.draw(|frame| ui::draw(frame, &app))?;
@@ -1013,8 +1081,14 @@ async fn event_loop(
         tokio::select! {
             _ = tick.tick(), if app.turn_active || app.turn_pending || app.seal_unfolded() => {}
             _ = git_tick.tick() => app.request_git_refresh(),
-            _ = forge_tick.tick(), if app.turn_active || !app.forge.tasks.is_empty() || app.forge.visible() || app.mission.open => {
+            _ = forge_tick.tick(), if app.turn_active || !app.forge.tasks.is_empty() || app.forge.visible() || app.mission.open || workflow.is_some() => {
                 app.forge.apply_snapshot(agent.subagent_snapshot().await);
+                // L'exécuteur n'a pas de canal d'événements : la vue le sonde,
+                // au même rythme que le volet forge (patron `drive_run`).
+                if let Some(live) = &workflow {
+                    app.apply_workflow_snapshot(Some(live.handle.snapshot()));
+                    app.apply_workflow_pauses(live.handle.paused_stages());
+                }
                 // Le tick forge purge les tâches terminées dès qu'une nouvelle
                 // lame arrive (`ForgeState::insert` → `retire_finished`) —
                 // c'est la seule construction de plateau que `apply_workflow_snapshot`
@@ -1293,6 +1367,81 @@ async fn event_loop(
                             }
                         }
                     }
+                    Action::WorkflowRun(path) => {
+                        if workflow.is_some() {
+                            app.push_mission_notice("workflow : un run est déjà en vol dans cette session");
+                        } else {
+                            match start_workflow(session_id, &working_dir, &path).await {
+                                Ok((live, name)) => {
+                                    app.apply_workflow_snapshot(Some(live.handle.snapshot()));
+                                    workflow = Some(live);
+                                    app.open_mission_control();
+                                    app.push_mission_notice(&format!("workflow « {name} » lancé"));
+                                }
+                                Err(error) => app.push_system(&format!("workflow : {error:#}")),
+                            }
+                        }
+                    }
+                    // Le verdict est LU, jamais supposé : une décision posée
+                    // sur un stage mort, inconnu ou sans gate n'est pas
+                    // appliquée, et la vue doit dire laquelle des trois.
+                    Action::WorkflowGate { stage, approve } => {
+                        match workflow.as_ref() {
+                            Some(live) => {
+                                let verdict = if approve {
+                                    live.handle.approve(&stage)
+                                } else {
+                                    live.handle.deny(&stage)
+                                };
+                                let decision = if approve { "approuvée" } else { "refusée" };
+                                if verdict.applied() {
+                                    app.push_mission_notice(&format!("gate « {stage} » {decision}"));
+                                } else {
+                                    app.push_mission_notice(&format!(
+                                        "gate « {stage} » non tranchée — {}",
+                                        verdict.label()
+                                    ));
+                                }
+                            }
+                            None => app.push_mission_notice("aucun workflow en vol"),
+                        }
+                    }
+                    Action::WorkflowPause { stage, paused } => {
+                        match workflow.as_ref() {
+                            Some(live) => {
+                                let applied = if paused {
+                                    live.handle.pause(&stage)
+                                } else {
+                                    live.handle.resume(&stage)
+                                };
+                                let verb = if paused { "suspendu" } else { "relâché" };
+                                // Relu tout de suite : la table de l'exécuteur
+                                // décide du sens du prochain `p`, et le tick
+                                // qui la rafraîchit est une seconde plus loin.
+                                app.apply_workflow_pauses(live.handle.paused_stages());
+                                if applied {
+                                    app.push_mission_notice(&format!("stage « {stage} » {verb}"));
+                                } else {
+                                    app.push_mission_notice(&format!(
+                                        "stage « {stage} » inconnu ou déjà terminé"
+                                    ));
+                                }
+                            }
+                            None => app.push_mission_notice("aucun workflow en vol"),
+                        }
+                    }
+                    Action::WorkflowCancelAgent { stage, agent } => {
+                        match workflow.as_ref() {
+                            Some(live) => {
+                                if live.handle.cancel_agent(&stage, &agent) {
+                                    app.push_mission_notice(&format!("{stage}.{agent} — annulation demandée"));
+                                } else {
+                                    app.push_mission_notice(&format!("{stage}.{agent} — déjà terminé"));
+                                }
+                            }
+                            None => app.push_mission_notice("aucun workflow en vol"),
+                        }
+                    }
                     Action::EditFile { path, line } => edit_request = Some((path, line)),
                     Action::None => {}
                 }
@@ -1383,6 +1532,21 @@ async fn event_loop(
             maybe = git_rx.recv() => {
                 if let Some(status) = maybe {
                     app.on_git_status(status);
+                }
+            }
+            // Le DAG a conclu. Le handle est relâché : un second `/workflow`
+            // ira alors se faire refuser par le recorder, qui est seul à savoir
+            // qu'une session ne porte qu'un workflow — le dire ici en
+            // dupliquerait la règle.
+            finished = async { (&mut workflow.as_mut().expect("workflow armé").run).await }, if workflow.is_some() => {
+                workflow = None;
+                match finished {
+                    Ok(Ok(state)) => {
+                        app.push_mission_notice(&workflow_outcome_line(&state));
+                        app.apply_workflow_snapshot(Some(state));
+                    }
+                    Ok(Err(error)) => app.push_mission_notice(&format!("workflow : {error:#}")),
+                    Err(error) => app.push_mission_notice(&format!("workflow interrompu : {error}")),
                 }
             }
         }
@@ -2821,7 +2985,8 @@ mod tests {
             ("/goal", "/files"),
             ("/files", "/explorer"),
             ("/explorer", "/forge"),
-            ("/forge", "/edit"),
+            ("/forge", "/workflow"),
+            ("/workflow", "/edit"),
             ("/edit", "/editor"),
             ("/editor", "/spec"),
             ("/spec", "/think"),

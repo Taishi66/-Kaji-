@@ -10,9 +10,10 @@
 //! l'usage ledger sur les tokens et le coût. Rien ici n'invente une mesure — un
 //! agent sans ligne au ledger affiche `炭 —`, il n'affiche pas zéro.
 //!
-//! T6 ne livre que la vue et sa navigation (h/l, j/k, q). Les actions
-//! (Enter fiche, x, p, s, g) sont T7 : la sélection est déjà là, prête à les
-//! recevoir.
+//! T7 branche les actions sur cette sélection : Enter ouvre la fiche, `x`
+//! annule, `p` suspend un stage, `g` tranche sa gate. Chaque carte porte donc
+//! sa **clé** — le nom d'agent ou l'identifiant de lame bruts — à côté du nom
+//! affiché, qui est assaini et ne peut pas servir d'adresse.
 
 use crate::tui::app::App;
 use crate::tui::forge::{ForgeStatus, ForgeTask};
@@ -24,7 +25,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// La colonne des lames qui ne relèvent d'aucun stage — un summon lancé à la
 /// main pendant qu'un workflow tourne ou non.
@@ -65,7 +66,11 @@ const TIMELINE_LABEL_CELLS: usize = 20;
 /// Cellules réservées au chrono en queue de barre — `12m34s` et sa respiration.
 const TIMELINE_DURATION_CELLS: usize = 8;
 
-const FOOTER: &str = " h/l stages · j/k cartes · q retour ";
+/// Les touches vraiment branchées, et elles seules : `s` (steer) attend un
+/// changement du chemin de spawn partagé avec summon, l'annoncer ici
+/// promettrait une action qui ne se produit pas.
+const FOOTER: &str =
+    " h/l stages · j/k cartes · ⏎ fiche · x annuler · p pause · g gate · q retour ";
 
 const BAR_FULL: char = '█';
 const BAR_EMPTY: char = '░';
@@ -92,6 +97,16 @@ pub struct MissionState {
     pub workflow: Option<WorkflowState>,
     /// Usage par identifiant de session d'agent.
     pub usage: HashMap<String, AgentUsage>,
+    /// Les stages qu'une pause vise, `WorkflowHandle::paused_stages` faisant
+    /// foi. Un stage pas encore démarré ne portera `StageState::Paused` qu'en
+    /// atteignant son point d'arrêt : sans cette table, `p` reposerait une
+    /// pause déjà posée au lieu de la lever, et le stage resterait suspendu
+    /// sans moyen de le relâcher.
+    pub paused: HashSet<String>,
+    /// La dernière réponse à une action — verdict de gate, refus d'annulation,
+    /// issue du run. Le plein écran cache le chat : sans elle, un `g` sur une
+    /// porte fermée serait un non-événement silencieux.
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +150,10 @@ impl CardMark {
 
 #[derive(Debug, Clone)]
 pub struct Card {
+    /// Le nom d'agent ou l'identifiant de lame **bruts** — ce que les actions
+    /// adressent. [`Card::name`] passe par `sanitize_for_display` et par une
+    /// troncature en cellules : il désigne à l'œil, jamais à l'exécuteur.
+    pub key: String,
     pub name: String,
     pub mark: CardMark,
     pub status: String,
@@ -147,6 +166,9 @@ pub struct Card {
 pub struct Column {
     pub name: String,
     pub state: String,
+    /// Le nom brut du stage, `None` pour la colonne des lames libres — c'est
+    /// ce qui distingue une carte d'agent de workflow d'un summon isolé.
+    pub stage: Option<String>,
     pub cards: Vec<Card>,
 }
 
@@ -162,16 +184,85 @@ impl Board {
     }
 }
 
-/// Le plateau que la vue rend. Un workflow au snapshot donne ses stages ; sans
-/// lui, les lames du volet forge tiennent dans l'unique colonne « libre ».
+/// Ce que la carte sous le curseur désigne. Les touches d'action de T7 ne
+/// consomment que ça : un agent d'un stage se pilote par le
+/// `WorkflowHandle`, une lame libre par le summon, et les deux chemins ne se
+/// confondent jamais.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MissionTarget {
+    Agent { stage: String, agent: String },
+    Blade { id: String },
+}
+
+/// La cible d'un couple de curseurs déjà bornés. `None` sur une colonne vide —
+/// le plateau libre d'une session au repos en est une.
+pub fn target(board: &Board, column: usize, card: usize) -> Option<MissionTarget> {
+    let column = board.columns.get(column)?;
+    let key = column.cards.get(card)?.key.clone();
+    Some(match column.stage.as_ref() {
+        Some(stage) => MissionTarget::Agent {
+            stage: stage.clone(),
+            agent: key,
+        },
+        None => MissionTarget::Blade { id: key },
+    })
+}
+
+/// Le plateau que la vue rend : les stages du workflow piloté, puis les lames
+/// qui n'en relèvent pas. Sans workflow il ne reste que la colonne « libre »,
+/// rendue même vide — une vue ouverte sur rien doit dire qu'elle n'a rien.
 pub fn board(app: &App) -> Board {
+    let tasks = app.forge.ordered();
+    let free = unattached(&tasks, app.mission.workflow.as_ref());
     match app.mission.workflow.as_ref() {
-        Some(workflow) => workflow_board(workflow, &app.mission.usage),
-        None => free_board(&app.forge.ordered(), &app.mission.usage),
+        Some(workflow) => {
+            let mut board = workflow_board(workflow, &app.mission.usage, &app.mission.paused);
+            if !free.is_empty() {
+                board.columns.push(free_column(&free, &app.mission.usage));
+            }
+            board
+        }
+        None => free_board(&free, &app.mission.usage),
     }
 }
 
-fn workflow_board(workflow: &WorkflowState, usage: &HashMap<String, AgentUsage>) -> Board {
+/// Les lames du volet qui ne relèvent pas du workflow en cours. Une session
+/// d'agent de workflow **est** l'identifiant de sa lame côté summon
+/// (`BackgroundTask::id`) : sans ce filtre, un agent lancé par le DAG puis
+/// remonté au volet aurait deux cartes, deux fois son coût au bandeau et deux
+/// chemins d'annulation contradictoires.
+fn unattached<'a>(tasks: &[&'a ForgeTask], workflow: Option<&WorkflowState>) -> Vec<&'a ForgeTask> {
+    let attached: HashSet<&str> = workflow
+        .into_iter()
+        .flat_map(|workflow| workflow.stages.iter())
+        .flat_map(|stage| stage.agents.iter())
+        .filter_map(|agent| agent.session_id.as_deref())
+        .collect();
+    tasks
+        .iter()
+        .copied()
+        .filter(|task| !attached.contains(task.id.as_str()))
+        .collect()
+}
+
+/// L'état affiché d'un stage. Une pause posée sur un stage pas encore démarré
+/// ne se lit nulle part dans son `StageState` : sans cette ligne, la vue
+/// afficherait « en attente » d'un stage que plus rien ne fera partir.
+fn stage_label(stage: &kaji::workflow::StageStatus, paused: &HashSet<String>) -> String {
+    if stage.state != StageState::Paused
+        && !stage.state.is_terminal()
+        && paused.contains(&stage.name)
+    {
+        return "pause demandée".to_string();
+    }
+    stage.state.label().to_string()
+}
+
+fn workflow_board(
+    workflow: &WorkflowState,
+    usage: &HashMap<String, AgentUsage>,
+    paused: &HashSet<String>,
+) -> Board {
     Board {
         title: sanitize_for_display(&workflow.workflow),
         columns: workflow
@@ -179,11 +270,13 @@ fn workflow_board(workflow: &WorkflowState, usage: &HashMap<String, AgentUsage>)
             .iter()
             .map(|stage| Column {
                 name: sanitize_for_display(&stage.name),
-                state: stage.state.label().to_string(),
+                state: stage_label(stage, paused),
+                stage: Some(stage.name.clone()),
                 cards: stage
                     .agents
                     .iter()
                     .map(|agent| Card {
+                        key: agent.name.clone(),
                         name: sanitize_for_display(&agent.name),
                         mark: agent_mark(&agent.state, &stage.state),
                         status: agent_status(&agent.state, &stage.state).to_string(),
@@ -203,21 +296,27 @@ fn workflow_board(workflow: &WorkflowState, usage: &HashMap<String, AgentUsage>)
 fn free_board(tasks: &[&ForgeTask], usage: &HashMap<String, AgentUsage>) -> Board {
     Board {
         title: FREE_STAGE.to_string(),
-        columns: vec![Column {
-            name: FREE_STAGE.to_string(),
-            state: format!("{} lames", tasks.len()),
-            cards: tasks
-                .iter()
-                .map(|task| Card {
-                    name: sanitize_for_display(&task.description.replace('\n', "␊")),
-                    mark: forge_mark(task.status),
-                    status: forge_label(task.status).to_string(),
-                    tool: task.current_tool.clone(),
-                    usage: usage.get(&task.id).copied(),
-                    elapsed_secs: task.elapsed_secs,
-                })
-                .collect(),
-        }],
+        columns: vec![free_column(tasks, usage)],
+    }
+}
+
+fn free_column(tasks: &[&ForgeTask], usage: &HashMap<String, AgentUsage>) -> Column {
+    Column {
+        name: FREE_STAGE.to_string(),
+        state: format!("{} lames", tasks.len()),
+        stage: None,
+        cards: tasks
+            .iter()
+            .map(|task| Card {
+                key: task.id.clone(),
+                name: sanitize_for_display(&task.description.replace('\n', "␊")),
+                mark: forge_mark(task.status),
+                status: forge_label(task.status).to_string(),
+                tool: task.current_tool.clone(),
+                usage: usage.get(&task.id).copied(),
+                elapsed_secs: task.elapsed_secs,
+            })
+            .collect(),
     }
 }
 
@@ -312,7 +411,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
             ),
             theme::title(),
         ))
-        .title_bottom(Line::from(FOOTER).style(theme::dim()));
+        .title_bottom(match app.mission.notice.as_deref() {
+            Some(notice) => {
+                Line::from(format!(" {} ", sanitize_for_display(notice))).style(theme::accent())
+            }
+            None => Line::from(FOOTER).style(theme::dim()),
+        });
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -740,6 +844,7 @@ mod tests {
     #[test]
     fn a_card_without_a_ledger_row_says_so_rather_than_showing_zero() {
         let card = Card {
+            key: "k".to_string(),
             name: "scanner".to_string(),
             mark: CardMark::Running,
             status: "en cours".to_string(),
@@ -754,6 +859,7 @@ mod tests {
     #[test]
     fn a_card_with_a_ledger_row_reads_tokens_cost_and_duration() {
         let card = Card {
+            key: "k".to_string(),
             name: "scanner".to_string(),
             mark: CardMark::Done,
             status: "terminé".to_string(),
@@ -777,6 +883,7 @@ mod tests {
         for name in ["監査を実行するエージェント", "👩‍🚀👩‍🚀👩‍🚀👩‍🚀👩‍🚀", "audit"]
         {
             let card = Card {
+                key: "k".to_string(),
                 name: name.to_string(),
                 mark: CardMark::Running,
                 status: "en cours".to_string(),
@@ -823,15 +930,107 @@ mod tests {
         assert!(content.contains("developer__shell"), "got:\n{content}");
     }
 
+    fn blade(id: &str, description: &str) -> ForgeTask {
+        ForgeTask {
+            id: id.to_string(),
+            description: description.to_string(),
+            status: ForgeStatus::Running,
+            current_tool: None,
+            elapsed_secs: 3,
+            turns: 1,
+            result: None,
+            error: None,
+            seq: 0,
+        }
+    }
+
+    /// Une lame dont l'identifiant est la session d'un agent du workflow est
+    /// **déjà** sur la colonne de son stage : la reprendre au plateau libre la
+    /// compterait deux fois, coût du bandeau compris.
+    #[test]
+    fn a_workflow_agent_never_gets_a_second_card_on_the_free_column() {
+        let mut app = app_with(workflow(vec![stage(
+            "collecte",
+            StageState::Running,
+            vec![agent("scanner", AgentState::Running)],
+        )]));
+        app.forge
+            .tasks
+            .insert("sess-scanner".to_string(), blade("sess-scanner", "scanner"));
+        app.forge
+            .tasks
+            .insert("libre-1".to_string(), blade("libre-1", "auditer à la main"));
+
+        let board = board(&app);
+
+        assert_eq!(board.columns.len(), 2, "un stage plus la colonne libre");
+        let free = &board.columns[1];
+        assert_eq!(free.name, FREE_STAGE);
+        assert_eq!(
+            free.cards
+                .iter()
+                .map(|card| card.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["libre-1"],
+            "la lame du workflow est filtrée, la lame libre reste"
+        );
+    }
+
+    /// Sans lame hors workflow, le plateau n'ajoute pas une colonne vide : une
+    /// colonne « libre » à zéro carte volerait de la largeur aux stages.
+    #[test]
+    fn the_free_column_only_appears_when_a_blade_escapes_the_workflow() {
+        let app = app_with(workflow(vec![stage(
+            "collecte",
+            StageState::Running,
+            vec![agent("scanner", AgentState::Running)],
+        )]));
+
+        assert_eq!(board(&app).columns.len(), 1);
+    }
+
+    /// La cible d'une carte, c'est sa clé brute — un agent adressé par son nom
+    /// affiché (assaini, tronqué en cellules) ne serait pas trouvé par
+    /// l'exécuteur.
+    #[test]
+    fn a_card_targets_its_agent_or_its_blade_by_raw_key() {
+        let mut app = app_with(workflow(vec![stage(
+            "collecte",
+            StageState::Running,
+            vec![agent("scan\tner", AgentState::Running)],
+        )]));
+        app.forge
+            .tasks
+            .insert("libre-1".to_string(), blade("libre-1", "auditer"));
+        let board = board(&app);
+
+        assert_eq!(
+            target(&board, 0, 0),
+            Some(MissionTarget::Agent {
+                stage: "collecte".to_string(),
+                agent: "scan\tner".to_string(),
+            })
+        );
+        assert_eq!(
+            target(&board, 1, 0),
+            Some(MissionTarget::Blade {
+                id: "libre-1".to_string()
+            })
+        );
+        assert_eq!(target(&board, 9, 0), None, "hors plateau");
+    }
+
     #[test]
     fn the_timeline_scales_the_bars_on_the_longest_agent() {
         let board = Board {
             title: "revue".to_string(),
             columns: vec![Column {
+                stage: None,
                 name: "collecte".to_string(),
                 state: "en cours".to_string(),
                 cards: vec![
                     Card {
+                        key: "k".to_string(),
                         name: "long".to_string(),
                         mark: CardMark::Running,
                         status: "en cours".to_string(),
@@ -840,6 +1039,7 @@ mod tests {
                         elapsed_secs: 100,
                     },
                     Card {
+                        key: "k".to_string(),
                         name: "court".to_string(),
                         mark: CardMark::Done,
                         status: "terminé".to_string(),
@@ -866,6 +1066,7 @@ mod tests {
     fn the_timeline_marks_the_agents_it_could_not_draw() {
         let cards: Vec<Card> = (0..8)
             .map(|rank| Card {
+                key: "k".to_string(),
                 name: format!("agent-{rank}"),
                 mark: CardMark::Done,
                 status: "terminé".to_string(),
@@ -877,6 +1078,7 @@ mod tests {
         let board = Board {
             title: "revue".to_string(),
             columns: vec![Column {
+                stage: None,
                 name: "collecte".to_string(),
                 state: "terminé".to_string(),
                 cards,
@@ -898,10 +1100,12 @@ mod tests {
             let board = Board {
                 title: "revue".to_string(),
                 columns: vec![Column {
+                    stage: None,
                     name: "collecte".to_string(),
                     state: "en cours".to_string(),
                     cards: (0..agents)
                         .map(|rank| Card {
+                            key: "k".to_string(),
                             name: format!("agent-{rank}"),
                             mark: CardMark::Done,
                             status: "terminé".to_string(),
@@ -963,6 +1167,7 @@ mod tests {
                     .collect(),
             ),
             &HashMap::new(),
+            &HashSet::new(),
         );
 
         assert_eq!(hidden_marker(&board, 0, 80), " · 4›");
@@ -1000,6 +1205,7 @@ mod tests {
     fn column_lines_slides_its_card_window_like_the_stage_columns() {
         let cards: Vec<Card> = (0..5)
             .map(|rank| Card {
+                key: "k".to_string(),
                 name: format!("agent-{rank}"),
                 mark: CardMark::Running,
                 status: "en cours".to_string(),
@@ -1009,6 +1215,7 @@ mod tests {
             })
             .collect();
         let column = Column {
+            stage: None,
             name: "libre".to_string(),
             state: "en cours".to_string(),
             cards,

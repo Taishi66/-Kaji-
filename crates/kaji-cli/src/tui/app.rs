@@ -436,6 +436,30 @@ pub enum Action {
     /// switch itself must not wait on the config write: the redraw right
     /// after this event is what the user is looking at.
     Theme(String),
+    /// `/workflow <fichier>` — le chemin déjà résolu contre le répertoire de
+    /// la session. L'exécuteur vit dans l'event loop : lui seul tient le
+    /// `WorkflowHandle` que les touches du mission-control adressent ensuite.
+    WorkflowRun(std::path::PathBuf),
+    /// `g` puis `y`/`n` sur un stage à gate ouverte. Le refus voyage comme
+    /// l'approbation : une gate abandonnée sans décision au journal ferait
+    /// diverger le rejeu.
+    WorkflowGate {
+        stage: String,
+        approve: bool,
+    },
+    /// `p` sur une colonne de stage — `paused` porte le sens déjà décidé à la
+    /// lecture du snapshot, l'event loop n'a plus à rejuger.
+    WorkflowPause {
+        stage: String,
+        paused: bool,
+    },
+    /// `x` confirmé sur la carte d'un agent de workflow. Une lame libre passe
+    /// par [`Action::ForgeCancel`] : deux chemins d'annulation, deux
+    /// propriétaires.
+    WorkflowCancelAgent {
+        stage: String,
+        agent: String,
+    },
 }
 
 pub struct Command {
@@ -484,6 +508,11 @@ pub const COMMANDS: &[Command] = &[
             app.toggle_forge();
             Action::None
         },
+    },
+    Command {
+        name: "/workflow",
+        desc: "lance un workflow déclaratif — /workflow <fichier.yaml>, piloté depuis le mission-control",
+        run: |app| app.run_workflow_command(""),
     },
     Command {
         name: "/edit",
@@ -609,6 +638,12 @@ fn forge_command_arg(text: &str) -> Option<&str> {
     slash_command_arg(text, "/forge")
 }
 
+/// `/workflow` seul EST dans `COMMANDS` (sans argument = son usage), donc la
+/// palette le complète ; `/workflow <fichier>` atterrit ici.
+fn workflow_command_arg(text: &str) -> Option<&str> {
+    slash_command_arg(text, "/workflow")
+}
+
 /// `/editor mode` est un sous-mot de `/editor <cmd>`, pas une commande à
 /// part : même garde de mot entier que [`slash_command_arg`], pour qu'un
 /// binaire réellement nommé `modeline` ne soit pas lu comme `mode line`.
@@ -728,6 +763,14 @@ pub struct App {
     /// [`Self::pending_restore`] : l'id est porté jusqu'à l'event loop, seul
     /// endroit d'où le summon s'atteint.
     pub pending_forge_cancel: Option<String>,
+    /// Agent de workflow dont l'annulation attend son `y`, par `(stage,
+    /// agent)`. Distinct de [`Self::pending_forge_cancel`] : une lame libre se
+    /// coupe par le summon, un agent de stage par le `WorkflowHandle`.
+    pub pending_workflow_cancel: Option<(String, String)>,
+    /// Stage dont la gate attend sa décision. `y` approuve, `n` refuse — les
+    /// **deux** sont journalisées par l'exécuteur ; Esc referme sans décider,
+    /// et la porte reste ouverte.
+    pub pending_workflow_gate: Option<String>,
     /// Id de la lame dont le lecteur montre la fiche. C'est l'id qui fait
     /// autorité, jamais le titre : deux délégations d'un même fan-out portent
     /// la même description, et le premier snapshot renomme celles qu'une
@@ -922,6 +965,8 @@ impl App {
             pending_restore: None,
             pending_restore_files_only: false,
             pending_forge_cancel: None,
+            pending_workflow_cancel: None,
+            pending_workflow_gate: None,
             forge_sheet_open: None,
             driver: PassDriver::Idle,
             goal: None,
@@ -2156,6 +2201,38 @@ impl App {
         self.clamp_mission_selection();
     }
 
+    /// Ce que le mission-control répond à une action. Le plein écran cache le
+    /// chat : la ligne est portée au pied de la vue **et** poussée au chat,
+    /// pour que la trace survive à la fermeture de la vue.
+    pub fn push_mission_notice(&mut self, text: &str) {
+        self.mission.notice = Some(text.to_string());
+        self.push_system(text);
+    }
+
+    /// `/workflow <fichier>` : le chemin est résolu contre le répertoire de la
+    /// session, comme toute mention. La lecture et la validation du YAML
+    /// appartiennent à l'event loop — `App` ne touche pas le disque.
+    fn run_workflow_command(&mut self, arg: &str) -> Action {
+        let arg = arg.trim();
+        if arg.is_empty() {
+            self.push_system("usage : /workflow <fichier.yaml>");
+            return Action::None;
+        }
+        let path = std::path::Path::new(arg);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.working_dir.join(path)
+        };
+        Action::WorkflowRun(path)
+    }
+
+    /// Les pauses posées sur l'exécuteur — `WorkflowHandle::paused_stages`
+    /// fait foi, la vue ne les déduit pas des états de stage.
+    pub fn apply_workflow_pauses(&mut self, paused: std::collections::HashSet<String>) {
+        self.mission.paused = paused;
+    }
+
     /// L'usage ledger, par identifiant de session d'agent.
     pub fn apply_agent_usage(
         &mut self,
@@ -2164,9 +2241,11 @@ impl App {
         self.mission.usage = usage;
     }
 
-    /// Toutes les touches du mission-control. T6 ne livre que la navigation :
-    /// `x`, `p`, `s`, `g` et `Enter` appartiennent à T7 et sont ignorées ici
-    /// plutôt que d'atterrir dans le composer derrière.
+    /// Toutes les touches du mission-control. `s` (steer) reste muette : la
+    /// file d'un sous-agent vit sur l'`Agent` que `subagent_handler` crée en
+    /// interne, et l'exposer touche le chemin de spawn partagé avec summon —
+    /// suivi hors T7. Une touche non branchée est avalée ici plutôt que
+    /// d'atterrir dans le composer derrière.
     fn mission_key(&mut self, key: &KeyEvent) -> Action {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return Action::None;
@@ -2176,10 +2255,122 @@ impl App {
             KeyCode::Char('l') | KeyCode::Right => self.mission_move_stage(1),
             KeyCode::Char('j') | KeyCode::Down => self.mission_move_card(1),
             KeyCode::Char('k') | KeyCode::Up => self.mission_move_card(-1),
+            KeyCode::Enter => self.open_mission_sheet(),
+            KeyCode::Char('x') => self.ask_mission_cancel(),
+            KeyCode::Char('p') => return self.mission_pause(),
+            KeyCode::Char('g') => self.ask_mission_gate(),
             KeyCode::Char('q') | KeyCode::Esc => self.close_mission_control(),
             _ => {}
         }
         Action::None
+    }
+
+    /// La cible sous le curseur, construite sur le plateau que la vue rend :
+    /// l'App et le rendu ne peuvent pas désigner deux cartes différentes.
+    fn mission_target(&self) -> Option<missioncontrol::MissionTarget> {
+        missioncontrol::target(
+            &missioncontrol::board(self),
+            self.mission.stage,
+            self.mission.card,
+        )
+    }
+
+    fn mission_stage(&self, name: &str) -> Option<&kaji::workflow::StageStatus> {
+        self.mission.workflow.as_ref()?.stage(name)
+    }
+
+    /// ⏎ : la fiche de la carte désignée, dans le lecteur. Le plein écran cède
+    /// la place — le lecteur vit dans la mise en page à colonnes, l'afficher
+    /// sous le plateau reviendrait à ne rien afficher.
+    fn open_mission_sheet(&mut self) {
+        match self.mission_target() {
+            Some(missioncontrol::MissionTarget::Agent { stage, agent }) => {
+                let Some(status) = self
+                    .mission_stage(&stage)
+                    .and_then(|stage| stage.agents.iter().find(|status| status.name == agent))
+                else {
+                    return;
+                };
+                self.viewer = Some(workflow_agent_sheet(&stage, status));
+                self.forge_sheet_open = None;
+                self.close_mission_control();
+                self.focus = Focus::Viewer;
+            }
+            Some(missioncontrol::MissionTarget::Blade { id }) => {
+                let Some(sheet) = self.forge.tasks.get(&id).map(|task| forge_sheet(task, 0)) else {
+                    return;
+                };
+                self.viewer = Some(sheet);
+                self.forge_sheet_open = Some(id);
+                self.close_mission_control();
+                self.focus = Focus::Viewer;
+            }
+            None => {}
+        }
+    }
+
+    /// `x` : un agent se coupe, il ne s'interrompt pas par accident — même
+    /// patron que le volet forge, la question est posée avant que quoi que ce
+    /// soit n'atteigne l'exécuteur.
+    fn ask_mission_cancel(&mut self) {
+        match self.mission_target() {
+            Some(missioncontrol::MissionTarget::Agent { stage, agent }) => {
+                let terminal = self
+                    .mission_stage(&stage)
+                    .and_then(|stage| stage.agents.iter().find(|status| status.name == agent))
+                    .is_some_and(|status| status.state.is_terminal());
+                if terminal {
+                    self.push_mission_notice(&format!("{agent} : agent déjà terminé"));
+                    return;
+                }
+                self.pending_workflow_cancel = Some((stage, agent));
+            }
+            Some(missioncontrol::MissionTarget::Blade { id }) => self.ask_forge_cancel(&id),
+            None => {}
+        }
+    }
+
+    /// `p` : suspend le stage de la carte désignée, ou le relâche s'il est déjà
+    /// suspendu. Le sens est décidé ici, sur le snapshot — l'event loop
+    /// n'aurait pas de raison de rejuger ce que la vue affiche.
+    fn mission_pause(&mut self) -> Action {
+        let Some(missioncontrol::MissionTarget::Agent { stage, .. }) = self.mission_target() else {
+            self.push_mission_notice("pause : réservée aux stages d'un workflow");
+            return Action::None;
+        };
+        let Some(status) = self.mission_stage(&stage) else {
+            return Action::None;
+        };
+        if status.state.is_terminal() {
+            self.push_mission_notice(&format!("stage « {stage} » déjà terminé"));
+            return Action::None;
+        }
+        // Un stage pas encore démarré ne porte pas `Paused` : sa suspension ne
+        // vit que dans la table de l'exécuteur, et la lire est ce qui rend `p`
+        // réversible avant le premier point d'arrêt.
+        let suspended = status.state == kaji::workflow::StageState::Paused
+            || self.mission.paused.contains(&stage);
+        Action::WorkflowPause {
+            stage,
+            paused: !suspended,
+        }
+    }
+
+    /// `g` : la décision d'une gate ouverte. Une porte qui n'attend rien ne
+    /// s'ouvre pas silencieusement — le pied de la vue dit pourquoi.
+    fn ask_mission_gate(&mut self) {
+        let Some(missioncontrol::MissionTarget::Agent { stage, .. }) = self.mission_target() else {
+            self.push_mission_notice("gate : réservée aux stages d'un workflow");
+            return;
+        };
+        let waiting = self
+            .mission_stage(&stage)
+            .is_some_and(|status| status.state == kaji::workflow::StageState::Waiting);
+        if !waiting {
+            self.push_mission_notice(&format!("gate « {stage} » : aucune décision attendue"));
+            return;
+        }
+        self.pending_workflow_gate = Some(stage);
     }
 
     /// Changer de stage remet l'œil en tête de colonne : la carte 3 d'un stage
@@ -2201,37 +2392,36 @@ impl App {
     }
 
     fn mission_columns(&self) -> usize {
-        match self.mission.workflow.as_ref() {
-            Some(workflow) => workflow.stages.len(),
-            None => 1,
-        }
+        missioncontrol::board(self).columns.len()
     }
 
     fn mission_cards(&self, stage: usize) -> usize {
-        match self.mission.workflow.as_ref() {
-            Some(workflow) => workflow
-                .stages
-                .get(stage)
-                .map(|stage| stage.agents.len())
-                .unwrap_or(0),
-            None => self.forge.tasks.len(),
-        }
+        missioncontrol::board(self)
+            .columns
+            .get(stage)
+            .map(|column| column.cards.len())
+            .unwrap_or(0)
     }
 
     /// Un workflow qui perd un stage, une vague de lames qui se range : la
     /// sélection suit le plateau plutôt que de désigner une carte disparue.
+    /// Le plateau est construit **une** fois : les deux curseurs se bornent sur
+    /// la même vue, celle que le rendu montrera.
     /// `pub(crate)` : le tick forge de `mod.rs` la rappelle après chaque
     /// `forge.apply_snapshot`, la seule construction de plateau que l'App ne
     /// pilote pas elle-même.
     pub(crate) fn clamp_mission_selection(&mut self) {
+        let board = missioncontrol::board(self);
         self.mission.stage = self
             .mission
             .stage
-            .min(self.mission_columns().saturating_sub(1));
-        self.mission.card = self
-            .mission
-            .card
-            .min(self.mission_cards(self.mission.stage).saturating_sub(1));
+            .min(board.columns.len().saturating_sub(1));
+        let cards = board
+            .columns
+            .get(self.mission.stage)
+            .map(|column| column.cards.len())
+            .unwrap_or(0);
+        self.mission.card = self.mission.card.min(cards.saturating_sub(1));
     }
 
     /// `Ctrl+O`: composer → explorer → viewer → forge → composer, skipping
@@ -2320,14 +2510,22 @@ impl App {
     /// patron que `/restore`, la question est posée avant que quoi que ce soit
     /// n'atteigne le summon.
     fn open_forge_cancel_confirm(&mut self) {
-        let Some(task) = self.forge.selected_task() else {
+        let Some(id) = self.forge.selected_task().map(|task| task.id.clone()) else {
+            return;
+        };
+        self.ask_forge_cancel(&id);
+    }
+
+    /// La question posée sur une lame **nommée** : le volet la prend de sa
+    /// sélection, le mission-control de la carte sous son curseur.
+    fn ask_forge_cancel(&mut self, id: &str) {
+        let Some(task) = self.forge.tasks.get(id) else {
             return;
         };
         if task.status != forge::ForgeStatus::Running {
             self.push_system("forge : tâche déjà terminée");
             return;
         }
-        let id = task.id.clone();
         let question = format!(
             "annuler {} {} ? y/n",
             theme::SUBAGENT_GLYPH,
@@ -2335,7 +2533,7 @@ impl App {
         );
         self.push_system(&question);
         self.scroll_offset = 0;
-        self.pending_forge_cancel = Some(id);
+        self.pending_forge_cancel = Some(id.to_string());
     }
 
     pub fn take_pending_forge_cancel(&mut self) -> Option<String> {
@@ -2844,6 +3042,8 @@ impl App {
             || self.gate_open
             || self.pending_restore.is_some()
             || self.pending_forge_cancel.is_some()
+            || self.pending_workflow_cancel.is_some()
+            || self.pending_workflow_gate.is_some()
     }
 
     /// Commands whose name starts with the current input, trimmed — empty
@@ -3138,6 +3338,41 @@ impl App {
             self.pending_forge_cancel = None;
             return Action::None;
         }
+        // Même contrat qu'une lame : tout ce qui n'est pas un `y` franc laisse
+        // l'agent tourner.
+        if let Some((stage, agent)) = self.pending_workflow_cancel.take() {
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                return Action::WorkflowCancelAgent { stage, agent };
+            }
+            return Action::None;
+        }
+        // Une gate, elle, n'a pas de réponse par défaut : `y` approuve, `n`
+        // refuse — les deux sont journalisées —, et Esc renonce à décider en
+        // laissant la porte ouverte plutôt qu'en inventant un refus.
+        if let Some(stage) = self.pending_workflow_gate.clone() {
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.pending_workflow_gate = None;
+                    Action::WorkflowGate {
+                        stage,
+                        approve: true,
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.pending_workflow_gate = None;
+                    Action::WorkflowGate {
+                        stage,
+                        approve: false,
+                    }
+                }
+                KeyCode::Esc => {
+                    self.pending_workflow_gate = None;
+                    self.push_mission_notice(&format!("gate « {stage} » laissée ouverte"));
+                    Action::None
+                }
+                _ => Action::None,
+            };
+        }
         match key.code {
             KeyCode::Backspace
                 if key
@@ -3248,12 +3483,15 @@ impl App {
             // queue path. `/goal` does the same, for `/goal clear`: stopping
             // a goal loop mid-turn must not wait for the turn it is stopping.
             // `/edit` too: queued, it would reach the model as a message
-            // instead of being refused the way `e` is. Every other
-            // command/message still gets the queue.
+            // instead of being refused the way `e` is. `/workflow` de même :
+            // l'orchestration ne s'adresse pas au modèle, et un run mis en
+            // file partirait comme un message quelques secondes plus tard.
+            // Every other command/message still gets the queue.
             KeyCode::Enter
                 if (self.turn_active || self.turn_pending)
                     && restore_command_arg(self.input.trim()).is_none()
                     && goal_command_arg(self.input.trim()).is_none()
+                    && workflow_command_arg(self.input.trim()).is_none()
                     && edit_command_arg(self.input.trim()).is_none() =>
             {
                 let text = self.input.trim().to_string();
@@ -3335,6 +3573,9 @@ impl App {
                     }
                     if let Some(arg) = forge_command_arg(&text) {
                         return self.run_forge_command(arg);
+                    }
+                    if let Some(arg) = workflow_command_arg(&text) {
+                        return self.run_workflow_command(arg);
                     }
                     // Unreachable today: any trimmed input that names a command
                     // keeps the palette visible (see `palette_matches`), so this
@@ -3783,6 +4024,52 @@ fn forge_sheet(task: &forge::ForgeTask, scroll: usize) -> crate::tui::viewer::Vi
         scroll,
         truncated: false,
         binary: false,
+    }
+}
+
+/// La fiche d'un agent de workflow : ce que la carte n'a pas la place de dire.
+/// Un instantané, pas une vue — l'exécuteur a son propre rythme, et le lecteur
+/// ne suit que les lames du volet (`refresh_forge_sheet`).
+fn workflow_agent_sheet(
+    stage: &str,
+    status: &kaji::workflow::AgentStatus,
+) -> crate::tui::viewer::Viewer {
+    let mut lines = forge_sheet_field("agent", &format!("{stage}.{}", status.name));
+    lines.extend(forge_sheet_field(
+        "statut",
+        &agent_state_label(&status.state),
+    ));
+    lines.extend(forge_sheet_field("tokens", &status.tokens.to_string()));
+    lines.extend(forge_sheet_field(
+        "durée",
+        &crate::tui::ui::forge_duration((status.duration_ms.max(0) / 1000) as u64),
+    ));
+    if let Some(session) = status.session_id.as_deref() {
+        lines.extend(forge_sheet_field("session", session));
+    }
+    crate::tui::viewer::Viewer {
+        path: forge_sheet_title(&format!("{stage}.{}", status.name)),
+        lines: lines
+            .iter()
+            .map(|line| sanitize_for_display(line))
+            .collect(),
+        scroll: 0,
+        truncated: false,
+        binary: false,
+    }
+}
+
+/// L'état d'un agent, cause comprise : « échoué » sans le budget qui l'a coupé
+/// laisserait la fiche moins informative que la ligne de progression du CLI.
+fn agent_state_label(state: &kaji::workflow::AgentState) -> String {
+    match state {
+        kaji::workflow::AgentState::Failed(kaji::workflow::FailureCause::Budget(limit)) => {
+            format!("échoué : budget {} dépassé", limit.field())
+        }
+        kaji::workflow::AgentState::Failed(kaji::workflow::FailureCause::Error(error)) => {
+            format!("échoué : {error}")
+        }
+        state => state.label().to_string(),
     }
 }
 
@@ -8468,6 +8755,306 @@ mod tests {
             app.mission.card,
             app.forge.tasks.len()
         );
+    }
+
+    /// Un workflow de test : deux stages, le second sous gate, un agent chacun.
+    fn piloted(app: &mut App, second: kaji::workflow::StageState) {
+        use kaji::workflow::{AgentState, AgentStatus, StageState, StageStatus, WorkflowState};
+        use kaji_core::workflow::Gate;
+
+        let agent = |name: &str, state: AgentState, session: Option<&str>| AgentStatus {
+            name: name.to_string(),
+            state,
+            session_id: session.map(str::to_string),
+            tokens: 0,
+            duration_ms: 12_000,
+        };
+        app.apply_workflow_snapshot(Some(WorkflowState {
+            workflow: "revue".to_string(),
+            stages: vec![
+                StageStatus {
+                    name: "collecte".to_string(),
+                    state: StageState::Running,
+                    gate: Gate::Auto,
+                    agents: vec![agent("scanner", AgentState::Running, Some("sess-scanner"))],
+                },
+                StageStatus {
+                    name: "deploie".to_string(),
+                    state: second,
+                    gate: Gate::Approve,
+                    agents: vec![agent("pousse", AgentState::Pending, None)],
+                },
+            ],
+        }));
+        app.open_mission_control();
+    }
+
+    /// `/workflow <fichier>` porte le chemin résolu contre le répertoire de la
+    /// session : l'event loop lit le disque, il ne devine pas la base.
+    #[test]
+    fn slash_workflow_carries_the_path_resolved_against_the_session_directory() {
+        let mut app = App::new(None);
+        app.set_working_dir(std::path::PathBuf::from("/tmp/atelier"));
+
+        assert_eq!(
+            app.run_workflow_command("revue.yaml"),
+            Action::WorkflowRun(std::path::PathBuf::from("/tmp/atelier/revue.yaml"))
+        );
+        assert_eq!(
+            app.run_workflow_command("/ailleurs/revue.yaml"),
+            Action::WorkflowRun(std::path::PathBuf::from("/ailleurs/revue.yaml"))
+        );
+
+        assert_eq!(app.run_workflow_command(""), Action::None);
+        assert!(app
+            .chat
+            .last()
+            .expect("une ligne système")
+            .text
+            .contains("usage : /workflow"));
+    }
+
+    /// Mis en file comme un message, `/workflow` partirait au modèle quelques
+    /// secondes plus tard : l'orchestration ne s'adresse pas au modèle.
+    #[test]
+    fn slash_workflow_is_not_queued_as_steering_mid_turn() {
+        let mut app = App::new(None);
+        app.set_working_dir(std::path::PathBuf::from("/tmp/atelier"));
+        app.turn_active = true;
+        for c in "/workflow revue.yaml".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+
+        assert_eq!(
+            app.on_event(&key(KeyCode::Enter)),
+            Action::WorkflowRun(std::path::PathBuf::from("/tmp/atelier/revue.yaml"))
+        );
+        assert!(app.steer_queue.is_empty());
+    }
+
+    /// ⏎ ouvre la fiche dans le lecteur — qui vit dans la mise en page à
+    /// colonnes : le plein écran doit céder la place, sans quoi la fiche
+    /// s'ouvrirait derrière le plateau.
+    #[test]
+    fn enter_opens_the_sheet_of_the_selected_workflow_agent() {
+        let mut app = App::new(None);
+        piloted(&mut app, kaji::workflow::StageState::Waiting);
+
+        app.on_event(&key(KeyCode::Enter));
+
+        assert!(!app.mission.open, "le lecteur reprend l'écran");
+        assert_eq!(app.focus, Focus::Viewer);
+        let viewer = app.viewer.as_ref().expect("une fiche");
+        assert!(
+            viewer.path.contains("collecte.scanner"),
+            "{:?}",
+            viewer.path
+        );
+        assert!(
+            viewer
+                .lines
+                .iter()
+                .any(|line| line.contains("sess-scanner")),
+            "{:?}",
+            viewer.lines
+        );
+    }
+
+    /// `x` sur un agent en vol pose la question avant d'atteindre l'exécuteur ;
+    /// `y` seul la valide.
+    #[test]
+    fn x_asks_before_cancelling_a_workflow_agent() {
+        let mut app = App::new(None);
+        piloted(&mut app, kaji::workflow::StageState::Waiting);
+
+        assert_eq!(app.on_event(&key(KeyCode::Char('x'))), Action::None);
+        assert_eq!(
+            app.pending_workflow_cancel.as_ref(),
+            Some(&("collecte".to_string(), "scanner".to_string()))
+        );
+        assert!(app.modal_active(), "la question tient le clavier");
+
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('y'))),
+            Action::WorkflowCancelAgent {
+                stage: "collecte".to_string(),
+                agent: "scanner".to_string(),
+            }
+        );
+        assert!(app.pending_workflow_cancel.is_none());
+    }
+
+    #[test]
+    fn anything_but_a_plain_y_leaves_a_workflow_agent_running() {
+        let mut app = App::new(None);
+        piloted(&mut app, kaji::workflow::StageState::Waiting);
+        app.on_event(&key(KeyCode::Char('x')));
+
+        assert_eq!(app.on_event(&key(KeyCode::Char('j'))), Action::None);
+        assert!(app.pending_workflow_cancel.is_none());
+        assert!(app.mission.open, "la vue reste, la question tombe");
+    }
+
+    /// Un agent terminé ne s'annule pas : le pied de la vue le dit plutôt que
+    /// d'ouvrir une question dont la réponse serait refusée par l'exécuteur.
+    #[test]
+    fn x_on_a_terminal_agent_says_so_instead_of_asking() {
+        let mut app = App::new(None);
+        piloted(&mut app, kaji::workflow::StageState::Done);
+        app.mission.workflow.as_mut().expect("un workflow").stages[0].agents[0].state =
+            kaji::workflow::AgentState::Done;
+
+        app.on_event(&key(KeyCode::Char('x')));
+
+        assert!(app.pending_workflow_cancel.is_none());
+        assert!(
+            app.mission
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("déjà terminé")),
+            "{:?}",
+            app.mission.notice
+        );
+    }
+
+    /// `x` sur une lame libre passe par le summon, pas par le
+    /// `WorkflowHandle` : deux chemins d'annulation, deux propriétaires.
+    #[test]
+    fn x_on_a_free_blade_goes_through_the_summon() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        app.open_mission_control();
+
+        app.on_event(&key(KeyCode::Char('x')));
+        assert_eq!(app.pending_forge_cancel.as_deref(), Some("t1"));
+        assert!(app.pending_workflow_cancel.is_none());
+
+        assert_eq!(app.on_event(&key(KeyCode::Char('y'))), Action::ForgeCancel);
+    }
+
+    /// `p` bascule : le sens est décidé sur le snapshot, jamais rejugé plus
+    /// loin — un stage suspendu se relâche avec la même touche.
+    #[test]
+    fn p_pauses_then_resumes_the_stage_of_the_selected_card() {
+        let mut app = App::new(None);
+        piloted(&mut app, kaji::workflow::StageState::Waiting);
+
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('p'))),
+            Action::WorkflowPause {
+                stage: "collecte".to_string(),
+                paused: true,
+            }
+        );
+
+        app.mission.workflow.as_mut().expect("un workflow").stages[0].state =
+            kaji::workflow::StageState::Paused;
+
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('p'))),
+            Action::WorkflowPause {
+                stage: "collecte".to_string(),
+                paused: false,
+            }
+        );
+    }
+
+    /// Un stage qui n'a pas démarré n'atteint jamais son point d'arrêt : son
+    /// `StageState` reste `Pending` alors que la pause **est** posée. Sans la
+    /// table de l'exécuteur, `p` en reposerait une seconde et le stage
+    /// resterait suspendu sans moyen de le relâcher.
+    #[test]
+    fn p_resumes_a_stage_suspended_before_it_ever_started() {
+        let mut app = App::new(None);
+        piloted(&mut app, kaji::workflow::StageState::Pending);
+        app.on_event(&key(KeyCode::Char('l')));
+        app.apply_workflow_pauses(std::collections::HashSet::from(["deploie".to_string()]));
+
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('p'))),
+            Action::WorkflowPause {
+                stage: "deploie".to_string(),
+                paused: false,
+            }
+        );
+        assert_eq!(
+            missioncontrol::board(&app).columns[1].state,
+            "pause demandée",
+            "la vue dit qu'une pause attend son point d'arrêt"
+        );
+    }
+
+    /// `g` n'ouvre que sur une porte réellement ouverte ; ailleurs il le dit.
+    /// `y`/`n` décident — les deux sont journalisées par l'exécuteur —, Esc
+    /// renonce et laisse la porte ouverte.
+    #[test]
+    fn g_decides_a_waiting_gate_and_says_so_when_there_is_none() {
+        let mut app = App::new(None);
+        piloted(&mut app, kaji::workflow::StageState::Waiting);
+
+        app.on_event(&key(KeyCode::Char('g')));
+        assert!(
+            app.pending_workflow_gate.is_none(),
+            "le stage sélectionné n'a pas de gate ouverte"
+        );
+        assert!(
+            app.mission
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("aucune décision attendue")),
+            "{:?}",
+            app.mission.notice
+        );
+
+        app.on_event(&key(KeyCode::Char('l')));
+        app.on_event(&key(KeyCode::Char('g')));
+        assert_eq!(app.pending_workflow_gate.as_deref(), Some("deploie"));
+
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('n'))),
+            Action::WorkflowGate {
+                stage: "deploie".to_string(),
+                approve: false,
+            },
+            "un refus est une décision, il descend jusqu'au journal"
+        );
+
+        app.on_event(&key(KeyCode::Char('g')));
+        assert_eq!(
+            app.on_event(&key(KeyCode::Char('y'))),
+            Action::WorkflowGate {
+                stage: "deploie".to_string(),
+                approve: true,
+            }
+        );
+
+        app.on_event(&key(KeyCode::Char('g')));
+        assert_eq!(app.on_event(&key(KeyCode::Esc)), Action::None);
+        assert!(app.pending_workflow_gate.is_none());
+        assert!(app.mission.open, "Esc referme la question, pas la vue");
+    }
+
+    /// Précédence : une question de gate à l'écran passe avant le plein écran,
+    /// qui passe avant le composer — un `j` sous la modale ne doit ni déplacer
+    /// le curseur ni s'écrire dans la saisie.
+    #[test]
+    fn a_workflow_modal_owns_the_keyboard_over_the_mission_view() {
+        let mut app = App::new(None);
+        piloted(&mut app, kaji::workflow::StageState::Waiting);
+        app.on_event(&key(KeyCode::Char('l')));
+        app.on_event(&key(KeyCode::Char('g')));
+        let stage = app.mission.stage;
+
+        assert_eq!(app.on_event(&key(KeyCode::Char('h'))), Action::None);
+        assert_eq!(app.on_event(&ctrl_key(KeyCode::Char('f'))), Action::None);
+
+        assert_eq!(app.mission.stage, stage, "le curseur n'a pas bougé");
+        assert_eq!(app.pending_workflow_gate.as_deref(), Some("deploie"));
+        assert!(app.input.is_empty());
+        assert!(app.mission.open);
     }
 
     /// Soixante kanji valent cent-vingt cellules : un titre borné en `chars()`

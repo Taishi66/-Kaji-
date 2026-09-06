@@ -149,6 +149,21 @@ fn draw_overlays(frame: &mut Frame, app: &App) {
         draw_gate_modal(frame);
     } else if app.pending_restore.is_some() {
         draw_restore_confirm_modal(frame, app.pending_restore_files_only);
+    } else if let Some(stage) = app.pending_workflow_gate.as_deref() {
+        draw_workflow_gate_modal(frame, stage);
+    } else if let Some((stage, agent)) = app.pending_workflow_cancel.as_ref() {
+        draw_cancel_confirm_modal(frame, &format!("{stage}.{agent}"));
+    } else if let Some(id) = app.pending_forge_cancel.as_deref() {
+        // Le plein écran cache le chat, où la question était jusqu'ici la
+        // seule trace : sans cette modale, `x` sur une lame libre ouvrirait
+        // une confirmation invisible qui avale la touche suivante.
+        let label = app
+            .forge
+            .tasks
+            .get(id)
+            .map(|task| task.description.clone())
+            .unwrap_or_else(|| id.to_string());
+        draw_cancel_confirm_modal(frame, &label);
     } else if let Some(approval) = &app.tool_approval {
         draw_tool_approval_modal(frame, approval, app.approval_detail.as_deref());
     }
@@ -1269,6 +1284,46 @@ L'arbre de travail sera rembobiné; la conversation est laissée telle quelle, s
         "L'arbre de travail et la conversation seront ramenés à l'état de ce checkpoint."
     };
     let paragraph = Paragraph::new(body).block(block).wrap(Wrap { trim: true });
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
+}
+
+/// La gate d'un stage de workflow. Trois issues nommées, parce qu'elles ne se
+/// valent pas : `n` **décide** un refus — journalisé, donc rejouable — là où
+/// Esc renonce à décider et laisse la porte ouverte.
+fn draw_workflow_gate_modal(frame: &mut Frame, stage: &str) {
+    let area = centered_rect(60, 20, frame.area());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::title())
+        .title(format!(
+            " {} gate « {} » — approuver ? (y/n) ",
+            theme::GATE_GLYPH,
+            sanitize_for_display(stage)
+        ));
+    let paragraph = Paragraph::new(
+        "y = approuver   n = refuser (le stage et sa descendance sont annulés)   Esc = laisser la porte ouverte",
+    )
+    .block(block)
+    .wrap(Wrap { trim: true });
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
+}
+
+/// L'annulation d'une lame ou d'un agent : tout ce qui n'est pas un `y` franc
+/// la laisse tourner.
+fn draw_cancel_confirm_modal(frame: &mut Frame, label: &str) {
+    let area = centered_rect(60, 20, frame.area());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::title())
+        .title(format!(" {} annuler ? (y/n) ", theme::SUBAGENT_GLYPH));
+    let paragraph = Paragraph::new(format!(
+        "{}\n\ny = couper   toute autre touche = laisser tourner",
+        sanitize_for_display(&label.replace('\n', "␊"))
+    ))
+    .block(block)
+    .wrap(Wrap { trim: true });
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
 }
