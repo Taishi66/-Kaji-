@@ -127,12 +127,55 @@ Place the plugin under a discovered plugin location, such as `~/.agents/plugins/
 
 Use `${PLUGIN_ROOT}` in a command to reference the plugin directory. kaji also sets `PLUGIN_ROOT` in the hook command's environment.
 
+## Hooks Without a Plugin
+
+A hook does not have to live in a plugin. kaji also reads hooks from two YAML sources, in this order:
+
+| Scope | Where | Enabled by |
+|---|---|---|
+| User | The `hooks:` key of your kaji config (`~/.config/kaji/config.yaml`, `/etc/kaji/config.yaml`, or a file listed in `KAJI_ADDITIONAL_CONFIG_FILES`) | Always |
+| Project | `<project>/.kaji/hooks.yaml` | `KAJI_PROJECT_HOOKS=1` |
+
+Project hooks are **off by default**: the file lives in the repository, so cloning a repo would otherwise be enough to run its shell commands on the first `kaji` started in it. Set `KAJI_PROJECT_HOOKS=1` (environment variable or config key) to consent to them. Rules from both sources add up — neither replaces the other, and the project's rules run after the user's.
+
+```yaml title="~/.config/kaji/config.yaml"
+hooks:
+  - event: session_start
+    command: ~/bin/log-session.sh
+    timeout_s: 15
+  - event: after_file_edit
+    matcher: '\.rs$'
+    command: ~/bin/format-edited-file.sh
+```
+
+`.kaji/hooks.yaml` accepts the same list, either bare or under a `hooks:` key:
+
+```yaml title="<project>/.kaji/hooks.yaml"
+- event: after_shell_execution
+  matcher: '^cargo test'
+  command: ./scripts/notify.sh
+```
+
+| Field | Required | Description |
+|---|---:|---|
+| `event` | Yes | Event name. Both spellings are accepted: `session_start` as well as `SessionStart`. An unknown name is skipped with a warning. |
+| `command` | Yes | Shell command to run, executed with `sh -c`. |
+| `matcher` | No | Same regular expression as a plugin rule. An invalid pattern skips the rule with a warning. |
+| `timeout_s` | No | Timeout in seconds for the command. Defaults to 10 seconds. |
+
+:::warning The field is `timeout_s`, not `timeout`
+These YAML hooks use `timeout_s`, while the plugin format above uses `timeout`. An unknown key is ignored silently by the parser, so a `timeout: 120` written here leaves the hook on the 10-second default with no error — a long hook is then cut short for no visible reason.
+:::
+
+The `HOOKS` environment variable is **not** a way to declare hooks: it is ignored (with a warning), so that neither a repository nor a process environment can add hooks behind the config layers.
+
 ## Supported Events
 
 | Event | When it runs | Matcher target |
 |---|---|---|
 | `SessionStart` | A session starts | None |
 | `SessionEnd` | A session ends | None |
+| `TurnEnd` | A turn ends, whether it succeeded or errored — it accompanies the `turn_end` journal entry. Its output is not fed back into the conversation, and it does not run during a replay | None |
 | `Stop` | kaji finishes a turn or receives a stop event | None |
 | `UserPromptSubmit` | The user submits a prompt | Prompt text |
 | `PreToolUse` | Before kaji runs a tool | Tool name |
