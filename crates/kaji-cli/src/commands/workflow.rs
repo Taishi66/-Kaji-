@@ -111,9 +111,15 @@ pub async fn handle_workflow_run(path: PathBuf, approve_all: bool) -> Result<()>
     let control = gate_control(approve_all, std::io::stdin().is_terminal());
 
     let mut run = tokio::spawn(executor.run());
-    let drive = drive_run(&handle, &mut run, control, || async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
+    let drive = drive_run(
+        &handle,
+        &mut run,
+        control,
+        || async {
+            let _ = tokio::signal::ctrl_c().await;
+        },
+        |stage| async move { ask_gate(&stage).await },
+    )
     .await?;
 
     let outcome = drive.state.outcome();
@@ -137,46 +143,107 @@ struct DriveOutcome {
     interrupted: bool,
 }
 
+/// Ce qu'un tour de boucle a produit. Les branches du `select!` se contentent
+/// de nommer l'événement : la suite s'écrit après, où les emprunts des futurs
+/// encore en attente sont relâchés.
+enum Step {
+    Finished(WorkflowState),
+    Interrupted,
+    Gate(String, Option<GateDecision>),
+    Tick,
+}
+
+/// L'invite d'une gate en cours : la question posée et la réponse à venir. Elle
+/// vit hors du `select!` pour survivre aux tours qu'une autre branche gagne.
+struct PendingGate {
+    stage: String,
+    answer: std::pin::Pin<Box<dyn std::future::Future<Output = Option<GateDecision>> + Send>>,
+}
+
+/// La branche « une gate a répondu », inerte tant qu'aucune n'est posée. Le
+/// futur de l'invite reste chez l'appelant : seul cet emprunt est abandonné
+/// quand une autre branche gagne, jamais l'attente elle-même.
+async fn wait_for_gate(pending: Option<&mut PendingGate>) -> (String, Option<GateDecision>) {
+    match pending {
+        Some(gate) => {
+            let decision = gate.answer.as_mut().await;
+            (gate.stage.clone(), decision)
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// Le pilote d'un run en vol : sonde l'état, imprime ce qui change, tranche
 /// les gates ouvertes, et annule sur interruption.
 ///
 /// La source d'interruption est un paramètre — `Ctrl+C` en production, une
 /// source scriptée sous test : `tokio::signal::ctrl_c()` n'est pas armable
 /// depuis un test sans envoyer un vrai signal au binaire de test entier. Elle
-/// est réarmée à chaque tour de boucle, comme le signal l'est.
-async fn drive_run<S, F>(
+/// est armée **une seule fois**, hors de la boucle : un futur reconstruit à
+/// chaque tour se désabonne à chaque drop, et tokio jette un SIGINT que
+/// personne n'écoute — après avoir désarmé la mort du processus.
+///
+/// L'invite d'une gate est une branche du `select!`, jamais le corps d'une
+/// autre : pendant que l'opérateur réfléchit, la fin du run et l'interruption
+/// restent observables.
+async fn drive_run<S, F, A, G>(
     handle: &WorkflowHandle,
     run: &mut tokio::task::JoinHandle<Result<WorkflowState>>,
     control: GateControl,
     interrupts: S,
+    ask: A,
 ) -> Result<DriveOutcome>
 where
     S: Fn() -> F,
     F: std::future::Future<Output = ()>,
+    A: Fn(String) -> G,
+    G: std::future::Future<Output = Option<GateDecision>> + Send + 'static,
 {
     let mut previous = handle.snapshot();
     let mut asked: HashSet<String> = HashSet::new();
     let mut interrupted = false;
+    let mut pending: Option<PendingGate> = None;
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    let interrupt = interrupts();
+    tokio::pin!(interrupt);
+
     let state = loop {
-        tokio::select! {
-            finished = &mut *run => break finished??,
-            () = interrupts() => {
+        let step = tokio::select! {
+            finished = &mut *run => Step::Finished(finished??),
+            () = &mut interrupt => Step::Interrupted,
+            (stage, decision) = wait_for_gate(pending.as_mut()) => Step::Gate(stage, decision),
+            _ = ticker.tick() => Step::Tick,
+        };
+
+        match step {
+            Step::Finished(state) => break state,
+            Step::Interrupted => {
                 // Le second Ctrl+C ne laisse plus de grâce : le premier a déjà
                 // demandé l'arrêt, et tokio garde la main sur le signal.
                 if interrupted {
                     std::process::exit(EXIT_INTERRUPTED);
                 }
                 interrupted = true;
+                pending = None;
                 handle.cancel();
+                // Réarmée pour le second appui, la boucle étant désormais
+                // sondée en continu : aucune fenêtre d'aveuglement.
+                interrupt.set(interrupts());
                 eprintln!("kaji workflow : annulation demandée — arrêt des agents en vol");
             }
-            _ = ticker.tick() => {
-                previous = report_progress(handle, previous);
+            Step::Gate(stage, decision) => {
+                pending = None;
+                apply_gate_decision(handle, &stage, decision);
                 if !interrupted {
-                    decide_pending_gates(handle, control, &mut asked).await;
+                    pending = next_gate(handle, control, &mut asked, &ask);
+                }
+            }
+            Step::Tick => {
+                previous = report_progress(handle, previous);
+                if !interrupted && pending.is_none() {
+                    pending = next_gate(handle, control, &mut asked, &ask);
                 }
             }
         }
@@ -250,49 +317,59 @@ fn gate_control(approve_all: bool, interactive: bool) -> GateControl {
     }
 }
 
-/// Tranche les gates ouvertes depuis le dernier passage. `asked` empêche de
-/// reposer la question pendant que l'exécuteur n'a pas encore consommé la
-/// décision — le stage reste `Waiting` un tick de plus.
-async fn decide_pending_gates(
+/// La prochaine gate ouverte à trancher, et l'attente de sa réponse. `asked`
+/// empêche de reposer la question pendant que l'exécuteur n'a pas encore
+/// consommé la décision — le stage reste `Waiting` un tick de plus.
+///
+/// Une seule à la fois : au terminal les questions se posent en file, et une
+/// décision immédiate rouvre le choix de la suivante dans la foulée.
+fn next_gate<A, G>(
     handle: &WorkflowHandle,
     control: GateControl,
     asked: &mut HashSet<String>,
-) {
-    let waiting: Vec<String> = handle
+    ask: &A,
+) -> Option<PendingGate>
+where
+    A: Fn(String) -> G,
+    G: std::future::Future<Output = Option<GateDecision>> + Send + 'static,
+{
+    let stage = handle
         .snapshot()
         .stages
         .iter()
-        .filter(|stage| stage.state == StageState::Waiting)
-        .map(|stage| stage.name.clone())
-        .filter(|stage| !asked.contains(stage))
-        .collect();
+        .find(|stage| stage.state == StageState::Waiting && !asked.contains(&stage.name))
+        .map(|stage| stage.name.clone())?;
 
-    for stage in waiting {
-        asked.insert(stage.clone());
-        let answered = match control {
-            GateControl::ApproveAll => Some(GateDecision::Approve),
-            GateControl::Ask => ask_gate(&stage).await,
-            GateControl::Unattended => None,
-        };
-        let decision = match answered {
-            Some(decision) => decision,
-            None => {
-                let (decision, message) = unattended_verdict(&stage);
-                eprintln!("kaji workflow : {message}");
-                decision
-            }
-        };
-        let verdict = if decision.approved() {
-            handle.approve(&stage)
-        } else {
-            handle.deny(&stage)
-        };
-        if !verdict.applied() {
-            println!(
-                "kaji workflow : gate « {stage} » non tranchée — {}",
-                verdict.label()
-            );
+    asked.insert(stage.clone());
+    let answer: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>> = match control {
+        GateControl::ApproveAll => Box::pin(std::future::ready(Some(GateDecision::Approve))),
+        GateControl::Ask => Box::pin(ask(stage.clone())),
+        GateControl::Unattended => Box::pin(std::future::ready(None)),
+    };
+    Some(PendingGate { stage, answer })
+}
+
+/// Applique la réponse à une gate ; `None` est le cas sans personne, qui refuse
+/// plutôt que d'attendre sans borne.
+fn apply_gate_decision(handle: &WorkflowHandle, stage: &str, answered: Option<GateDecision>) {
+    let decision = match answered {
+        Some(decision) => decision,
+        None => {
+            let (decision, message) = unattended_verdict(stage);
+            eprintln!("kaji workflow : {message}");
+            decision
         }
+    };
+    let verdict = if decision.approved() {
+        handle.approve(stage)
+    } else {
+        handle.deny(stage)
+    };
+    if !verdict.applied() {
+        println!(
+            "kaji workflow : gate « {stage} » non tranchée — {}",
+            verdict.label()
+        );
     }
 }
 
@@ -830,7 +907,13 @@ stages:
         });
         let drive = tokio::time::timeout(
             Duration::from_secs(10),
-            drive_run(&handle, &mut run, GateControl::Unattended, source),
+            drive_run(
+                &handle,
+                &mut run,
+                GateControl::Unattended,
+                source,
+                never_asked,
+            ),
         )
         .await
         .expect("l'interruption sort de la boucle")
@@ -848,6 +931,99 @@ stages:
             exit_code(&drive.state.outcome(), drive.interrupted),
             130,
             "l'interruption prime sur l'issue annulée"
+        );
+    }
+
+    /// Une invite de gate sans réponse : l'opérateur regarde la question et
+    /// presse Ctrl+C. Le pilote doit rester sondable pendant ce temps — sinon
+    /// l'interruption n'est vue par personne et le seul moyen de sortir est de
+    /// répondre à la gate.
+    async fn never_asked(_stage: String) -> Option<GateDecision> {
+        unreachable!("aucune gate n'est posée dans ce test")
+    }
+
+    const GATED_SPEC: &str = r#"
+name: revue
+stages:
+  - name: deploie
+    gate: approve
+    agents:
+      - name: pousse
+        prompt: pousse
+"#;
+
+    #[tokio::test]
+    async fn ctrl_c_while_a_gate_waits_for_an_answer_cancels_the_run_and_exits_130() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let session_manager = Arc::new(SessionManager::new(data_dir.path().join("data")));
+        let working_dir = data_dir.path().join("workspace");
+        let session = session_manager
+            .create_session(
+                working_dir.clone(),
+                "workflow test".to_string(),
+                SessionType::Hidden,
+                KajiMode::Auto,
+            )
+            .await
+            .unwrap();
+
+        let spec = WorkflowSpec::from_yaml(GATED_SPEC).unwrap();
+        let recorder =
+            WorkflowRecorder::open(Arc::clone(&session_manager), session.id.clone(), &spec.name)
+                .await
+                .unwrap();
+        let executor = WorkflowExecutor::new(
+            spec,
+            Arc::new(HangingRunner),
+            recorder,
+            session.id.clone(),
+            working_dir,
+        )
+        .unwrap();
+        let handle = executor.handle();
+        let mut run = tokio::spawn(executor.run());
+
+        let interrupt = Arc::new(tokio::sync::Notify::new());
+        let source = {
+            let interrupt = Arc::clone(&interrupt);
+            move || {
+                let interrupt = Arc::clone(&interrupt);
+                async move { interrupt.notified().await }
+            }
+        };
+
+        // L'invite est posée puis plus rien : c'est l'opérateur qui réfléchit.
+        let asked = Arc::new(tokio::sync::Notify::new());
+        let ask = {
+            let asked = Arc::clone(&asked);
+            move |_stage: String| {
+                let asked = Arc::clone(&asked);
+                async move {
+                    asked.notify_one();
+                    std::future::pending::<Option<GateDecision>>().await
+                }
+            }
+        };
+
+        let press = tokio::spawn(async move {
+            asked.notified().await;
+            interrupt.notify_one();
+        });
+        let drive = tokio::time::timeout(
+            Duration::from_secs(10),
+            drive_run(&handle, &mut run, GateControl::Ask, source, ask),
+        )
+        .await
+        .expect("l'interruption sort de la boucle même pendant l'invite")
+        .unwrap();
+        press.await.unwrap();
+
+        assert!(drive.interrupted);
+        assert_eq!(drive.state.outcome(), WorkflowOutcome::Cancelled);
+        assert_eq!(
+            exit_code(&drive.state.outcome(), drive.interrupted),
+            130,
+            "l'interruption pendant une gate sort en 130"
         );
     }
 }
