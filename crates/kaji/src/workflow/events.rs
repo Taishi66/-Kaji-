@@ -251,24 +251,12 @@ impl WorkflowRecorder {
         self.turn_seq
     }
 
+    /// Le seul endroit qui décide de la non-fatalité : **toute** perte d'event
+    /// — sérialisation comprise — marque la session non rejouable. Une branche
+    /// qui rendrait la main sans le faire laisserait un journal troué se
+    /// présenter comme complet, et le rejeu partirait dessus.
     async fn append<T: Serialize>(&self, kind: &str, payload: &T) {
-        let payload_json = match serde_json::to_value(payload) {
-            Ok(Value::Object(mut object)) => {
-                object.insert("turn_seq".to_string(), Value::from(self.turn_seq));
-                Value::Object(object).to_string()
-            }
-            Ok(other) => other.to_string(),
-            Err(error) => {
-                warn!(%error, kind, "workflow: payload non sérialisable");
-                return;
-            }
-        };
-
-        if let Err(error) = self
-            .session_manager
-            .append_event(&self.session_id, self.turn_seq, kind, &payload_json)
-            .await
-        {
+        if let Err(error) = self.try_append(kind, payload).await {
             warn!(
                 %error,
                 kind,
@@ -283,6 +271,27 @@ impl WorkflowRecorder {
                 warn!(%error, session_id = %self.session_id, "workflow: mark_not_replayable a aussi échoué");
             }
         }
+    }
+
+    async fn try_append<T: Serialize>(&self, kind: &str, payload: &T) -> Result<()> {
+        self.session_manager
+            .append_event(
+                &self.session_id,
+                self.turn_seq,
+                kind,
+                &self.encode(payload)?,
+            )
+            .await
+    }
+
+    fn encode<T: Serialize>(&self, payload: &T) -> Result<String> {
+        Ok(match serde_json::to_value(payload)? {
+            Value::Object(mut object) => {
+                object.insert("turn_seq".to_string(), Value::from(self.turn_seq));
+                Value::Object(object).to_string()
+            }
+            other => other.to_string(),
+        })
     }
 
     pub async fn workflow_started(&self, spec: &WorkflowSpec) {
