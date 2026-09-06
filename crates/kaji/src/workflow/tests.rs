@@ -1391,6 +1391,42 @@ async fn the_workflow_turn_is_visible_to_the_replay_plan() {
     assert_eq!(name, "revue");
 }
 
+/// Un tour d'agent **complet** dans le journal : la borne ouvrante, le message
+/// user, la borne fermante. Un tour laissé ouvert n'est pas un journal que le
+/// curseur accepterait de charger — un test qui en fabrique un ne teste plus le
+/// chemin de production.
+async fn user_turn(fixture: &Fixture, turn_seq: i64, text: &str) {
+    use crate::conversation::message::{Message, MessageContentBlock};
+    use rmcp::model::Role;
+
+    let payload = serde_json::to_string(&Message::new(
+        Role::User,
+        0,
+        vec![MessageContentBlock::text(text)],
+    ))
+    .unwrap();
+    fixture
+        .session_manager
+        .append_event(
+            &fixture.session_id,
+            turn_seq,
+            "turn_start",
+            r#"{"query_preview":"agent"}"#,
+        )
+        .await
+        .unwrap();
+    fixture
+        .session_manager
+        .append_event(&fixture.session_id, turn_seq, "message", &payload)
+        .await
+        .unwrap();
+    fixture
+        .session_manager
+        .append_event(&fixture.session_id, turn_seq, "turn_end", "{}")
+        .await
+        .unwrap();
+}
+
 /// T7 : lancé depuis la TUI (`/workflow`), le workflow s'écrit sur la session
 /// de **conversation**, pas sur une session dédiée comme `kaji workflow run`.
 /// Le journal porte alors des tours d'agent et un tour d'orchestration mêlés :
@@ -1399,33 +1435,6 @@ async fn the_workflow_turn_is_visible_to_the_replay_plan() {
 /// diverger le rejeu de la session que l'utilisateur relance.
 #[tokio::test]
 async fn a_conversation_session_replays_its_agent_turns_and_its_workflow_turn() {
-    use crate::conversation::message::{Message, MessageContentBlock};
-    use rmcp::model::Role;
-
-    async fn user_turn(fixture: &Fixture, turn_seq: i64, text: &str) {
-        let payload = serde_json::to_string(&Message::new(
-            Role::User,
-            0,
-            vec![MessageContentBlock::text(text)],
-        ))
-        .unwrap();
-        fixture
-            .session_manager
-            .append_event(
-                &fixture.session_id,
-                turn_seq,
-                "turn_start",
-                r#"{"query_preview":"agent"}"#,
-            )
-            .await
-            .unwrap();
-        fixture
-            .session_manager
-            .append_event(&fixture.session_id, turn_seq, "message", &payload)
-            .await
-            .unwrap();
-    }
-
     let fixture = Fixture::new().await;
     user_turn(&fixture, 2, "avant").await;
     let runner = Arc::new(FixtureRunner::new());
@@ -1472,6 +1481,41 @@ async fn a_killed_workflow_is_detected_as_truncated() {
 
     let Err(error) = EventCursor::load(&fixture.session_manager, &fixture.session_id).await else {
         panic!("un workflow tronqué ne se charge pas");
+    };
+    assert_eq!(
+        error.downcast_ref::<crate::replay::cursor::ReplayUnavailable>(),
+        Some(&crate::replay::cursor::ReplayUnavailable::TruncatedAt(2))
+    );
+}
+
+/// C1 : la troncature n'est pas qu'une affaire de fin de journal. Un tour de
+/// workflow tué, puis un tour d'agent normalement clos par-dessus, laisse un
+/// trou **au milieu** : le dernier tour est propre, mais le journal est amputé.
+/// Le rejeu doit le refuser — sans quoi `replay_plan` rend un `(n, Workflow)`
+/// que le `ReplayRunner` ne sait pas servir, `workflow_final` reste `None` et
+/// le verdict sort vert sur une session à moitié rejouée.
+#[tokio::test]
+async fn a_workflow_turn_left_open_under_a_later_agent_turn_is_truncated() {
+    let fixture = Fixture::new().await;
+    let recorder = fixture.recorder().await;
+    recorder.workflow_started(&spec(FAN_OUT_THEN_JOIN)).await;
+    recorder.stage_started("collecte", Gate::Auto).await;
+    // Pas de `workflow_done` : le processus est mort en plein stage. La
+    // session, elle, a repris et a joué un tour d'agent complet derrière.
+    user_turn(&fixture, 3, "et maintenant ?").await;
+
+    assert!(
+        fixture
+            .session_manager
+            .last_turn_is_interrupted(&fixture.session_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "le dernier tour est clos : c'est le tour antérieur qui est ouvert"
+    );
+
+    let Err(error) = EventCursor::load(&fixture.session_manager, &fixture.session_id).await else {
+        panic!("un tour antérieur laissé ouvert est une troncature, pas un journal rejouable");
     };
     assert_eq!(
         error.downcast_ref::<crate::replay::cursor::ReplayUnavailable>(),

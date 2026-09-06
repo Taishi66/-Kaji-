@@ -175,18 +175,24 @@ fn call_key(event: &SessionEvent, payload: &Value) -> Option<(i64, u32)> {
 }
 
 impl EventCursor {
-    /// Comme [`Self::load_until`], sans borne : une troncature de fin de
-    /// journal est toujours refusée.
+    /// Comme [`Self::load_until`], sans borne : un tour laissé ouvert est
+    /// toujours refusé.
     pub async fn load(session_manager: &SessionManager, session_id: &str) -> Result<Self> {
         Self::load_until(session_manager, session_id, None).await
     }
 
-    /// Charge le journal, en tolérant une troncature de fin de journal quand
-    /// elle se situe strictement après `until_turn` : le tour interrompu
-    /// n'est de toute façon jamais rejoué si l'appelant borne le rejeu à un
-    /// tour antérieur (CLI `kaji replay --until`, message d'erreur de
-    /// `TruncatedAt` — S3 « replay jusqu'au tour N-1 possible »).
-    /// `until_turn: None` refuse toute troncature, comme `load`.
+    /// Charge le journal, en tolérant la troncature quand elle se situe
+    /// strictement après `until_turn` : le tour interrompu n'est de toute
+    /// façon jamais rejoué si l'appelant borne le rejeu à un tour antérieur
+    /// (CLI `kaji replay --until`, message d'erreur de `TruncatedAt` — S3
+    /// « replay jusqu'au tour N-1 possible »). `until_turn: None` refuse toute
+    /// troncature, comme `load`.
+    ///
+    /// La troncature se juge sur le **premier** tour non clos du journal, pas
+    /// sur le dernier tour de la session : un tour de workflow tué puis
+    /// recouvert par des tours d'agent normalement fermés ampute le journal au
+    /// milieu, et un rejeu qui l'accepterait sortirait vert sans avoir rejoué
+    /// l'orchestration.
     pub async fn load_until(
         session_manager: &SessionManager,
         session_id: &str,
@@ -211,7 +217,7 @@ impl EventCursor {
             return Err(ReplayUnavailable::Purged.into());
         }
 
-        if let Some(interrupted) = session_manager.last_turn_is_interrupted(session_id).await? {
+        if let Some(interrupted) = session_manager.first_unclosed_turn(session_id).await? {
             let tolerated = until_turn.is_some_and(|until| until < interrupted.turn_seq);
             if !tolerated {
                 return Err(ReplayUnavailable::TruncatedAt(interrupted.turn_seq).into());

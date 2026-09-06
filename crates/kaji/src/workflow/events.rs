@@ -26,9 +26,10 @@
 //! transaction de [`SessionManager::claim_exclusive_turn_start`] ferme
 //! l'exclusivité du workflow sur la session — et qu'il referme avec un
 //! `turn_end` à `workflow_done`. Un workflow tué laisse donc une borne
-//! ouverte, exactement comme un tour d'agent tué : `last_turn_is_interrupted`
-//! le voit, et le curseur refuse un journal tronqué au lieu de le rejouer à
-//! moitié.
+//! ouverte, exactement comme un tour d'agent tué : `first_unclosed_turn` la
+//! voit — y compris sous les tours d'agent qu'une session reprise a joués
+//! par-dessus —, et le curseur refuse un journal tronqué au lieu de le rejouer
+//! à moitié.
 //!
 //! Un agent qui échoue à `prepare` n'a pas de session enfant : il n'émet que
 //! `agent_done`, sans `agent_started` préalable. Les vues se construisent donc

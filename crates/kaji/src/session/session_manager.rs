@@ -461,13 +461,28 @@ fn payload_string_field(payload_json: &str, field: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Résultat de `last_turn_is_interrupted` : le dernier tour de la session a
-/// un `turn_start` sans `turn_end` correspondant (crash/kill/annulation).
+/// Un tour dont le `turn_start` n'a pas de `turn_end` correspondant
+/// (crash/kill/annulation) — le dernier de la session pour
+/// `last_turn_is_interrupted`, le premier du journal pour
+/// `first_unclosed_turn`.
 #[derive(Debug, Clone)]
 pub struct InterruptedTurn {
     pub turn_seq: i64,
     pub event_count: i64,
     pub query_preview: Option<String>,
+}
+
+fn interrupted_turn(turn_seq: i64, rows: &[(String, String)]) -> InterruptedTurn {
+    let query_preview = rows
+        .iter()
+        .find(|(kind, _)| kind == "turn_start")
+        .and_then(|(_, payload)| payload_string_field(payload, "query_preview"));
+
+    InterruptedTurn {
+        turn_seq,
+        event_count: rows.len() as i64,
+        query_preview,
+    }
 }
 
 impl SessionManager {
@@ -919,11 +934,23 @@ impl SessionManager {
 
     /// `Some` ssi le dernier tour de la session a un `turn_start` sans
     /// `turn_end` correspondant (tour interrompu par crash/kill/annulation).
+    /// C'est le signal de **reprise** : la session rouvre là où elle s'est
+    /// arrêtée et le dit. Pour juger un journal rejouable, c'est
+    /// [`Self::first_unclosed_turn`] qu'il faut — un tour antérieur laissé
+    /// ouvert est une corruption, pas une reprise.
     pub async fn last_turn_is_interrupted(
         &self,
         session_id: &str,
     ) -> Result<Option<InterruptedTurn>> {
         self.storage.last_turn_is_interrupted(session_id).await
+    }
+
+    /// Le premier `turn_start` du journal qui n'a pas de `turn_end`, quel que
+    /// soit son rang. Un tour ouvert sous des tours fermés — workflow tué puis
+    /// session reprise — ampute le journal aussi sûrement qu'une coupure en
+    /// fin de log, et le rejeu doit s'y arrêter.
+    pub async fn first_unclosed_turn(&self, session_id: &str) -> Result<Option<InterruptedTurn>> {
+        self.storage.first_unclosed_turn(session_id).await
     }
 }
 
@@ -3157,14 +3184,7 @@ impl SessionStorage {
             return Ok(None);
         };
 
-        let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT kind, payload_json FROM session_events WHERE session_id = ? AND turn_seq = ? ORDER BY id ASC",
-        )
-        .bind(session_id)
-        .bind(turn_seq)
-        .fetch_all(pool)
-        .await?;
-
+        let rows = self.turn_rows(session_id, turn_seq).await?;
         let has_start = rows.iter().any(|(kind, _)| kind == "turn_start");
         let has_end = rows.iter().any(|(kind, _)| kind == "turn_end");
 
@@ -3172,21 +3192,39 @@ impl SessionStorage {
             return Ok(None);
         }
 
-        let query_preview = rows
-            .iter()
-            .find(|(kind, _)| kind == "turn_start")
-            .and_then(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload).ok())
-            .and_then(|v| {
-                v.get("query_preview")
-                    .and_then(|q| q.as_str())
-                    .map(str::to_string)
-            });
+        Ok(Some(interrupted_turn(turn_seq, &rows)))
+    }
 
-        Ok(Some(InterruptedTurn {
-            turn_seq,
-            event_count: rows.len() as i64,
-            query_preview,
-        }))
+    async fn first_unclosed_turn(&self, session_id: &str) -> Result<Option<InterruptedTurn>> {
+        let pool = self.pool().await?;
+
+        let turn_seq: Option<i64> = sqlx::query_scalar(
+            "SELECT MIN(turn_seq) FROM session_events \
+             WHERE session_id = ?1 AND kind = 'turn_start' AND turn_seq NOT IN \
+             (SELECT turn_seq FROM session_events WHERE session_id = ?1 AND kind = 'turn_end')",
+        )
+        .bind(session_id)
+        .fetch_one(pool)
+        .await?;
+
+        let Some(turn_seq) = turn_seq else {
+            return Ok(None);
+        };
+
+        let rows = self.turn_rows(session_id, turn_seq).await?;
+        Ok(Some(interrupted_turn(turn_seq, &rows)))
+    }
+
+    async fn turn_rows(&self, session_id: &str, turn_seq: i64) -> Result<Vec<(String, String)>> {
+        let pool = self.pool().await?;
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT kind, payload_json FROM session_events WHERE session_id = ? AND turn_seq = ? ORDER BY id ASC",
+        )
+        .bind(session_id)
+        .bind(turn_seq)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
     }
 
     async fn export_session(&self, id: &str) -> Result<String> {
@@ -6058,6 +6096,56 @@ mod tests {
             .expect("tour 2 ouvert → interrompu");
         assert_eq!(it.turn_seq, 2);
         assert_eq!(it.query_preview.as_deref(), Some("q2"));
+    }
+
+    /// La reprise regarde le dernier tour, le rejeu regarde le premier trou :
+    /// un tour ouvert recouvert par un tour clos est invisible à l'une et
+    /// fatal à l'autre.
+    #[tokio::test]
+    async fn first_unclosed_turn_sees_the_hole_the_last_turn_hides() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = new_session(&sm).await;
+
+        sm.append_event(&sid, 1, "turn_start", r#"{"query_preview":"q1"}"#)
+            .await
+            .unwrap();
+        sm.append_event(&sid, 1, "message", "{}").await.unwrap();
+        sm.append_event(&sid, 2, "turn_start", r#"{"query_preview":"q2"}"#)
+            .await
+            .unwrap();
+        sm.append_event(&sid, 2, "turn_end", "{}").await.unwrap();
+
+        assert!(
+            sm.last_turn_is_interrupted(&sid).await.unwrap().is_none(),
+            "le dernier tour est clos"
+        );
+        let unclosed = sm
+            .first_unclosed_turn(&sid)
+            .await
+            .unwrap()
+            .expect("le tour 1 n'a jamais été fermé");
+        assert_eq!(unclosed.turn_seq, 1);
+        assert_eq!(unclosed.query_preview.as_deref(), Some("q1"));
+        assert_eq!(unclosed.event_count, 2);
+    }
+
+    #[tokio::test]
+    async fn first_unclosed_turn_is_none_on_a_fully_closed_log() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let sid = new_session(&sm).await;
+
+        for turn_seq in 1..=3 {
+            sm.append_event(&sid, turn_seq, "turn_start", "{}")
+                .await
+                .unwrap();
+            sm.append_event(&sid, turn_seq, "turn_end", "{}")
+                .await
+                .unwrap();
+        }
+
+        assert!(sm.first_unclosed_turn(&sid).await.unwrap().is_none());
     }
 
     #[tokio::test]
