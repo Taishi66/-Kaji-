@@ -4,7 +4,7 @@ use crate::tui::icons::IconSet;
 use crate::tui::report;
 use crate::tui::theme::SpanRole;
 use crate::tui::ui::sanitize_for_display;
-use crate::tui::{diff, forge, theme};
+use crate::tui::{diff, forge, gitstatus, missioncontrol, theme};
 use kaji::agents::{AgentEvent, SUBAGENT_TOOL_REQUEST_TYPE};
 use kaji::config::KajiMode;
 use kaji::conversation::message::{
@@ -479,7 +479,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/forge",
-        desc: "(ou Ctrl+F) volet forge — subagents en cours, ↑/↓ choisir, ⏎ la fiche, x annuler",
+        desc: "(ou Ctrl+F) volet forge — ↑/↓ choisir, ⏎ la fiche, x annuler, f (ou /forge full) plein écran",
         run: |app| {
             app.toggle_forge();
             Action::None
@@ -601,6 +601,12 @@ fn edit_command_arg(text: &str) -> Option<&str> {
 /// `/edit` dont le chemin serait `or`.
 fn editor_command_arg(text: &str) -> Option<&str> {
     slash_command_arg(text, "/editor")
+}
+
+/// `/forge` seul EST dans `COMMANDS` (sans argument = le volet), donc la
+/// palette le complète ; `/forge full` atterrit ici.
+fn forge_command_arg(text: &str) -> Option<&str> {
+    slash_command_arg(text, "/forge")
 }
 
 /// `/editor mode` est un sous-mot de `/editor <cmd>`, pas une commande à
@@ -877,6 +883,9 @@ pub struct App {
     /// Le volet 炉 forge : ce que les lames déléguées font, alimenté par le
     /// tick 1 s d'`event_loop` et par les notifications MCP des subagents.
     pub forge: forge::ForgeState,
+    /// La vue plein écran du même 炉 : stages en colonnes, cartes agent,
+    /// timeline. Ouverte depuis le volet (`f`) ou par `/forge full`.
+    pub mission: missioncontrol::MissionState,
 }
 
 impl App {
@@ -954,6 +963,7 @@ impl App {
             viewer_area: Cell::new(Rect::default()),
             turn_had_error: false,
             forge: forge::ForgeState::default(),
+            mission: missioncontrol::MissionState::default(),
         }
     }
 
@@ -2098,6 +2108,111 @@ impl App {
         }
     }
 
+    /// `/forge` sans argument bascule le volet ; `/forge full` ouvre la vue
+    /// plein écran.
+    fn run_forge_command(&mut self, arg: &str) -> Action {
+        match arg.trim() {
+            "" => self.toggle_forge(),
+            "full" => self.open_mission_control(),
+            other => self.push_system(&format!("usage : /forge [full] (reçu « {other} »)")),
+        }
+        Action::None
+    }
+
+    /// `f` depuis le volet forge, ou `/forge full` : la même forge, en plein
+    /// écran. La vue s'ouvre même vide — `/forge full` ne doit jamais être un
+    /// non-événement silencieux, et le plateau sait dire qu'il n'a rien.
+    pub fn open_mission_control(&mut self) {
+        self.mission.open = true;
+        self.clamp_mission_selection();
+    }
+
+    pub fn close_mission_control(&mut self) {
+        self.mission.open = false;
+    }
+
+    /// Le snapshot du workflow que la session pilote — `None` quand elle n'en
+    /// pilote aucun, ce qui rend la vue à sa colonne « libre ».
+    pub fn apply_workflow_snapshot(&mut self, state: Option<kaji::workflow::WorkflowState>) {
+        self.mission.workflow = state;
+        self.clamp_mission_selection();
+    }
+
+    /// L'usage ledger, par identifiant de session d'agent.
+    pub fn apply_agent_usage(
+        &mut self,
+        usage: std::collections::HashMap<String, missioncontrol::AgentUsage>,
+    ) {
+        self.mission.usage = usage;
+    }
+
+    /// Toutes les touches du mission-control. T6 ne livre que la navigation :
+    /// `x`, `p`, `s`, `g` et `Enter` appartiennent à T7 et sont ignorées ici
+    /// plutôt que d'atterrir dans le composer derrière.
+    fn mission_key(&mut self, key: &KeyEvent) -> Action {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Action::None;
+        }
+        match key.code {
+            KeyCode::Char('h') | KeyCode::Left => self.mission_move_stage(-1),
+            KeyCode::Char('l') | KeyCode::Right => self.mission_move_stage(1),
+            KeyCode::Char('j') | KeyCode::Down => self.mission_move_card(1),
+            KeyCode::Char('k') | KeyCode::Up => self.mission_move_card(-1),
+            KeyCode::Char('q') | KeyCode::Esc => self.close_mission_control(),
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Changer de stage remet l'œil en tête de colonne : la carte 3 d'un stage
+    /// n'a rien à voir avec la carte 3 du suivant.
+    fn mission_move_stage(&mut self, delta: isize) {
+        let last = self.mission_columns().saturating_sub(1) as isize;
+        let target = self.mission.stage as isize + delta;
+        let stage = target.clamp(0, last.max(0)) as usize;
+        if stage != self.mission.stage {
+            self.mission.card = 0;
+        }
+        self.mission.stage = stage;
+    }
+
+    fn mission_move_card(&mut self, delta: isize) {
+        let last = self.mission_cards(self.mission.stage).saturating_sub(1) as isize;
+        let target = self.mission.card as isize + delta;
+        self.mission.card = target.clamp(0, last.max(0)) as usize;
+    }
+
+    fn mission_columns(&self) -> usize {
+        match self.mission.workflow.as_ref() {
+            Some(workflow) => workflow.stages.len(),
+            None => 1,
+        }
+    }
+
+    fn mission_cards(&self, stage: usize) -> usize {
+        match self.mission.workflow.as_ref() {
+            Some(workflow) => workflow
+                .stages
+                .get(stage)
+                .map(|stage| stage.agents.len())
+                .unwrap_or(0),
+            None => self.forge.tasks.len(),
+        }
+    }
+
+    /// Un workflow qui perd un stage, une vague de lames qui se range : la
+    /// sélection suit le plateau plutôt que de désigner une carte disparue.
+    fn clamp_mission_selection(&mut self) {
+        self.mission.stage = self
+            .mission
+            .stage
+            .min(self.mission_columns().saturating_sub(1));
+        self.mission.card = self
+            .mission
+            .card
+            .min(self.mission_cards(self.mission.stage).saturating_sub(1));
+    }
+
     /// `Ctrl+O`: composer → explorer → viewer → forge → composer, skipping
     /// whatever is closed. Attaching from a pane hands the keyboard back to the
     /// composer, and without this chord nothing ever gave it back.
@@ -2136,6 +2251,7 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.forge_move(-1),
             KeyCode::Enter => self.open_forge_sheet(),
             KeyCode::Char('x') => self.open_forge_cancel_confirm(),
+            KeyCode::Char('f') => self.open_mission_control(),
             KeyCode::Esc => self.close_forge(),
             _ => {}
         }
@@ -2821,6 +2937,14 @@ impl App {
             if self.editor_picker.is_some() {
                 return self.editor_picker_key(key);
             }
+            // Le mission-control est une vue plein écran, pas un volet : tant
+            // qu'il est ouvert il prend la touche avant les accords de volets
+            // — `Ctrl+F` replierait une forge qu'on ne verrait plus. Les
+            // modales restent au-dessus, elles : une approbation à l'écran
+            // répond toujours y/n.
+            if self.mission.open {
+                return self.mission_key(key);
+            }
             // The pane chords sit above the panes themselves: `Ctrl+E` has to
             // reach the explorer from inside the viewer, and `Ctrl+O` has to
             // rotate out of whichever pane currently owns the keyboard.
@@ -3187,6 +3311,9 @@ impl App {
                     }
                     if let Some(arg) = edit_command_arg(&text) {
                         return self.run_edit_command(arg);
+                    }
+                    if let Some(arg) = forge_command_arg(&text) {
+                        return self.run_forge_command(arg);
                     }
                     // Unreachable today: any trimmed input that names a command
                     // keeps the palette visible (see `palette_matches`), so this
@@ -3588,18 +3715,18 @@ const FORGE_SHEET_WRAP: usize = 76;
 /// valeurs commencent à la même colonne.
 const FORGE_SHEET_LABEL: usize = 9;
 
-/// Ce qu'un titre de fiche garde d'une description — au-delà il déborderait de
-/// l'en-tête du lecteur.
+/// Ce qu'un titre de fiche garde d'une description, en cellules — au-delà il
+/// déborderait de l'en-tête du lecteur.
 const FORGE_SHEET_TITLE: usize = 60;
 
 /// L'en-tête de la fiche dans le lecteur. C'est un titre, pas un chemin, et
 /// pas non plus une clé : [`App::refresh_forge_sheet`] suit l'id de la tâche,
 /// donc un renommage se contente de réécrire cette ligne.
 fn forge_sheet_title(description: &str) -> String {
-    let head: String = sanitize_for_display(&description.replace('\n', "␊"))
-        .chars()
-        .take(FORGE_SHEET_TITLE)
-        .collect();
+    let head = gitstatus::truncate_cells(
+        &sanitize_for_display(&description.replace('\n', "␊")),
+        FORGE_SHEET_TITLE,
+    );
     format!("{} {head}", theme::SUBAGENT_GLYPH)
 }
 
@@ -3672,20 +3799,27 @@ fn forge_sheet_field(label: &str, value: &str) -> Vec<String> {
         .collect()
 }
 
-/// Repli sur les espaces. Un mot plus long que la largeur part seul sur sa
-/// ligne : le lecteur rogne, il ne coupe pas un chemin en deux.
+/// Repli sur les espaces, à la cellule : une prose japonaise repliée sur des
+/// `chars()` rend des lignes deux fois trop larges, que le lecteur rogne
+/// ensuite en silence. Un mot plus long que la largeur part seul sur sa ligne :
+/// le lecteur rogne, il ne coupe pas un chemin en deux.
 fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
+    let mut current_width = 0usize;
     for word in text.split_whitespace() {
+        let word_width = gitstatus::display_width(word);
         if current.is_empty() {
             current = word.to_string();
-        } else if current.chars().count() + 1 + word.chars().count() <= width {
+            current_width = word_width;
+        } else if current_width + 1 + word_width <= width {
             current.push(' ');
             current.push_str(word);
+            current_width += 1 + word_width;
         } else {
             lines.push(std::mem::take(&mut current));
             current = word.to_string();
+            current_width = word_width;
         }
     }
     lines.push(current);
@@ -7971,6 +8105,221 @@ mod tests {
         assert_eq!(app.forge.view, forge::ForgeView::ForcedOpen);
         assert_eq!(app.focus, Focus::Forge);
         assert!(app.input.is_empty());
+    }
+
+    /// `f` depuis le volet ouvre la vue plein écran ; `q` la referme et rend
+    /// le volet — la forge est la même, seule la surface change.
+    #[test]
+    fn f_from_the_forge_panel_opens_the_mission_control_and_q_comes_back() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        app.focus = Focus::Forge;
+
+        app.on_event(&key(KeyCode::Char('f')));
+        assert!(app.mission.open);
+        assert!(app.input.is_empty(), "f ne tape rien dans le composer");
+
+        app.on_event(&key(KeyCode::Char('q')));
+        assert!(!app.mission.open);
+        assert_eq!(app.focus, Focus::Forge, "le volet reprend la main");
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn slash_forge_full_opens_the_mission_control() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+
+        for c in "/forge full".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
+
+        assert!(app.mission.open);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_forge_argument_says_its_usage() {
+        let mut app = App::new(None);
+
+        assert_eq!(app.run_forge_command("plein"), Action::None);
+
+        assert!(!app.mission.open);
+        assert!(app
+            .chat
+            .last()
+            .expect("une ligne système")
+            .text
+            .contains("usage : /forge [full]"));
+    }
+
+    /// Plein écran veut dire plein écran : tant qu'il est ouvert, la vue prend
+    /// la touche avant les accords de volets — `Ctrl+F` replierait une forge
+    /// qu'on ne verrait plus — et une lettre n'atterrit jamais dans le
+    /// composer derrière.
+    #[test]
+    fn the_mission_control_swallows_the_pane_chords_and_the_composer() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        app.open_mission_control();
+        let view = app.forge.view;
+
+        app.on_event(&ctrl_key(KeyCode::Char('f')));
+        app.on_event(&ctrl_key(KeyCode::Char('e')));
+        app.on_event(&key(KeyCode::Char('z')));
+
+        assert!(app.mission.open);
+        assert_eq!(app.forge.view, view);
+        assert!(app.explorer.is_none());
+        assert!(app.input.is_empty());
+    }
+
+    /// h/l changent de stage, j/k de carte, et changer de colonne repose l'œil
+    /// en tête : la carte 3 d'un stage n'a rien à voir avec celle du suivant.
+    #[test]
+    fn the_mission_control_navigates_stages_and_cards() {
+        use kaji::workflow::{AgentState, AgentStatus, StageState, StageStatus, WorkflowState};
+        use kaji_core::workflow::Gate;
+
+        let agents = |names: &[&str]| -> Vec<AgentStatus> {
+            names
+                .iter()
+                .map(|name| AgentStatus {
+                    name: name.to_string(),
+                    state: AgentState::Running,
+                    session_id: None,
+                    tokens: 0,
+                    duration_ms: 0,
+                })
+                .collect()
+        };
+        let mut app = App::new(None);
+        app.apply_workflow_snapshot(Some(WorkflowState {
+            workflow: "revue".to_string(),
+            stages: vec![
+                StageStatus {
+                    name: "collecte".to_string(),
+                    state: StageState::Running,
+                    gate: Gate::Auto,
+                    agents: agents(&["a", "b", "c"]),
+                },
+                StageStatus {
+                    name: "synthese".to_string(),
+                    state: StageState::Pending,
+                    gate: Gate::Auto,
+                    agents: agents(&["d"]),
+                },
+            ],
+        }));
+        app.open_mission_control();
+
+        app.on_event(&key(KeyCode::Char('j')));
+        app.on_event(&key(KeyCode::Char('j')));
+        assert_eq!(app.mission.card, 2);
+        app.on_event(&key(KeyCode::Char('j')));
+        assert_eq!(app.mission.card, 2, "jamais sous la dernière carte");
+
+        app.on_event(&key(KeyCode::Char('l')));
+        assert_eq!(app.mission.stage, 1);
+        assert_eq!(app.mission.card, 0, "changer de stage repose l'œil en tête");
+
+        app.on_event(&key(KeyCode::Char('l')));
+        assert_eq!(app.mission.stage, 1, "jamais au-delà du dernier stage");
+
+        app.on_event(&key(KeyCode::Char('h')));
+        assert_eq!(app.mission.stage, 0);
+        app.on_event(&key(KeyCode::Char('h')));
+        assert_eq!(app.mission.stage, 0, "jamais avant le premier");
+    }
+
+    /// Un workflow qui rétrécit ne doit pas laisser la sélection désigner un
+    /// stage disparu — le prochain rendu lirait dans le vide.
+    #[test]
+    fn a_shrinking_workflow_clamps_the_mission_selection() {
+        use kaji::workflow::{AgentState, AgentStatus, StageState, StageStatus, WorkflowState};
+        use kaji_core::workflow::Gate;
+
+        let stage = |name: &str, count: usize| StageStatus {
+            name: name.to_string(),
+            state: StageState::Running,
+            gate: Gate::Auto,
+            agents: (0..count)
+                .map(|rank| AgentStatus {
+                    name: format!("{name}-{rank}"),
+                    state: AgentState::Running,
+                    session_id: None,
+                    tokens: 0,
+                    duration_ms: 0,
+                })
+                .collect(),
+        };
+        let mut app = App::new(None);
+        app.apply_workflow_snapshot(Some(WorkflowState {
+            workflow: "revue".to_string(),
+            stages: vec![stage("a", 3), stage("b", 3)],
+        }));
+        app.open_mission_control();
+        app.mission.stage = 1;
+        app.mission.card = 2;
+
+        app.apply_workflow_snapshot(Some(WorkflowState {
+            workflow: "revue".to_string(),
+            stages: vec![stage("a", 1)],
+        }));
+
+        assert_eq!(app.mission.stage, 0);
+        assert_eq!(app.mission.card, 0);
+    }
+
+    /// Soixante kanji valent cent-vingt cellules : un titre borné en `chars()`
+    /// débordait de l'en-tête du lecteur, qui le rognait sans le dire.
+    #[test]
+    fn a_sheet_title_is_bounded_in_cells_not_chars() {
+        let title = forge_sheet_title(&"監".repeat(80));
+
+        assert!(
+            gitstatus::display_width(&title) <= FORGE_SHEET_TITLE + 3,
+            "{title:?} fait {} cellules",
+            gitstatus::display_width(&title)
+        );
+        assert!(title.starts_with(theme::SUBAGENT_GLYPH), "{title:?}");
+        assert!(title.ends_with('…'), "la coupe se dit : {title:?}");
+    }
+
+    /// Le repli se compte en cellules : une prose japonaise repliée sur des
+    /// `chars()` rend des lignes deux fois trop larges.
+    #[test]
+    fn wrapping_counts_cells_not_chars() {
+        let text = "監査 実行 結果 確認 報告 検証 修正 完了";
+
+        for line in wrap_words(text, 20) {
+            assert!(
+                gitstatus::display_width(&line) <= 20,
+                "{line:?} fait {} cellules",
+                gitstatus::display_width(&line)
+            );
+        }
+    }
+
+    /// Un mot plus large que la largeur part seul sur sa ligne — le lecteur
+    /// rogne, il ne coupe pas un chemin en deux.
+    #[test]
+    fn wrapping_leaves_an_oversized_word_on_its_own_line() {
+        let long = "x".repeat(30);
+
+        let lines = wrap_words(&format!("a {long} b"), 10);
+
+        assert_eq!(lines, vec!["a".to_string(), long, "b".to_string()]);
     }
 
     /// Sans extension summon, aucune lame n'a jamais existé : ouvrir donnerait

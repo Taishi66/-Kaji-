@@ -311,6 +311,33 @@ pub(crate) fn display_width(text: &str) -> usize {
     Span::raw(text).width()
 }
 
+/// Le pendant tête de [`truncate_left`] : garde le début de `text` dans
+/// `budget` cellules, `…` compris. C'est la coupe partagée par toutes les
+/// vues — un budget en `chars()` laisse déborder un kanji (deux cellules) et
+/// rogne pour rien un emoji composé, dans les deux cas sans que la marque de
+/// coupe le dise. Un budget trop court pour la seule marque rend une chaîne
+/// vide : mieux vaut rien qu'un `…` qui déborde.
+pub(crate) fn truncate_cells(text: &str, budget: usize) -> String {
+    if display_width(text) <= budget {
+        return text.to_string();
+    }
+    let mut used = display_width(ELLIPSIS);
+    if used > budget {
+        return String::new();
+    }
+    let mut head = String::new();
+    let mut buffer = [0u8; 4];
+    for c in text.chars() {
+        let cell = display_width(c.encode_utf8(&mut buffer));
+        if used + cell > budget {
+            break;
+        }
+        used += cell;
+        head.push(c);
+    }
+    format!("{head}{ELLIPSIS}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,5 +676,38 @@ mod tests {
     fn read_returns_none_outside_a_repo() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(read(dir.path()), None);
+    }
+
+    #[test]
+    fn truncate_cells_leaves_what_already_fits() {
+        assert_eq!(truncate_cells("auditer", 10), "auditer");
+        assert_eq!(truncate_cells("鍛冶", 4), "鍛冶");
+    }
+
+    /// Cinq kanji valent dix cellules : sur un budget de six, une coupe en
+    /// `chars()` en garderait cinq — onze cellules, cinq de trop.
+    #[test]
+    fn truncate_cells_counts_cells_not_chars() {
+        let cut = truncate_cells("鍛冶鍛冶鍛", 6);
+
+        assert_eq!(cut, "鍛冶…");
+        assert!(display_width(&cut) <= 6, "{cut:?}");
+    }
+
+    #[test]
+    fn truncate_cells_never_overflows_on_an_emoji() {
+        for budget in 1..=8 {
+            let cut = truncate_cells("👩‍🚀👩‍🚀👩‍🚀", budget);
+            assert!(
+                display_width(&cut) <= budget,
+                "budget {budget} : {cut:?} fait {} cellules",
+                display_width(&cut)
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_cells_gives_up_rather_than_overflow_with_the_mark_alone() {
+        assert_eq!(truncate_cells("鍛冶鍛", 0), "");
     }
 }

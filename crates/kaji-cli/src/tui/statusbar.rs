@@ -180,11 +180,7 @@ fn telemetry_spans(app: &App, with_model: bool) -> Vec<Span<'static>> {
 const FIRE_PHASE_MAX_WIDTH: usize = 24;
 
 fn truncate_tool_name(name: &str) -> String {
-    if name.chars().count() <= FIRE_PHASE_MAX_WIDTH {
-        return name.to_string();
-    }
-    let head: String = name.chars().take(FIRE_PHASE_MAX_WIDTH - 1).collect();
-    format!("{head}…")
+    gitstatus::truncate_cells(name, FIRE_PHASE_MAX_WIDTH)
 }
 
 fn push_group(spans: &mut Vec<Span<'static>>, group: Span<'static>) {
@@ -227,6 +223,23 @@ mod tests {
         let mut app = App::new(None);
         app.set_working_dir(PathBuf::from(dir));
         app
+    }
+
+    /// Vingt-quatre kanji valent quarante-huit cellules : une coupe en
+    /// `chars()` les laissait tous passer et le feu poussait le lieu hors de
+    /// la barre.
+    #[test]
+    fn the_fire_cuts_a_tool_name_on_cells_not_chars() {
+        let name = "工".repeat(24);
+
+        let cut = truncate_tool_name(&name);
+
+        assert!(
+            gitstatus::display_width(&cut) <= FIRE_PHASE_MAX_WIDTH,
+            "{cut:?} fait {} cellules",
+            gitstatus::display_width(&cut)
+        );
+        assert!(cut.ends_with('…'), "la coupe se dit : {cut:?}");
     }
 
     fn running_tool(app: &mut App, name: &str) {

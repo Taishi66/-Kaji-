@@ -2,7 +2,7 @@ use crate::tui::app::{self, App, ChatLine, Focus, RoledLine, Sender, ToolApprova
 use crate::tui::explorer::ExplorerState;
 use crate::tui::forge::{ForgeStatus, ForgeTask};
 use crate::tui::viewer::{self, Viewer};
-use crate::tui::{gitstatus, markdown, statusbar, theme};
+use crate::tui::{gitstatus, markdown, missioncontrol, statusbar, theme};
 use kaji_core::sdd::StageStatus;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
@@ -11,6 +11,15 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 pub fn draw(frame: &mut Frame, app: &App) {
+    // Le mission-control prend l'écran entier : il remplace la mise en page à
+    // quatre colonnes, il ne s'y ajoute pas. Les modales gardent le dessus —
+    // une approbation d'outil doit rester lisible et répondable de là.
+    if app.mission.open {
+        missioncontrol::draw(frame, app);
+        draw_overlays(frame, app);
+        return;
+    }
+
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -126,6 +135,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if let Some(area) = forge_area {
         draw_forge(frame, app, area);
     }
+    draw_overlays(frame, app);
+}
+
+/// Ce qui flotte au-dessus de la mise en page, quelle qu'elle soit : les
+/// sélecteurs puis, au plus une, la modale qui a la main.
+fn draw_overlays(frame: &mut Frame, app: &App) {
     draw_finder(frame, app);
     draw_theme_picker(frame, app);
     draw_editor_picker(frame, app);
@@ -156,24 +171,16 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(statusbar::render(app, area.width)), area);
 }
 
-/// Condition width in the header badge — the full text stays available under
-/// `/goal`; the badge only has to say which goal is running.
-const GOAL_BADGE_CONDITION_CHARS: usize = 28;
+/// Condition width in the header badge, in cells — the full text stays
+/// available under `/goal`; the badge only has to say which goal is running.
+const GOAL_BADGE_CONDITION_CELLS: usize = 28;
 
 /// `None` once the loop is idle: a finished goal keeps its state for `/goal`,
 /// but must stop claiming the header.
 fn goal_badge(app: &App) -> Option<String> {
     let goal = app.goal.as_ref().filter(|goal| goal.is_active())?;
     let condition = sanitize_for_display(&goal.condition.replace('\n', "␊"));
-    let condition = if condition.chars().count() > GOAL_BADGE_CONDITION_CHARS {
-        let head: String = condition
-            .chars()
-            .take(GOAL_BADGE_CONDITION_CHARS - 1)
-            .collect();
-        format!("{head}…")
-    } else {
-        condition
-    };
+    let condition = gitstatus::truncate_cells(&condition, GOAL_BADGE_CONDITION_CELLS);
     Some(format!(
         " · 目標 {condition} · it {}/{} · {}",
         goal.iteration,
@@ -972,7 +979,7 @@ fn draw_explorer(frame: &mut Frame, app: &App, explorer: &ExplorerState, area: R
 
 /// Ce que le volet promet en pied, et qui n'a de sens qu'avec une lame à
 /// désigner — les touches sont celles de la task 4.
-const FORGE_FOOTER: &str = " ↑/↓ · Enter fiche · x annule ";
+const FORGE_FOOTER: &str = " ⏎ fiche · x coupe · f plein ";
 
 /// Deux lignes par lame : la première la nomme, la seconde dit ce qu'elle
 /// brûle. Le main agent ouvre la liste sur le même patron, sans être
@@ -981,10 +988,6 @@ const FORGE_ROWS_PER_BLADE: usize = 2;
 
 /// Cellules qu'un `{glyphe} 遣 ` prend avant la description.
 const FORGE_BLADE_INDENT: u16 = 5;
-
-/// Ce qu'une description coupée laisse à la place du texte perdu — une
-/// cellule, décomptée du budget avant la coupe.
-const FORGE_ELLIPSIS: &str = "…";
 
 /// Volet droit des lames déléguées (炉). Comme l'explorateur, il ne garde pas
 /// de décalage à lui : la fenêtre glisse pour tenir la sélection visible.
@@ -1121,22 +1124,7 @@ pub fn forge_duration(secs: u64) -> String {
 fn forge_description(description: &str, width: u16) -> String {
     let budget = usize::from(width.saturating_sub(FORGE_BLADE_INDENT));
     let description = sanitize_for_display(&description.replace('\n', "␊"));
-    if gitstatus::display_width(&description) <= budget {
-        return description;
-    }
-
-    let mut used = gitstatus::display_width(FORGE_ELLIPSIS);
-    let mut head = String::new();
-    let mut buffer = [0u8; 4];
-    for c in description.chars() {
-        let cell = gitstatus::display_width(c.encode_utf8(&mut buffer));
-        if used + cell > budget {
-            break;
-        }
-        used += cell;
-        head.push(c);
-    }
-    format!("{head}{FORGE_ELLIPSIS}")
+    gitstatus::truncate_cells(&description, budget)
 }
 
 /// Read-only file pane (task 8). Lines are already sanitized and tab-expanded
@@ -1338,7 +1326,7 @@ fn modal_wrapped_rows(text: &str, width: u16, trim: bool) -> usize {
 /// indication anything was cut). Anti-masquage forbids a silent hidden
 /// tail, so this clips the sanitized body itself and appends an explicit
 /// `… (+N car.)` marker sized to what's actually hidden. Bounds the search
-/// to `width * height` chars up front — the maximum ever paintable
+/// to `width * height` **cells** up front — the maximum ever paintable
 /// regardless of wrapping — so a pathologically long hostile string can't
 /// turn this into quadratic work.
 fn truncate_for_modal(text: &str, width: u16, height: u16, trim: bool) -> String {
@@ -1349,7 +1337,7 @@ fn truncate_for_modal(text: &str, width: u16, height: u16, trim: bool) -> String
     }
     let total_chars = text.chars().count();
     let budget = (width as usize).saturating_mul(height as usize);
-    let chars: Vec<char> = text.chars().take(budget.min(total_chars)).collect();
+    let chars = prefix_within_cells(text, budget);
 
     let fits = |cut: usize| -> bool {
         let hidden = total_chars - cut;
@@ -1376,6 +1364,36 @@ fn truncate_for_modal(text: &str, width: u16, height: u16, trim: bool) -> String
         chars[..lo].iter().collect::<String>()
     )
 }
+
+/// Le plus long préfixe de `text` qui tient en `cells` cellules. Un plafond en
+/// `chars()` mentait dans les deux sens : il gardait deux fois trop de CJK à
+/// parcourir, et il coupait un texte dense en marques de largeur nulle avant
+/// que le `Paragraph` ait eu à le faire — le modal annonçait alors une coupe
+/// qui n'avait pas lieu d'être. Le plafond dur en chars reste, uniquement pour
+/// garder le parcours linéaire face à une chaîne hostile.
+fn prefix_within_cells(text: &str, cells: usize) -> Vec<char> {
+    let ceiling = cells.saturating_mul(MODAL_SCAN_CHARS_PER_CELL);
+    let mut used = 0usize;
+    let mut kept = Vec::new();
+    let mut buffer = [0u8; 4];
+    for c in text.chars() {
+        if kept.len() >= ceiling {
+            break;
+        }
+        let cell = gitstatus::display_width(c.encode_utf8(&mut buffer));
+        if cell > 0 && used + cell > cells {
+            break;
+        }
+        used += cell;
+        kept.push(c);
+    }
+    kept
+}
+
+/// Combien de chars une cellule peut coûter avant que [`prefix_within_cells`]
+/// arrête de compter : une grappe emoji en aligne une poignée, une chaîne
+/// hostile en alignerait des millions.
+const MODAL_SCAN_CHARS_PER_CELL: usize = 8;
 
 /// The four answers plus the derived grant `s`/`a` would persist — an approver
 /// must be able to read what a session-wide or permanent grant would cover
@@ -2572,6 +2590,66 @@ mod tests {
         assert!(badge.chars().count() < 60, "{badge}");
     }
 
+    /// Vingt-huit kanji valent cinquante-six cellules : un bandeau borné en
+    /// `chars()` doublait de largeur sur une condition japonaise et poussait
+    /// la session hors du header.
+    #[test]
+    fn the_goal_badge_bounds_the_condition_in_cells_not_chars() {
+        let mut app = App::new(None);
+        app.goal_set(&"目".repeat(40), 10);
+
+        let badge = goal_badge(&app).expect("un but actif a un bandeau");
+
+        let condition = badge
+            .split(" · ")
+            .find_map(|part| part.strip_prefix("目標 "))
+            .expect("le bandeau nomme sa condition");
+        assert!(
+            gitstatus::display_width(condition) <= GOAL_BADGE_CONDITION_CELLS,
+            "{condition:?} fait {} cellules",
+            gitstatus::display_width(condition)
+        );
+        assert!(condition.contains('…'), "la coupe se dit : {condition:?}");
+    }
+
+    /// Le préfixe se borne en cellules : compter en chars gardait deux fois
+    /// trop de CJK à parcourir et, à l'inverse, coupait un texte dense en
+    /// marques de largeur nulle avant que le `Paragraph` ait eu à le faire.
+    #[test]
+    fn the_modal_prefix_is_bounded_in_cells() {
+        let cjk = "監".repeat(50);
+        let prefix: String = prefix_within_cells(&cjk, 20).into_iter().collect();
+        assert_eq!(gitstatus::display_width(&prefix), 20, "{prefix:?}");
+
+        let combining = "e\u{0301}".repeat(50);
+        let prefix: String = prefix_within_cells(&combining, 20).into_iter().collect();
+        assert_eq!(
+            gitstatus::display_width(&prefix),
+            20,
+            "une marque de largeur nulle ne consomme pas de cellule : {prefix:?}"
+        );
+        assert!(
+            prefix.chars().count() > 20,
+            "elle consomme pourtant des chars : {}",
+            prefix.chars().count()
+        );
+    }
+
+    /// Ce que le modal peint doit tenir dans les lignes qu'on lui donne, quel
+    /// que soit le script — c'est le contrat anti-masquage.
+    #[test]
+    fn a_clipped_modal_body_fits_its_rows_whatever_the_script() {
+        for text in ["監査".repeat(400), "👩‍🚀".repeat(200), "x".repeat(800)] {
+            let clipped = truncate_for_modal(&text, 40, 6, true);
+            assert!(
+                modal_wrapped_rows(&clipped, 40, true) <= 6,
+                "{} lignes pour six",
+                modal_wrapped_rows(&clipped, 40, true)
+            );
+            assert!(clipped.contains("car.)"), "la coupe se dit : {clipped:?}");
+        }
+    }
+
     fn rendered(app: &App, width: u16, height: u16) -> String {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
@@ -2870,13 +2948,25 @@ mod tests {
             "✓",
             "terminé",
             "7s",
-            "↑/↓ · Enter fiche · x annule",
+            "x coupe · f plein",
         ] {
             assert!(
                 content.contains(expected),
                 "{expected} manquant, got:\n{content}"
             );
         }
+    }
+
+    /// Le pied du volet est un titre de bloc : ratatui le rogne en silence
+    /// s'il dépasse, et la touche qui ouvre le plein écran disparaîtrait sans
+    /// que rien ne le dise.
+    #[test]
+    fn the_forge_footer_fits_the_column_it_hangs_under() {
+        assert!(
+            gitstatus::display_width(FORGE_FOOTER) <= usize::from(FORGE_WIDTH - 2),
+            "{FORGE_FOOTER:?} fait {} cellules",
+            gitstatus::display_width(FORGE_FOOTER)
+        );
     }
 
     #[test]
@@ -2902,7 +2992,7 @@ mod tests {
         let content = rendered(&app, 130, 24);
 
         assert!(content.contains("forge"), "got:\n{content}");
-        assert!(!content.contains("Enter fiche"), "got:\n{content}");
+        assert!(!content.contains("x coupe"), "got:\n{content}");
     }
 
     /// La sélection reprend le style du curseur de l'explorateur, sur les deux

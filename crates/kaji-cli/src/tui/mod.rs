@@ -8,6 +8,7 @@ pub mod gitstatus;
 pub mod icons;
 pub mod markdown;
 pub mod mentions;
+pub mod missioncontrol;
 pub mod report;
 pub mod statusbar;
 pub mod theme;
@@ -870,6 +871,39 @@ fn checkpoints_disabled_line(has_store: bool, reason: Option<&str>) -> Option<St
     reason.map(|reason| format!("checkpoints désactivés — {reason}"))
 }
 
+/// L'usage ledger par session d'agent, tel que le mission-control le lit. La
+/// fenêtre glisse sur sept jours plutôt que sur le mois calendaire : une lame
+/// lancée hier soir et encore vivante ne doit pas perdre ses lignes à minuit.
+/// Un ledger illisible rend une carte muette (`炭 —`), jamais un zéro.
+async fn agent_usage(
+    session_manager: &SessionManager,
+) -> std::collections::HashMap<String, missioncontrol::AgentUsage> {
+    let Ok(report) = kaji::metrics::report(
+        session_manager,
+        kaji::metrics::MetricsWindow::Last7d,
+        kaji::metrics::MetricsDimension::Session,
+        now_local(),
+    )
+    .await
+    else {
+        return std::collections::HashMap::new();
+    };
+    report
+        .rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.key,
+                missioncontrol::AgentUsage {
+                    input: row.input_tokens,
+                    output: row.output_tokens,
+                    cost: row.cost,
+                },
+            )
+        })
+        .collect()
+}
+
 async fn session_working_dir(session_manager: &SessionManager, session_id: &str) -> PathBuf {
     match session_manager.get_session(session_id, false).await {
         Ok(session) => session.working_dir,
@@ -979,9 +1013,15 @@ async fn event_loop(
         tokio::select! {
             _ = tick.tick(), if app.turn_active || app.turn_pending || app.seal_unfolded() => {}
             _ = git_tick.tick() => app.request_git_refresh(),
-            _ = forge_tick.tick(), if app.turn_active || !app.forge.tasks.is_empty() || app.forge.visible() => {
+            _ = forge_tick.tick(), if app.turn_active || !app.forge.tasks.is_empty() || app.forge.visible() || app.mission.open => {
                 app.forge.apply_snapshot(agent.subagent_snapshot().await);
                 app.refresh_forge_sheet();
+                // Le ledger n'est interrogé que sous les yeux du
+                // mission-control : c'est la seule vue qui lit l'usage par
+                // agent, et l'agrégat coûte une requête par battement.
+                if app.mission.open {
+                    app.apply_agent_usage(agent_usage(&session_manager).await);
+                }
             }
             ev = input_rx.recv() => {
                 let Some(ev) = ev else { break };
