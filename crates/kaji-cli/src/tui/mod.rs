@@ -409,8 +409,9 @@ async fn cost_windows_report(
 /// Avertissements de budget au démarrage : un seuil déjà franchi doit se voir
 /// sans que le user pense à taper `/cost`. Une seule fois, au boot, pour les
 /// **quatre** lectures de `metrics::burn` — coût du jour, coût de la semaine,
-/// lignes du mois, regroupement par provider — toutes bornées au mois courant
-/// et servies par `idx_usage_ledger_created`.
+/// lignes du mois, regroupement par provider — chacune bornée à sa propre
+/// fenêtre (jour, semaine, mois : la semaine chevauche deux mois en fin de
+/// mois) et servie par `idx_usage_ledger_created`.
 async fn boot_budget_lines(session_manager: &SessionManager) -> Vec<RoledLine> {
     match kaji::metrics::burn(session_manager, now_local()).await {
         Ok(burn) => report::budget_warning_lines(&burn.budgets),

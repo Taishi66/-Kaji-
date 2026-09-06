@@ -16,6 +16,10 @@
 //!
 //! S1 n'attache que des images fixes : un GIF animé est refusé ici, avec sa
 //! raison, plutôt que renvoyé bien plus tard par une erreur d'API du provider.
+//! Seul le GIF est inspecté — un WebP animé passe et part au provider, qui
+//! tranche. Périmètre assumé : le GIF est la forme animée qu'un utilisateur
+//! mentionne en pratique, et la reconnaître demande six octets d'en-tête là où
+//! le WebP demanderait de parcourir ses chunks RIFF.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

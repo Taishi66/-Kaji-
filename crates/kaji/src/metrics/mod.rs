@@ -389,6 +389,10 @@ mod tests {
     #[test]
     fn the_bundled_catalog_never_prices_input_without_output() {
         let registry = crate::providers::canonical::CanonicalModelRegistry::bundled().unwrap();
+        assert!(
+            !registry.all_models().is_empty(),
+            "un catalogue vide passerait l'invariant sans rien vérifier"
+        );
         let asymmetric: Vec<&str> = registry
             .all_models()
             .into_iter()
