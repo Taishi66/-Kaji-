@@ -92,6 +92,14 @@ pub fn day_of_month(now: DateTime<Local>) -> u32 {
     now.date_naive().day()
 }
 
+/// Clé `YYYY-MM-DD` du jour local d'un instant epoch — même fuseau que
+/// [`day_span`], donc une ligne du ledger tombe toujours dans le jour qui la
+/// contient. `None` pour un timestamp hors de la plage représentable.
+pub fn local_day_key(timestamp: i64) -> Option<String> {
+    DateTime::from_timestamp(timestamp, 0)
+        .map(|instant| instant.with_timezone(&Local).format("%Y-%m-%d").to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +173,29 @@ mod tests {
     fn day_of_month_is_one_based() {
         assert_eq!(day_of_month(at(2026, 9, 1, 0, 0)), 1);
         assert_eq!(day_of_month(at(2026, 9, 30, 23, 59)), 30);
+    }
+
+    #[test]
+    fn local_day_key_agrees_with_the_day_span_that_contains_it() {
+        let noon = at(2026, 9, 5, 12, 0);
+        assert_eq!(local_day_key(noon.timestamp()).unwrap(), "2026-09-05");
+
+        let span = day_span(noon);
+        assert_eq!(local_day_key(span.start).unwrap(), "2026-09-05");
+        assert_eq!(
+            local_day_key(span.end - 1).unwrap(),
+            "2026-09-05",
+            "la dernière seconde du jour reste dans le jour"
+        );
+        assert_eq!(
+            local_day_key(span.end).unwrap(),
+            "2026-09-06",
+            "la borne haute appartient au jour suivant"
+        );
+    }
+
+    #[test]
+    fn local_day_key_declines_an_unrepresentable_timestamp() {
+        assert_eq!(local_day_key(i64::MAX), None);
     }
 }

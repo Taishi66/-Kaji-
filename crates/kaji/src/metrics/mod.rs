@@ -1,6 +1,6 @@
 //! Télémétrie tokens/coûts native — agrégats du `usage_ledger` par modèle,
-//! provider, session ou projet, sur fenêtres glissantes (5 h / 7 j) et
-//! calendaires (jour / semaine / mois locaux), économie de cache, burn rate,
+//! provider, session, projet ou jour local, sur fenêtres glissantes (5 h / 7 j)
+//! et calendaires (jour / semaine / mois locaux), économie de cache, burn rate,
 //! projection de fin de mois et budgets.
 //!
 //! Lecture pure : rien ici n'écrit dans le ledger et rien n'entre dans le
@@ -73,6 +73,7 @@ pub enum MetricsDimension {
     Provider,
     Session,
     Project,
+    Day,
 }
 
 impl MetricsDimension {
@@ -84,6 +85,7 @@ impl MetricsDimension {
             "provider" | "providers" => Some(MetricsDimension::Provider),
             "session" | "sessions" => Some(MetricsDimension::Session),
             "project" | "projet" | "projects" | "projets" => Some(MetricsDimension::Project),
+            "day" | "days" | "jour" | "jours" | "j" => Some(MetricsDimension::Day),
             _ => None,
         }
     }
@@ -94,7 +96,14 @@ impl MetricsDimension {
             MetricsDimension::Provider => "provider",
             MetricsDimension::Session => "session",
             MetricsDimension::Project => "projet",
+            MetricsDimension::Day => "jour",
         }
+    }
+
+    /// La série jour-par-jour se lit dans le temps ; toutes les autres
+    /// dimensions se lisent par dépense décroissante.
+    pub fn is_chronological(self) -> bool {
+        matches!(self, MetricsDimension::Day)
     }
 }
 
@@ -261,6 +270,13 @@ pub fn project_key(working_dir: Option<&str>) -> String {
         .unwrap_or_else(|| dir.to_string())
 }
 
+/// Clé de jour local d'une ligne du ledger. Un timestamp hors plage tombe dans
+/// `(inconnu)` plutôt que dans un jour inventé — même parti pris que
+/// [`project_key`].
+pub fn day_key(timestamp: i64) -> String {
+    calendar::local_day_key(timestamp).unwrap_or_else(|| UNKNOWN_KEY.to_string())
+}
+
 /// Agrégat d'une fenêtre selon une dimension. `now` vient de l'appelant :
 /// hors boucle agent, pas de seam replay à traverser.
 pub async fn report(
@@ -273,7 +289,10 @@ pub async fn report(
     let buckets = session_manager
         .metrics_buckets(dimension, span.start, span.end)
         .await?;
-    let (rows, totals) = fold_buckets(&buckets, &CanonicalPrices);
+    let (mut rows, totals) = fold_buckets(&buckets, &CanonicalPrices);
+    if dimension.is_chronological() {
+        rows.sort_by(|a, b| a.key.cmp(&b.key));
+    }
     Ok(MetricsReport {
         window,
         dimension,
@@ -484,7 +503,24 @@ mod tests {
             MetricsDimension::parse("PROJECT"),
             Some(MetricsDimension::Project)
         );
+        assert_eq!(
+            MetricsDimension::parse("jours"),
+            Some(MetricsDimension::Day)
+        );
         assert_eq!(MetricsDimension::parse("planet"), None);
+    }
+
+    #[test]
+    fn only_the_day_dimension_reads_chronologically() {
+        assert!(MetricsDimension::Day.is_chronological());
+        assert!(!MetricsDimension::Model.is_chronological());
+        assert!(!MetricsDimension::Project.is_chronological());
+    }
+
+    #[test]
+    fn day_key_falls_back_when_the_timestamp_is_unrepresentable() {
+        assert_eq!(day_key(0), calendar::local_day_key(0).unwrap());
+        assert_eq!(day_key(i64::MAX), UNKNOWN_KEY);
     }
 
     #[test]
@@ -714,6 +750,114 @@ mod tests {
                 keys.contains(&"/tmp/projet-a") && keys.contains(&"/tmp/projet-b"),
                 "un working_dir hors dépôt git reste sa propre clé : {keys:?}"
             );
+        }
+
+        /// La série jour-par-jour : une ligne par jour local qui porte de
+        /// l'usage, dans l'ordre du calendrier, les jours creux absents.
+        #[tokio::test]
+        async fn the_day_dimension_yields_one_chronological_row_per_used_day() {
+            let dir = TempDir::new().unwrap();
+            let sm = SessionManager::new(dir.path().to_path_buf());
+            let id = session(&sm, "/tmp/projet-a", "anthropic").await;
+            let pool = sm.storage().pool().await.unwrap();
+            let now = reference_now();
+
+            // Le 7 deux fois, le 9 une fois, le 8 jamais.
+            seed(
+                pool,
+                &id,
+                at(2026, 9, 7, 9).timestamp(),
+                "m",
+                "a",
+                100,
+                0,
+                1.0,
+            )
+            .await;
+            seed(
+                pool,
+                &id,
+                at(2026, 9, 7, 23).timestamp(),
+                "m",
+                "a",
+                200,
+                0,
+                2.0,
+            )
+            .await;
+            seed(
+                pool,
+                &id,
+                at(2026, 9, 9, 8).timestamp(),
+                "m",
+                "a",
+                400,
+                0,
+                4.0,
+            )
+            .await;
+
+            let week = report(&sm, MetricsWindow::Week, MetricsDimension::Day, now)
+                .await
+                .unwrap();
+            let keys: Vec<&str> = week.rows.iter().map(|row| row.key.as_str()).collect();
+            assert_eq!(
+                keys,
+                vec!["2026-09-07", "2026-09-09"],
+                "ordre chronologique, le 8 sans usage omis"
+            );
+
+            let seventh = &week.rows[0];
+            assert_eq!(seventh.input_tokens, 300, "les deux lignes du 7 fusionnent");
+            assert_eq!(seventh.entries, 2);
+            assert!((seventh.cost.unwrap() - 3.0).abs() < 1e-9);
+            assert!((week.totals.cost.unwrap() - 7.0).abs() < 1e-9);
+        }
+
+        /// Les fenêtres existantes s'appliquent telles quelles : la dimension
+        /// jour découpe ce que la fenêtre a déjà borné.
+        #[tokio::test]
+        async fn the_day_dimension_stays_inside_the_window_bounds() {
+            let dir = TempDir::new().unwrap();
+            let sm = SessionManager::new(dir.path().to_path_buf());
+            let id = session(&sm, "/tmp/projet-a", "anthropic").await;
+            let pool = sm.storage().pool().await.unwrap();
+            let now = reference_now();
+
+            for day in [31u32, 1, 6, 7, 9] {
+                let month = if day == 31 { 8 } else { 9 };
+                seed(
+                    pool,
+                    &id,
+                    at(2026, month, day, 12).timestamp(),
+                    "m",
+                    "a",
+                    100,
+                    0,
+                    1.0,
+                )
+                .await;
+            }
+
+            let month = report(&sm, MetricsWindow::Month, MetricsDimension::Day, now)
+                .await
+                .unwrap();
+            let keys: Vec<&str> = month.rows.iter().map(|row| row.key.as_str()).collect();
+            assert_eq!(
+                keys,
+                vec!["2026-09-01", "2026-09-06", "2026-09-07", "2026-09-09"],
+                "le 31 août est hors du mois courant"
+            );
+
+            let day = report(&sm, MetricsWindow::Day, MetricsDimension::Day, now)
+                .await
+                .unwrap();
+            assert_eq!(
+                day.rows.len(),
+                1,
+                "une fenêtre d'un jour ne peut porter qu'une ligne"
+            );
+            assert_eq!(day.rows[0].key, "2026-09-09");
         }
 
         #[tokio::test]

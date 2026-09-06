@@ -1137,8 +1137,10 @@ enum Command {
         about = "Report token and cost usage from the local ledger",
         long_about = "Report token and cost usage from the local usage ledger.\n\n\
                       Windows are either sliding (5h, 7d) or calendar-local (day, week from \
-                      Monday, month from the 1st). Rows are grouped by model, provider, session \
-                      or project (the git root of the session working dir). The report also \
+                      Monday, month from the 1st). Rows are grouped by model, provider, session, \
+                      project (the git root of the session working dir), or day — one row per \
+                      local day of the window, oldest first, days without usage left out. \
+                      The report also \
                       carries cache hit rate, dollars saved by cache reads, the current burn \
                       rate and a linear month-end projection. Declare KAJI_BUDGET_MONTHLY_USD \
                       (and KAJI_BUDGET_MONTHLY_USD_<PROVIDER>) to get budget lines; they warn, \

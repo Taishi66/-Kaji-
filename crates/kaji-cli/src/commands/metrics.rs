@@ -43,6 +43,7 @@ pub enum MetricsDimensionArg {
     Provider,
     Session,
     Project,
+    Day,
 }
 
 impl From<MetricsDimensionArg> for MetricsDimension {
@@ -52,6 +53,7 @@ impl From<MetricsDimensionArg> for MetricsDimension {
             MetricsDimensionArg::Provider => MetricsDimension::Provider,
             MetricsDimensionArg::Session => MetricsDimension::Session,
             MetricsDimensionArg::Project => MetricsDimension::Project,
+            MetricsDimensionArg::Day => MetricsDimension::Day,
         }
     }
 }
@@ -185,6 +187,10 @@ mod tests {
         assert_eq!(
             MetricsDimension::from(MetricsDimensionArg::Project),
             MetricsDimension::Project
+        );
+        assert_eq!(
+            MetricsDimension::from(MetricsDimensionArg::Day),
+            MetricsDimension::Day
         );
         assert_eq!(MetricsWindowArg::default(), MetricsWindowArg::Day);
         assert_eq!(MetricsDimensionArg::default(), MetricsDimensionArg::Model);

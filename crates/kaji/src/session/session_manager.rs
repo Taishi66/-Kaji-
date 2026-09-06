@@ -2800,11 +2800,21 @@ impl SessionStorage {
             MetricsDimension::Provider => "COALESCE(u.provider, s.provider_name, '(inconnu)')",
             MetricsDimension::Session => "u.session_id",
             MetricsDimension::Project => "COALESCE(s.working_dir, '')",
+            MetricsDimension::Day => "''",
+        };
+
+        // Le découpage en jours locaux se fait côté Rust (`date(...,
+        // 'localtime')` dépend du fuseau du process SQLite) : la dimension jour
+        // groupe donc sur le timestamp brut et les autres sur une constante.
+        let stamp_expr = match dimension {
+            MetricsDimension::Day => "u.created_timestamp",
+            _ => "0",
         };
 
         let query = format!(
             r#"
             SELECT {key_expr} AS bucket_key,
+                   {stamp_expr} AS bucket_stamp,
                    COALESCE(u.provider, s.provider_name) AS bucket_provider,
                    u.model AS bucket_model,
                    COALESCE(SUM(u.input_tokens), 0),
@@ -2817,7 +2827,7 @@ impl SessionStorage {
             FROM usage_ledger u
             LEFT JOIN sessions s ON s.id = u.session_id
             WHERE u.created_timestamp >= ? AND u.created_timestamp < ?
-            GROUP BY bucket_key, bucket_provider, bucket_model
+            GROUP BY bucket_key, bucket_stamp, bucket_provider, bucket_model
             "#
         );
 
@@ -2826,6 +2836,7 @@ impl SessionStorage {
             _,
             (
                 String,
+                i64,
                 Option<String>,
                 Option<String>,
                 i64,
@@ -2847,17 +2858,18 @@ impl SessionStorage {
             .map(|row| LedgerBucket {
                 key: match dimension {
                     MetricsDimension::Project => crate::metrics::project_key(Some(&row.0)),
+                    MetricsDimension::Day => crate::metrics::day_key(row.1),
                     _ => row.0,
                 },
-                provider: row.1,
-                model: row.2,
-                input_tokens: row.3,
-                output_tokens: row.4,
-                total_tokens: row.5,
-                cache_read_tokens: row.6,
-                cache_write_tokens: row.7,
-                cost: row.8,
-                entries: row.9,
+                provider: row.2,
+                model: row.3,
+                input_tokens: row.4,
+                output_tokens: row.5,
+                total_tokens: row.6,
+                cache_read_tokens: row.7,
+                cache_write_tokens: row.8,
+                cost: row.9,
+                entries: row.10,
             })
             .collect())
     }
