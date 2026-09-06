@@ -216,6 +216,20 @@ impl WorkflowHandle {
         self.switch_pause(stage, false)
     }
 
+    /// Les stages qu'un opérateur a demandé de suspendre. Un stage encore
+    /// `Pending` n'atteint son point d'arrêt qu'en démarrant : son `StageState`
+    /// ne dira `Paused` que plus tard, et une vue qui ne lirait que l'état ne
+    /// saurait pas qu'une pause est déjà posée — elle en poserait une seconde
+    /// au lieu de la lever.
+    pub fn paused_stages(&self) -> HashSet<String> {
+        self.shared
+            .pauses
+            .paused
+            .lock()
+            .expect("pauses empoisonnées")
+            .clone()
+    }
+
     fn switch_pause(&self, stage: &str, paused: bool) -> bool {
         let snapshot = self.snapshot();
         let Some(status) = snapshot.stage(stage) else {

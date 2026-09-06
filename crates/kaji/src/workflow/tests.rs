@@ -1391,6 +1391,75 @@ async fn the_workflow_turn_is_visible_to_the_replay_plan() {
     assert_eq!(name, "revue");
 }
 
+/// T7 : lancé depuis la TUI (`/workflow`), le workflow s'écrit sur la session
+/// de **conversation**, pas sur une session dédiée comme `kaji workflow run`.
+/// Le journal porte alors des tours d'agent et un tour d'orchestration mêlés :
+/// le plan de rejeu doit rendre chacun à son propre chemin, dans l'ordre des
+/// tours — un tour de workflow lu comme un tour d'agent (ou l'inverse) ferait
+/// diverger le rejeu de la session que l'utilisateur relance.
+#[tokio::test]
+async fn a_conversation_session_replays_its_agent_turns_and_its_workflow_turn() {
+    use crate::conversation::message::{Message, MessageContentBlock};
+    use rmcp::model::Role;
+
+    async fn user_turn(fixture: &Fixture, turn_seq: i64, text: &str) {
+        let payload = serde_json::to_string(&Message::new(
+            Role::User,
+            0,
+            vec![MessageContentBlock::text(text)],
+        ))
+        .unwrap();
+        fixture
+            .session_manager
+            .append_event(
+                &fixture.session_id,
+                turn_seq,
+                "turn_start",
+                r#"{"query_preview":"agent"}"#,
+            )
+            .await
+            .unwrap();
+        fixture
+            .session_manager
+            .append_event(&fixture.session_id, turn_seq, "message", &payload)
+            .await
+            .unwrap();
+    }
+
+    let fixture = Fixture::new().await;
+    user_turn(&fixture, 2, "avant").await;
+    let runner = Arc::new(FixtureRunner::new());
+    fixture
+        .executor(spec(FAN_OUT_THEN_JOIN), Arc::clone(&runner))
+        .await
+        .run()
+        .await
+        .unwrap();
+    user_turn(&fixture, 4, "après").await;
+
+    let events = fixture
+        .session_manager
+        .session_events(&fixture.session_id)
+        .await
+        .unwrap();
+    let plan = crate::replay::plan::replay_plan(&events, None);
+
+    let shape: Vec<(i64, &str)> = plan
+        .iter()
+        .map(|(turn_seq, planned)| {
+            (
+                *turn_seq,
+                match planned {
+                    crate::replay::plan::PlannedTurn::Replay(_) => "agent",
+                    crate::replay::plan::PlannedTurn::Workflow(_) => "workflow",
+                    crate::replay::plan::PlannedTurn::Skipped => "sauté",
+                },
+            )
+        })
+        .collect();
+    assert_eq!(shape, vec![(2, "agent"), (3, "workflow"), (4, "agent")]);
+}
+
 /// I-8 (second volet) : un workflow tué laisse sa borne ouverte, donc le
 /// curseur refuse le journal au lieu de le rejouer à moitié.
 #[tokio::test]
