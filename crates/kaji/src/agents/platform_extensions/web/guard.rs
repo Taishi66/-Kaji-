@@ -15,6 +15,12 @@
 //! `169.254.169.254` joignable, et le port n'est levé que pour l'entrée qui le
 //! porte. Une entrée sans port s'en tient à la liste blanche de ports.
 //!
+//! Un CIDR **nomme une exception**, il n'ouvre pas le monde : son préfixe ne
+//! peut pas être plus large que la plus large des plages internes usuelles
+//! (`10.0.0.0/8` en v4, `fc00::/7` en v6). `0.0.0.0/0` — qui rendrait toute la
+//! garde inopérante d'une seule entrée — est donc refusé comme entrée illisible,
+//! avec sa raison au journal.
+//!
 //! La variable est lue par `std::env::var`, jamais par `Config::get_param` :
 //! l'escalade n'est pas posable depuis le fichier de configuration, qu'un agent
 //! outillé peut écrire.
@@ -31,6 +37,14 @@ pub const MAX_REDIRECTS: usize = 5;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const ALLOW_HOSTS_ENV: &str = "KAJI_WEB_ALLOW_HOSTS";
+
+/// Le préfixe le plus large qu'un CIDR de la liste ait le droit de porter :
+/// celui de `10.0.0.0/8`, la plus large plage privée v4. Plus large que ça,
+/// l'entrée ne nomme plus une exception, elle éteint la garde.
+pub const MIN_NET_PREFIX_V4: u8 = 8;
+
+/// Son équivalent v6 : celui de `fc00::/7`, la plage unique-local.
+pub const MIN_NET_PREFIX_V6: u8 = 7;
 
 /// Ce qu'une entrée de la liste désigne : un nom d'hôte tel qu'il est écrit
 /// dans l'URL, ou un réseau qui contient l'adresse résolue.
@@ -72,22 +86,35 @@ impl AllowEntry {
     }
 }
 
-impl FromStr for AllowEntry {
-    type Err = ();
+/// Pourquoi une entrée est écartée. Une chaîne plutôt qu'un `()` : le journal
+/// doit dire *ce qui* cloche, sinon un `0.0.0.0/0` refusé se lit comme une
+/// faute de frappe.
+type EntryError = &'static str;
 
-    fn from_str(raw: &str) -> Result<Self, ()> {
+impl FromStr for AllowEntry {
+    type Err = EntryError;
+
+    fn from_str(raw: &str) -> Result<Self, EntryError> {
         let (host, port) = split_host_port(raw.trim())?;
         if host.is_empty() || host.contains(char::is_whitespace) {
-            return Err(());
+            return Err("hôte vide ou espacé");
         }
 
         let host = match host.split_once('/') {
             Some((addr, prefix)) => {
-                let addr: IpAddr = addr.parse().map_err(|_| ())?;
-                let prefix: u8 = prefix.parse().map_err(|_| ())?;
-                let width = if addr.is_ipv4() { 32 } else { 128 };
+                let addr: IpAddr = addr.parse().map_err(|_| "CIDR sans adresse valide")?;
+                let prefix: u8 = prefix.parse().map_err(|_| "préfixe CIDR illisible")?;
+                let (width, floor) = if addr.is_ipv4() {
+                    (32, MIN_NET_PREFIX_V4)
+                } else {
+                    (128, MIN_NET_PREFIX_V6)
+                };
                 if prefix > width {
-                    return Err(());
+                    return Err("préfixe CIDR plus long que l'adresse");
+                }
+                if prefix < floor {
+                    return Err("préfixe CIDR trop large : une entrée nomme une exception, \
+                         pas l'internet entier");
                 }
                 HostPattern::Net { addr, prefix }
             }
@@ -106,19 +133,24 @@ impl FromStr for AllowEntry {
 
 /// `[::1]:8888`, `10.0.0.0/8:9000`, `localhost`, `fe80::1`. Un littéral IPv6
 /// sans crochets n'a pas de port : ses deux-points sont les siens.
-fn split_host_port(raw: &str) -> Result<(&str, Option<u16>), ()> {
+fn split_host_port(raw: &str) -> Result<(&str, Option<u16>), EntryError> {
     if let Some(rest) = raw.strip_prefix('[') {
-        let (host, rest) = rest.split_once(']').ok_or(())?;
+        let (host, rest) = rest.split_once(']').ok_or("crochet IPv6 non refermé")?;
         let port = match rest {
             "" => None,
-            _ => Some(rest.strip_prefix(':').ok_or(())?.parse().map_err(|_| ())?),
+            _ => Some(
+                rest.strip_prefix(':')
+                    .ok_or("suffixe inattendu après le crochet IPv6")?
+                    .parse()
+                    .map_err(|_| "port illisible")?,
+            ),
         };
         return Ok((host, port));
     }
 
     match raw.split_once(':') {
         Some((host, port)) if !port.contains(':') => {
-            Ok((host, Some(port.parse().map_err(|_| ())?)))
+            Ok((host, Some(port.parse().map_err(|_| "port illisible")?)))
         }
         Some(_) => Ok((raw, None)),
         None => Ok((raw, None)),
@@ -177,8 +209,8 @@ impl FetchPolicy {
             .filter(|entry| !entry.is_empty())
             .filter_map(|entry| match entry.parse::<AllowEntry>() {
                 Ok(parsed) => Some(parsed),
-                Err(()) => {
-                    tracing::warn!("{ALLOW_HOSTS_ENV} : entrée illisible ignorée — '{entry}'");
+                Err(reason) => {
+                    tracing::warn!("{ALLOW_HOSTS_ENV} : entrée ignorée — '{entry}' : {reason}");
                     None
                 }
             })
@@ -540,6 +572,46 @@ mod tests {
     fn an_unreadable_entry_is_dropped_not_widened() {
         let policy = FetchPolicy::allowing("pas une entrée, 10.0.0.0/99, [::1, , 127.0.0.1:99999");
         assert!(policy.allowed.is_empty(), "{:?}", policy.allowed);
+    }
+
+    /// Sans plancher de préfixe, une seule entrée éteint la garde entière : le
+    /// refus doit tomber au parsing, pas au premier `web_fetch` vers un réseau
+    /// interne.
+    #[test]
+    fn a_cidr_wider_than_the_widest_internal_range_is_refused() {
+        for spec in [
+            "0.0.0.0/0",
+            "0.0.0.0/7",
+            "128.0.0.0/1",
+            "::/0",
+            "::/6",
+            "0.0.0.0/0:11434",
+        ] {
+            assert!(
+                FetchPolicy::allowing(spec).allowed.is_empty(),
+                "« {spec} » ouvre plus qu'une exception nommée"
+            );
+        }
+    }
+
+    #[test]
+    fn the_usual_internal_ranges_stay_expressible() {
+        for spec in ["10.0.0.0/8", "192.168.0.0/16", "127.0.0.0/8", "fc00::/7"] {
+            assert_eq!(
+                FetchPolicy::allowing(spec).allowed.len(),
+                1,
+                "« {spec} » devrait rester une entrée valide"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rejected_entry_names_what_is_wrong_with_it() {
+        assert_eq!(
+            "0.0.0.0/0".parse::<AllowEntry>().unwrap_err(),
+            "préfixe CIDR trop large : une entrée nomme une exception, \
+             pas l'internet entier"
+        );
     }
 
     #[test]
