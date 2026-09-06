@@ -209,40 +209,27 @@ pub fn target(board: &Board, column: usize, card: usize) -> Option<MissionTarget
 }
 
 /// Le plateau que la vue rend : les stages du workflow piloté, puis les lames
-/// qui n'en relèvent pas. Sans workflow il ne reste que la colonne « libre »,
-/// rendue même vide — une vue ouverte sur rien doit dire qu'elle n'a rien.
+/// du volet forge. Sans workflow il ne reste que la colonne « libre », rendue
+/// même vide — une vue ouverte sur rien doit dire qu'elle n'a rien.
+///
+/// La colonne libre n'est pas filtrée : le `SubagentRunner` du workflow appelle
+/// `run_subagent_task` en direct, et seul l'outil `delegate` inscrit une lame
+/// dans les `background_tasks` de summon — un agent de workflow n'y apparaît
+/// donc jamais. Si l'exécuteur passe un jour par summon, il faudra réintroduire
+/// un filtre ici : la session d'un agent de workflow **est** l'identifiant de
+/// sa lame côté summon, et l'agent aurait alors deux cartes.
 pub fn board(app: &App) -> Board {
     let tasks = app.forge.ordered();
-    let free = unattached(&tasks, app.mission.workflow.as_ref());
     match app.mission.workflow.as_ref() {
         Some(workflow) => {
             let mut board = workflow_board(workflow, &app.mission.usage, &app.mission.paused);
-            if !free.is_empty() {
-                board.columns.push(free_column(&free, &app.mission.usage));
+            if !tasks.is_empty() {
+                board.columns.push(free_column(&tasks, &app.mission.usage));
             }
             board
         }
-        None => free_board(&free, &app.mission.usage),
+        None => free_board(&tasks, &app.mission.usage),
     }
-}
-
-/// Les lames du volet qui ne relèvent pas du workflow en cours. Une session
-/// d'agent de workflow **est** l'identifiant de sa lame côté summon
-/// (`BackgroundTask::id`) : sans ce filtre, un agent lancé par le DAG puis
-/// remonté au volet aurait deux cartes, deux fois son coût au bandeau et deux
-/// chemins d'annulation contradictoires.
-fn unattached<'a>(tasks: &[&'a ForgeTask], workflow: Option<&WorkflowState>) -> Vec<&'a ForgeTask> {
-    let attached: HashSet<&str> = workflow
-        .into_iter()
-        .flat_map(|workflow| workflow.stages.iter())
-        .flat_map(|stage| stage.agents.iter())
-        .filter_map(|agent| agent.session_id.as_deref())
-        .collect();
-    tasks
-        .iter()
-        .copied()
-        .filter(|task| !attached.contains(task.id.as_str()))
-        .collect()
 }
 
 /// L'état affiché d'un stage. Une pause posée sur un stage pas encore démarré
@@ -944,11 +931,15 @@ mod tests {
         }
     }
 
-    /// Une lame dont l'identifiant est la session d'un agent du workflow est
-    /// **déjà** sur la colonne de son stage : la reprendre au plateau libre la
-    /// compterait deux fois, coût du bandeau compris.
+    /// La colonne libre liste les vraies délégations, sans filtre : un agent de
+    /// workflow n'est **pas** une lame summon. Le `SubagentRunner` appelle
+    /// `run_subagent_task` en direct, et seul l'outil `delegate` inscrit une
+    /// lame dans les `background_tasks` d'où sort le snapshot du volet — les
+    /// deux populations sont donc disjointes en production. Le filtre qui
+    /// dédoublonnait les deux reposait sur l'invariant inverse : il n'a jamais
+    /// rien filtré.
     #[test]
-    fn a_workflow_agent_never_gets_a_second_card_on_the_free_column() {
+    fn the_free_column_lists_the_delegations_a_workflow_never_creates() {
         let mut app = app_with(workflow(vec![stage(
             "collecte",
             StageState::Running,
@@ -956,14 +947,24 @@ mod tests {
         )]));
         app.forge
             .tasks
-            .insert("sess-scanner".to_string(), blade("sess-scanner", "scanner"));
+            .insert("libre-1".to_string(), blade("libre-1", "auditer à la main"));
         app.forge
             .tasks
-            .insert("libre-1".to_string(), blade("libre-1", "auditer à la main"));
+            .insert("libre-2".to_string(), blade("libre-2", "relire la spec"));
 
         let board = board(&app);
 
         assert_eq!(board.columns.len(), 2, "un stage plus la colonne libre");
+        let stage_column = &board.columns[0];
+        assert_eq!(
+            stage_column
+                .cards
+                .iter()
+                .map(|card| card.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["scanner"],
+            "l'agent du DAG vit sur la colonne de son stage"
+        );
         let free = &board.columns[1];
         assert_eq!(free.name, FREE_STAGE);
         assert_eq!(
@@ -971,12 +972,12 @@ mod tests {
                 .iter()
                 .map(|card| card.key.as_str())
                 .collect::<Vec<_>>(),
-            vec!["libre-1"],
-            "la lame du workflow est filtrée, la lame libre reste"
+            vec!["libre-1", "libre-2"],
+            "les lames du volet sont les délégations, toutes rendues"
         );
     }
 
-    /// Sans lame hors workflow, le plateau n'ajoute pas une colonne vide : une
+    /// Sans lame au volet, le plateau n'ajoute pas une colonne vide : une
     /// colonne « libre » à zéro carte volerait de la largeur aux stages.
     #[test]
     fn the_free_column_only_appears_when_a_blade_escapes_the_workflow() {
