@@ -265,7 +265,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
 fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledLine> {
     let mut lines = vec![vec![RoledSpan::title("navigation")]];
     if mouse_enabled {
-        let rows: [(&str, &str); 15] = [
+        let rows: [(&str, &str); 16] = [
             ("molette", "défile le chat (3 lignes/cran)"),
             ("PageUp/PageDown", "défile par page · Home/End"),
             ("Ctrl+↑/↓", "saute au tour précédent/suivant"),
@@ -281,6 +281,10 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
                 "change de volet (composer → explorateur → lecteur → forge)",
             ),
             ("", "le chat se replie quand le lecteur a le focus"),
+            (
+                "Esc/h/←",
+                "quitte le lecteur — retour à l'explorateur s'il est ouvert, sinon fermeture",
+            ),
             (
                 "e",
                 "éditer ($EDITOR, nvim hôte ou pane Zellij/tmux selon KAJI_EDIT_MODE) · /edit <chemin>",
@@ -320,6 +324,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             "Ctrl+F volet forge (/forge) — qui fait quoi : subagents, statut, outil en cours",
             "Ctrl+O change de volet (composer → explorateur → lecteur → forge)",
             "  le chat se replie quand le lecteur a le focus",
+            "Esc/h/← quitte le lecteur — retour à l'explorateur s'il est ouvert, sinon fermeture",
             "e éditer ($EDITOR, nvim hôte ou pane Zellij/tmux selon KAJI_EDIT_MODE) · /edit <chemin>",
             "Ctrl+S steer : envoie les messages en file au tour en cours",
             "Shift+Tab change le mode (承 approve → 智 smart → 自 auto) — sceau à gauche de la barre d'état",
@@ -3006,7 +3011,7 @@ mod tests {
     fn the_forge_row_follows_the_explorer_row_in_the_navigation_table() {
         let lines = navigation_section(true, SpanRole::Text);
 
-        assert_eq!(lines.len(), 16, "un titre puis 15 lignes de navigation");
+        assert_eq!(lines.len(), 17, "un titre puis 16 lignes de navigation");
 
         let rows: Vec<String> = lines
             .iter()
