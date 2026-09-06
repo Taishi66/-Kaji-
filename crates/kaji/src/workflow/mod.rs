@@ -16,7 +16,7 @@ pub mod state;
 mod tests;
 
 pub use executor::{WorkflowExecutor, WorkflowHandle, CANCEL_GRACE, SHUTDOWN_GRACE};
-pub use gate::{GateDecision, GateSource, GateVerdict, LiveGates, ReplayGates};
+pub use gate::{GateDecision, GateOutcome, GateSource, GateVerdict, LiveGates, ReplayGates};
 pub use registry::{find_workflow_run, list_workflow_runs, WorkflowRun};
 pub use runner::{
     AgentRunRequest, AgentRunner, RecordedOutcome, ReplayRunner, ResolvedRecipe, SubagentRunner,

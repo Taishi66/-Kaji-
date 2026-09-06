@@ -673,6 +673,70 @@ async fn a_replayed_gate_comes_from_the_log_instead_of_a_live_decision() {
     assert_eq!(replay_runner.started(), runner.started());
 }
 
+/// T7 écart 1 : une annulation prise pendant l'attente d'une gate ne
+/// journalise aucune décision — il n'y en a pas eu. Le journal dit pourtant ce
+/// qu'il faut : le workflow s'est terminé **annulé**. C'est cette issue qui
+/// fait foi au rejeu, qui rejoue l'annulation au point où elle est tombée au
+/// lieu de réclamer une décision que personne n'a prise.
+#[tokio::test]
+async fn a_cancellation_taken_at_a_waiting_gate_replays_as_a_cancellation() {
+    let recorded = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = recorded.executor(spec(GATED), Arc::clone(&runner)).await;
+    let handle = executor.handle();
+    let run = tokio::spawn(executor.run());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    handle.cancel();
+    let recorded_state = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("cancel() réveille l'attente de gate")
+        .unwrap()
+        .unwrap();
+    assert_eq!(recorded_state.outcome(), WorkflowOutcome::Cancelled);
+
+    let cursor = EventCursor::load(&recorded.session_manager, &recorded.session_id)
+        .await
+        .unwrap();
+    assert!(
+        cursor.gate_decisions.is_empty(),
+        "une gate annulée n'a laissé aucune décision au journal"
+    );
+
+    let replayed = Fixture::new().await;
+    let replay_runner = Arc::new(FixtureRunner::new());
+    let executor = WorkflowExecutor::replaying(
+        spec(GATED),
+        Arc::clone(&replay_runner) as Arc<dyn AgentRunner>,
+        Arc::new(ReplayGates::from_cursor(&cursor)),
+        cursor.workflow_recipes.clone(),
+        replayed.recorder().await,
+        replayed.session_id.clone(),
+        replayed.working_dir.clone(),
+    )
+    .unwrap();
+
+    let state = tokio::time::timeout(Duration::from_secs(5), executor.run())
+        .await
+        .expect("le rejeu d'une annulation ne s'arrête pas sur la gate")
+        .unwrap();
+
+    assert_eq!(
+        state.topology(),
+        recorded_state.topology(),
+        "le rejeu d'une annulation à la gate ne diverge pas"
+    );
+    assert_eq!(state.outcome(), WorkflowOutcome::Cancelled);
+    assert_eq!(
+        replay_runner.started(),
+        runner.started(),
+        "aucun agent ne part au-delà de la gate annulée, au rejeu comme à l'enregistrement"
+    );
+    assert!(
+        replayed.payloads("gate_decision").await.is_empty(),
+        "le rejeu n'invente pas la décision que l'annulation n'a pas prise"
+    );
+}
+
 #[tokio::test]
 async fn a_replay_without_the_recorded_gate_fails_the_stage_instead_of_waiting() {
     let fixture = Fixture::new().await;

@@ -31,7 +31,7 @@ use tracing::warn;
 use crate::recipe::local_recipes::load_local_recipe_file;
 use crate::workflow::artifacts::Artifacts;
 use crate::workflow::events::{AgentDone, WorkflowRecipeContent, WorkflowRecorder};
-use crate::workflow::gate::{GateDecision, GateSource, GateVerdict, LiveGates};
+use crate::workflow::gate::{GateDecision, GateOutcome, GateSource, GateVerdict, LiveGates};
 use crate::workflow::runner::{AgentRunRequest, AgentRunner, ResolvedRecipe};
 use crate::workflow::state::{AgentState, BudgetLimit, FailureCause, StageState, WorkflowState};
 
@@ -513,7 +513,17 @@ impl WorkflowExecutor {
                 }
             };
             let decision = match decision {
-                Ok(decision) => decision,
+                Ok(GateOutcome::Decided(decision)) => decision,
+                // Le journal dit que l'annulation est tombée pendant cette
+                // attente : elle se rejoue comme la vivante, sur tout le
+                // workflow, sinon les stages parallèles finiraient là où
+                // l'enregistrement les a coupés.
+                Ok(GateOutcome::Cancelled) => {
+                    self.shared.cancel.cancel();
+                    self.set_stage(index, StageState::Cancelled);
+                    self.cancel_stage_agents(index);
+                    return (index, StageState::Cancelled);
+                }
                 Err(error) => {
                     let state = StageState::Failed(FailureCause::Error(error.to_string()));
                     self.set_stage(index, state.clone());
