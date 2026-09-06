@@ -16,10 +16,17 @@
 //! porte. Une entrée sans port s'en tient à la liste blanche de ports.
 //!
 //! Un CIDR **nomme une exception**, il n'ouvre pas le monde : son préfixe ne
-//! peut pas être plus large que la plus large des plages internes usuelles
-//! (`10.0.0.0/8` en v4, `fc00::/7` en v6). `0.0.0.0/0` — qui rendrait toute la
-//! garde inopérante d'une seule entrée — est donc refusé comme entrée illisible,
-//! avec sa raison au journal.
+//! peut pas être plus court que celui de la plus large des plages internes
+//! usuelles (`10.0.0.0/8` en v4, `fc00::/7` en v6). `0.0.0.0/0` — qui rendrait
+//! toute la garde inopérante d'une seule entrée — est donc refusé comme entrée
+//! illisible, avec sa raison au journal.
+//!
+//! Ce plancher se lit sur la **forme** autant que sur la famille : une IPv4
+//! voyage aussi en costume v6 (v4-mappée, 6to4, NAT64…), et `::ffff:0:0/96`
+//! passerait le plancher v6 tout en nommant l'espace v4 entier. Un CIDR qui
+//! touche l'un de ces préfixes porteurs prend donc le plancher de la v4,
+//! reporté à la position de l'adresse embarquée — `/104` sous `::ffff:0:0/96`,
+//! `/24` sous `2002::/16`.
 //!
 //! La variable est lue par `std::env::var`, jamais par `Config::get_param` :
 //! l'escalade n'est pas posable depuis le fichier de configuration, qu'un agent
@@ -38,13 +45,60 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const ALLOW_HOSTS_ENV: &str = "KAJI_WEB_ALLOW_HOSTS";
 
-/// Le préfixe le plus large qu'un CIDR de la liste ait le droit de porter :
-/// celui de `10.0.0.0/8`, la plus large plage privée v4. Plus large que ça,
+/// Le préfixe le plus court qu'un CIDR de la liste ait le droit de porter :
+/// celui de `10.0.0.0/8`, la plus large plage privée v4. Plus court que ça,
 /// l'entrée ne nomme plus une exception, elle éteint la garde.
 pub const MIN_NET_PREFIX_V4: u8 = 8;
 
-/// Son équivalent v6 : celui de `fc00::/7`, la plage unique-local.
+/// Son équivalent v6 : celui de `fc00::/7`, la plage unique-local. Il ne vaut
+/// que pour un réseau qui ne touche aucune forme porteuse d'IPv4
+/// ([`V4_BEARING_PREFIXES`]).
 pub const MIN_NET_PREFIX_V6: u8 = 7;
+
+/// Les préfixes v6 qui **transportent** une IPv4 dans leurs bits de poids
+/// faible — exactement les formes que [`embedded_ipv4`] déballe : v4-mappée,
+/// v4-traduite, NAT64, 6to4, compatible. Chacun porte sa position de départ et
+/// le plancher qui en découle : celui de la v4 (`/8`) décalé de cette position.
+///
+/// Un CIDR qui touche l'un d'eux ne nomme pas un réseau v6, il nomme de la v4 :
+/// `::ffff:0:0/96` passe le plancher v6 (96 ≥ 7) et désigne pourtant **tout**
+/// l'espace v4 sous sa forme mappée. Le refus tombe au parsing parce que c'est
+/// la dernière occasion de le voir — [`AllowEntry::matches_host`] déballe
+/// ensuite la v4 sans jamais revoir le préfixe.
+const V4_BEARING_PREFIXES: [(Ipv6Addr, u8); 5] = [
+    // `::ffff:0:0/96` — v4-mappée, l'IPv4 occupe les 32 derniers bits.
+    (Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0, 0), 96),
+    // `::ffff:0:0:0/96` — v4-traduite.
+    (Ipv6Addr::new(0, 0, 0, 0, 0xffff, 0, 0, 0), 96),
+    // `64:ff9b::/96` — traduction NAT64.
+    (Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0), 96),
+    // `2002::/16` — encapsulation 6to4, l'IPv4 occupe les bits 16 à 48.
+    (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16),
+    // `::/96` — forme compatible héritée.
+    (Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0), 96),
+];
+
+/// Le préfixe minimal exigé d'un CIDR. Un réseau v6 qui **touche** une forme
+/// porteuse d'IPv4 — qu'il vive dedans ou qu'il la recouvre — hérite du
+/// plancher de la v4 reporté à la position de l'adresse embarquée ; le plus
+/// exigeant l'emporte.
+fn min_prefix(addr: IpAddr, prefix: u8) -> u8 {
+    let IpAddr::V6(addr) = addr else {
+        return MIN_NET_PREFIX_V4;
+    };
+    V4_BEARING_PREFIXES
+        .iter()
+        .filter(|(bearer, bearer_prefix)| {
+            in_net(
+                IpAddr::V6(addr),
+                IpAddr::V6(*bearer),
+                prefix.min(*bearer_prefix),
+            )
+        })
+        .map(|(_, bearer_prefix)| bearer_prefix + MIN_NET_PREFIX_V4)
+        .max()
+        .unwrap_or(MIN_NET_PREFIX_V6)
+}
 
 /// Ce qu'une entrée de la liste désigne : un nom d'hôte tel qu'il est écrit
 /// dans l'URL, ou un réseau qui contient l'adresse résolue.
@@ -88,8 +142,9 @@ impl AllowEntry {
 
 /// Pourquoi une entrée est écartée. Une chaîne plutôt qu'un `()` : le journal
 /// doit dire *ce qui* cloche, sinon un `0.0.0.0/0` refusé se lit comme une
-/// faute de frappe.
-type EntryError = &'static str;
+/// faute de frappe. Possédée plutôt qu'empruntée : un refus de plancher nomme
+/// la limite qu'il oppose, et elle dépend de l'entrée.
+type EntryError = String;
 
 impl FromStr for AllowEntry {
     type Err = EntryError;
@@ -97,24 +152,29 @@ impl FromStr for AllowEntry {
     fn from_str(raw: &str) -> Result<Self, EntryError> {
         let (host, port) = split_host_port(raw.trim())?;
         if host.is_empty() || host.contains(char::is_whitespace) {
-            return Err("hôte vide ou espacé");
+            return Err("hôte vide ou espacé".to_string());
         }
 
         let host = match host.split_once('/') {
             Some((addr, prefix)) => {
-                let addr: IpAddr = addr.parse().map_err(|_| "CIDR sans adresse valide")?;
-                let prefix: u8 = prefix.parse().map_err(|_| "préfixe CIDR illisible")?;
-                let (width, floor) = if addr.is_ipv4() {
-                    (32, MIN_NET_PREFIX_V4)
-                } else {
-                    (128, MIN_NET_PREFIX_V6)
-                };
+                let addr: IpAddr = addr
+                    .parse()
+                    .map_err(|_| "CIDR sans adresse valide".to_string())?;
+                let prefix: u8 = prefix
+                    .parse()
+                    .map_err(|_| "préfixe CIDR illisible".to_string())?;
+                let width = if addr.is_ipv4() { 32 } else { 128 };
                 if prefix > width {
-                    return Err("préfixe CIDR plus long que l'adresse");
+                    return Err(format!(
+                        "préfixe /{prefix} plus long que l'adresse — maximum /{width}"
+                    ));
                 }
+                let floor = min_prefix(addr, prefix);
                 if prefix < floor {
-                    return Err("préfixe CIDR trop large : une entrée nomme une exception, \
-                         pas l'internet entier");
+                    return Err(format!(
+                        "préfixe /{prefix} trop court — minimum /{floor} : une entrée nomme \
+                         une exception, pas l'internet entier"
+                    ));
                 }
                 HostPattern::Net { addr, prefix }
             }
@@ -135,23 +195,26 @@ impl FromStr for AllowEntry {
 /// sans crochets n'a pas de port : ses deux-points sont les siens.
 fn split_host_port(raw: &str) -> Result<(&str, Option<u16>), EntryError> {
     if let Some(rest) = raw.strip_prefix('[') {
-        let (host, rest) = rest.split_once(']').ok_or("crochet IPv6 non refermé")?;
+        let (host, rest) = rest
+            .split_once(']')
+            .ok_or_else(|| "crochet IPv6 non refermé".to_string())?;
         let port = match rest {
             "" => None,
             _ => Some(
                 rest.strip_prefix(':')
-                    .ok_or("suffixe inattendu après le crochet IPv6")?
+                    .ok_or_else(|| "suffixe inattendu après le crochet IPv6".to_string())?
                     .parse()
-                    .map_err(|_| "port illisible")?,
+                    .map_err(|_| "port illisible".to_string())?,
             ),
         };
         return Ok((host, port));
     }
 
     match raw.split_once(':') {
-        Some((host, port)) if !port.contains(':') => {
-            Ok((host, Some(port.parse().map_err(|_| "port illisible")?)))
-        }
+        Some((host, port)) if !port.contains(':') => Ok((
+            host,
+            Some(port.parse().map_err(|_| "port illisible".to_string())?),
+        )),
         Some(_) => Ok((raw, None)),
         None => Ok((raw, None)),
     }
@@ -605,12 +668,63 @@ mod tests {
         }
     }
 
+    /// Le plancher v6 générique est aveugle aux formes traduites : `/96` le
+    /// passe largement et nomme pourtant tout l'espace v4 en costume. Chaque
+    /// préfixe porteur d'IPv4 impose donc le plancher de la v4, reporté à la
+    /// position de l'adresse embarquée.
+    #[test]
+    fn a_v6_cidr_that_carries_the_whole_v4_space_is_refused() {
+        for spec in [
+            "::ffff:0:0/96",   // v4-mappée
+            "::ffff:0:0:0/96", // v4-traduite
+            "64:ff9b::/96",    // NAT64
+            "2002::/16",       // 6to4
+            "::/96",           // forme compatible
+            "::ffff:0:0/103",  // toujours deux fois trop large
+            "2002::/23",       // idem, côté 6to4
+            "::/64",           // recouvre les formes à 96 bits
+        ] {
+            assert!(
+                FetchPolicy::allowing(spec).allowed.is_empty(),
+                "« {spec} » nomme de la v4 en costume v6, pas une exception"
+            );
+        }
+    }
+
+    #[test]
+    fn a_translated_range_as_narrow_as_its_v4_floor_stays_expressible() {
+        for spec in [
+            "::ffff:10.0.0.0/104",
+            "::ffff:0:10.0.0.0/104",
+            "64:ff9b::10.0.0.0/104",
+            "2002:0a00::/24",
+            "::1/128",
+            "fe80::/10",
+        ] {
+            assert_eq!(
+                FetchPolicy::allowing(spec).allowed.len(),
+                1,
+                "« {spec} » nomme une exception aussi étroite qu'un /8 en v4"
+            );
+        }
+    }
+
     #[test]
     fn a_rejected_entry_names_what_is_wrong_with_it() {
         assert_eq!(
             "0.0.0.0/0".parse::<AllowEntry>().unwrap_err(),
-            "préfixe CIDR trop large : une entrée nomme une exception, \
+            "préfixe /0 trop court — minimum /8 : une entrée nomme une exception, \
              pas l'internet entier"
+        );
+        assert_eq!(
+            "::ffff:0:0/96".parse::<AllowEntry>().unwrap_err(),
+            "préfixe /96 trop court — minimum /104 : une entrée nomme une exception, \
+             pas l'internet entier",
+            "le refus nomme le plancher de la forme, pas celui de la famille"
+        );
+        assert_eq!(
+            "10.0.0.0/99".parse::<AllowEntry>().unwrap_err(),
+            "préfixe /99 plus long que l'adresse — maximum /32"
         );
     }
 
