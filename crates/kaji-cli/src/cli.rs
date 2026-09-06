@@ -1144,7 +1144,13 @@ enum Command {
                       carries cache hit rate, dollars saved by cache reads, the current burn \
                       rate and a linear month-end projection. Declare KAJI_BUDGET_MONTHLY_USD \
                       (and KAJI_BUDGET_MONTHLY_USD_<PROVIDER>) to get budget lines; they warn, \
-                      they never stop a run."
+                      they never stop a run.\n\n\
+                      A `model_pricing:` section in config.yaml prices models the bundled \
+                      catalog does not know, keyed by model name (exact, then with the version \
+                      suffix stripped) with the catalog's own USD-per-million fields: input and \
+                      output (both required), cache_read and cache_write (optional, defaulting \
+                      to input). It takes precedence over the catalog and fills in costs the \
+                      ledger recorded as unknown; a model in neither stays n/a."
     )]
     Metrics {
         /// Fenêtre agrégée

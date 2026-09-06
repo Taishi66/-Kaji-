@@ -590,18 +590,6 @@ impl SessionManager {
         self.storage.metrics_buckets(dimension, start, end).await
     }
 
-    pub async fn usage_ledger_costs_between(
-        &self,
-        start: i64,
-        end: i64,
-    ) -> Result<Vec<(i64, Option<f64>)>> {
-        self.storage.usage_ledger_costs_between(start, end).await
-    }
-
-    pub async fn usage_cost_between(&self, start: i64, end: i64) -> Result<f64> {
-        self.storage.usage_cost_between(start, end).await
-    }
-
     /// Fenêtres d'usage pour `/cost` : session courante, dernières 5 h et
     /// derniers 7 j. Lecture pure, aucun effet de bord.
     #[allow(clippy::disallowed_methods)] // usage
@@ -2872,45 +2860,6 @@ impl SessionStorage {
                 entries: row.10,
             })
             .collect())
-    }
-
-    /// Lignes `(timestamp, coût)` d'une fenêtre — le découpage en jours locaux
-    /// se fait côté Rust, pas via `date(..., 'localtime')` dont le fuseau
-    /// dépend de l'environnement du process SQLite.
-    async fn usage_ledger_costs_between(
-        &self,
-        start: i64,
-        end: i64,
-    ) -> Result<Vec<(i64, Option<f64>)>> {
-        let pool = self.pool().await?;
-        let rows = sqlx::query_as::<_, (i64, Option<f64>)>(
-            r#"
-            SELECT created_timestamp, cost
-            FROM usage_ledger
-            WHERE created_timestamp >= ? AND created_timestamp < ?
-            ORDER BY created_timestamp
-            "#,
-        )
-        .bind(start)
-        .bind(end)
-        .fetch_all(pool)
-        .await?;
-        Ok(rows)
-    }
-
-    async fn usage_cost_between(&self, start: i64, end: i64) -> Result<f64> {
-        let pool = self.pool().await?;
-        let total = sqlx::query_scalar::<_, Option<f64>>(
-            r#"
-            SELECT SUM(cost) FROM usage_ledger
-            WHERE created_timestamp >= ? AND created_timestamp < ?
-            "#,
-        )
-        .bind(start)
-        .bind(end)
-        .fetch_one(pool)
-        .await?;
-        Ok(total.unwrap_or(0.0))
     }
 
     #[allow(clippy::disallowed_methods)] // eventlog
@@ -6013,7 +5962,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::disallowed_methods)] // test
-    async fn ledger_costs_between_returns_rows_and_the_summed_cost() {
+    async fn metrics_buckets_by_day_group_on_the_raw_timestamp() {
         let temp_dir = TempDir::new().unwrap();
         let sm = SessionManager::new(temp_dir.path().to_path_buf());
         let id = new_session(&sm).await;
@@ -6024,19 +5973,27 @@ mod tests {
         seed_metrics_row(pool, &id, now - 20, "m", Some("p"), 10, 0, None).await;
         seed_metrics_row(pool, &id, now + 500, "m", Some("p"), 10, 0, Some(5.0)).await;
 
-        let rows = sm
-            .usage_ledger_costs_between(now - 3600, now)
+        let buckets = sm
+            .metrics_buckets(MetricsDimension::Day, now - 3600, now)
             .await
             .unwrap();
-        assert_eq!(rows.len(), 2, "la borne haute est exclusive : {rows:?}");
-        assert_eq!(rows[1].1, None);
-
-        let total = sm.usage_cost_between(now - 3600, now).await.unwrap();
-        assert!((total - 1.0).abs() < 1e-9);
         assert_eq!(
-            sm.usage_cost_between(now - 3600, now - 3599).await.unwrap(),
-            0.0,
-            "fenêtre vide : zéro, pas d'erreur"
+            buckets.len(),
+            2,
+            "la borne haute est exclusive : {buckets:?}"
+        );
+        let key = crate::metrics::day_key(now - 30);
+        assert!(
+            buckets.iter().all(|bucket| bucket.key == key),
+            "deux instants du même jour local partagent leur clé : {buckets:?}"
+        );
+
+        assert!(
+            sm.metrics_buckets(MetricsDimension::Day, now - 3600, now - 3599)
+                .await
+                .unwrap()
+                .is_empty(),
+            "fenêtre vide : aucun groupe, pas d'erreur"
         );
     }
 

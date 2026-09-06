@@ -9,16 +9,19 @@
 
 pub mod budget;
 pub mod calendar;
+pub mod pricing;
 pub mod projection;
 
 use anyhow::Result;
-use chrono::{DateTime, Local, TimeZone};
+use chrono::{DateTime, Local};
 use serde::Serialize;
 
 use crate::config::paths::find_git_root;
+use crate::providers::canonical::Pricing;
 use crate::session::SessionManager;
 use budget::BudgetStatus;
 use calendar::Span;
+use pricing::ConfiguredPrices;
 use projection::Projection;
 
 const UNKNOWN_KEY: &str = "(inconnu)";
@@ -124,15 +127,11 @@ pub struct LedgerBucket {
     pub entries: i64,
 }
 
-/// Tarifs USD par million de tokens, servis au calcul d'économie de cache.
+/// Tarifs USD par million de tokens d'un couple (provider, modèle).
 pub trait PriceBook {
-    /// `(entrée, lecture cache)`. `None` quand le modèle n'a pas de
-    /// tarification connue — le provider local, typiquement.
-    fn input_and_cache_read(
-        &self,
-        provider: Option<&str>,
-        model: Option<&str>,
-    ) -> Option<(f64, f64)>;
+    /// `None` quand rien ne tarife le modèle — un provider local, un modèle
+    /// hors catalogue et non déclaré en config.
+    fn pricing(&self, provider: Option<&str>, model: Option<&str>) -> Option<Pricing>;
 }
 
 /// Tarifs du catalogue canonique embarqué — la même source que
@@ -141,14 +140,9 @@ pub trait PriceBook {
 pub struct CanonicalPrices;
 
 impl PriceBook for CanonicalPrices {
-    fn input_and_cache_read(
-        &self,
-        provider: Option<&str>,
-        model: Option<&str>,
-    ) -> Option<(f64, f64)> {
-        let canonical = crate::providers::canonical::maybe_get_canonical_model(provider?, model?)?;
-        let input = canonical.cost.input?;
-        Some((input, canonical.cost.cache_read.unwrap_or(input)))
+    fn pricing(&self, provider: Option<&str>, model: Option<&str>) -> Option<Pricing> {
+        crate::providers::canonical::maybe_get_canonical_model(provider?, model?)
+            .map(|canonical| canonical.cost)
     }
 }
 
@@ -162,6 +156,8 @@ pub struct MetricsRow {
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
     pub entries: i64,
+    /// Le coût enregistré au ledger, ou à défaut celui que le tarif connu
+    /// permet de reconstituer — `None` quand aucun des deux n'existe.
     pub cost: Option<f64>,
     /// Ce que les lectures de cache ont évité de payer, au tarif d'entrée
     /// plein. Plancher, pas exact : les groupes sans tarif connu comptent
@@ -177,12 +173,21 @@ impl MetricsRow {
         self.cache_read_tokens += bucket.cache_read_tokens;
         self.cache_write_tokens += bucket.cache_write_tokens;
         self.entries += bucket.entries;
-        if let Some(cost) = bucket.cost {
+
+        let price = prices.pricing(bucket.provider.as_deref(), bucket.model.as_deref());
+        let cost = bucket.cost.or_else(|| {
+            price
+                .as_ref()
+                .and_then(|price| pricing::estimate_bucket_cost(price, bucket))
+        });
+        if let Some(cost) = cost {
             self.cost = Some(self.cost.unwrap_or(0.0) + cost);
         }
-        if let Some((input_price, cache_read_price)) =
-            prices.input_and_cache_read(bucket.provider.as_deref(), bucket.model.as_deref())
-        {
+        if let Some(input_price) = price.as_ref().and_then(|price| price.input) {
+            let cache_read_price = price
+                .as_ref()
+                .and_then(|price| price.cache_read)
+                .unwrap_or(input_price);
             let saved = bucket.cache_read_tokens.max(0) as f64
                 * (input_price - cache_read_price).max(0.0)
                 / 1_000_000.0;
@@ -289,7 +294,8 @@ pub async fn report(
     let buckets = session_manager
         .metrics_buckets(dimension, span.start, span.end)
         .await?;
-    let (mut rows, totals) = fold_buckets(&buckets, &CanonicalPrices);
+    let prices = ConfiguredPrices::load(crate::config::Config::global());
+    let (mut rows, totals) = fold_buckets(&buckets, &prices);
     if dimension.is_chronological() {
         rows.sort_by(|a, b| a.key.cmp(&b.key));
     }
@@ -315,18 +321,17 @@ pub struct BurnReport {
     pub budgets: Vec<BudgetStatus>,
 }
 
-/// Répartit des lignes `(timestamp, coût)` sur les jours locaux écoulés du
+/// Répartit les lignes de la dimension jour sur les jours locaux écoulés du
 /// mois de `now`. Les jours sans dépense valent `0.0` — la régression a
 /// besoin d'une série continue, pas d'un nuage de points épars.
-pub fn daily_costs(rows: &[(i64, Option<f64>)], now: DateTime<Local>) -> Vec<f64> {
+pub fn daily_costs(rows: &[MetricsRow], now: DateTime<Local>) -> Vec<f64> {
     let elapsed = calendar::day_of_month(now) as usize;
     let mut daily = vec![0.0; elapsed];
-    for (timestamp, cost) in rows {
-        let Some(cost) = cost else { continue };
-        let Some(moment) = Local.timestamp_opt(*timestamp, 0).single() else {
+    for row in rows {
+        let Some(cost) = row.cost else { continue };
+        let Some(index) = calendar::day_of_month_from_key(&row.key).map(|day| day as usize) else {
             continue;
         };
-        let index = calendar::day_of_month(moment) as usize;
         if index >= 1 && index <= elapsed {
             daily[index - 1] += cost;
         }
@@ -334,22 +339,33 @@ pub fn daily_costs(rows: &[(i64, Option<f64>)], now: DateTime<Local>) -> Vec<f64
     daily
 }
 
+/// Le burn passe par les mêmes agrégats que le rapport, donc les tarifs
+/// déclarés en config chiffrent la projection comme ils chiffrent les lignes :
+/// une ligne « total » et un burn qui divergeraient seraient un bug.
 pub async fn burn(session_manager: &SessionManager, now: DateTime<Local>) -> Result<BurnReport> {
-    let day = calendar::day_span(now);
-    let week = calendar::week_span(now);
-    let month = calendar::month_span(now);
+    let today = report(
+        session_manager,
+        MetricsWindow::Day,
+        MetricsDimension::Day,
+        now,
+    )
+    .await?;
+    let week = report(
+        session_manager,
+        MetricsWindow::Week,
+        MetricsDimension::Day,
+        now,
+    )
+    .await?;
+    let month = report(
+        session_manager,
+        MetricsWindow::Month,
+        MetricsDimension::Day,
+        now,
+    )
+    .await?;
 
-    let today = session_manager
-        .usage_cost_between(day.start, day.end)
-        .await?;
-    let week_cost = session_manager
-        .usage_cost_between(week.start, week.end)
-        .await?;
-
-    let month_rows = session_manager
-        .usage_ledger_costs_between(month.start, month.end)
-        .await?;
-    let daily = daily_costs(&month_rows, now);
+    let daily = daily_costs(&month.rows, now);
     let month_cost = daily.iter().sum::<f64>();
     let projection = projection::project_month_end(&daily, calendar::days_in_month(now));
 
@@ -369,8 +385,8 @@ pub async fn burn(session_manager: &SessionManager, now: DateTime<Local>) -> Res
         budget::monthly_statuses(crate::config::Config::global(), month_cost, &per_provider);
 
     Ok(BurnReport {
-        today,
-        week: week_cost,
+        today: today.totals.cost.unwrap_or(0.0),
+        week: week.totals.cost.unwrap_or(0.0),
         month: month_cost,
         daily,
         projection,
@@ -381,19 +397,21 @@ pub async fn burn(session_manager: &SessionManager, now: DateTime<Local>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     /// Tarifs figés : `pricey` cache 10× moins cher que l'entrée, `free` sans
     /// tarif connu.
     struct FixedPrices;
 
     impl PriceBook for FixedPrices {
-        fn input_and_cache_read(
-            &self,
-            _provider: Option<&str>,
-            model: Option<&str>,
-        ) -> Option<(f64, f64)> {
+        fn pricing(&self, _provider: Option<&str>, model: Option<&str>) -> Option<Pricing> {
             match model {
-                Some("pricey") => Some((10.0, 1.0)),
+                Some("pricey") => Some(Pricing {
+                    input: Some(10.0),
+                    output: Some(20.0),
+                    cache_read: Some(1.0),
+                    cache_write: None,
+                }),
                 _ => None,
             }
         }
@@ -952,7 +970,7 @@ mod tests {
     }
 
     #[test]
-    fn daily_costs_bucket_rows_into_elapsed_local_days() {
+    fn daily_costs_spread_day_rows_over_the_elapsed_local_days() {
         let now = Local
             .from_local_datetime(
                 &chrono::NaiveDate::from_ymd_opt(2026, 9, 5)
@@ -962,26 +980,18 @@ mod tests {
             )
             .earliest()
             .unwrap();
-        let day = |d: u32, h: u32| {
-            Local
-                .from_local_datetime(
-                    &chrono::NaiveDate::from_ymd_opt(2026, 9, d)
-                        .unwrap()
-                        .and_hms_opt(h, 0, 0)
-                        .unwrap(),
-                )
-                .earliest()
-                .unwrap()
-                .timestamp()
+        let row = |key: &str, cost: Option<f64>| MetricsRow {
+            key: key.to_string(),
+            cost,
+            ..MetricsRow::default()
         };
 
         let daily = daily_costs(
             &[
-                (day(1, 9), Some(1.0)),
-                (day(1, 23), Some(0.5)),
-                (day(3, 12), Some(2.0)),
-                (day(5, 17), Some(4.0)),
-                (day(5, 12), None),
+                row("2026-09-01", Some(1.5)),
+                row("2026-09-03", Some(2.0)),
+                row("2026-09-05", Some(4.0)),
+                row(UNKNOWN_KEY, Some(99.0)),
             ],
             now,
         );
@@ -992,5 +1002,9 @@ mod tests {
         assert!((daily[2] - 2.0).abs() < 1e-9);
         assert_eq!(daily[3], 0.0);
         assert!((daily[4] - 4.0).abs() < 1e-9);
+        assert!(
+            (daily.iter().sum::<f64>() - 7.5).abs() < 1e-9,
+            "une clé qui n'est pas une date ne se range dans aucun jour"
+        );
     }
 }

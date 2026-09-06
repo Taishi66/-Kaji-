@@ -92,6 +92,14 @@ pub fn day_of_month(now: DateTime<Local>) -> u32 {
     now.date_naive().day()
 }
 
+/// Rang 1-basé dans son mois d'une clé de jour `YYYY-MM-DD`. `None` si la clé
+/// n'est pas une date — la ligne `(inconnu)` d'un timestamp aberrant.
+pub fn day_of_month_from_key(key: &str) -> Option<u32> {
+    NaiveDate::parse_from_str(key, "%Y-%m-%d")
+        .ok()
+        .map(|date| date.day())
+}
+
 /// Clé `YYYY-MM-DD` du jour local d'un instant epoch — même fuseau que
 /// [`day_span`], donc une ligne du ledger tombe toujours dans le jour qui la
 /// contient. `None` pour un timestamp hors de la plage représentable.

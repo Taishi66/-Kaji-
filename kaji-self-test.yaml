@@ -133,7 +133,8 @@ instructions: |
   ### Phase 8 — Metrics CLI surface
   Check the `kaji metrics` command line only — the aggregates themselves are covered by unit
   tests over a seeded ledger:
-  - `kaji metrics --help` exits 0 and names `--window`, `--by`, `--format`
+  - `kaji metrics --help` exits 0 and names `--window`, `--by`, `--format` and `model_pricing`
+  - `--by day` is accepted and its rows read as dates
   - `--format json` emits parsable JSON even on an empty ledger
   - an unknown `--window` value is refused by clap
 
@@ -544,7 +545,16 @@ prompt: |
   ```
   kaji metrics --help; echo "exit=$?"
   ```
-  **Expected**: `exit=0`, et l'aide nomme `--window`, `--by` et `--format`.
+  **Expected**: `exit=0`, l'aide nomme `--window`, `--by` et `--format`, elle liste `day` parmi
+  les valeurs de `--by`, et elle documente la section `model_pricing:` de la config.
+
+  ### La série jour-par-jour est datée et chronologique
+  ```
+  kaji metrics --by day --window 7d; echo "exit=$?"
+  ```
+  **Expected**: `exit=0`. Chaque clé de ligne est une date `YYYY-MM-DD`, les dates montent, et
+  aucun jour sans consommation n'apparaît. Un ledger vide dit « aucune consommation sur la
+  fenêtre », ce n'est pas un échec.
 
   ### Le format JSON est du JSON valide
   ```
