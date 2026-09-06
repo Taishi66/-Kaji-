@@ -268,12 +268,9 @@ async fn replay_workflow(
     )];
     let verdict = workflow_verdict(cursor.workflow_final.as_ref(), &state, workflow, lenient);
     if matches!(verdict, TurnVerdict::Faithful) {
-        lines.push(match &cursor.workflow_final {
-            Some(_) => format!("workflow « {workflow} » identique à l'enregistrement"),
-            None => {
-                format!("workflow « {workflow} » sans état final enregistré : rien à comparer")
-            }
-        });
+        lines.push(format!(
+            "workflow « {workflow} » identique à l'enregistrement"
+        ));
     }
     Ok(WorkflowReplay { lines, verdict })
 }
@@ -306,24 +303,32 @@ enum TurnVerdict {
 /// `tokens`/`duration_ms` : ce qu'elle prouve est la cohérence de
 /// l'ordonnanceur avec son journal, pas le déterminisme d'un modèle — aucun
 /// agent ne tourne au rejeu.
+///
+/// Un tour clos **sans** `workflow_done` n'est pas fidèle : la borne est là, le
+/// témoin manque, et rien n'a été comparé. L'annoncer « sans divergence »
+/// promettrait une vérification qui n'a pas eu lieu — c'est une divergence
+/// nommée, fatale en strict et comptée sous `--lenient`.
 fn workflow_verdict(
     recorded: Option<&kaji::workflow::WorkflowState>,
     replayed: &kaji::workflow::WorkflowState,
     workflow: &str,
     lenient: bool,
 ) -> TurnVerdict {
-    let Some(recorded) = recorded else {
-        return TurnVerdict::Faithful;
+    let divergence = match recorded {
+        None => format!(
+            "journal incomplet — workflow « {workflow} » clos sans état final \
+             enregistré : le rejeu n'a rien contre quoi se mesurer"
+        ),
+        Some(recorded) if recorded.topology() == replayed.topology() => {
+            return TurnVerdict::Faithful
+        }
+        Some(recorded) => format!(
+            "état du workflow « {workflow} » différent de l'enregistrement — \
+             enregistré {:?}, rejoué {:?}",
+            recorded.topology(),
+            replayed.topology()
+        ),
     };
-    if recorded.topology() == replayed.topology() {
-        return TurnVerdict::Faithful;
-    }
-    let divergence = format!(
-        "état du workflow « {workflow} » différent de l'enregistrement — \
-         enregistré {:?}, rejoué {:?}",
-        recorded.topology(),
-        replayed.topology()
-    );
     if lenient {
         TurnVerdict::Tolerated(divergence)
     } else {
@@ -516,15 +521,30 @@ mod tests {
         assert!(matches!(verdict, TurnVerdict::Faithful));
     }
 
+    /// Un tour de workflow dont le journal ne porte pas d'état final n'a rien
+    /// été comparé : le dire fidèle promettrait une vérification qui n'a pas eu
+    /// lieu. C'est une divergence nommée — fatale en strict, comptée en
+    /// `--lenient`.
     #[test]
-    fn a_workflow_turn_without_a_recorded_state_has_nothing_to_compare() {
-        let verdict = workflow_verdict(
-            None,
-            &state_with_stage(serde_json::json!("done")),
-            "livraison",
-            false,
+    fn a_workflow_turn_without_a_recorded_state_is_an_incomplete_journal() {
+        let replayed = state_with_stage(serde_json::json!("done"));
+
+        let TurnVerdict::Fatal(message) = workflow_verdict(None, &replayed, "livraison", false)
+        else {
+            panic!("sans état final enregistré, le rejeu n'a rien vérifié");
+        };
+        assert!(
+            message.contains("journal incomplet") && message.contains("livraison"),
+            "{message}"
         );
-        assert!(matches!(verdict, TurnVerdict::Faithful));
+
+        assert!(
+            matches!(
+                workflow_verdict(None, &replayed, "livraison", true),
+                TurnVerdict::Tolerated(_)
+            ),
+            "`--lenient` la compte au lieu de sortir en 2"
+        );
     }
 
     /// F-9 : `--lenient` existe pour auditer les divergences en sortant vert.

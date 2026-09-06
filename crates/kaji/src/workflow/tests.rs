@@ -1601,6 +1601,35 @@ async fn a_workflow_turn_left_open_under_a_later_agent_turn_is_truncated() {
     );
 }
 
+/// L'autre moitié de C1 : un tour d'orchestration **clos** dont l'état final
+/// manque n'est pas une troncature — le curseur le charge sans broncher — et le
+/// rejeu se retrouve alors sans témoin. Le cas est atteignable, c'est au verdict
+/// du rejeu de ne pas l'annoncer « sans divergence ».
+#[tokio::test]
+async fn a_workflow_turn_closed_without_its_final_state_still_loads() {
+    let fixture = Fixture::new().await;
+    let recorder = fixture.recorder().await;
+    recorder.workflow_started(&spec(SOLO)).await;
+    recorder.stage_started("collecte", Gate::Auto).await;
+    fixture
+        .session_manager
+        .append_event(&fixture.session_id, recorder.turn_seq(), "turn_end", "{}")
+        .await
+        .unwrap();
+
+    let cursor = EventCursor::load(&fixture.session_manager, &fixture.session_id)
+        .await
+        .expect("un tour clos n'est pas une troncature");
+    assert!(
+        cursor.workflow.is_some(),
+        "le tour se planifie bien comme un workflow"
+    );
+    assert!(
+        cursor.workflow_final.is_none(),
+        "l'état final manque : le rejeu n'a rien contre quoi se mesurer"
+    );
+}
+
 /// I-9 : le contenu d'une recette entre dans le prompt de l'agent. Il est
 /// journalisé à l'exécution, puis servi au rejeu — un fichier édité entre les
 /// deux ne change pas ce que le rejeu voit.
