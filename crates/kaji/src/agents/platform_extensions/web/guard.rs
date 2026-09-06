@@ -51,8 +51,8 @@ pub const ALLOW_HOSTS_ENV: &str = "KAJI_WEB_ALLOW_HOSTS";
 pub const MIN_NET_PREFIX_V4: u8 = 8;
 
 /// Son équivalent v6 : celui de `fc00::/7`, la plage unique-local. Il ne vaut
-/// que pour un réseau qui ne touche aucune forme porteuse d'IPv4
-/// ([`V4_BEARING_PREFIXES`]).
+/// que pour un réseau qui ne touche aucune forme porteuse d'IPv4 — celles-là
+/// prennent le plancher de la v4, reporté à la position de l'adresse embarquée.
 pub const MIN_NET_PREFIX_V6: u8 = 7;
 
 /// Les préfixes v6 qui **transportent** une IPv4 dans leurs bits de poids

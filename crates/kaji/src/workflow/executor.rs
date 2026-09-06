@@ -601,6 +601,12 @@ impl WorkflowExecutor {
                 // ici couperait des stages que l'enregistrement a vus aboutir
                 // **avant** que l'annulation ne tombe, et le journal ne dit pas
                 // qu'un rejeu atteint les gates dans le même ordre.
+                //
+                // Rien n'est réécrit ici : le rejeu ne réémet pas
+                // `workflow_cancelled` sur sa session dérivée. Il le poserait à
+                // l'endroit où il rencontre la gate, c'est-à-dire précisément à
+                // la date fausse dont ce kind existe pour se débarrasser — et
+                // une fois par gate annulée là où il n'y a eu qu'une annulation.
                 Ok(GateOutcome::Cancelled) => {
                     self.set_stage(index, StageState::Cancelled);
                     self.cancel_stage_agents(index);
