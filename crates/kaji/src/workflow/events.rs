@@ -257,19 +257,23 @@ impl WorkflowRecorder {
     /// présenter comme complet, et le rejeu partirait dessus.
     async fn append<T: Serialize>(&self, kind: &str, payload: &T) {
         if let Err(error) = self.try_append(kind, payload).await {
-            warn!(
-                %error,
-                kind,
-                session_id = %self.session_id,
-                "event log v2: écriture échouée — session marquée non rejouable"
-            );
-            if let Err(error) = self
-                .session_manager
-                .mark_not_replayable(&self.session_id)
-                .await
-            {
-                warn!(%error, session_id = %self.session_id, "workflow: mark_not_replayable a aussi échoué");
-            }
+            self.lose_event(kind, &error).await;
+        }
+    }
+
+    async fn lose_event(&self, kind: &str, error: &anyhow::Error) {
+        warn!(
+            %error,
+            kind,
+            session_id = %self.session_id,
+            "event log v2: écriture échouée — session marquée non rejouable"
+        );
+        if let Err(error) = self
+            .session_manager
+            .mark_not_replayable(&self.session_id)
+            .await
+        {
+            warn!(%error, session_id = %self.session_id, "workflow: mark_not_replayable a aussi échoué");
         }
     }
 
@@ -367,22 +371,33 @@ impl WorkflowRecorder {
     }
 
     /// Ferme le tour en même temps qu'elle fige l'état : `workflow_done` sans
-    /// `turn_end` laisserait le journal indiscernable d'un workflow tué.
+    /// `turn_end` laisserait le journal indiscernable d'un workflow tué, et
+    /// `turn_end` sans `workflow_done` ferait passer un tour invérifiable pour
+    /// un tour clos. Les deux INSERT tiennent donc dans une seule transaction —
+    /// écrits séparément, le second pouvait échouer seul et condamner la
+    /// session sans réparation possible.
     pub async fn workflow_done(&self, state: &WorkflowState) {
-        self.append(
-            WORKFLOW_DONE,
-            &WorkflowDone {
-                workflow: state.workflow.clone(),
-                state: state.clone(),
-            },
-        )
-        .await;
+        let done = match self.encode(&WorkflowDone {
+            workflow: state.workflow.clone(),
+            state: state.clone(),
+        }) {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.lose_event(WORKFLOW_DONE, &error).await;
+                return;
+            }
+        };
+
         if let Err(error) = self
             .session_manager
-            .append_event(&self.session_id, self.turn_seq, TURN_END, "{}")
+            .append_events(
+                &self.session_id,
+                self.turn_seq,
+                &[(WORKFLOW_DONE, done.as_str()), (TURN_END, "{}")],
+            )
             .await
         {
-            warn!(%error, session_id = %self.session_id, "workflow: turn_end non écrit — le tour restera « interrompu »");
+            self.lose_event(WORKFLOW_DONE, &error).await;
         }
     }
 }

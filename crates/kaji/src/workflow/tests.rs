@@ -1750,6 +1750,25 @@ async fn a_paused_stage_holds_its_agents_until_it_is_resumed() {
     );
 }
 
+/// L'état figé et la borne qui referme le tour partent ensemble. Écrits
+/// séparément, perdre le second condamnait la session sans réparation : rejeu
+/// refusé pour troncature, second `/workflow` refusé — sur l'échec d'un INSERT
+/// au payload vide.
+#[tokio::test]
+async fn the_final_state_and_the_turn_end_are_written_together() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new());
+    let executor = fixture.executor(spec(SOLO), Arc::clone(&runner)).await;
+    executor.run().await.unwrap();
+
+    let kinds = fixture.kinds().await;
+    assert_eq!(
+        kinds.iter().rev().take(2).cloned().collect::<Vec<_>>(),
+        vec!["turn_end".to_string(), "workflow_done".to_string()],
+        "le couple ferme le journal d'un seul tenant : {kinds:?}"
+    );
+}
+
 /// Les deux points d'arrêt sont **avant** le fan-out : une pause posée pendant
 /// que les agents tournent ne retiendra plus rien. Elle est refusée par son
 /// nom, jamais rangée dans la table — sinon la vue annoncerait « suspendu » sur

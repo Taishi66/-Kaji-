@@ -843,6 +843,21 @@ impl SessionManager {
             .await
     }
 
+    /// Journalise plusieurs events du même tour dans **une seule** transaction :
+    /// ou bien ils sont tous au journal, ou bien aucun ne l'est. Ce que deux
+    /// `append_event` successifs ne garantissent pas — la seconde écriture peut
+    /// échouer seule et laisser un tour figé mais jamais refermé.
+    pub async fn append_events(
+        &self,
+        session_id: &str,
+        turn_seq: i64,
+        events: &[(&str, &str)],
+    ) -> Result<()> {
+        self.storage
+            .append_events(session_id, turn_seq, events)
+            .await
+    }
+
     /// Prochain `turn_seq` pour la session : `MAX(turn_seq) + 1`, `1` si vide.
     /// Lecture pure, aucun effet de bord ; exécutée sous `BEGIN IMMEDIATE`
     /// pour sérialiser les appels concurrents (voir `SessionStorage::next_turn_seq`).
@@ -2908,6 +2923,37 @@ impl SessionStorage {
         .bind(payload_json)
         .execute(pool)
         .await?;
+        Ok(())
+    }
+
+    /// Les mêmes INSERT, sous une seule transaction `BEGIN IMMEDIATE` : un
+    /// couple d'events qui ne vaut que complet — l'état figé et la borne qui
+    /// referme son tour — ne peut pas être écrit à moitié.
+    #[allow(clippy::disallowed_methods)] // eventlog
+    async fn append_events(
+        &self,
+        session_id: &str,
+        turn_seq: i64,
+        events: &[(&str, &str)],
+    ) -> Result<()> {
+        let pool = self.pool().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        for (kind, payload_json) in events {
+            sqlx::query(
+                r#"
+                INSERT INTO session_events (session_id, turn_seq, ts_ms, kind, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(session_id)
+            .bind(turn_seq)
+            .bind(Utc::now().timestamp_millis())
+            .bind(kind)
+            .bind(payload_json)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
