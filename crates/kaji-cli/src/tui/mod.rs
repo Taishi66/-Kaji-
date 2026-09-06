@@ -1438,7 +1438,7 @@ async fn event_loop(
                     Action::WorkflowPause { stage, paused } => {
                         match workflow.as_ref() {
                             Some(live) => {
-                                let applied = if paused {
+                                let verdict = if paused {
                                     live.handle.pause(&stage)
                                 } else {
                                     live.handle.resume(&stage)
@@ -1448,11 +1448,12 @@ async fn event_loop(
                                 // décide du sens du prochain `p`, et le tick
                                 // qui la rafraîchit est une seconde plus loin.
                                 app.apply_workflow_pauses(live.handle.paused_stages());
-                                if applied {
+                                if verdict.applied() {
                                     app.push_mission_notice(&format!("stage « {stage} » {verb}"));
                                 } else {
                                     app.push_mission_notice(&format!(
-                                        "stage « {stage} » inconnu ou déjà terminé"
+                                        "stage « {stage} » non {verb} — {}",
+                                        verdict.label()
                                     ));
                                 }
                             }

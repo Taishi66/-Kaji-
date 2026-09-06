@@ -22,7 +22,7 @@ use crate::session::SessionManager;
 use crate::workflow::events::{
     WorkflowRecorder, AGENT_DONE, AGENT_STARTED, STAGE_STARTED, WORKFLOW_KINDS, WORKFLOW_STARTED,
 };
-use crate::workflow::executor::WorkflowExecutor;
+use crate::workflow::executor::{PauseVerdict, WorkflowExecutor};
 use crate::workflow::gate::{GateDecision, GateVerdict, ReplayGates};
 use crate::workflow::runner::{AgentRunRequest, AgentRunner, ReplayRunner};
 use crate::workflow::state::{
@@ -1725,7 +1725,7 @@ async fn a_paused_stage_holds_its_agents_until_it_is_resumed() {
     let executor = fixture.executor(spec(SOLO), Arc::clone(&runner)).await;
     let handle = executor.handle();
 
-    assert!(handle.pause("collecte"));
+    assert!(handle.pause("collecte").applied());
     let run = tokio::spawn(executor.run());
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1738,7 +1738,7 @@ async fn a_paused_stage_holds_its_agents_until_it_is_resumed() {
         StageState::Paused
     );
 
-    assert!(handle.resume("collecte"));
+    assert!(handle.resume("collecte").applied());
     let state = run.await.unwrap().unwrap();
 
     assert_eq!(state.outcome(), WorkflowOutcome::Done);
@@ -1748,6 +1748,47 @@ async fn a_paused_stage_holds_its_agents_until_it_is_resumed() {
         Some("[scan]"),
         "la sortie publiée reste lisible par la vue"
     );
+}
+
+/// Les deux points d'arrêt sont **avant** le fan-out : une pause posée pendant
+/// que les agents tournent ne retiendra plus rien. Elle est refusée par son
+/// nom, jamais rangée dans la table — sinon la vue annoncerait « suspendu » sur
+/// un stage qui va au bout.
+#[tokio::test]
+async fn a_pause_asked_after_the_fan_out_left_is_refused_by_name() {
+    let fixture = Fixture::new().await;
+    let runner = Arc::new(FixtureRunner::new().with("collecte.scan", Script::Hang));
+    let executor = fixture.executor(spec(SOLO), Arc::clone(&runner)).await;
+    let handle = executor.handle();
+    let run = tokio::spawn(executor.run());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        runner.started(),
+        vec!["collecte.scan".to_string()],
+        "la pause doit être posée une fois le fan-out parti"
+    );
+
+    let verdict = handle.pause("collecte");
+    assert_eq!(verdict, PauseVerdict::AlreadyLaunched);
+    assert!(!verdict.applied());
+    assert!(
+        verdict.label().contains("déjà lancé"),
+        "le refus se lit : {}",
+        verdict.label()
+    );
+    assert!(
+        handle.paused_stages().is_empty(),
+        "rien n'est rangé dans la table : la vue n'a pas de pause à annoncer"
+    );
+
+    handle.cancel();
+    let state = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("le run se termine sur l'annulation")
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.outcome(), WorkflowOutcome::Cancelled);
 }
 
 /// Une pause n'a pas de borne de temps : `cancel()` est **la** sortie d'un
@@ -1774,7 +1815,7 @@ stages:
     let executor = fixture.executor(spec(yaml), Arc::clone(&runner)).await;
     let handle = executor.handle();
 
-    assert!(handle.pause("collecte"));
+    assert!(handle.pause("collecte").applied());
     let run = tokio::spawn(executor.run());
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1836,7 +1877,7 @@ async fn a_pause_asked_during_a_gate_takes_effect_after_the_decision() {
         StageState::Waiting,
         "la pause doit être posée sur un stage dont la gate est ouverte"
     );
-    assert!(handle.pause("deploie"));
+    assert!(handle.pause("deploie").applied());
     assert_eq!(handle.approve("deploie"), GateVerdict::Applied);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1857,7 +1898,7 @@ async fn a_pause_asked_during_a_gate_takes_effect_after_the_decision() {
         "la décision de gate est bien consommée avant la pause"
     );
 
-    assert!(handle.resume("deploie"));
+    assert!(handle.resume("deploie").applied());
     let state = tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .expect("resume relâche le stage retenu après sa gate")

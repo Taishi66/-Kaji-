@@ -58,10 +58,27 @@ struct Shared {
     cancel: CancellationToken,
     live_gates: Option<Arc<LiveGates>>,
     pauses: PauseSwitch,
+    /// Les stages dont le fan-out est parti : leurs deux points d'arrêt sont
+    /// derrière eux, une pause n'y mordrait plus.
+    launched: Mutex<HashSet<String>>,
     agent_cancels: Mutex<AgentCancels>,
 }
 
 impl Shared {
+    fn mark_fan_out_left(&self, stage: &str) {
+        self.launched
+            .lock()
+            .expect("stages lancés empoisonnés")
+            .insert(stage.to_string());
+    }
+
+    fn fan_out_left(&self, stage: &str) -> bool {
+        self.launched
+            .lock()
+            .expect("stages lancés empoisonnés")
+            .contains(stage)
+    }
+
     /// Enregistre l'intention d'annuler un agent et coupe son jeton s'il est
     /// déjà armé. L'intention est gardée pour l'agent qui n'a pas encore
     /// démarré : sans elle, une annulation posée pendant la préparation se
@@ -161,6 +178,39 @@ enum RecipeSource {
     Recorded(HashMap<String, WorkflowRecipeContent>),
 }
 
+/// Ce que devient une demande de pause ou de reprise. Quatre verdicts et non un
+/// booléen : une pause posée sur un stage dont le fan-out est parti n'a plus de
+/// point d'arrêt où mordre, et l'annoncer « suspendu » ferait attendre un arrêt
+/// qui ne viendra pas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseVerdict {
+    /// Demande enregistrée : le stage la lira à son prochain point d'arrêt.
+    Applied,
+    /// Aucun stage de ce nom dans le workflow.
+    UnknownStage,
+    /// Le stage est terminal : il n'a plus rien à suspendre.
+    Settled,
+    /// Le fan-out est parti, les deux points d'arrêt sont derrière lui.
+    AlreadyLaunched,
+}
+
+impl PauseVerdict {
+    pub fn applied(&self) -> bool {
+        *self == PauseVerdict::Applied
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            PauseVerdict::Applied => "demande enregistrée",
+            PauseVerdict::UnknownStage => "stage inconnu",
+            PauseVerdict::Settled => "stage déjà terminé",
+            PauseVerdict::AlreadyLaunched => {
+                "stage déjà lancé, aucun point d'arrêt restant — `x` coupe un agent"
+            }
+        }
+    }
+}
+
 /// La prise de contrôle d'un workflow en vol : approuver/refuser une gate,
 /// annuler, lire l'état. T5 (CLI) et T6 (mission-control) ne consomment que
 /// ça.
@@ -207,20 +257,19 @@ impl WorkflowHandle {
     }
 
     /// Suspend un stage à son prochain point d'arrêt — avant son démarrage,
-    /// et de nouveau après sa gate. Rend `false` sur un stage inconnu ou déjà
-    /// terminal.
+    /// et de nouveau après sa gate.
     ///
-    /// La suspension n'est **pas** rétroactive : un stage dont le fan-out est
-    /// déjà parti n'est pas rattrapé, c'est [`Self::cancel_agent`] qui coupe
-    /// un agent en vol.
-    pub fn pause(&self, stage: &str) -> bool {
+    /// La suspension n'est **pas** rétroactive, et le refus le dit : un stage
+    /// dont le fan-out est parti n'a plus de point d'arrêt où mordre, la
+    /// demande est refusée par son nom plutôt qu'enregistrée sans effet — c'est
+    /// [`Self::cancel_agent`] qui coupe un agent en vol.
+    pub fn pause(&self, stage: &str) -> PauseVerdict {
         self.switch_pause(stage, true)
     }
 
-    /// Relâche un stage suspendu. Rend `false` sur un stage inconnu ou
-    /// terminal, comme [`Self::pause`] — jamais sur un stage simplement pas en
-    /// pause, où reprendre est un non-événement.
-    pub fn resume(&self, stage: &str) -> bool {
+    /// Relâche un stage suspendu. Refuse un stage inconnu ou terminal, jamais
+    /// un stage simplement pas en pause : y reprendre est un non-événement.
+    pub fn resume(&self, stage: &str) -> PauseVerdict {
         self.switch_pause(stage, false)
     }
 
@@ -238,16 +287,19 @@ impl WorkflowHandle {
             .clone()
     }
 
-    fn switch_pause(&self, stage: &str, paused: bool) -> bool {
+    fn switch_pause(&self, stage: &str, paused: bool) -> PauseVerdict {
         let snapshot = self.snapshot();
         let Some(status) = snapshot.stage(stage) else {
-            return false;
+            return PauseVerdict::UnknownStage;
         };
         if status.state.is_terminal() {
-            return false;
+            return PauseVerdict::Settled;
+        }
+        if paused && self.shared.fan_out_left(stage) {
+            return PauseVerdict::AlreadyLaunched;
         }
         self.shared.pauses.set(stage, paused);
-        true
+        PauseVerdict::Applied
     }
 
     /// Coupe **un** agent, sans toucher au reste de son fan-out ni au
@@ -375,6 +427,7 @@ impl WorkflowExecutor {
             cancel: CancellationToken::new(),
             live_gates,
             pauses: PauseSwitch::default(),
+            launched: Mutex::new(HashSet::new()),
             agent_cancels: Mutex::new(AgentCancels::default()),
         });
         Ok(Self {
@@ -546,6 +599,9 @@ impl WorkflowExecutor {
             return (index, StageState::Cancelled);
         }
         self.set_stage(index, StageState::Running);
+        // Passé ce point, plus aucune pause ne peut retenir le stage : la
+        // demande sera refusée par son nom au lieu d'être rangée sans effet.
+        self.shared.mark_fan_out_left(&stage.name);
 
         // Le budget `max_tokens` appartient au stage, donc à tout son fan-out :
         // un seul garde somme l'usage des sessions enfants et coupe les agents
