@@ -2212,10 +2212,23 @@ impl App {
     /// `/workflow <fichier>` : le chemin est résolu contre le répertoire de la
     /// session, comme toute mention. La lecture et la validation du YAML
     /// appartiennent à l'event loop — `App` ne touche pas le disque.
+    ///
+    /// Un tour en cours interdit le lancement : l'agent réserve son `turn_seq`
+    /// à l'entrée de `reply()` et n'écrit son `turn_start` qu'au premier poll
+    /// du stream ; un workflow ouvert entre les deux revendique le même numéro
+    /// et les events du tour d'agent finissent sous le tour d'orchestration.
+    /// Le carve-out qui garde `/workflow` hors de la file de steer reste :
+    /// refusée, la commande ne part toujours ni au modèle ni en steer.
     fn run_workflow_command(&mut self, arg: &str) -> Action {
         let arg = arg.trim();
         if arg.is_empty() {
             self.push_system("usage : /workflow <fichier.yaml>");
+            return Action::None;
+        }
+        if self.turn_active || self.turn_pending {
+            self.push_system(
+                "workflow : un tour est en cours — attends la fin du tour pour lancer un workflow",
+            );
             return Action::None;
         }
         let path = std::path::Path::new(arg);
@@ -3486,6 +3499,8 @@ impl App {
             // instead of being refused the way `e` is. `/workflow` de même :
             // l'orchestration ne s'adresse pas au modèle, et un run mis en
             // file partirait comme un message quelques secondes plus tard.
+            // Elle atteint alors `run_workflow_command`, qui la refuse tant
+            // que le tour court — refusée dans le chat, jamais envoyée.
             // Every other command/message still gets the queue.
             KeyCode::Enter
                 if (self.turn_active || self.turn_pending)
@@ -8814,13 +8829,51 @@ mod tests {
             .contains("usage : /workflow"));
     }
 
-    /// Mis en file comme un message, `/workflow` partirait au modèle quelques
-    /// secondes plus tard : l'orchestration ne s'adresse pas au modèle.
+    /// C2 : l'agent réserve son `turn_seq` au début de `reply()` mais n'écrit
+    /// son `turn_start` qu'au premier poll du stream. Un `/workflow` glissé
+    /// entre les deux vole le numéro — les events du tour d'agent atterrissent
+    /// alors sous le tour du workflow, et le message user n'est jamais rejoué.
+    /// Le lancement attend donc la fin du tour ; le carve-out anti-file-de-steer
+    /// reste, la commande ne part ni au modèle ni en steer.
     #[test]
-    fn slash_workflow_is_not_queued_as_steering_mid_turn() {
+    fn slash_workflow_is_refused_mid_turn_without_being_queued() {
+        for (active, pending) in [(true, false), (false, true)] {
+            let mut app = App::new(None);
+            app.set_working_dir(std::path::PathBuf::from("/tmp/atelier"));
+            app.turn_active = active;
+            app.turn_pending = pending;
+            for c in "/workflow revue.yaml".chars() {
+                app.on_event(&key(KeyCode::Char(c)));
+            }
+
+            assert_eq!(
+                app.on_event(&key(KeyCode::Enter)),
+                Action::None,
+                "turn_active={active} turn_pending={pending}"
+            );
+            assert!(app.steer_queue.is_empty(), "ni file de steer");
+            assert!(
+                app.mission.workflow.is_none() && !app.mission.open,
+                "aucun workflow n'a été armé"
+            );
+            assert!(
+                app.chat
+                    .last()
+                    .expect("une ligne de refus")
+                    .text
+                    .contains("attends la fin du tour"),
+                "le refus se dit : {:?}",
+                app.chat.last().map(|line| &line.text)
+            );
+        }
+    }
+
+    /// Hors tour, la commande passe : le refus ci-dessus est une garde de
+    /// course, pas une désactivation de `/workflow`.
+    #[test]
+    fn slash_workflow_runs_once_the_turn_is_over() {
         let mut app = App::new(None);
         app.set_working_dir(std::path::PathBuf::from("/tmp/atelier"));
-        app.turn_active = true;
         for c in "/workflow revue.yaml".chars() {
             app.on_event(&key(KeyCode::Char(c)));
         }
@@ -8829,7 +8882,6 @@ mod tests {
             app.on_event(&key(KeyCode::Enter)),
             Action::WorkflowRun(std::path::PathBuf::from("/tmp/atelier/revue.yaml"))
         );
-        assert!(app.steer_queue.is_empty());
     }
 
     /// ⏎ ouvre la fiche dans le lecteur — qui vit dans la mise en page à
