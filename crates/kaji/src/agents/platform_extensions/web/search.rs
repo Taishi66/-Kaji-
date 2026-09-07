@@ -97,7 +97,7 @@ async fn json_body(backend: &'static str, response: reqwest::Response) -> Result
     if capped {
         return Err(WebError::BackendPayload {
             backend,
-            detail: format!("réponse au-delà du plafond de {MAX_BODY_BYTES} octets"),
+            detail: format!("response beyond the {MAX_BODY_BYTES} byte cap"),
         });
     }
 
@@ -364,7 +364,7 @@ fn secret(
 /// comme le corps d'une page, pour la même raison.
 pub fn format_results(query: &str, results: &[SearchResult]) -> String {
     if results.is_empty() {
-        return format!("Aucun résultat pour « {query} ».");
+        return format!("No results for \"{query}\".");
     }
 
     let mut rendered = String::new();
@@ -381,8 +381,8 @@ pub fn format_results(query: &str, results: &[SearchResult]) -> String {
     }
 
     format!(
-        "Résultats pour « {query} » :\n\n{}",
-        untrusted::frame("résultats de recherche", rendered.trim_end())
+        "Results for \"{query}\":\n\n{}",
+        untrusted::frame("search results", rendered.trim_end())
     )
 }
 

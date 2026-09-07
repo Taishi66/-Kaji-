@@ -180,7 +180,7 @@ fn log_for_the_operator(error: &WebError) {
             | WebError::BackendEndpointRefused { .. }
     ) {
         tracing::info!(
-            "{error} — pour ouvrir cet hôte volontairement : {}=hôte[:port] (entrées séparées par des virgules)",
+            "{error} — to open this host deliberately: {}=host[:port] (comma-separated entries)",
             guard::ALLOW_HOSTS_ENV
         );
     }
@@ -188,9 +188,9 @@ fn log_for_the_operator(error: &WebError) {
 
 fn parse<T: for<'de> Deserialize<'de>>(arguments: Option<JsonObject>) -> Result<T, WebError> {
     let arguments =
-        arguments.ok_or_else(|| WebError::InvalidUrl("arguments absents".to_string()))?;
+        arguments.ok_or_else(|| WebError::InvalidUrl("missing arguments".to_string()))?;
     serde_json::from_value(serde_json::Value::Object(arguments))
-        .map_err(|error| WebError::InvalidUrl(format!("arguments illisibles — {error}")))
+        .map_err(|error| WebError::InvalidUrl(format!("unreadable arguments — {error}")))
 }
 
 #[async_trait]
@@ -265,6 +265,6 @@ mod tests {
     #[tokio::test]
     async fn a_fetch_without_arguments_is_a_named_error() {
         let error = WebClient::handle_fetch(None).await.expect_err("refusé");
-        assert!(error.to_string().contains("arguments absents"));
+        assert!(error.to_string().contains("missing arguments"));
     }
 }

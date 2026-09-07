@@ -226,7 +226,7 @@ async fn a_backend_body_beyond_the_cap_is_refused_instead_of_buffered() {
         panic!("le plafond doit nommer sa cause : {error}");
     };
     assert_eq!(*backend, "searxng");
-    assert!(detail.contains("plafond"), "{detail}");
+    assert!(detail.contains("cap"), "{detail}");
 }
 
 #[test]
@@ -508,7 +508,7 @@ async fn a_fetched_body_is_framed_as_untrusted_data() {
         "le corps est à l'intérieur du cadre : {rendered}"
     );
     assert!(
-        rendered.contains("jamais des instructions"),
+        rendered.contains("never instructions"),
         "le cadre dit ce que le contenu est : {rendered}"
     );
 }
@@ -554,7 +554,7 @@ fn a_refusal_never_teaches_the_model_how_to_lift_it() {
         WebError::BlockedAddress {
             host: "metadata.test".into(),
             addr: "169.254.169.254".parse().unwrap(),
-            reason: "lien-local",
+            reason: "link-local",
         }
         .to_string(),
         WebError::BlockedScheme("file".into()).to_string(),

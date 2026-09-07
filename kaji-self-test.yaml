@@ -630,7 +630,7 @@ prompt: |
   ### `web_fetch` sur le bouclage est refusé par la garde
   Appelle ton outil `web_fetch` avec `url: "http://127.0.0.1:8080/"`.
 
-  **Expected**: refus immédiat citant la raison de l'adresse (`bouclage`). Un timeout réseau, une
+  **Expected**: refus immédiat citant la raison de l'adresse (`loopback`). Un timeout réseau, une
   tentative de connexion réelle ou un succès sont des FAILURES : la garde SSRF doit trancher
   avant toute connexion.
 

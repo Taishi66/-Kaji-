@@ -171,7 +171,7 @@ struct PinnedOnly;
 impl reqwest::dns::Resolve for PinnedOnly {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let refusal: Box<dyn std::error::Error + Send + Sync> =
-            format!("{} n'est pas épinglé par la garde web", name.as_str()).into();
+            format!("{} is not pinned by the web guard", name.as_str()).into();
         Box::pin(std::future::ready(Err(refusal)))
     }
 }
@@ -267,7 +267,7 @@ pub async fn run_fetch(
     let mut body = body;
     if outcome.truncated {
         body.push_str(&format!(
-            "\n\n[corps tronqué au plafond de {} octets]",
+            "\n\n[body truncated at the {} byte cap]",
             policy.max_bytes
         ));
     }
@@ -347,7 +347,7 @@ mod tests {
             source = inner.source();
         }
         assert!(
-            chain.contains("épinglé"),
+            chain.contains("pinned"),
             "le refus vient du résolveur, pas d'un fallback DNS : {chain}"
         );
     }

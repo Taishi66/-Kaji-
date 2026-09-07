@@ -13,75 +13,75 @@ use std::time::Duration;
 #[derive(Debug, thiserror::Error)]
 pub enum WebError {
     #[error(
-        "web_search: aucun backend de recherche configuré — définir KAJI_WEB_SEARCH_BACKEND \
-         (brave, tavily ou searxng) puis la clé ou l'URL correspondante"
+        "web_search: no search backend configured — set KAJI_WEB_SEARCH_BACKEND \
+         (brave, tavily or searxng), then the matching key or URL"
     )]
     NoSearchBackend,
 
-    #[error("web_search: backend '{0}' inconnu — valeurs acceptées : brave, tavily, searxng")]
+    #[error("web_search: unknown backend '{0}' — accepted values: brave, tavily, searxng")]
     UnknownSearchBackend(String),
 
-    #[error("web_search: backend {backend} non configuré — renseigner {setting}")]
+    #[error("web_search: backend {backend} not configured — set {setting}")]
     BackendNotConfigured {
         backend: &'static str,
         setting: &'static str,
     },
 
-    #[error("web_search: le backend {backend} a répondu {status}")]
+    #[error("web_search: backend {backend} responded {status}")]
     BackendHttp { backend: &'static str, status: u16 },
 
-    #[error("web_search: réponse illisible du backend {backend} — {detail}")]
+    #[error("web_search: unreadable response from backend {backend} — {detail}")]
     BackendPayload {
         backend: &'static str,
         detail: String,
     },
 
-    #[error("web_search: le backend {backend} est injoignable — {detail}")]
+    #[error("web_search: backend {backend} is unreachable — {detail}")]
     BackendTransport {
         backend: &'static str,
         detail: String,
     },
 
     #[error(
-        "web_search: l'endpoint configuré pour {backend} est refusé par la garde réseau — {detail}"
+        "web_search: the endpoint configured for {backend} is refused by the network guard — {detail}"
     )]
     BackendEndpointRefused {
         backend: &'static str,
         detail: String,
     },
 
-    #[error("web_fetch: URL invalide — {0}")]
+    #[error("web_fetch: invalid URL — {0}")]
     InvalidUrl(String),
 
-    #[error("web_fetch: schéma '{0}' refusé — seuls http et https sont autorisés")]
+    #[error("web_fetch: scheme '{0}' refused — only http and https are allowed")]
     BlockedScheme(String),
 
-    #[error("web_fetch: port {0} refusé — ports autorisés : 80, 443, 8080, 8443")]
+    #[error("web_fetch: port {0} refused — allowed ports: 80, 443, 8080, 8443")]
     BlockedPort(u16),
 
-    #[error("web_fetch: identifiants dans l'URL de {0} — refusé")]
+    #[error("web_fetch: credentials in the URL of {0} — refused")]
     BlockedUserinfo(String),
 
-    #[error("web_fetch: {host} résout vers {addr} ({reason}) — hôte non joignable")]
+    #[error("web_fetch: {host} resolves to {addr} ({reason}) — host not reachable")]
     BlockedAddress {
         host: String,
         addr: IpAddr,
         reason: &'static str,
     },
 
-    #[error("web_fetch: {host} ne résout vers aucune adresse — {detail}")]
+    #[error("web_fetch: {host} resolves to no address — {detail}")]
     UnresolvedHost { host: String, detail: String },
 
-    #[error("web_fetch: plus de {0} redirections")]
+    #[error("web_fetch: more than {0} redirects")]
     TooManyRedirects(usize),
 
-    #[error("web_fetch: redirection sans en-tête Location depuis {0}")]
+    #[error("web_fetch: redirect without a Location header from {0}")]
     RedirectWithoutLocation(String),
 
-    #[error("web_fetch: {url} a répondu {status}")]
+    #[error("web_fetch: {url} responded {status}")]
     HttpStatus { url: String, status: u16 },
 
-    #[error("web_fetch: délai de {0:?} dépassé, redirections comprises")]
+    #[error("web_fetch: deadline of {0:?} exceeded, redirects included")]
     DeadlineExceeded(Duration),
 
     #[error("web_fetch: {0}")]

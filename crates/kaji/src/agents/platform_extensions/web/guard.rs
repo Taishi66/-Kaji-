@@ -152,28 +152,28 @@ impl FromStr for AllowEntry {
     fn from_str(raw: &str) -> Result<Self, EntryError> {
         let (host, port) = split_host_port(raw.trim())?;
         if host.is_empty() || host.contains(char::is_whitespace) {
-            return Err("hôte vide ou espacé".to_string());
+            return Err("empty or whitespaced host".to_string());
         }
 
         let host = match host.split_once('/') {
             Some((addr, prefix)) => {
                 let addr: IpAddr = addr
                     .parse()
-                    .map_err(|_| "CIDR sans adresse valide".to_string())?;
+                    .map_err(|_| "CIDR without a valid address".to_string())?;
                 let prefix: u8 = prefix
                     .parse()
-                    .map_err(|_| "préfixe CIDR illisible".to_string())?;
+                    .map_err(|_| "unreadable CIDR prefix".to_string())?;
                 let width = if addr.is_ipv4() { 32 } else { 128 };
                 if prefix > width {
                     return Err(format!(
-                        "préfixe /{prefix} plus long que l'adresse — maximum /{width}"
+                        "prefix /{prefix} longer than the address — maximum /{width}"
                     ));
                 }
                 let floor = min_prefix(addr, prefix);
                 if prefix < floor {
                     return Err(format!(
-                        "préfixe /{prefix} trop court — minimum /{floor} : une entrée nomme \
-                         une exception, pas l'internet entier"
+                        "prefix /{prefix} too short — minimum /{floor}: an entry names \
+                         an exception, not the whole internet"
                     ));
                 }
                 HostPattern::Net { addr, prefix }
@@ -197,14 +197,14 @@ fn split_host_port(raw: &str) -> Result<(&str, Option<u16>), EntryError> {
     if let Some(rest) = raw.strip_prefix('[') {
         let (host, rest) = rest
             .split_once(']')
-            .ok_or_else(|| "crochet IPv6 non refermé".to_string())?;
+            .ok_or_else(|| "unclosed IPv6 bracket".to_string())?;
         let port = match rest {
             "" => None,
             _ => Some(
                 rest.strip_prefix(':')
-                    .ok_or_else(|| "suffixe inattendu après le crochet IPv6".to_string())?
+                    .ok_or_else(|| "unexpected suffix after the IPv6 bracket".to_string())?
                     .parse()
-                    .map_err(|_| "port illisible".to_string())?,
+                    .map_err(|_| "unreadable port".to_string())?,
             ),
         };
         return Ok((host, port));
@@ -213,7 +213,7 @@ fn split_host_port(raw: &str) -> Result<(&str, Option<u16>), EntryError> {
     match raw.split_once(':') {
         Some((host, port)) if !port.contains(':') => Ok((
             host,
-            Some(port.parse().map_err(|_| "port illisible".to_string())?),
+            Some(port.parse().map_err(|_| "unreadable port".to_string())?),
         )),
         Some(_) => Ok((raw, None)),
         None => Ok((raw, None)),
@@ -273,7 +273,7 @@ impl FetchPolicy {
             .filter_map(|entry| match entry.parse::<AllowEntry>() {
                 Ok(parsed) => Some(parsed),
                 Err(reason) => {
-                    tracing::warn!("{ALLOW_HOSTS_ENV} : entrée ignorée — '{entry}' : {reason}");
+                    tracing::warn!("{ALLOW_HOSTS_ENV}: entry ignored — '{entry}': {reason}");
                     None
                 }
             })
@@ -341,10 +341,10 @@ pub fn check_url(url: &Url, policy: &FetchPolicy) -> Result<Target, WebError> {
 
     let host = url
         .host()
-        .ok_or_else(|| WebError::InvalidUrl(format!("{url} n'a pas d'hôte")))?;
+        .ok_or_else(|| WebError::InvalidUrl(format!("{url} has no host")))?;
     let port = url
         .port_or_known_default()
-        .ok_or_else(|| WebError::InvalidUrl(format!("{url} n'a pas de port")))?;
+        .ok_or_else(|| WebError::InvalidUrl(format!("{url} has no port")))?;
 
     if !policy.port_is_conceivable(port) {
         return Err(WebError::BlockedPort(port));
@@ -384,7 +384,7 @@ pub async fn resolve_target(
     if addrs.is_empty() {
         return Err(WebError::UnresolvedHost {
             host: target.host.clone(),
-            detail: "la résolution n'a rendu aucune adresse".to_string(),
+            detail: "resolution returned no address".to_string(),
         });
     }
 
@@ -429,37 +429,37 @@ fn ipv4_kind(ip: Ipv4Addr) -> Option<(AddressKind, &'static str)> {
     let octets = ip.octets();
 
     if ip.is_loopback() {
-        return Some((AddressKind::Loopback, "bouclage"));
+        return Some((AddressKind::Loopback, "loopback"));
     }
     if ip.is_unspecified() || octets[0] == 0 {
-        return Some((AddressKind::Internal, "réseau courant"));
+        return Some((AddressKind::Internal, "current network"));
     }
     if ip.is_private() {
-        return Some((AddressKind::Internal, "réseau privé"));
+        return Some((AddressKind::Internal, "private network"));
     }
     if ip.is_link_local() {
-        return Some((AddressKind::Internal, "lien-local"));
+        return Some((AddressKind::Internal, "link-local"));
     }
     if octets[0] == 100 && (64..128).contains(&octets[1]) {
-        return Some((AddressKind::Internal, "espace partagé CGNAT"));
+        return Some((AddressKind::Internal, "CGNAT shared space"));
     }
     if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 {
-        return Some((AddressKind::Internal, "assignation de protocole IETF"));
+        return Some((AddressKind::Internal, "IETF protocol assignment"));
     }
     if ip.is_documentation() {
-        return Some((AddressKind::Internal, "plage de documentation"));
+        return Some((AddressKind::Internal, "documentation range"));
     }
     if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
-        return Some((AddressKind::Internal, "banc d'essai réseau"));
+        return Some((AddressKind::Internal, "network benchmarking"));
     }
     if octets[0] == 192 && octets[1] == 88 && octets[2] == 99 {
-        return Some((AddressKind::Internal, "anycast de relais 6to4"));
+        return Some((AddressKind::Internal, "6to4 relay anycast"));
     }
     if ip.is_multicast() {
         return Some((AddressKind::Internal, "multicast"));
     }
     if octets[0] >= 240 {
-        return Some((AddressKind::Internal, "plage réservée"));
+        return Some((AddressKind::Internal, "reserved range"));
     }
     None
 }
@@ -472,34 +472,34 @@ fn ipv6_kind(ip: Ipv6Addr) -> Option<(AddressKind, &'static str)> {
     let segments = ip.segments();
 
     if ip.is_loopback() {
-        return Some((AddressKind::Loopback, "bouclage"));
+        return Some((AddressKind::Loopback, "loopback"));
     }
     if ip.is_unspecified() {
-        return Some((AddressKind::Internal, "adresse non spécifiée"));
+        return Some((AddressKind::Internal, "unspecified address"));
     }
     if (segments[0] & 0xfe00) == 0xfc00 {
         return Some((AddressKind::Internal, "unique-local"));
     }
     if (segments[0] & 0xffc0) == 0xfe80 {
-        return Some((AddressKind::Internal, "lien-local"));
+        return Some((AddressKind::Internal, "link-local"));
     }
     if (segments[0] & 0xffc0) == 0xfec0 {
         return Some((AddressKind::Internal, "site-local"));
     }
     if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 0x0001 {
-        return Some((AddressKind::Internal, "NAT64 à usage local"));
+        return Some((AddressKind::Internal, "local-use NAT64"));
     }
     if ip.is_multicast() {
         return Some((AddressKind::Internal, "multicast"));
     }
     if segments[0] == 0x2001 && segments[1] == 0x0db8 {
-        return Some((AddressKind::Internal, "plage de documentation"));
+        return Some((AddressKind::Internal, "documentation range"));
     }
     if segments[0] == 0x0100 && segments[1..4].iter().all(|part| *part == 0) {
-        return Some((AddressKind::Internal, "trou noir"));
+        return Some((AddressKind::Internal, "discard-only"));
     }
     if segments[0] == 0x2001 && (segments[1] & 0xff00) == 0x0000 {
-        return Some((AddressKind::Internal, "assignation de protocole IETF"));
+        return Some((AddressKind::Internal, "IETF protocol assignment"));
     }
     None
 }
@@ -560,44 +560,44 @@ mod tests {
 
     #[test]
     fn every_internal_v4_range_is_named() {
-        assert_eq!(kind("127.0.0.1"), Some("bouclage"));
-        assert_eq!(kind("0.0.0.0"), Some("réseau courant"));
-        assert_eq!(kind("10.0.0.1"), Some("réseau privé"));
-        assert_eq!(kind("172.31.255.1"), Some("réseau privé"));
-        assert_eq!(kind("192.168.0.1"), Some("réseau privé"));
-        assert_eq!(kind("169.254.169.254"), Some("lien-local"));
-        assert_eq!(kind("100.64.0.1"), Some("espace partagé CGNAT"));
-        assert_eq!(kind("192.0.0.1"), Some("assignation de protocole IETF"));
-        assert_eq!(kind("192.0.2.1"), Some("plage de documentation"));
-        assert_eq!(kind("198.18.0.1"), Some("banc d'essai réseau"));
-        assert_eq!(kind("192.88.99.1"), Some("anycast de relais 6to4"));
+        assert_eq!(kind("127.0.0.1"), Some("loopback"));
+        assert_eq!(kind("0.0.0.0"), Some("current network"));
+        assert_eq!(kind("10.0.0.1"), Some("private network"));
+        assert_eq!(kind("172.31.255.1"), Some("private network"));
+        assert_eq!(kind("192.168.0.1"), Some("private network"));
+        assert_eq!(kind("169.254.169.254"), Some("link-local"));
+        assert_eq!(kind("100.64.0.1"), Some("CGNAT shared space"));
+        assert_eq!(kind("192.0.0.1"), Some("IETF protocol assignment"));
+        assert_eq!(kind("192.0.2.1"), Some("documentation range"));
+        assert_eq!(kind("198.18.0.1"), Some("network benchmarking"));
+        assert_eq!(kind("192.88.99.1"), Some("6to4 relay anycast"));
         assert_eq!(kind("224.0.0.1"), Some("multicast"));
-        assert_eq!(kind("255.255.255.255"), Some("plage réservée"));
+        assert_eq!(kind("255.255.255.255"), Some("reserved range"));
     }
 
     #[test]
     fn every_internal_v6_range_is_named() {
-        assert_eq!(kind("::1"), Some("bouclage"));
-        assert_eq!(kind("::"), Some("adresse non spécifiée"));
+        assert_eq!(kind("::1"), Some("loopback"));
+        assert_eq!(kind("::"), Some("unspecified address"));
         assert_eq!(kind("fc00::1"), Some("unique-local"));
         assert_eq!(kind("fd00::1"), Some("unique-local"));
-        assert_eq!(kind("fe80::1"), Some("lien-local"));
+        assert_eq!(kind("fe80::1"), Some("link-local"));
         assert_eq!(kind("ff02::1"), Some("multicast"));
-        assert_eq!(kind("2001:db8::1"), Some("plage de documentation"));
-        assert_eq!(kind("100::1"), Some("trou noir"));
+        assert_eq!(kind("2001:db8::1"), Some("documentation range"));
+        assert_eq!(kind("100::1"), Some("discard-only"));
         assert_eq!(kind("fec0::1"), Some("site-local"));
-        assert_eq!(kind("64:ff9b:1::1"), Some("NAT64 à usage local"));
+        assert_eq!(kind("64:ff9b:1::1"), Some("local-use NAT64"));
     }
 
     #[test]
     fn ipv6_wrappers_are_unwrapped_to_their_ipv4() {
-        assert_eq!(kind("::ffff:127.0.0.1"), Some("bouclage"));
-        assert_eq!(kind("::ffff:10.0.0.1"), Some("réseau privé"));
-        assert_eq!(kind("64:ff9b::169.254.169.254"), Some("lien-local"));
-        assert_eq!(kind("::127.0.0.1"), Some("bouclage"));
-        assert_eq!(kind("::ffff:0:7f00:1"), Some("bouclage"));
-        assert_eq!(kind("2002:7f00:1::"), Some("bouclage"));
-        assert_eq!(kind("2002:a9fe:a9fe::"), Some("lien-local"));
+        assert_eq!(kind("::ffff:127.0.0.1"), Some("loopback"));
+        assert_eq!(kind("::ffff:10.0.0.1"), Some("private network"));
+        assert_eq!(kind("64:ff9b::169.254.169.254"), Some("link-local"));
+        assert_eq!(kind("::127.0.0.1"), Some("loopback"));
+        assert_eq!(kind("::ffff:0:7f00:1"), Some("loopback"));
+        assert_eq!(kind("2002:7f00:1::"), Some("loopback"));
+        assert_eq!(kind("2002:a9fe:a9fe::"), Some("link-local"));
         assert_eq!(kind("::ffff:1.1.1.1"), None);
     }
 
@@ -713,18 +713,18 @@ mod tests {
     fn a_rejected_entry_names_what_is_wrong_with_it() {
         assert_eq!(
             "0.0.0.0/0".parse::<AllowEntry>().unwrap_err(),
-            "préfixe /0 trop court — minimum /8 : une entrée nomme une exception, \
-             pas l'internet entier"
+            "prefix /0 too short — minimum /8: an entry names an exception, \
+             not the whole internet"
         );
         assert_eq!(
             "::ffff:0:0/96".parse::<AllowEntry>().unwrap_err(),
-            "préfixe /96 trop court — minimum /104 : une entrée nomme une exception, \
-             pas l'internet entier",
+            "prefix /96 too short — minimum /104: an entry names an exception, \
+             not the whole internet",
             "le refus nomme le plancher de la forme, pas celui de la famille"
         );
         assert_eq!(
             "10.0.0.0/99".parse::<AllowEntry>().unwrap_err(),
-            "préfixe /99 plus long que l'adresse — maximum /32"
+            "prefix /99 longer than the address — maximum /32"
         );
     }
 
