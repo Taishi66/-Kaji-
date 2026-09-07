@@ -39,22 +39,22 @@ pub enum MetricsWindow {
 impl MetricsWindow {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_lowercase().as_str() {
-            "day" | "jour" | "j" => Some(MetricsWindow::Day),
-            "week" | "semaine" | "s" => Some(MetricsWindow::Week),
-            "month" | "mois" | "m" => Some(MetricsWindow::Month),
+            "day" | "d" => Some(MetricsWindow::Day),
+            "week" | "w" => Some(MetricsWindow::Week),
+            "month" | "m" => Some(MetricsWindow::Month),
             "5h" => Some(MetricsWindow::Last5h),
-            "7d" | "7j" => Some(MetricsWindow::Last7d),
+            "7d" => Some(MetricsWindow::Last7d),
             _ => None,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            MetricsWindow::Day => "jour",
-            MetricsWindow::Week => "semaine",
-            MetricsWindow::Month => "mois",
-            MetricsWindow::Last5h => "5 h",
-            MetricsWindow::Last7d => "7 j",
+            MetricsWindow::Day => "day",
+            MetricsWindow::Week => "week",
+            MetricsWindow::Month => "month",
+            MetricsWindow::Last5h => "5h",
+            MetricsWindow::Last7d => "7d",
         }
     }
 
@@ -82,24 +82,22 @@ pub enum MetricsDimension {
 impl MetricsDimension {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_lowercase().as_str() {
-            "model" | "modele" | "modèle" | "models" | "modeles" | "modèles" => {
-                Some(MetricsDimension::Model)
-            }
+            "model" | "models" => Some(MetricsDimension::Model),
             "provider" | "providers" => Some(MetricsDimension::Provider),
             "session" | "sessions" => Some(MetricsDimension::Session),
-            "project" | "projet" | "projects" | "projets" => Some(MetricsDimension::Project),
-            "day" | "days" | "jour" | "jours" | "j" => Some(MetricsDimension::Day),
+            "project" | "projects" => Some(MetricsDimension::Project),
+            "day" | "days" | "d" => Some(MetricsDimension::Day),
             _ => None,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            MetricsDimension::Model => "modèle",
+            MetricsDimension::Model => "model",
             MetricsDimension::Provider => "provider",
             MetricsDimension::Session => "session",
-            MetricsDimension::Project => "projet",
-            MetricsDimension::Day => "jour",
+            MetricsDimension::Project => "project",
+            MetricsDimension::Day => "day",
         }
     }
 
@@ -508,23 +506,20 @@ mod tests {
     #[test]
     fn window_and_dimension_parse_french_and_english_spellings() {
         assert_eq!(MetricsWindow::parse("day"), Some(MetricsWindow::Day));
-        assert_eq!(MetricsWindow::parse("Mois"), Some(MetricsWindow::Month));
+        assert_eq!(MetricsWindow::parse("Month"), Some(MetricsWindow::Month));
         assert_eq!(MetricsWindow::parse("5h"), Some(MetricsWindow::Last5h));
-        assert_eq!(MetricsWindow::parse("7j"), Some(MetricsWindow::Last7d));
+        assert_eq!(MetricsWindow::parse("7d"), Some(MetricsWindow::Last7d));
         assert_eq!(MetricsWindow::parse("decade"), None);
 
         assert_eq!(
-            MetricsDimension::parse("modèles"),
+            MetricsDimension::parse("models"),
             Some(MetricsDimension::Model)
         );
         assert_eq!(
             MetricsDimension::parse("PROJECT"),
             Some(MetricsDimension::Project)
         );
-        assert_eq!(
-            MetricsDimension::parse("jours"),
-            Some(MetricsDimension::Day)
-        );
+        assert_eq!(MetricsDimension::parse("days"), Some(MetricsDimension::Day));
         assert_eq!(MetricsDimension::parse("planet"), None);
     }
 

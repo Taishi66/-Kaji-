@@ -118,12 +118,12 @@ pub async fn handle_metrics_subcommand(
         }
         MetricsFormat::Table => {
             println!(
-                "kaji metrics — {} · par {}",
+                "kaji metrics — {} · by {}",
                 window.label(),
                 dimension.label()
             );
             if report.rows.is_empty() {
-                println!("aucune consommation sur la fenêtre");
+                println!("no usage in this window");
             } else {
                 let (headers, align) = metrics_headers(false);
                 for line in render_table(headers, &metrics_rows(&report), align) {
@@ -132,7 +132,7 @@ pub async fn handle_metrics_subcommand(
             }
             println!();
             println!(
-                " cache : {} % de hit · {} économisés",
+                " cache: {} % hit · {} saved",
                 (report.totals.cache_hit_rate() * 100.0).round() as i64,
                 match report.totals.cache_savings {
                     Some(saved) => format!("${saved:.2}"),
@@ -140,7 +140,7 @@ pub async fn handle_metrics_subcommand(
                 }
             );
             println!(
-                " burn : ${:.2} aujourd'hui · ${:.2} cette semaine · ${:.2} ce mois (J{}/{})",
+                " burn: ${:.2} today · ${:.2} this week · ${:.2} this month (D{}/{})",
                 burn.today,
                 burn.week,
                 burn.month,
@@ -148,12 +148,12 @@ pub async fn handle_metrics_subcommand(
                 burn.projection.days_in_month
             );
             println!(
-                " projection fin de mois : ${:.2} (${:.2}/jour)",
+                " month-end projection: ${:.2} (${:.2}/day)",
                 burn.projection.month_end, burn.projection.daily_rate
             );
             for status in &burn.budgets {
                 println!(
-                    " budget {} : ${:.2} / ${:.2} ({} %)",
+                    " budget {}: ${:.2} / ${:.2} ({} %)",
                     status.scope,
                     status.spent,
                     status.limit,

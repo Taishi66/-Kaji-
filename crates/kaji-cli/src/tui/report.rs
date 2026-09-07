@@ -143,17 +143,17 @@ pub fn cost_table_lines(
         (
             "session",
             &windows.session,
-            format!("{} % du 5 h", pct(session_total, last_5h_total)),
+            format!("{} % of 5h", pct(session_total, last_5h_total)),
         ),
         (
-            "5 h",
+            "5h",
             &windows.last_5h,
-            format!("{} % du 7 j", pct(last_5h_total, last_7d_total)),
+            format!("{} % of 7d", pct(last_5h_total, last_7d_total)),
         ),
-        ("7 j", &windows.last_7d, "—".to_string()),
+        ("7d", &windows.last_7d, "—".to_string()),
     ];
 
-    let headers = ["fenêtre", "↑ entrée", "↓ sortie", "total", "coût", "part"];
+    let headers = ["window", "↑ input", "↓ output", "total", "cost", "share"];
     let right_align = [false, true, true, true, true, false];
 
     let rows: Vec<Vec<String>> = rows_data
@@ -198,13 +198,13 @@ pub fn cost_table_lines(
         && windows.last_7d.cost.is_none();
     if cost_unknown_everywhere {
         lines.push(vec![RoledSpan::dim(
-            "coût indisponible : provider sans tarification",
+            "cost unavailable: provider has no pricing",
         )]);
     }
 
     for (label, budget, agg) in [
-        ("5 h", budget_5h, &windows.last_5h),
-        ("7 j", budget_7j, &windows.last_7d),
+        ("5h", budget_5h, &windows.last_5h),
+        ("7d", budget_7j, &windows.last_7d),
     ] {
         if let Some(budget) = budget {
             lines.push(budget_gauge_line(label, budget, agg));
@@ -232,7 +232,7 @@ fn budget_gauge_line(window_label: &str, budget: Budget, agg: &UsageAggregate) -
             }
             None => {
                 return vec![RoledSpan::dim(format!(
-                    " budget {window_label} — coût indisponible pour ce budget"
+                    " budget {window_label} — cost unavailable for this budget"
                 ))];
             }
         },
@@ -280,12 +280,10 @@ impl CostView {
             return Some(CostView::Windows);
         }
         match trimmed.to_lowercase().as_str() {
-            "modèles" | "modeles" | "models" | "modèle" | "modele" | "model" => {
-                Some(CostView::Models)
-            }
-            "jour" | "day" => Some(CostView::Day),
-            "semaine" | "week" => Some(CostView::Week),
-            "mois" | "month" => Some(CostView::Month),
+            "models" | "model" => Some(CostView::Models),
+            "day" => Some(CostView::Day),
+            "week" => Some(CostView::Week),
+            "month" => Some(CostView::Month),
             "cache" => Some(CostView::Cache),
             "projection" | "proj" => Some(CostView::Projection),
             _ => None,
@@ -305,7 +303,7 @@ impl CostView {
     }
 
     pub fn usage() -> &'static str {
-        "usage : /cost [modèles|jour|semaine|mois|cache|projection]"
+        "usage: /cost [models|day|week|month|cache|projection]"
     }
 }
 
@@ -333,10 +331,10 @@ pub fn render_table(headers: &[&str], rows: &[Vec<String>], right_align: &[bool]
     lines
 }
 
-const METRICS_HEADERS: [&str; 6] = ["clé", "↑ entrée", "↓ sortie", "total", "coût", "appels"];
+const METRICS_HEADERS: [&str; 6] = ["key", "↑ input", "↓ output", "total", "cost", "calls"];
 const METRICS_ALIGN: [bool; 6] = [false, true, true, true, true, true];
 
-const CACHE_HEADERS: [&str; 6] = ["clé", "↑ entrée", "cache lu", "hit", "coût", "économisé"];
+const CACHE_HEADERS: [&str; 6] = ["key", "↑ input", "cache read", "hit", "cost", "saved"];
 const CACHE_ALIGN: [bool; 6] = [false, true, true, true, true, true];
 
 /// Lignes du tableau d'agrégats — clé, tokens, coût, appels — totaux inclus
@@ -415,13 +413,13 @@ pub fn metrics_table_lines(view: CostView, report: &MetricsReport) -> Vec<RoledL
 
     let title = if cache {
         format!(
-            "/cost cache — {} (par {})",
+            "/cost cache — {} (by {})",
             report.window.label(),
             report.dimension.label()
         )
     } else {
         format!(
-            "/cost {} — par {}",
+            "/cost {} — by {}",
             report.window.label(),
             report.dimension.label()
         )
@@ -429,7 +427,7 @@ pub fn metrics_table_lines(view: CostView, report: &MetricsReport) -> Vec<RoledL
 
     let mut lines = vec![vec![RoledSpan::title(title)], vec![RoledSpan::plain("")]];
     if report.rows.is_empty() {
-        lines.push(vec![RoledSpan::dim("aucune consommation sur la fenêtre")]);
+        lines.push(vec![RoledSpan::dim("no usage in this window")]);
         return lines;
     }
     lines.extend(styled_table(headers, &rows, align));
@@ -437,12 +435,12 @@ pub fn metrics_table_lines(view: CostView, report: &MetricsReport) -> Vec<RoledL
     if cache {
         if let Some(full) = report.totals.cost_uncached() {
             lines.push(vec![RoledSpan::dim(format!(
-                "sans cache : ${full:.2} — le cache a épargné {}",
+                "without cache: ${full:.2} — the cache saved {}",
                 cost_str(report.totals.cache_savings)
             ))]);
         } else {
             lines.push(vec![RoledSpan::dim(
-                "économie chiffrable seulement pour les modèles tarifés",
+                "savings are only measurable for priced models",
             )]);
         }
     }
@@ -454,26 +452,26 @@ pub fn metrics_table_lines(view: CostView, report: &MetricsReport) -> Vec<RoledL
 pub fn projection_lines(burn: &BurnReport) -> Vec<RoledLine> {
     let projection = &burn.projection;
     let mut lines = vec![
-        vec![RoledSpan::title("/cost projection — mois en cours")],
+        vec![RoledSpan::title("/cost projection — current month")],
         vec![RoledSpan::plain("")],
     ];
 
     let rows = vec![
-        vec!["aujourd'hui".to_string(), format!("${:.2}", burn.today)],
-        vec!["semaine".to_string(), format!("${:.2}", burn.week)],
+        vec!["today".to_string(), format!("${:.2}", burn.today)],
+        vec!["week".to_string(), format!("${:.2}", burn.week)],
         vec![
             format!(
-                "mois (J{}/{})",
+                "month (D{}/{})",
                 projection.elapsed_days, projection.days_in_month
             ),
             format!("${:.2}", burn.month),
         ],
         vec![
-            "rythme".to_string(),
-            format!("${:.2} / jour", projection.daily_rate),
+            "rate".to_string(),
+            format!("${:.2} / day", projection.daily_rate),
         ],
         vec![
-            "projection fin de mois".to_string(),
+            "month-end projection".to_string(),
             format!("${:.2}", projection.month_end),
         ],
     ];
@@ -481,7 +479,7 @@ pub fn projection_lines(burn: &BurnReport) -> Vec<RoledLine> {
 
     if projection.elapsed_days < 2 {
         lines.push(vec![RoledSpan::dim(
-            "projection extrapolée d'un seul jour — indicative",
+            "projection extrapolated from a single day — indicative",
         )]);
     }
 
@@ -505,7 +503,7 @@ pub fn budget_status_line(status: &BudgetStatus) -> RoledLine {
         RoledSpan::dim(format!(" budget {} ", status.scope)),
         budget_span(status.level, gauge(status.ratio, GAUGE_WIDTH)),
         RoledSpan::text(format!(
-            "  {percent} %  (${:.2} / ${:.2} ce mois)",
+            "  {percent} %  (${:.2} / ${:.2} this month)",
             status.spent, status.limit
         )),
     ]
@@ -523,7 +521,7 @@ pub fn budget_warning_lines(statuses: &[BudgetStatus]) -> Vec<RoledLine> {
             vec![
                 budget_span(status.level, format!("budget {} ", status.scope)),
                 RoledSpan::text(format!(
-                    "— {threshold} % franchi : ${:.2} / ${:.2} ce mois ({percent} %)",
+                    "— {threshold} % crossed: ${:.2} / ${:.2} this month ({percent} %)",
                     status.spent, status.limit
                 )),
             ]
@@ -543,7 +541,7 @@ pub fn condense_line(totals: &CondenseTotals) -> Option<RoledLine> {
     }
     let saved_tokens = totals.bytes_before.saturating_sub(totals.bytes_after) / 4;
     Some(vec![RoledSpan::dim(format!(
-        "condensé : {} résultats · ~{} tok d'historique non envoyés (cumul, est.)",
+        "condensed: {} results · ~{} tok of history not sent (cumulative, est.)",
         totals.results_touched,
         fmt_tokens(saved_tokens)
     ))])
@@ -568,7 +566,7 @@ pub fn context_table_lines(
     // target to announce, and no threshold to colour the bar against.
     let auto_compact = (breakdown.compaction_threshold_pct > 0).then(|| {
         format!(
-            " · auto-compact à {} ({} %)",
+            " · auto-compact at {} ({} %)",
             fmt_tokens(breakdown.compact_at() as u64),
             breakdown.compaction_threshold_pct
         )
@@ -592,21 +590,19 @@ pub fn context_table_lines(
                 fmt_tokens(used),
                 fmt_tokens(limit),
                 breakdown.used_pct(),
-                auto_compact
-                    .as_deref()
-                    .unwrap_or(" · auto-compact désactivé")
+                auto_compact.as_deref().unwrap_or(" · auto-compact off")
             )),
         ],
         vec![RoledSpan::plain("")],
     ];
 
     for (label, tokens) in [
-        ("système", breakdown.system),
+        ("system", breakdown.system),
         ("hints", breakdown.hints),
         ("skills", breakdown.skills),
-        ("outils", breakdown.tools),
+        ("tools", breakdown.tools),
         ("mcp", breakdown.mcp),
-        ("mémoire", breakdown.memory),
+        ("memory", breakdown.memory),
         ("messages", breakdown.messages),
     ] {
         lines.push(context_category_line(label, tokens as u64, limit));
@@ -614,19 +610,19 @@ pub fn context_table_lines(
 
     lines.push(vec![RoledSpan::text(format!(
         " {:<CONTEXT_LABEL_WIDTH$} {:>8}",
-        "libre",
+        "free",
         fmt_tokens(breakdown.free() as u64)
     ))]);
 
     if let Some(last_reported) = breakdown.last_reported {
         lines.push(vec![RoledSpan::dim(format!(
-            "dernier total rapporté par le provider : {}",
+            "last total reported by the provider: {}",
             fmt_tokens(last_reported as u64)
         ))]);
     }
 
     lines.push(vec![RoledSpan::dim(
-        "estimation tokenizer o200k — les chiffres exacts sont ceux du provider",
+        "o200k tokenizer estimate — exact figures come from the provider",
     )]);
 
     lines
@@ -811,21 +807,21 @@ mod tests {
 
         assert_eq!(text[0], "/cost — ollama_cloud/deepseek-v4-flash:0731");
         assert_eq!(text[1], "");
-        assert_eq!(text[2], " fenêtre  ↑ entrée  ↓ sortie    total  coût  part");
+        assert_eq!(text[2], " window   ↑ input  ↓ output    total  cost  share");
         assert_eq!(text[3], " ────────────────────────────────────────────────");
         assert_eq!(
             text[4],
-            " session         0         0        0   n/a  0 % du 5 h"
+            " session        0         0        0   n/a  0 % of 5h"
         );
         assert_eq!(
             text[5],
-            " 5 h        32\u{202f}928     1\u{202f}314   34\u{202f}242   n/a  23 % du 7 j"
+            " 5h        32\u{202f}928     1\u{202f}314   34\u{202f}242   n/a  23 % of 7d"
         );
         assert_eq!(
             text[6],
-            " 7 j       139\u{202f}286     9\u{202f}904  149\u{202f}190   n/a  —"
+            " 7d       139\u{202f}286     9\u{202f}904  149\u{202f}190   n/a  —"
         );
-        assert_eq!(text[7], "coût indisponible : provider sans tarification");
+        assert_eq!(text[7], "cost unavailable: provider has no pricing");
         assert_eq!(text.len(), 8);
     }
 
@@ -841,7 +837,7 @@ mod tests {
         assert!(text.iter().any(|l| l.contains("$0.10")));
         assert!(text.iter().any(|l| l.contains("$1.50")));
         assert!(text.iter().any(|l| l.contains("$12.00")));
-        assert!(!text.iter().any(|l| l.contains("indisponible")));
+        assert!(!text.iter().any(|l| l.contains("unavailable")));
     }
 
     #[test]
@@ -857,7 +853,7 @@ mod tests {
         let text = plain_lines(&lines);
         let gauge_line = text
             .iter()
-            .find(|l| l.contains("budget 5 h"))
+            .find(|l| l.contains("budget 5h"))
             .expect("budget line present");
         assert!(gauge_line.contains("43 %"));
         assert!(gauge_line.contains("34\u{202f}242 / 80\u{202f}000 tokens"));
@@ -876,7 +872,7 @@ mod tests {
         let text = plain_lines(&lines);
         assert!(text
             .iter()
-            .any(|l| l.contains("budget 7 j") && l.contains("indisponible")));
+            .any(|l| l.contains("budget 7d") && l.contains("unavailable")));
     }
 
     #[test]
@@ -899,7 +895,7 @@ mod tests {
         let line = condense_line(&totals).expect("line present");
         assert_eq!(
             plain_text(&line),
-            "condensé : 3 résultats · ~1\u{202f}000 tok d'historique non envoyés (cumul, est.)"
+            "condensed: 3 results · ~1\u{202f}000 tok of history not sent (cumulative, est.)"
         );
     }
 
@@ -928,24 +924,24 @@ mod tests {
         assert_eq!(text[1], "");
         assert_eq!(
             text[2],
-            " [███░░░░░░░░░░░░░░░░░░░░░░░░░░░] 20\u{202f}100 / 200\u{202f}000 (10 %) · auto-compact à 120\u{202f}000 (60 %)"
+            " [███░░░░░░░░░░░░░░░░░░░░░░░░░░░] 20\u{202f}100 / 200\u{202f}000 (10 %) · auto-compact at 120\u{202f}000 (60 %)"
         );
         assert_eq!(text[3], "");
-        assert_eq!(text[4], " système       4\u{202f}200   2 %  [░░░░░░░░░░]");
+        assert_eq!(text[4], " system        4\u{202f}200   2 %  [░░░░░░░░░░]");
         assert_eq!(text[5], " hints         1\u{202f}100   1 %  [░░░░░░░░░░]");
         assert_eq!(text[6], " skills            —");
-        assert_eq!(text[7], " outils        3\u{202f}300   2 %  [░░░░░░░░░░]");
+        assert_eq!(text[7], " tools         3\u{202f}300   2 %  [░░░░░░░░░░]");
         assert_eq!(text[8], " mcp           2\u{202f}500   1 %  [░░░░░░░░░░]");
-        assert_eq!(text[9], " mémoire           —");
+        assert_eq!(text[9], " memory            —");
         assert_eq!(text[10], " messages      9\u{202f}000   5 %  [░░░░░░░░░░]");
-        assert_eq!(text[11], " libre       179\u{202f}900");
+        assert_eq!(text[11], " free        179\u{202f}900");
         assert_eq!(
             text[12],
-            "dernier total rapporté par le provider : 18\u{202f}742"
+            "last total reported by the provider: 18\u{202f}742"
         );
         assert_eq!(
             text[13],
-            "estimation tokenizer o200k — les chiffres exacts sont ceux du provider"
+            "o200k tokenizer estimate — exact figures come from the provider"
         );
         assert_eq!(text.len(), 14);
     }
@@ -962,7 +958,7 @@ mod tests {
 
         assert_eq!(
             text[2],
-            " [███░░░░░░░░░░░░░░░░░░░░░░░░░░░] 20\u{202f}100 / 200\u{202f}000 (10 %) · auto-compact désactivé"
+            " [███░░░░░░░░░░░░░░░░░░░░░░░░░░░] 20\u{202f}100 / 200\u{202f}000 (10 %) · auto-compact off"
         );
     }
 
@@ -971,8 +967,8 @@ mod tests {
         let mut breakdown = fixture_breakdown();
         breakdown.last_reported = None;
         let text = plain_lines(&context_table_lines(&breakdown, "ollama", "qwen"));
-        assert!(!text.iter().any(|l| l.contains("dernier total")));
-        assert!(text.last().unwrap().starts_with("estimation tokenizer"));
+        assert!(!text.iter().any(|l| l.contains("last total")));
+        assert!(text.last().unwrap().starts_with("o200k tokenizer estimate"));
     }
 
     #[test]
@@ -1073,11 +1069,11 @@ mod tests {
     #[test]
     fn cost_view_parses_the_six_named_views_and_rejects_the_rest() {
         assert_eq!(CostView::parse(""), Some(CostView::Windows));
-        assert_eq!(CostView::parse("modèles"), Some(CostView::Models));
         assert_eq!(CostView::parse("models"), Some(CostView::Models));
-        assert_eq!(CostView::parse("jour"), Some(CostView::Day));
-        assert_eq!(CostView::parse("Semaine"), Some(CostView::Week));
-        assert_eq!(CostView::parse("mois"), Some(CostView::Month));
+        assert_eq!(CostView::parse("models"), Some(CostView::Models));
+        assert_eq!(CostView::parse("day"), Some(CostView::Day));
+        assert_eq!(CostView::parse("Week"), Some(CostView::Week));
+        assert_eq!(CostView::parse("month"), Some(CostView::Month));
         assert_eq!(CostView::parse("cache"), Some(CostView::Cache));
         assert_eq!(CostView::parse("proj"), Some(CostView::Projection));
         assert_eq!(CostView::parse("bidule"), None);
@@ -1098,8 +1094,8 @@ mod tests {
     fn metrics_table_lines_render_one_row_per_key_plus_totals() {
         let lines = metrics_table_lines(CostView::Month, &fixture_report(MetricsWindow::Month));
         let text = plain_lines(&lines);
-        assert_eq!(text[0], "/cost mois — par modèle");
-        assert!(text[2].contains("↑ entrée"), "en-tête : {}", text[2]);
+        assert_eq!(text[0], "/cost month — by model");
+        assert!(text[2].contains("↑ input"), "en-tête : {}", text[2]);
         assert!(text[4].contains("claude-sonnet") && text[4].contains("$1.50"));
         assert!(text[5].contains("claude-haiku"));
         assert!(
@@ -1114,7 +1110,7 @@ mod tests {
         let mut report = fixture_report(MetricsWindow::Day);
         report.rows.clear();
         let text = plain_lines(&metrics_table_lines(CostView::Day, &report));
-        assert_eq!(text[2], "aucune consommation sur la fenêtre");
+        assert_eq!(text[2], "no usage in this window");
     }
 
     #[test]
@@ -1123,12 +1119,12 @@ mod tests {
             CostView::Cache,
             &fixture_report(MetricsWindow::Month),
         ));
-        assert!(text[0].starts_with("/cost cache — mois"));
+        assert!(text[0].starts_with("/cost cache — month"));
         assert!(text[2].contains("hit"), "colonnes cache : {}", text[2]);
         // 4 000 lus sur 10 000 d'entrée.
         assert!(text[4].contains("40 %"), "taux de hit : {}", text[4]);
         assert!(
-            text.last().unwrap().contains("sans cache : $2.10"),
+            text.last().unwrap().contains("without cache: $2.10"),
             "pied de page : {:?}",
             text.last()
         );
@@ -1144,7 +1140,7 @@ mod tests {
         let text = plain_lines(&metrics_table_lines(CostView::Cache, &report));
         assert_eq!(
             text.last().unwrap(),
-            "économie chiffrable seulement pour les modèles tarifés"
+            "savings are only measurable for priced models"
         );
     }
 
@@ -1163,8 +1159,8 @@ mod tests {
     #[test]
     fn projection_view_lists_burn_then_the_month_end_estimate() {
         let text = plain_lines(&projection_lines(&fixture_burn(vec![2.0; 10], Vec::new())));
-        assert_eq!(text[0], "/cost projection — mois en cours");
-        assert!(text.iter().any(|l| l.contains("mois (J10/30)")));
+        assert_eq!(text[0], "/cost projection — current month");
+        assert!(text.iter().any(|l| l.contains("month (D10/30)")));
         assert!(
             text.iter().any(|l| l.contains("$60.00")),
             "projection : {text:?}"
@@ -1207,9 +1203,9 @@ mod tests {
         ];
         let text = plain_lines(&budget_warning_lines(&statuses));
         assert_eq!(text.len(), 3, "le budget à 10 % ne dit rien : {text:?}");
-        assert!(text[0].contains("half") && text[0].contains("50 % franchi"));
-        assert!(text[1].contains("high") && text[1].contains("80 % franchi"));
-        assert!(text[2].contains("over") && text[2].contains("100 % franchi"));
+        assert!(text[0].contains("half") && text[0].contains("50 % crossed"));
+        assert!(text[1].contains("high") && text[1].contains("80 % crossed"));
+        assert!(text[2].contains("over") && text[2].contains("100 % crossed"));
     }
 
     #[test]
@@ -1218,7 +1214,7 @@ mod tests {
             vec!["a".to_string(), "1".to_string()],
             vec!["longue".to_string(), "22".to_string()],
         ];
-        let lines = render_table(&["clé", "n"], &rows, &[false, true]);
+        let lines = render_table(&["key", "n"], &rows, &[false, true]);
         assert_eq!(lines.len(), 4, "en-tête, filet, 2 lignes");
         assert!(lines[1].contains('─'));
         assert!(lines[2].starts_with(" a      "), "padding : {:?}", lines[2]);

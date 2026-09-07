@@ -7836,8 +7836,8 @@ mod tests {
     #[test]
     fn slash_cost_with_a_view_carries_it_in_the_action() {
         for (typed, expected) in [
-            ("/cost modèles", report::CostView::Models),
-            ("/cost mois", report::CostView::Month),
+            ("/cost models", report::CostView::Models),
+            ("/cost month", report::CostView::Month),
             ("/cost cache", report::CostView::Cache),
             ("/cost projection", report::CostView::Projection),
         ] {
@@ -7863,7 +7863,7 @@ mod tests {
         assert!(
             app.chat
                 .last()
-                .is_some_and(|line| line.text.contains("usage : /cost")),
+                .is_some_and(|line| line.text.contains("usage: /cost")),
             "dernière ligne : {:?}",
             app.chat.last().map(|l| &l.text)
         );
