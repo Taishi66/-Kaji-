@@ -463,7 +463,7 @@ async fn assert_missing_tool_result_is_refused(state_machine: Option<&str>) -> R
     let replayed = replay_turn(&agent, &session_id, &fixture).await?;
 
     assert!(
-        replayed.contains(TOOL_REQUEST_ID) && replayed.contains("tool_result absent"),
+        replayed.contains(TOOL_REQUEST_ID) && replayed.contains("tool_result missing"),
         "{label}: the missing key is named, not worked around: {replayed}"
     );
     assert!(
