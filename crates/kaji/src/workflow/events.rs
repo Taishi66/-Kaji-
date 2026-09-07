@@ -289,7 +289,7 @@ impl WorkflowRecorder {
             .mark_not_replayable(&self.session_id)
             .await
         {
-            warn!(%error, session_id = %self.session_id, "workflow: mark_not_replayable a aussi échoué");
+            warn!(%error, session_id = %self.session_id, "workflow: mark_not_replayable also failed");
         }
     }
 

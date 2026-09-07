@@ -103,9 +103,9 @@ impl WebClient {
 
     fn tools() -> Vec<Tool> {
         let search_schema = serde_json::to_value(schema_for!(WebSearchParams))
-            .expect("le schéma de web_search est sérialisable");
+            .expect("the web_search schema is serializable");
         let fetch_schema = serde_json::to_value(schema_for!(WebFetchParams))
-            .expect("le schéma de web_fetch est sérialisable");
+            .expect("the web_fetch schema is serializable");
 
         // Ni l'un ni l'autre n'est annoté en lecture seule : les deux sortent de
         // la machine et ne doivent donc pas être auto-approuvés. L'annotation ne
@@ -130,7 +130,7 @@ impl WebClient {
                 ),
                 search_schema
                     .as_object()
-                    .expect("un schéma JSON est un objet")
+                    .expect("a JSON schema is an object")
                     .clone(),
             )
             .annotate(annotations("Web search")),
@@ -144,7 +144,7 @@ impl WebClient {
                 .to_string(),
                 fetch_schema
                     .as_object()
-                    .expect("un schéma JSON est un objet")
+                    .expect("a JSON schema is an object")
                     .clone(),
             )
             .annotate(annotations("Web fetch")),

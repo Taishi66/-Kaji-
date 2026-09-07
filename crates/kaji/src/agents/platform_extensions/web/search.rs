@@ -57,7 +57,7 @@ fn client() -> reqwest::Client {
             .redirect(reqwest::redirect::Policy::none())
             .timeout(BACKEND_TIMEOUT)
             .build()
-            .expect("le client de recherche se construit sans TLS ni proxy à découvrir")
+            .expect("the search client builds without TLS or proxy discovery")
     });
     CLIENT.clone()
 }

@@ -528,7 +528,7 @@ pub fn launch_label(launch: &Launch, editor: &Editor) -> String {
     match launch {
         Launch::Suspend(_) => "suspend".to_string(),
         Launch::Detached(_) => editor.program_name().to_string(),
-        Launch::Remote { .. } => "nvim hôte".to_string(),
+        Launch::Remote { .. } => "host nvim".to_string(),
         Launch::Pane(argv) => match argv.first().map(String::as_str) {
             Some("zellij") => "pane zellij".to_string(),
             _ => "pane tmux".to_string(),
@@ -1030,7 +1030,7 @@ mod tests {
                 },
                 &vim
             ),
-            "nvim hôte"
+            "host nvim"
         );
         assert_eq!(launch_label(&Launch::Detached(vec![]), &code), "code");
         assert_eq!(

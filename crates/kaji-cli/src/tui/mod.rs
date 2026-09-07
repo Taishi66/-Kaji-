@@ -375,7 +375,7 @@ async fn cost_report(
             }
         }
         _ => {
-            let window = view.window().expect("les vues tabulaires ont une fenêtre");
+            let window = view.window().expect("tabular views have a window");
             kaji::metrics::report(
                 session_manager,
                 window,
