@@ -9722,7 +9722,7 @@ mod tests {
         );
         assert_eq!(
             missioncontrol::board(&app).columns[1].state,
-            "pause requested",
+            "‖ paused",
             "la vue dit qu'une pause attend son point d'arrêt"
         );
     }

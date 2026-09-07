@@ -342,6 +342,20 @@ pub fn dim() -> Style {
     Style::default().fg(active().muted)
 }
 
+/// Ce qui a abouti — le vert de la palette, seule teinte qui ne demande rien et
+/// ne s'éteint pas. Rôle distinct de [`text`] : un `✓ done` doit se lire comme
+/// un verdict, pas comme du texte courant.
+pub fn success() -> Style {
+    Style::default().fg(active().chart_alt)
+}
+
+/// Ce qui attend une main humaine — l'or, entre le calme du texte et l'urgence
+/// de l'accent. Rôle distinct de [`gold`] et de [`title`] : ni titre ni jauge,
+/// une alerte qui ne saigne pas.
+pub fn warning() -> Style {
+    Style::default().fg(active().gold)
+}
+
 pub fn border_inactive() -> Style {
     Style::default().fg(active().border_inactive)
 }
