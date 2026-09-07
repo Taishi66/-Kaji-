@@ -532,7 +532,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(theme::border_active())
         .title(Span::styled(
-            header_title(&board, area.width),
+            header_title(&board, app.mission.stage, area.width),
             theme::title(),
         ))
         .title_top(Line::from(Span::styled(header_summary(&board), theme::dim())).right_aligned())
@@ -634,14 +634,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 /// Le titre de gauche : le nom du workflow et, quand des stages sortent du
-/// champ, combien. Sans ce compteur une vue étroite ferait croire que le
-/// workflow n'a que les cartes visibles.
-pub fn header_title(board: &Board, width: u16) -> String {
+/// champ, combien de chaque côté. Le curseur vient de l'appelant : c'est lui
+/// qui fait glisser la fenêtre de cartes, et un compteur qui l'ignorerait
+/// annoncerait « devant » des stages déjà passés.
+pub fn header_title(board: &Board, selected: usize, width: u16) -> String {
     format!(
         " {} mission-control · {}{} ",
         theme::FORGE_GLYPH,
         board.title,
-        hidden_marker(board, 0, width)
+        hidden_marker(board, selected, width)
     )
 }
 
@@ -2304,6 +2305,35 @@ mod tests {
         assert!(hidden_marker(&board, 0, 80).ends_with('›'));
         assert!(hidden_marker(&board, 5, 80).contains('‹'));
         assert_eq!(hidden_marker(&board, 0, 400), "");
+    }
+
+    /// Le compteur passe par `header_title`, le seul appelant de production :
+    /// testé sur `hidden_marker` seul, le `‹N` certifiait un chemin que la vue
+    /// n'atteignait jamais — le curseur y était câblé à 0, et un plateau
+    /// défilé jusqu'au bout annonçait encore des stages « devant ».
+    #[test]
+    fn the_header_counter_follows_the_cursor_it_is_given() {
+        let _theme = theme::test_guard();
+        let mut app = app_with(workflow(
+            (0..6)
+                .map(|rank| {
+                    stage(
+                        &format!("stage-{rank}"),
+                        StageState::Running,
+                        vec![agent(&format!("agent-{rank}"), AgentState::Running)],
+                    )
+                })
+                .collect(),
+        ));
+        let board = board(&app);
+
+        assert!(header_title(&board, 0, 100).ends_with("4› "));
+
+        app.mission.stage = 5;
+        let content = rendered(&app, 100, 30);
+        let header = content.lines().next().expect("une ligne d'en-tête");
+        assert!(header.contains("‹4"), "curseur en queue : {header}");
+        assert!(!header.contains('›'), "plus rien devant : {header}");
     }
 
     #[test]
