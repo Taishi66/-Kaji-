@@ -2370,8 +2370,13 @@ impl App {
     /// `f` depuis le volet forge, ou `/forge full` : la même forge, en plein
     /// écran. La vue s'ouvre même vide — `/forge full` ne doit jamais être un
     /// non-événement silencieux, et le plateau sait dire qu'il n'a rien.
+    ///
+    /// La notice meurt aussi à l'ouverture : un run qui se termine pendant que
+    /// la vue est fermée pose quand même sa ligne, et la réouverture la
+    /// rendrait en REVERSED comme si elle décrivait l'instant présent.
     pub fn open_mission_control(&mut self) {
         self.mission.open = true;
+        self.mission.notice = None;
         self.clamp_mission_selection();
     }
 
@@ -9895,6 +9900,30 @@ mod tests {
         app.push_mission_notice("stage \"deploie\" paused");
         app.close_mission_control();
         assert!(app.mission.notice.is_none());
+    }
+
+    /// Un workflow qui se termine minutes après la fermeture de la vue posait
+    /// quand même sa ligne dans `mission.notice`. Rien ne l'effaçait : le
+    /// prochain `f` ouvrait sur une réponse périmée, rendue dans le style le
+    /// plus fort de la vue.
+    #[test]
+    fn a_notice_pushed_on_a_closed_view_never_comes_back_as_a_banner() {
+        let mut app = App::new(None);
+        app.open_mission_control();
+        app.close_mission_control();
+
+        app.push_mission_notice("workflow \"demo\" done");
+        assert_eq!(
+            app.chat.last().expect("une ligne système").text,
+            "workflow \"demo\" done",
+            "la trace reste au chat, c'est la bannière qui périme"
+        );
+
+        app.open_mission_control();
+        assert!(
+            app.mission.notice.is_none(),
+            "la vue rouvre sur l'état courant, pas sur une réponse d'il y a dix minutes"
+        );
     }
 
     /// m3 : un nom de stage venu de la spec peut porter un `\n`, que

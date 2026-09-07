@@ -1603,9 +1603,14 @@ async fn event_loop(
             finished = async { (&mut workflow.as_mut().expect("workflow armed").run).await }, if workflow.is_some() => {
                 workflow = None;
                 match finished {
+                    // Le snapshot d'abord : son `clamp_mission_selection`
+                    // efface la notice dès que le curseur bouge, et le verdict
+                    // poussé avant lui se ferait avaler par le plateau qu'il
+                    // annonce.
                     Ok(Ok(state)) => {
-                        app.push_mission_notice(&workflow_outcome_line(&state));
+                        let outcome = workflow_outcome_line(&state);
                         app.apply_workflow_snapshot(Some(state));
+                        app.push_mission_notice(&outcome);
                     }
                     Ok(Err(error)) => {
                         app.push_mission_notice(&workflow_failure_line(&format!("{error:#}")))
