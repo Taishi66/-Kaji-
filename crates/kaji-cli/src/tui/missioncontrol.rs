@@ -341,8 +341,14 @@ pub fn board(app: &App) -> Board {
 /// L'état affiché d'un stage. Une pause posée sur un stage pas encore démarré
 /// ne se lit nulle part dans son `StageState` : sans cette ligne, la vue
 /// afficherait « pending » d'un stage que plus rien ne fera partir.
+///
+/// `Waiting` fait exception et l'emporte : une porte ouverte est le fait qui
+/// bloque le run, et c'est le seul état que la bannière et la touche `g`
+/// savent lire. Une pause acceptée sur un stage déjà à sa porte effaçait les
+/// deux — `g` restait la seule sortie, sans plus rien pour la nommer.
 fn stage_mark(stage: &kaji::workflow::StageStatus, paused: &HashSet<String>) -> CardMark {
     if stage.state != StageState::Paused
+        && stage.state != StageState::Waiting
         && !stage.state.is_terminal()
         && paused.contains(&stage.name)
     {
@@ -2251,6 +2257,30 @@ mod tests {
             header_summary(&board(&app)).is_empty(),
             "une session au repos n'annonce pas « ○ pending · 0 tasks »"
         );
+    }
+
+    /// Une pause posée sur un stage déjà à sa porte ne doit pas effacer la
+    /// porte : la bannière et la touche `g` sont le seul chemin qui débloque
+    /// le run, et `g` continuait de marcher — invisible.
+    #[test]
+    fn a_pause_on_a_gated_stage_never_hides_the_gate() {
+        let _theme = theme::test_guard();
+        let gated = stage(
+            "validation",
+            StageState::Waiting,
+            vec![agent("verdict", AgentState::Pending)],
+        );
+        let paused = HashSet::from(["validation".to_string()]);
+
+        assert_eq!(stage_mark(&gated, &paused), CardMark::Gate);
+
+        let mut app = app_with(workflow(vec![gated]));
+        app.mission.paused = paused;
+        let board = board(&app);
+
+        assert_eq!(board.waiting_gates(), vec!["validation"]);
+        assert!(banners(&board, None)[0].text.contains("is waiting"));
+        assert!(footer_keys(&board, 0, 0, 120).contains("g gate"));
     }
 
     #[test]
