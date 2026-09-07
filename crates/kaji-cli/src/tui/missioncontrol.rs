@@ -1298,6 +1298,10 @@ pub fn timeline_lines(board: &Board, width: usize, rows: usize) -> Vec<Line<'sta
                     / (longest as u128 * 2)) as usize)
                     .min(bar_cells)
             };
+            // Un stage qui court occupe au moins sa lame : sa première seconde
+            // arrondit à zéro cellule, et une barre toute vide se lirait comme
+            // la durée nulle que le tiret, lui, dit franchement.
+            let filled = filled.max(usize::from(column.mark == CardMark::Running));
             let blade = usize::from(column.mark == CardMark::Running && filled > 0);
             spans.push(Span::styled(
                 BAR_FULL.to_string().repeat(filled - blade),
@@ -2136,6 +2140,39 @@ mod tests {
             assert!(bar.contains("0s"), "{bar:?}");
         }
         assert!(lines[0].to_string().contains(BAR_FULL), "{:?}", lines[0]);
+    }
+
+    /// Un stage qui court porte sa lame dès la première seconde. `elapsed`
+    /// vient de `duration_ms / 1000` : un stage lancé à l'instant vaut 0 une
+    /// seconde entière, et un stage court à côté d'un stage long arrondit à
+    /// zéro cellule — la barre sortait toute vide, exactement la lecture de
+    /// « durée nulle mesurée » que le tiret existe pour éviter.
+    #[test]
+    fn a_running_stage_always_carries_its_blade() {
+        let _theme = theme::test_guard();
+        let board = Board {
+            title: "review".to_string(),
+            columns: vec![
+                column("long", CardMark::Done, vec![card("a", CardMark::Done, 300)]),
+                column(
+                    "fresh",
+                    CardMark::Running,
+                    vec![card("b", CardMark::Running, 0)],
+                ),
+            ],
+        };
+
+        let bar = timeline_lines(&board, 100, 5)[1].to_string();
+
+        assert!(bar.contains("fresh"), "{bar:?}");
+        assert!(
+            !bar.contains('─'),
+            "un stage qui court n'est pas un tiret : {bar:?}"
+        );
+        assert!(
+            bar.contains(theme::blade_frame(std::time::Duration::from_secs(0))),
+            "la lame manque : {bar:?}"
+        );
     }
 
     #[test]
