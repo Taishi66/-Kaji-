@@ -668,6 +668,13 @@ fn char_boundary(text: &str, index: usize) -> usize {
         .map_or(text.len(), |(at, _)| at)
 }
 
+/// Tête de `text` jusqu'à l'octet `at`. `get` plutôt qu'un slice indexé : le
+/// lint `string_slice` interdit d'indexer une chaîne, et un décalage tombé
+/// hors frontière rend la chaîne entière au lieu de paniquer.
+fn head_to(text: &str, at: usize) -> &str {
+    text.get(..at).unwrap_or(text)
+}
+
 /// Stable vocabulary for the `goal_end` event payload — the labels the UI
 /// shows are French and free to change, an event log's is not.
 fn outcome_token(outcome: GoalOutcome) -> &'static str {
@@ -714,6 +721,11 @@ pub struct App {
     /// the event loop, empty everywhere else (tests, `App::new`).
     pub model: String,
     pub input: String,
+    /// Position du caret dans `input`, en chars depuis le début. Tout chemin
+    /// qui touche `input` la repositionne explicitement — un caret laissé
+    /// derrière insérerait au milieu du prompt suivant. Écrire `input`
+    /// directement casse l'invariant : passer par [`App::set_input`].
+    pub input_cursor: usize,
     pub chat: Vec<ChatLine>,
     pub status: String,
     pub turn_active: bool,
@@ -965,6 +977,7 @@ impl App {
             header: String::new(),
             model: String::new(),
             input: String::new(),
+            input_cursor: 0,
             chat: Vec::new(),
             status: String::new(),
             turn_active: false,
@@ -1432,8 +1445,7 @@ impl App {
     /// runs on its own task.
     fn update_mention_matches(&mut self) {
         self.reset_mention_state();
-        let Some(fragment) = crate::tui::mentions::active_fragment(&self.input).map(str::to_string)
-        else {
+        let Some(fragment) = self.active_mention_fragment().map(str::to_string) else {
             return;
         };
         if let Some(listing) =
@@ -1448,6 +1460,14 @@ impl App {
         if let Some(index) = &self.mention_index {
             self.mention_matches = index.complete(&fragment);
         }
+    }
+
+    /// Le fragment `@` que la complétion vise : celui qui finit AU caret, pas
+    /// en fin de ligne. Avec le caret au bout — le cas courant — c'est le
+    /// même token qu'avant ; au milieu d'une ligne, la complétion suit
+    /// l'édition en cours au lieu de réécrire la queue.
+    fn active_mention_fragment(&self) -> Option<&str> {
+        crate::tui::mentions::active_fragment(head_to(&self.input, self.input_cursor_byte()))
     }
 
     /// Clears everything the dropdown derives from the live fragment. Single
@@ -1514,7 +1534,7 @@ impl App {
             && self.mention_matches.is_empty()
             && !self.mention_suppressed
             && !self.modal_active()
-            && crate::tui::mentions::active_fragment(&self.input).is_some()
+            && self.active_mention_fragment().is_some()
     }
 
     /// Tab/Enter on the dropdown: replaces the active `@` fragment with the
@@ -1531,12 +1551,13 @@ impl App {
         else {
             return;
         };
-        let fragment_len = crate::tui::mentions::active_fragment(&self.input)
-            .map(str::len)
-            .unwrap_or(0);
-        let keep = self.input.len() - fragment_len;
-        self.input.truncate(keep);
-        self.input.push_str(&completion);
+        let fragment_len = self.active_mention_fragment().map(str::len).unwrap_or(0);
+        let at = self.input_cursor_byte();
+        let keep = at - fragment_len;
+        self.input.replace_range(keep..at, &completion);
+        self.input_cursor = head_to(&self.input, keep + completion.len())
+            .chars()
+            .count();
         self.update_mention_matches();
     }
 
@@ -2737,12 +2758,13 @@ impl App {
     pub fn attach_mention(&mut self, path: &str) {
         self.exit_history_navigation();
         self.reset_palette_selection();
-        if !self.input.is_empty() && !self.input.ends_with(char::is_whitespace) {
-            self.input.push(' ');
-        }
-        self.input.push('@');
-        self.input.push_str(path);
-        self.input.push(' ');
+        let head = head_to(&self.input, self.input_cursor_byte());
+        let separator = if head.is_empty() || head.ends_with(char::is_whitespace) {
+            ""
+        } else {
+            " "
+        };
+        self.input_insert(&format!("{separator}@{path} "));
         self.reset_mention_state();
     }
 
@@ -2758,10 +2780,9 @@ impl App {
         self.reset_palette_selection();
         let trimmed = flattened.trim();
         if self.pasted_path_exists(trimmed) {
-            self.input.push('@');
-            self.input.push_str(trimmed);
+            self.input_insert(&format!("@{trimmed}"));
         } else {
-            self.input.push_str(&flattened);
+            self.input_insert(&flattened);
         }
         // A pasted path is already complete — opening the dropdown on it
         // would only put a redundant match over the composer.
@@ -2835,32 +2856,97 @@ impl App {
         self.chat_overflow.get()
     }
 
-    pub fn input_cursor_chars(&self) -> u16 {
-        self.input.chars().count() as u16
+    /// Remplace le brouillon et pose le caret à sa fin — le point de passage
+    /// unique pour tout ce qui écrit `input` d'un bloc (rappel d'historique,
+    /// palette, suggestion, tests).
+    pub fn set_input(&mut self, text: impl Into<String>) {
+        self.input = text.into();
+        self.input_cursor = self.input.chars().count();
+    }
+
+    fn clear_input(&mut self) {
+        self.input.clear();
+        self.input_cursor = 0;
+    }
+
+    fn take_input(&mut self) -> String {
+        self.input_cursor = 0;
+        std::mem::take(&mut self.input)
+    }
+
+    /// Décalage en octets du caret — `String::insert_str`/`remove` les
+    /// exigent, et un char multi-octets rend l'index char inutilisable tel
+    /// quel.
+    fn input_cursor_byte(&self) -> usize {
+        char_boundary(&self.input, self.input_cursor)
+    }
+
+    fn input_insert(&mut self, text: &str) {
+        let at = self.input_cursor_byte();
+        self.input.insert_str(at, text);
+        self.input_cursor += text.chars().count();
+    }
+
+    fn input_backspace(&mut self) {
+        let Some(previous) = self.input_cursor.checked_sub(1) else {
+            return;
+        };
+        let at = char_boundary(&self.input, previous);
+        self.input.remove(at);
+        self.input_cursor = previous;
+    }
+
+    fn input_delete(&mut self) {
+        if self.input_cursor >= self.input.chars().count() {
+            return;
+        }
+        let at = self.input_cursor_byte();
+        self.input.remove(at);
+    }
+
+    fn input_cursor_left(&mut self) {
+        self.input_cursor = self.input_cursor.saturating_sub(1);
+    }
+
+    fn input_cursor_right(&mut self) {
+        self.input_cursor = (self.input_cursor + 1).min(self.input.chars().count());
+    }
+
+    fn input_cursor_home(&mut self) {
+        self.input_cursor = 0;
+    }
+
+    fn input_cursor_end(&mut self) {
+        self.input_cursor = self.input.chars().count();
+    }
+
+    /// Colonne du caret, en cellules du terminal : un idéogramme ou un emoji
+    /// en occupe deux, et compter les chars ferait dériver le curseur dessiné
+    /// du texte réellement affiché.
+    pub fn input_cursor_cells(&self) -> u16 {
+        let at = self.input_cursor_byte();
+        crate::tui::gitstatus::display_width(head_to(&self.input, at)) as u16
     }
 
     /// `.wrap()` et `scroll.x` sont mutuellement exclusifs sur `Paragraph`
     /// dans ratatui 0.30 (la branche wrap ignore `scroll.x`) — ne pas
     /// ajouter `.wrap()` au Paragraph de l'input sans retirer ce scroll.
     pub fn input_scroll_x(&self, visible_width: u16) -> u16 {
-        self.input_cursor_chars()
+        self.input_cursor_cells()
             .saturating_sub(visible_width.saturating_sub(1))
     }
 
     pub fn delete_last_word(&mut self) {
         self.exit_history_navigation();
         self.reset_palette_selection();
-        let trimmed_len = self.input.trim_end().len();
-        self.input.truncate(trimmed_len);
-        match self
-            .input
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace())
-        {
-            Some((pos, c)) => self.input.truncate(pos + c.len_utf8()),
-            None => self.input.clear(),
-        }
+        let at = self.input_cursor_byte();
+        let head = head_to(&self.input, at).trim_end();
+        let start = match head.char_indices().rev().find(|(_, c)| c.is_whitespace()) {
+            Some((pos, c)) => pos + c.len_utf8(),
+            None => 0,
+        };
+        self.input.replace_range(start..at, "");
+        self.input_cursor = head_to(&self.input, start).chars().count();
     }
 
     pub fn scroll_page_up(&mut self) {
@@ -2964,8 +3050,8 @@ impl App {
                 None => return,
             },
         };
-        if let Some(text) = self.prompt_history.get(next_idx) {
-            self.input = text.clone();
+        if let Some(text) = self.prompt_history.get(next_idx).cloned() {
+            self.set_input(text);
             self.history_index = Some(next_idx);
             self.reset_palette_selection();
         }
@@ -2981,10 +3067,11 @@ impl App {
         self.reset_palette_selection();
         if idx + 1 < self.prompt_history.len() {
             self.history_index = Some(idx + 1);
-            self.input = self.prompt_history[idx + 1].clone();
+            let text = self.prompt_history[idx + 1].clone();
+            self.set_input(text);
         } else {
             self.history_index = None;
-            self.input.clear();
+            self.clear_input();
         }
     }
 
@@ -3071,7 +3158,7 @@ impl App {
     /// edit) and clears the ghost. No-op when there is nothing to accept.
     pub fn accept_suggestion(&mut self) {
         if let Some(text) = self.suggestion.take() {
-            self.input = text;
+            self.set_input(text);
             self.history_index = None;
             self.reset_palette_selection();
             self.update_mention_matches();
@@ -3355,6 +3442,18 @@ impl App {
                 }
                 return Action::None;
             }
+            // Un brouillon en cours réclame Home/End pour son caret : c'est
+            // la ligne qu'on est en train d'écrire, pas le chat, qu'on veut
+            // rejoindre. Composer vide (ou modale ouverte), elles retournent
+            // au défilement du chat, où elles n'ont pas d'autre emploi.
+            KeyCode::Home if !modal_active && !self.input.is_empty() => {
+                self.input_cursor_home();
+                return Action::None;
+            }
+            KeyCode::End if !modal_active && !self.input.is_empty() => {
+                self.input_cursor_end();
+                return Action::None;
+            }
             KeyCode::Home => {
                 self.scroll_home();
                 return Action::None;
@@ -3515,17 +3614,42 @@ impl App {
             KeyCode::BackTab if !self.palette_visible() && !self.mention_dropdown_visible() => {
                 Action::Mode(self.cycle_kaji_mode())
             }
+            // Ctrl+A rejoint le début de la ligne. Pas de Ctrl+E symétrique :
+            // l'accord appartient déjà au volet explorateur, et la touche End
+            // couvre le besoin.
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input_cursor_home();
+                Action::None
+            }
+            // Le caret du composer : ←/→ n'étaient câblés nulle part ici, une
+            // faute de frappe ne se corrigeait donc que par la fin de la ligne.
+            // Le lecteur et l'arbre ont déjà rendu leur verdict plus haut.
+            KeyCode::Left => {
+                self.input_cursor_left();
+                Action::None
+            }
+            KeyCode::Right => {
+                self.input_cursor_right();
+                Action::None
+            }
             KeyCode::Char(c) => {
                 self.exit_history_navigation();
                 self.reset_palette_selection();
-                self.input.push(c);
+                self.input_insert(c.encode_utf8(&mut [0u8; 4]));
                 self.update_mention_matches();
                 Action::None
             }
             KeyCode::Backspace => {
                 self.exit_history_navigation();
                 self.reset_palette_selection();
-                self.input.pop();
+                self.input_backspace();
+                self.update_mention_matches();
+                Action::None
+            }
+            KeyCode::Delete => {
+                self.exit_history_navigation();
+                self.reset_palette_selection();
+                self.input_delete();
                 self.update_mention_matches();
                 Action::None
             }
@@ -3540,7 +3664,7 @@ impl App {
             KeyCode::Tab if self.palette_visible() => {
                 let matches = self.palette_matches();
                 let name = matches[self.palette_selected.min(matches.len() - 1)].name;
-                self.input = name.to_string();
+                self.set_input(name);
                 self.exit_history_navigation();
                 self.reset_palette_selection();
                 self.update_mention_matches();
@@ -3554,7 +3678,7 @@ impl App {
                 Action::None
             }
             KeyCode::Esc if self.palette_visible() => {
-                self.input.clear();
+                self.clear_input();
                 self.reset_palette_selection();
                 self.update_mention_matches();
                 Action::None
@@ -3598,7 +3722,7 @@ impl App {
                     && edit_command_arg(self.input.trim()).is_none() =>
             {
                 let text = self.input.trim().to_string();
-                self.input.clear();
+                self.clear_input();
                 self.reset_mention_state();
                 if text.is_empty() {
                     Action::None
@@ -3625,13 +3749,13 @@ impl App {
                 if self.palette_visible() {
                     let matches = self.palette_matches();
                     let cmd = matches[self.palette_selected.min(matches.len() - 1)];
-                    self.input.clear();
+                    self.clear_input();
                     self.reset_palette_selection();
                     self.reset_mention_state();
                     self.push_history(cmd.name);
                     return cmd.run(self);
                 }
-                let text = std::mem::take(&mut self.input);
+                let text = self.take_input();
                 self.reset_mention_state();
                 let text = text.trim().to_string();
                 if text.is_empty() {
@@ -4299,7 +4423,7 @@ mod tests {
     #[test]
     fn ctrl_backspace_deletes_previous_word() {
         let mut app = App::new(None);
-        app.input = "hello world  ".to_string();
+        app.set_input("hello world  ");
         let ctrl_backspace = Event::Key(KeyEvent {
             code: KeyCode::Backspace,
             modifiers: KeyModifiers::CONTROL,
@@ -4328,14 +4452,135 @@ mod tests {
         });
 
         let mut app_alt = App::new(None);
-        app_alt.input = "hello world  ".to_string();
+        app_alt.set_input("hello world  ");
         app_alt.on_event(&alt_backspace);
         assert_eq!(app_alt.input, "hello ");
 
         let mut app_ctrl_w = App::new(None);
-        app_ctrl_w.input = "hello world  ".to_string();
+        app_ctrl_w.set_input("hello world  ");
         app_ctrl_w.on_event(&ctrl_w);
         assert_eq!(app_ctrl_w.input, "hello ");
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+    }
+
+    /// Le bug signalé : `/workflow flox.yaml` ne se corrigeait pas, faute de
+    /// caret — ←/← puis la frappe insère là où le caret est, pas en fin.
+    #[test]
+    fn left_arrow_walks_back_and_typing_inserts_at_the_caret() {
+        let mut app = App::new(None);
+        type_text(&mut app, "/workflow flox.yaml");
+        for _ in 0..".yaml".chars().count() {
+            app.on_event(&key(KeyCode::Left));
+        }
+        app.on_event(&key(KeyCode::Backspace));
+        type_text(&mut app, "w");
+        assert_eq!(app.input, "/workflow flow.yaml");
+        assert_eq!(app.input_cursor, "/workflow flow".chars().count());
+        // Delete mange le char SOUS le caret, Backspace celui d'avant.
+        app.on_event(&key(KeyCode::Delete));
+        assert_eq!(app.input, "/workflow flowyaml");
+    }
+
+    #[test]
+    fn right_arrow_walks_forward_and_both_clamp_at_the_edges() {
+        let mut app = App::new(None);
+        type_text(&mut app, "ab");
+        for _ in 0..5 {
+            app.on_event(&key(KeyCode::Left));
+        }
+        assert_eq!(app.input_cursor, 0);
+        app.on_event(&key(KeyCode::Backspace));
+        assert_eq!(app.input, "ab", "backspace au bord ne mange rien");
+        for _ in 0..5 {
+            app.on_event(&key(KeyCode::Right));
+        }
+        assert_eq!(app.input_cursor, 2);
+        app.on_event(&key(KeyCode::Delete));
+        assert_eq!(app.input, "ab", "delete au bord ne mange rien");
+    }
+
+    #[test]
+    fn home_and_end_move_the_caret_while_a_draft_is_being_typed() {
+        let mut app = App::new(None);
+        type_text(&mut app, "milieu");
+        app.on_event(&key(KeyCode::Home));
+        type_text(&mut app, "«");
+        app.on_event(&key(KeyCode::End));
+        type_text(&mut app, "»");
+        assert_eq!(app.input, "«milieu»");
+    }
+
+    /// Ctrl+E est déjà pris (volet explorateur) : seul Ctrl+A rejoint Home.
+    #[test]
+    fn ctrl_a_puts_the_caret_at_the_start_of_the_line() {
+        let mut app = App::new(None);
+        type_text(&mut app, "abc");
+        app.on_event(&ctrl_key(KeyCode::Char('a')));
+        assert_eq!(app.input_cursor, 0);
+        type_text(&mut app, "z");
+        assert_eq!(app.input, "zabc");
+    }
+
+    #[test]
+    fn ctrl_w_deletes_the_word_before_the_caret_not_the_last_one() {
+        let mut app = App::new(None);
+        type_text(&mut app, "alpha beta gamma");
+        for _ in 0.."gamma".chars().count() {
+            app.on_event(&key(KeyCode::Left));
+        }
+        app.on_event(&ctrl_key(KeyCode::Char('w')));
+        assert_eq!(app.input, "alpha gamma");
+        assert_eq!(app.input_cursor, "alpha ".chars().count());
+    }
+
+    #[test]
+    fn a_recalled_prompt_lands_with_the_caret_at_its_end() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+        app.push_history("bonjour");
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.input, "bonjour");
+        assert_eq!(app.input_cursor, 7);
+        type_text(&mut app, "!");
+        assert_eq!(app.input, "bonjour!");
+    }
+
+    #[test]
+    fn submitting_puts_the_caret_back_at_zero() {
+        let mut app = App::new(None);
+        type_text(&mut app, "hi");
+        app.on_event(&key(KeyCode::Enter));
+        assert_eq!(app.input_cursor, 0);
+        type_text(&mut app, "ok");
+        assert_eq!(app.input, "ok");
+    }
+
+    /// Le caret se compte en cellules pour l'affichage : un idéogramme en vaut
+    /// deux, sinon le curseur dessiné dérive du texte réellement à l'écran.
+    #[test]
+    fn input_cursor_cells_counts_terminal_cells_not_chars() {
+        let mut app = App::new(None);
+        type_text(&mut app, "鍛冶");
+        assert_eq!(app.input_cursor_cells(), 4);
+        app.on_event(&key(KeyCode::Left));
+        assert_eq!(app.input_cursor_cells(), 2);
+    }
+
+    /// Précédence : le composer prend ←/→, jamais au détriment du lecteur.
+    #[test]
+    fn the_caret_never_steals_the_readers_left_arrow() {
+        let (mut app, _dir) = app_with_open_explorer();
+        app.on_event(&key(KeyCode::Char('j')));
+        app.on_event(&key(KeyCode::Enter));
+        assert_eq!(app.focus, Focus::Viewer);
+        app.on_event(&key(KeyCode::Left));
+        assert_eq!(app.focus, Focus::Explorer);
+        assert!(app.input.is_empty());
     }
 
     #[test]
@@ -7030,30 +7275,30 @@ mod tests {
     #[test]
     fn input_scroll_x_is_zero_while_input_fits_the_visible_width() {
         let mut app = App::new(None);
-        app.input = "short".to_string();
+        app.set_input("short");
         assert_eq!(app.input_scroll_x(20), 0);
     }
 
     #[test]
     fn input_scroll_x_follows_cursor_once_input_overflows_the_visible_width() {
         let mut app = App::new(None);
-        app.input = "a".repeat(30);
+        app.set_input("a".repeat(30));
         assert_eq!(app.input_scroll_x(10), 21);
     }
 
     #[test]
     fn input_scroll_x_never_panics_on_zero_width_area() {
         let mut app = App::new(None);
-        app.input = "hello".to_string();
+        app.set_input("hello");
         assert_eq!(app.input_scroll_x(0), 5);
     }
 
     #[test]
-    fn input_cursor_chars_counts_unicode_scalars_not_bytes() {
+    fn input_cursor_cells_counts_cells_not_bytes() {
         let mut app = App::new(None);
-        app.input = "héllo".to_string();
-        assert_eq!(app.input_cursor_chars(), 5);
-        assert_ne!(app.input_cursor_chars() as usize, app.input.len());
+        app.set_input("héllo");
+        assert_eq!(app.input_cursor_cells(), 5);
+        assert_ne!(app.input_cursor_cells() as usize, app.input.len());
     }
 
     #[test]
@@ -8057,7 +8302,7 @@ mod tests {
     #[test]
     fn suggestion_is_not_accepted_when_the_input_is_not_empty() {
         let mut app = App::new(None);
-        app.input = "draft en cours".to_string();
+        app.set_input("draft en cours");
         app.suggestion = Some("suggestion".to_string());
         app.on_event(&key(KeyCode::Tab));
         assert_eq!(

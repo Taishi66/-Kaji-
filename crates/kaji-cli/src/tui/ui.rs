@@ -502,7 +502,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph.scroll((0, scroll_x)), content);
 
     let cursor_x =
-        content.x + (app.input_cursor_chars() - scroll_x).min(content.width.saturating_sub(1));
+        content.x + (app.input_cursor_cells() - scroll_x).min(content.width.saturating_sub(1));
     frame.set_cursor_position((cursor_x, content.y));
 }
 

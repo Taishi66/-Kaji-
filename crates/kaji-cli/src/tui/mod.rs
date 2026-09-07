@@ -265,11 +265,18 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
 fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledLine> {
     let mut lines = vec![vec![RoledSpan::title("navigation")]];
     if mouse_enabled {
-        let rows: [(&str, &str); 16] = [
+        let rows: [(&str, &str); 17] = [
             ("molette", "défile le chat (3 lignes/cran)"),
-            ("PageUp/PageDown", "défile par page · Home/End"),
+            (
+                "PageUp/PageDown",
+                "défile par page · Home/End quand le composer est vide",
+            ),
             ("Ctrl+↑/↓", "saute au tour précédent/suivant"),
             ("↑/↓", "historique de prompts"),
+            (
+                "←/→",
+                "déplace le caret dans le composer · Home/End (ou Ctrl+A) début/fin de ligne · Ctrl+W efface le mot",
+            ),
             ("Ctrl+P", "recherche floue de fichiers (/files)"),
             ("Ctrl+E", "explorateur de fichiers (/explorer)"),
             (
@@ -317,7 +324,8 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
         }
     } else {
         for text in [
-            "PageUp/PageDown/Home/End font défiler le chat",
+            "PageUp/PageDown font défiler le chat · Home/End aussi quand le composer est vide",
+            "←/→ déplace le caret dans le composer · Home/End (ou Ctrl+A) début/fin de ligne · Ctrl+W efface le mot",
             "Ctrl+↑/↓ saute au tour précédent/suivant",
             "Ctrl+P recherche floue de fichiers (/files)",
             "Ctrl+E explorateur de fichiers (/explorer)",
@@ -2938,8 +2946,12 @@ mod tests {
         let text = welcome_text(&app);
         assert!(!text.contains("molette"));
         assert!(!text.contains("↑/↓ rappelle"));
-        assert!(text.contains("PageUp/PageDown/Home/End"));
+        assert!(text.contains("PageUp/PageDown font défiler le chat"));
         assert!(text.contains("Ctrl+↑/↓"));
+        assert!(
+            text.contains("←/→ déplace le caret"),
+            "le caret du composer ne dépend pas de la souris"
+        );
     }
 
     /// Le mode est une information de sécurité : au premier démarrage la
@@ -3013,7 +3025,7 @@ mod tests {
     fn the_forge_row_follows_the_explorer_row_in_the_navigation_table() {
         let lines = navigation_section(true, SpanRole::Text);
 
-        assert_eq!(lines.len(), 17, "un titre puis 16 lignes de navigation");
+        assert_eq!(lines.len(), 18, "un titre puis 17 lignes de navigation");
 
         let rows: Vec<String> = lines
             .iter()
