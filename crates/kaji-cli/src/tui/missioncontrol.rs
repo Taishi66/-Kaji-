@@ -521,7 +521,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     frame.render_widget(Clear, area);
 
     let board = board(app);
-    let banner = banner_text(&board, app.mission.notice.as_deref());
+    let banners = banners(&board, app.mission.notice.as_deref());
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::border_active())
@@ -546,12 +546,24 @@ pub fn draw(frame: &mut Frame, app: &App) {
         return;
     }
 
-    let banner_rows = u16::from(banner.is_some() && inner.height > 1);
-    if let Some(banner) = banner.filter(|_| banner_rows > 0) {
+    let banner_rows = (banners.len() as u16).min(inner.height.saturating_sub(1));
+    for (row, banner) in banners.iter().take(usize::from(banner_rows)).enumerate() {
+        let style = if banner.urgent {
+            theme::accent().add_modifier(Modifier::REVERSED)
+        } else {
+            theme::accent()
+        };
         frame.render_widget(
-            Paragraph::new(Line::from(pad_cells(&banner, usize::from(inner.width))))
-                .style(theme::accent().add_modifier(Modifier::REVERSED)),
-            Rect { height: 1, ..inner },
+            Paragraph::new(Line::from(pad_cells(
+                &banner.text,
+                usize::from(inner.width),
+            )))
+            .style(style),
+            Rect {
+                y: inner.y + row as u16,
+                height: 1,
+                ..inner
+            },
         );
     }
 
@@ -629,8 +641,12 @@ pub fn header_title(board: &Board, width: u16) -> String {
 
 /// Le résumé de droite : l'état d'ensemble, le compte de stages, ce que le run
 /// a brûlé et depuis combien de temps. Un plateau sans ligne au ledger dit
-/// `炭 —`, jamais zéro.
+/// `炭 —`, jamais zéro ; un plateau vide ne dit rien du tout, plutôt que
+/// d'annoncer `○ pending · 0 tasks` d'une session qui n'a rien lancé.
 pub fn header_summary(board: &Board) -> String {
+    if board.is_empty() && board.columns.iter().all(|column| column.stage.is_none()) {
+        return String::new();
+    }
     let mark = board
         .columns
         .iter()
@@ -701,30 +717,45 @@ fn aggregate_usage(board: &Board) -> String {
     )
 }
 
+/// Une ligne pleine largeur au-dessus du plateau. `urgent` la passe en
+/// REVERSED : c'est l'état qui réclame une main, pas la réponse à une touche.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Banner {
+    pub text: String,
+    pub urgent: bool,
+}
+
 /// L'anti-confusion n°1 : dès qu'une porte attend, une ligne pleine largeur le
-/// dit et nomme la touche. La réponse à une action prend sa place le temps de
-/// sa péremption — c'est la seule chose plus fraîche qu'une gate ouverte, et
-/// le badge du stage continue de porter la porte pendant ce temps.
-pub fn banner_text(board: &Board, notice: Option<&str>) -> Option<String> {
+/// dit et nomme la touche — elle ne cède **jamais** sa place, sans quoi une
+/// gate ouverte redeviendrait invisible sitôt qu'une action a répondu. La
+/// réponse à une action prend la ligne suivante, le temps de sa péremption
+/// (une navigation ou la fermeture de la vue l'efface).
+pub fn banners(board: &Board, notice: Option<&str>) -> Vec<Banner> {
+    let mut banners = Vec::new();
+    let gates = board.waiting_gates();
+    if let Some(first) = gates.first() {
+        let more = match gates.len() {
+            1 => String::new(),
+            many => format!(" (+{} more)", many - 1),
+        };
+        banners.push(Banner {
+            text: format!(
+                " ▶ {} gate \"{}\" is waiting{more} — press g to decide ",
+                theme::GATE_GLYPH,
+                sanitize_for_display(&first.replace('\n', "␊"))
+            ),
+            urgent: true,
+        });
+    }
     if let Some(notice) = notice {
         // Une notice porte des noms venus de la spec : `sanitize_for_display`
         // laisse passer `\n`, qui casserait cette ligne unique.
-        return Some(format!(
-            " {} ",
-            sanitize_for_display(&notice.replace('\n', "␊"))
-        ));
+        banners.push(Banner {
+            text: format!(" {} ", sanitize_for_display(&notice.replace('\n', "␊"))),
+            urgent: banners.is_empty(),
+        });
     }
-    let gates = board.waiting_gates();
-    let first = gates.first()?;
-    let more = match gates.len() {
-        1 => String::new(),
-        many => format!(" (+{} more)", many - 1),
-    };
-    Some(format!(
-        " ▶ {} gate \"{}\" is waiting{more} — press g to decide ",
-        theme::GATE_GLYPH,
-        sanitize_for_display(&first.replace('\n', "␊"))
-    ))
+    banners
 }
 
 /// Les touches, toujours visibles et contextuelles : pas de `g` sans porte
@@ -763,6 +794,7 @@ pub fn footer_keys(board: &Board, stage: usize, card: usize, width: u16) -> Stri
 /// vide.
 pub fn empty_state_lines(width: usize) -> Vec<Line<'static>> {
     let lines = [
+        (String::new(), theme::dim()),
         (
             format!(
                 "{} mission-control — no workflow running",
@@ -780,10 +812,17 @@ pub fn empty_state_lines(width: usize) -> Vec<Line<'static>> {
             theme::dim(),
         ),
     ];
+    let budget = width.saturating_sub(2);
     lines
         .into_iter()
         .map(|(text, style)| {
-            Line::from(Span::styled(gitstatus::truncate_cells(&text, width), style))
+            if text.is_empty() {
+                return Line::from(String::new());
+            }
+            Line::from(Span::styled(
+                format!(" {}", gitstatus::truncate_cells(&text, budget)),
+                style,
+            ))
         })
         .collect()
 }
@@ -1199,7 +1238,7 @@ fn draw_timeline(frame: &mut Frame, board: &Board, area: Rect) {
 }
 
 /// Une barre par stage, proportionnelle au plus long. Un stage qui court porte
-/// une lame animée en tête de barre ; un stage qui n'a pas démarré n'a pas de
+/// une lame animée en tête de barre ; un stage qui n'a rien mesuré n'a pas de
 /// barre du tout — un tiret et `0s`, parce qu'une barre vide se lirait comme
 /// une durée nulle mesurée.
 pub fn timeline_lines(board: &Board, width: usize, rows: usize) -> Vec<Line<'static>> {
@@ -1234,7 +1273,10 @@ pub fn timeline_lines(board: &Board, width: usize, rows: usize) -> Vec<Line<'sta
             theme::dim(),
         )];
 
-        if column.mark == CardMark::Pending {
+        // Un stage qui n'a rien mesuré n'a pas de barre : une barre vide se
+        // lirait comme une durée nulle mesurée, et un stage en attente de sa
+        // porte n'a pas plus tourné qu'un stage jamais parti.
+        if elapsed == 0 && column.mark != CardMark::Running {
             spans.push(Span::styled(
                 format!("{}{}", "─", " ".repeat(bar_cells - 1)),
                 theme::dim(),
@@ -1576,8 +1618,11 @@ mod tests {
             ],
         };
 
-        let banner = banner_text(&board, None).expect("une gate attend");
+        let raised = banners(&board, None);
 
+        assert_eq!(raised.len(), 1);
+        assert!(raised[0].urgent, "une porte ouverte crie");
+        let banner = &raised[0].text;
         assert!(
             banner.contains("gate \"validation\" is waiting"),
             "{banner}"
@@ -1599,25 +1644,63 @@ mod tests {
             ],
         };
 
-        let banner = banner_text(&board, None).expect("trois gates attendent");
+        let banner = &banners(&board, None)[0].text;
 
         assert!(banner.contains("\"first\""), "{banner}");
         assert!(banner.contains("(+2 more)"), "{banner}");
     }
 
-    /// La réponse à une action prend la bannière le temps de sa péremption : le
-    /// plein écran cache le chat, un refus silencieux serait un non-événement.
+    /// La réponse à une action se lit sans effacer la porte qui attend : le
+    /// plein écran cache le chat, un refus silencieux serait un non-événement,
+    /// mais une gate ouverte doit rester à l'écran tant qu'elle attend.
     #[test]
-    fn an_action_notice_takes_over_the_banner() {
+    fn an_action_notice_stacks_under_the_gate_banner_instead_of_hiding_it() {
         let board = Board {
             title: "demo".to_string(),
             columns: vec![column("validation", CardMark::Gate, vec![])],
         };
 
-        let banner = banner_text(&board, Some("gate « validation » denied")).expect("une notice");
+        let both = banners(
+            &board,
+            Some("stage \"validation\" not paused — unknown stage"),
+        );
 
-        assert!(banner.contains("denied"), "{banner}");
-        assert!(!banner.contains("press g"), "{banner}");
+        assert_eq!(both.len(), 2);
+        assert!(both[0].text.contains("press g"), "{:?}", both[0]);
+        assert!(both[0].urgent);
+        assert!(both[1].text.contains("not paused"), "{:?}", both[1]);
+        assert!(
+            !both[1].urgent,
+            "une réponse ne crie pas par-dessus la porte"
+        );
+    }
+
+    /// Sans porte ouverte, la réponse à une action prend la première ligne et
+    /// son style d'alerte : c'est la seule chose que la vue a à dire.
+    #[test]
+    fn an_action_notice_alone_takes_the_urgent_row() {
+        let board = Board {
+            title: "demo".to_string(),
+            columns: vec![column("build", CardMark::Running, vec![])],
+        };
+
+        let raised = banners(&board, Some("forge — task already finished"));
+
+        assert_eq!(raised.len(), 1);
+        assert!(raised[0].urgent);
+        assert!(raised[0].text.contains("already finished"));
+    }
+
+    /// Une vue au calme n'affiche aucune bannière : la ligne est réservée à ce
+    /// qui attend une main.
+    #[test]
+    fn a_quiet_board_raises_no_banner() {
+        let board = Board {
+            title: "demo".to_string(),
+            columns: vec![column("build", CardMark::Running, vec![])],
+        };
+
+        assert!(banners(&board, None).is_empty());
     }
 
     /// Une notice multi-ligne casserait la bannière d'une seule ligne.
@@ -1628,7 +1711,7 @@ mod tests {
             columns: vec![],
         };
 
-        let banner = banner_text(&board, Some("gate « de\nploy » left open")).expect("une notice");
+        let banner = &banners(&board, Some("gate \"de\nploy\" left open"))[0].text;
 
         assert!(!banner.contains('\n'), "{banner:?}");
         assert!(banner.contains('␊'), "{banner:?}");
@@ -2013,10 +2096,11 @@ mod tests {
         );
     }
 
-    /// Un stage qui n'a pas démarré n'a pas de barre : une barre vide se lirait
-    /// comme une durée nulle mesurée.
+    /// Un stage qui n'a rien mesuré n'a pas de barre : une barre vide se lirait
+    /// comme une durée nulle mesurée. Vaut aussi pour un stage arrêté sur sa
+    /// porte, qui n'a pas plus tourné qu'un stage jamais parti.
     #[test]
-    fn a_pending_stage_gets_a_dash_and_no_bar() {
+    fn an_unmeasured_stage_gets_a_dash_and_no_bar() {
         let board = Board {
             title: "review".to_string(),
             columns: vec![
@@ -2030,16 +2114,21 @@ mod tests {
                     CardMark::Pending,
                     vec![card("b", CardMark::Pending, 0)],
                 ),
+                column("gated", CardMark::Gate, vec![card("c", CardMark::Gate, 0)]),
             ],
         };
 
-        let lines = timeline_lines(&board, 60, 4);
-        let pending = lines[1].to_string();
+        let lines = timeline_lines(&board, 60, 5);
 
-        assert!(!pending.contains(BAR_FULL), "{pending:?}");
-        assert!(!pending.contains(BAR_EMPTY), "{pending:?}");
-        assert!(pending.contains('─'), "{pending:?}");
-        assert!(pending.contains("0s"), "{pending:?}");
+        for (rank, name) in [(1, "later"), (2, "gated")] {
+            let bar = lines[rank].to_string();
+            assert!(bar.contains(name), "{bar:?}");
+            assert!(!bar.contains(BAR_FULL), "{bar:?}");
+            assert!(!bar.contains(BAR_EMPTY), "{bar:?}");
+            assert!(bar.contains('─'), "{bar:?}");
+            assert!(bar.contains("0s"), "{bar:?}");
+        }
+        assert!(lines[0].to_string().contains(BAR_FULL), "{:?}", lines[0]);
     }
 
     #[test]
@@ -2158,6 +2247,10 @@ mod tests {
         assert!(content.contains("no workflow running"), "got:\n{content}");
         assert!(content.contains("/workflow"), "got:\n{content}");
         assert!(content.contains("Ctrl+F"), "got:\n{content}");
+        assert!(
+            header_summary(&board(&app)).is_empty(),
+            "une session au repos n'annonce pas « ○ pending · 0 tasks »"
+        );
     }
 
     #[test]
