@@ -206,13 +206,13 @@ fn curation_summary(outcome: &CurationOutcome) -> String {
     let memorized = outcome.created + outcome.updated;
     if outcome.failed > 0 {
         format!(
-            "記 {memorized} faits mémorisés — {} échoués, le lot sera rejoué",
+            "記 {memorized} facts memorized — {} failed, the batch will be replayed",
             outcome.failed
         )
     } else if memorized == 0 {
-        "記 0 faits mémorisés — rien à curer".to_string()
+        "記 0 facts memorized — nothing to curate".to_string()
     } else {
-        format!("記 {memorized} faits mémorisés")
+        format!("記 {memorized} facts memorized")
     }
 }
 
@@ -220,10 +220,10 @@ fn curation_summary(outcome: &CurationOutcome) -> String {
 async fn curate() -> Result<()> {
     let config = Config::global();
     let Ok(provider_name) = config.get_kaji_provider() else {
-        anyhow::bail!("aucun provider configuré — lancez `kaji configure`");
+        anyhow::bail!("no provider configured — run `kaji configure`");
     };
     let Ok(model_name) = config.get_kaji_model() else {
-        anyhow::bail!("aucun modèle configuré — lancez `kaji configure`");
+        anyhow::bail!("no model configured — run `kaji configure`");
     };
     let model_config = model_config_from_user_config(&provider_name, &model_name)?;
     let provider = kaji::providers::create(&provider_name, Vec::new()).await?;
@@ -248,7 +248,7 @@ async fn curate() -> Result<()> {
 fn curation_result(outcome: &CurationOutcome) -> Result<()> {
     if outcome.failed > 0 {
         anyhow::bail!(
-            "curation partielle : {} fait(s) en échec, le lot sera rejoué",
+            "partial curation: {} fact(s) failed, the batch will be replayed",
             outcome.failed
         );
     }
@@ -482,7 +482,7 @@ mod tests {
     fn curation_summary_surfaces_failures_and_the_empty_run() {
         assert_eq!(
             curation_summary(&CurationOutcome::default()),
-            "記 0 faits mémorisés — rien à curer"
+            "記 0 facts memorized — nothing to curate"
         );
         assert_eq!(
             curation_summary(&CurationOutcome {
@@ -490,7 +490,7 @@ mod tests {
                 updated: 1,
                 failed: 0
             }),
-            "記 3 faits mémorisés"
+            "記 3 facts memorized"
         );
         assert_eq!(
             curation_summary(&CurationOutcome {
@@ -498,7 +498,7 @@ mod tests {
                 updated: 0,
                 failed: 2
             }),
-            "記 1 faits mémorisés — 2 échoués, le lot sera rejoué"
+            "記 1 facts memorized — 2 failed, the batch will be replayed"
         );
     }
 

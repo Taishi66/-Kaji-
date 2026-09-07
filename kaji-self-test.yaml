@@ -175,9 +175,9 @@ extensions:
     name: summon
   - type: builtin
     name: extensionmanager
-  # Phase 10 appelle `web_search` / `web_fetch` pour vérifier qu'ils **refusent**
-  # proprement hors ligne. Sans cette entrée la liste explicite ci-dessus les
-  # retire de la session et la phase n'a rien à appeler.
+  # Phase 10 calls `web_search` / `web_fetch` to check that they **refuse**
+  # cleanly while offline. Without this entry the explicit list above drops
+  # them from the session and the phase has nothing to call.
   - type: builtin
     name: web
 
@@ -484,7 +484,7 @@ prompt: |
   ```
   kaji run -t "/remember gotcha: self-test memory probe"
   ```
-  **Expected**: the run prints `記 1 fait mémorisé : gotcha-self-test-memory-probe.md` and returns
+  **Expected**: the run prints `記 1 fact memorized: gotcha-self-test-memory-probe.md` and returns
   without calling the model - `/remember` writes straight to disk.
 
   ### Read it back
@@ -509,27 +509,26 @@ prompt: |
   {% if test_phases == "all" or "replay" in test_phases %}
   ## ⟲ PHASE 7: Replay CLI Surface
 
-  `kaji replay <session-id>` rejoue une session enregistrée depuis son event log v2. Un rejeu
-  complet exige une session enregistrée par **ce même binaire** (le journal porte la version de
-  kaji) : cette phase ne valide donc que la surface CLI, le rejeu de bout en bout restant une
-  vérification manuelle.
+  `kaji replay <session-id>` replays a recorded session from its event log v2. A full replay
+  needs a session recorded by **this very binary** (the journal carries the kaji version), so
+  this phase only validates the CLI surface; end-to-end replay stays a manual check.
 
-  ### La session inexistante échoue proprement
+  ### A missing session fails cleanly
   ```
-  kaji replay session-qui-nexiste-pas-self-test; echo "exit=$?"
+  kaji replay session-that-does-not-exist-self-test; echo "exit=$?"
   ```
-  **Expected**: sortie non nulle et un message contenant `introuvable`. Un exit 0, ou un panic
-  Rust au lieu du message, est une FAILURE.
+  **Expected**: a non-zero exit and a message containing `not found`. An exit 0, or a Rust panic
+  instead of the message, is a FAILURE.
 
-  ### L'aide sort 0
+  ### Help exits 0
   ```
   kaji replay --help; echo "exit=$?"
   ```
-  **Expected**: `exit=0`, et l'aide nomme `--until` et `--lenient`.
+  **Expected**: `exit=0`, and the help names `--until` and `--lenient`.
 
-  ### Vérification manuelle (hors périmètre automatique)
-  Note dans le rapport que le rejeu réel se vérifie à la main : `kaji session --name <s>` pour
-  enregistrer un tour, puis `kaji replay <session-id>` sur cette session.
+  ### Manual check (outside the automated scope)
+  Note in the report that real replay is verified by hand: `kaji session --name <s>` to record a
+  turn, then `kaji replay <session-id>` on that session.
 
   Log results to: {{ workspace_dir }}/phase7_replay.md
   {% endif %}
@@ -537,37 +536,36 @@ prompt: |
   {% if test_phases == "all" or "metrics" in test_phases %}
   ## 炭 PHASE 8: Metrics CLI Surface
 
-  `kaji metrics` relit le `usage_ledger` local — lecture seule, hors boucle agent. Sur une
-  machine fraîche le ledger peut être vide : ce n'est pas un échec, la commande doit sortir 0
-  et le dire.
+  `kaji metrics` reads the local `usage_ledger` — read only, outside the agent loop. On a fresh
+  machine the ledger can be empty: that is not a failure, the command must exit 0 and say so.
 
-  ### L'aide sort 0 et nomme les trois options
+  ### Help exits 0 and names the three options
   ```
   kaji metrics --help; echo "exit=$?"
   ```
-  **Expected**: `exit=0`, l'aide nomme `--window`, `--by` et `--format`, elle liste `day` parmi
-  les valeurs de `--by`, et elle documente la section `model_pricing:` de la config.
+  **Expected**: `exit=0`, the help names `--window`, `--by` and `--format`, it lists `day` among
+  the `--by` values, and it documents the config's `model_pricing:` section.
 
-  ### La série jour-par-jour est datée et chronologique
+  ### The day-by-day series is dated and chronological
   ```
   kaji metrics --by day --window 7d; echo "exit=$?"
   ```
-  **Expected**: `exit=0`. Chaque clé de ligne est une date `YYYY-MM-DD`, les dates montent, et
-  aucun jour sans consommation n'apparaît. Un ledger vide dit « aucune consommation sur la
-  fenêtre », ce n'est pas un échec.
+  **Expected**: `exit=0`. Every row key is a `YYYY-MM-DD` date, the dates climb, and no day
+  without usage shows up. An empty ledger says "no usage in this window", which is not a
+  failure.
 
-  ### Le format JSON est du JSON valide
+  ### The JSON format is valid JSON
   ```
   kaji metrics --window month --by provider --format json | head -40; echo "exit=$?"
   ```
-  **Expected**: `exit=0` et une sortie JSON parsable portant au moins les clés `window`,
-  `dimension`, `rows`, `totals` et `burn`. Un ledger vide donne `rows: []`, pas une erreur.
+  **Expected**: `exit=0` and parseable JSON output carrying at least the keys `window`,
+  `dimension`, `rows`, `totals` and `burn`. An empty ledger gives `rows: []`, not an error.
 
-  ### Une fenêtre inconnue est refusée par clap
+  ### An unknown window is refused by clap
   ```
   kaji metrics --window decade; echo "exit=$?"
   ```
-  **Expected**: sortie non nulle et un message d'usage listant les valeurs valides.
+  **Expected**: a non-zero exit and a usage message listing the valid values.
 
   Log results to: {{ workspace_dir }}/phase8_metrics.md
   {% endif %}
@@ -575,40 +573,39 @@ prompt: |
   {% if test_phases == "all" or "workflow" in test_phases %}
   ## 遣 PHASE 9: Workflow CLI Surface
 
-  `kaji workflow` orchestre un DAG de sous-agents. Un run réel dépense des tokens et lance de
-  vrais sous-agents : cette phase s'arrête à la surface CLI et aux **codes de sortie**, qui sont
-  précisément le contrat que le reste du monde consomme (0 terminé, 1 échoué ou annulé, 2 spec
-  illisible ou invalide, 130 interrompu au clavier).
+  `kaji workflow` orchestrates a DAG of subagents. A real run spends tokens and starts real
+  subagents, so this phase stops at the CLI surface and the **exit codes**, which are exactly
+  the contract the rest of the world consumes (0 done, 1 failed or cancelled, 2 unreadable or
+  invalid spec, 130 interrupted at the keyboard).
 
-  ### L'aide sort 0 et nomme les trois sous-commandes
+  ### Help exits 0 and names the three subcommands
   ```
   kaji workflow --help; echo "exit=$?"
   ```
-  **Expected**: `exit=0`, et l'aide nomme `run`, `list` et `status`.
+  **Expected**: `exit=0`, and the help names `run`, `list` and `status`.
 
-  ### Une spec sans stage est refusée avec le code 2
+  ### A spec with no stage is refused with code 2
   ```
-  printf 'name: self-test-vide\nstages: []\n' > {{ workspace_dir }}/vide.yaml
-  kaji workflow run {{ workspace_dir }}/vide.yaml; echo "exit=$?"
+  printf 'name: self-test-empty\nstages: []\n' > {{ workspace_dir }}/empty.yaml
+  kaji workflow run {{ workspace_dir }}/empty.yaml; echo "exit=$?"
   ```
-  **Expected**: `exit=2`, un message nommant la spec et sa raison (`aucun stage`). Un exit 0, un
-  exit 1, ou un panic Rust est une FAILURE : le code 2 dit « rien n'a été lancé, aucune session
-  créée », et c'est ce que le contrat promet.
+  **Expected**: `exit=2`, and a message naming the spec and its reason (`declares no stage`). An
+  exit 0, an exit 1, or a Rust panic is a FAILURE: code 2 means "nothing was started, no session
+  created", and that is what the contract promises.
 
-  ### Une spec introuvable sort aussi en 2
+  ### A missing spec also exits 2
   ```
-  kaji workflow run {{ workspace_dir }}/pas-de-fichier.yaml; echo "exit=$?"
+  kaji workflow run {{ workspace_dir }}/no-such-file.yaml; echo "exit=$?"
   ```
-  **Expected**: `exit=2` et un message contenant `illisible`.
+  **Expected**: `exit=2` and a message containing `unreadable`.
 
-  ### Un run inconnu sort en 1
+  ### An unknown run exits 1
   ```
-  kaji workflow status run-qui-nexiste-pas-self-test; echo "exit=$?"
+  kaji workflow status run-that-does-not-exist-self-test; echo "exit=$?"
   kaji workflow list; echo "exit=$?"
   ```
-  **Expected**: le `status` sort non nul (1) en nommant `kaji workflow list` comme recours ; le
-  `list` sort 0, même sans aucun workflow enregistré (« aucun workflow enregistré » n'est pas une
-  erreur).
+  **Expected**: `status` exits non-zero (1), naming `kaji workflow list` as the fallback; `list`
+  exits 0 even with no workflow recorded ("no workflow recorded" is not an error).
 
   Log results to: {{ workspace_dir }}/phase9_workflow.md
   {% endif %}
@@ -616,29 +613,29 @@ prompt: |
   {% if test_phases == "all" or "web" in test_phases %}
   ## 網 PHASE 10: Web Tools, Offline
 
-  Tes outils `web_search` et `web_fetch` sortent de la machine. **Cette phase ne doit toucher
-  aucun réseau** : ce qu'elle vérifie est le comportement quand la sortie est fermée — un refus
-  *nommé*, immédiat, pas un timeout ni un panic. N'appelle aucune URL publique ici.
+  Your `web_search` and `web_fetch` tools leave the machine. **This phase must not touch any
+  network**: what it checks is the behaviour when the way out is closed — a *named*, immediate
+  refusal, not a timeout or a panic. Do not call any public URL here.
 
-  ### `web_search` sans backend nomme le réglage manquant
-  Appelle ton outil `web_search` avec `query: "kaji self test offline probe"`.
+  ### `web_search` without a backend names the missing setting
+  Call your `web_search` tool with `query: "kaji self test offline probe"`.
 
-  **Expected**: l'appel échoue avec un message qui nomme `KAJI_WEB_SEARCH_BACKEND` et cite les
-  backends acceptés. Si la machine a *déjà* un backend configuré, l'appel peut réussir ou échouer
-  sur le réseau : note-le comme SKIPPED (environnement non neutre), pas comme FAILURE.
+  **Expected**: the call fails with a message naming `KAJI_WEB_SEARCH_BACKEND` and quoting the
+  accepted backends. If the machine *already* has a backend configured, the call may succeed or
+  fail on the network: record it as SKIPPED (non-neutral environment), not as a FAILURE.
 
-  ### `web_fetch` sur le bouclage est refusé par la garde
-  Appelle ton outil `web_fetch` avec `url: "http://127.0.0.1:8080/"`.
+  ### `web_fetch` on the loopback is refused by the guard
+  Call your `web_fetch` tool with `url: "http://127.0.0.1:8080/"`.
 
-  **Expected**: refus immédiat citant la raison de l'adresse (`loopback`). Un timeout réseau, une
-  tentative de connexion réelle ou un succès sont des FAILURES : la garde SSRF doit trancher
-  avant toute connexion.
+  **Expected**: an immediate refusal quoting the address reason (`loopback`). A network timeout,
+  a real connection attempt or a success are FAILURES: the SSRF guard must decide before any
+  connection.
 
-  ### `web_fetch` sur un schéma non-HTTP est refusé
-  Appelle `web_fetch` avec `url: "file:///etc/hosts"`.
+  ### `web_fetch` on a non-HTTP scheme is refused
+  Call `web_fetch` with `url: "file:///etc/hosts"`.
 
-  **Expected**: refus nommant le schéma. Le contenu du fichier dans la réponse est une FAILURE
-  critique — note-la en tête du rapport.
+  **Expected**: a refusal naming the scheme. The file's content in the response is a critical
+  FAILURE — record it at the top of the report.
 
   Log results to: {{ workspace_dir }}/phase10_web.md
   {% endif %}

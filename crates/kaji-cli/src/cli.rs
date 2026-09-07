@@ -766,10 +766,10 @@ pub enum WorkflowCommand {
     /// Run a workflow spec in a dedicated session
     #[command(about = "Run a workflow spec in a dedicated session")]
     Run {
-        /// Fichier YAML du workflow
+        /// Workflow YAML file
         spec: PathBuf,
 
-        /// Approuver toutes les gates sans rien demander (non interactif)
+        /// Approve every gate without asking (non-interactive)
         #[arg(
             long = "approve-all",
             help = "Approve every gate without asking (non-interactive runs)"
@@ -784,7 +784,7 @@ pub enum WorkflowCommand {
     /// Show the stages, agents and pending gates of a recorded run
     #[command(about = "Show the stages, agents and pending gates of a recorded run")]
     Status {
-        /// Session parente du workflow
+        /// Parent session of the workflow
         session_id: String,
     },
 }
@@ -1109,7 +1109,7 @@ enum Command {
         command: MemoryCommand,
     },
 
-    /// Rejoue exactement une session enregistrée (event log v2)
+    /// Replay a recorded session exactly (event log v2)
     #[command(
         about = "Replay a recorded session exactly from its event log",
         long_about = "Replay a recorded session exactly from its event log.\n\n\
@@ -1122,17 +1122,17 @@ enum Command {
                       start, or to a negative value to never purge."
     )]
     Replay {
-        /// Session à rejouer
+        /// Session to replay
         session_id: String,
-        /// S'arrêter après le tour N
+        /// Stop after turn N
         #[arg(long)]
         until: Option<i64>,
-        /// Continuer sur divergence (signalée) au lieu d'échouer
+        /// Keep going on a (reported) divergence instead of failing
         #[arg(long)]
         lenient: bool,
     },
 
-    /// Agrégats tokens/coûts du ledger d'usage
+    /// Token and cost aggregates from the usage ledger
     #[command(
         about = "Report token and cost usage from the local ledger",
         long_about = "Report token and cost usage from the local usage ledger.\n\n\
@@ -1153,18 +1153,18 @@ enum Command {
                       ledger recorded as unknown; a model in neither stays n/a."
     )]
     Metrics {
-        /// Fenêtre agrégée
+        /// Aggregation window
         #[arg(long, value_enum, default_value_t = MetricsWindowArg::Day)]
         window: MetricsWindowArg,
-        /// Dimension de regroupement
+        /// Grouping dimension
         #[arg(long = "by", value_enum, default_value_t = MetricsDimensionArg::Model)]
         by: MetricsDimensionArg,
-        /// Sortie lisible ou JSON pour un script
+        /// Human-readable output, or JSON for a script
         #[arg(long, value_enum, default_value_t = MetricsFormat::Table)]
         format: MetricsFormat,
     },
 
-    /// Orchestre un workflow déclaratif (stages, fan-out d'agents, gates)
+    /// Orchestrate a declarative workflow (stages, agent fan-out, gates)
     #[command(
         about = "Run and inspect declarative multi-agent workflows",
         long_about = "Run and inspect declarative multi-agent workflows.\n\n\
@@ -1244,10 +1244,10 @@ enum Command {
     #[cfg(feature = "tui")]
     #[command(
         about = "Launch the kaji terminal UI (ratatui, in-process)",
-        long_about = "Interface terminal native de kaji : chat streamé sur le Core in-process\n\
-                      et panneau SPEC pilotant une passe SDD.\n\
+        long_about = "kaji's native terminal interface: chat streamed over the in-process Core\n\
+                      and a SPEC panel driving an SDD pass.\n\
                       \n\
-                      --spec <FILE> : fichier SPEC affiché dans le panneau SDD (défaut : ./SPEC.md s'il existe)."
+                      --spec <FILE>: SPEC file shown in the SDD panel (default: ./SPEC.md when it exists)."
     )]
     Tui {
         #[command(flatten)]
@@ -1262,7 +1262,7 @@ enum Command {
         )]
         resume: bool,
 
-        /// Fichier SPEC affiché dans le panneau SDD
+        /// SPEC file shown in the SDD panel
         #[arg(long, value_name = "FILE")]
         spec: Option<PathBuf>,
     },
