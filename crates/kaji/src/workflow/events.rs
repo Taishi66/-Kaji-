@@ -105,10 +105,10 @@ pub enum WorkflowRecorderError {
     /// une nouvelle session, jamais un second tour sur celle-ci (les gates y
     /// sont adressées par nom de stage, un second run écraserait les
     /// décisions du premier).
-    #[error("la session « {0} » porte déjà le workflow « {1} » : une session parente n'en porte qu'un, même annulé — relancer demande une nouvelle session")]
+    #[error("session \"{0}\" already carries workflow \"{1}\": a parent session carries only one, even a cancelled one — starting over requires a new session")]
     AlreadyCarriesAWorkflow(String, String),
 
-    #[error("impossible de revendiquer un tour sur la session « {0} » après {1} tentatives : un autre écrivain alloue en boucle")]
+    #[error("cannot claim a turn on session \"{0}\" after {1} attempts: another writer is allocating in a loop")]
     TurnAllocationLost(String, u32),
 }
 
@@ -228,7 +228,7 @@ impl WorkflowRecorder {
             .await?;
 
         let payload = serde_json::json!({
-            "query_preview": format!("workflow « {workflow} »"),
+            "query_preview": format!("workflow \"{workflow}\""),
             TURN_WORKFLOW_FIELD: workflow,
         })
         .to_string();

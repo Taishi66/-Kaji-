@@ -39,8 +39,8 @@ impl GateDecision {
 
     pub fn label(self) -> &'static str {
         match self {
-            GateDecision::Approve => "approuvée",
-            GateDecision::Deny => "refusée",
+            GateDecision::Approve => "approved",
+            GateDecision::Deny => "denied",
         }
     }
 }
@@ -71,10 +71,10 @@ impl GateVerdict {
 
     pub fn label(&self) -> &'static str {
         match self {
-            GateVerdict::Applied => "décision enregistrée",
-            GateVerdict::UnknownStage => "stage inconnu",
-            GateVerdict::NoGate => "stage sans gate",
-            GateVerdict::Settled => "stage déjà terminal ou rejeu",
+            GateVerdict::Applied => "decision recorded",
+            GateVerdict::UnknownStage => "unknown stage",
+            GateVerdict::NoGate => "stage has no gate",
+            GateVerdict::Settled => "stage already terminal or replaying",
         }
     }
 }
@@ -116,7 +116,7 @@ impl LiveGates {
     pub fn record(&self, stage: &str, decision: GateDecision) {
         self.decisions
             .lock()
-            .expect("gates empoisonnées")
+            .expect("gates poisoned")
             .insert(stage.to_string(), decision);
         self.version.send_modify(|version| *version += 1);
     }
@@ -124,7 +124,7 @@ impl LiveGates {
     pub fn decided(&self, stage: &str) -> Option<GateDecision> {
         self.decisions
             .lock()
-            .expect("gates empoisonnées")
+            .expect("gates poisoned")
             .get(stage)
             .copied()
     }
@@ -195,11 +195,14 @@ impl GateSource for ReplayGates {
             // s'arrête, en lenient il refuse le stage et continue plutôt que
             // de laisser tourner des agents que personne n'a approuvés.
             None if self.lenient => {
-                warn!(stage, "gate absente du journal : refusée (rejeu lenient)");
+                warn!(
+                    stage,
+                    "gate missing from the journal: denied (lenient replay)"
+                );
                 Ok(GateOutcome::Decided(GateDecision::Deny))
             }
             None => Err(anyhow!(
-                "gate « {stage} » absente du journal : le rejeu ne redemande jamais une approbation"
+                "gate \"{stage}\" missing from the journal: replay never asks for an approval again"
             )),
         }
     }

@@ -51,11 +51,11 @@ impl AgentState {
 
     pub fn label(&self) -> &'static str {
         match self {
-            AgentState::Pending => "en attente",
-            AgentState::Running => "en cours",
-            AgentState::Done => "terminé",
-            AgentState::Failed(_) => "échoué",
-            AgentState::Cancelled => "annulé",
+            AgentState::Pending => "pending",
+            AgentState::Running => "running",
+            AgentState::Done => "done",
+            AgentState::Failed(_) => "failed",
+            AgentState::Cancelled => "cancelled",
         }
     }
 }
@@ -87,13 +87,13 @@ impl StageState {
 
     pub fn label(&self) -> &'static str {
         match self {
-            StageState::Pending => "en attente",
-            StageState::Running => "en cours",
+            StageState::Pending => "pending",
+            StageState::Running => "running",
             StageState::Waiting => "gate",
-            StageState::Paused => "en pause",
-            StageState::Done => "terminé",
-            StageState::Failed(_) => "échoué",
-            StageState::Cancelled => "annulé",
+            StageState::Paused => "paused",
+            StageState::Done => "done",
+            StageState::Failed(_) => "failed",
+            StageState::Cancelled => "cancelled",
         }
     }
 
@@ -220,7 +220,7 @@ impl WorkflowState {
         }
         if let Some(stage) = self.stages.iter().find(|stage| !stage.state.is_terminal()) {
             return WorkflowOutcome::Failed(FailureCause::Error(format!(
-                "stage « {} » n'a jamais abouti ({})",
+                "stage \"{}\" never concluded ({})",
                 stage.name,
                 stage.state.label()
             )));
@@ -249,9 +249,9 @@ pub enum WorkflowOutcome {
 impl WorkflowOutcome {
     pub fn label(&self) -> &'static str {
         match self {
-            WorkflowOutcome::Done => "terminé",
-            WorkflowOutcome::Failed(_) => "échoué",
-            WorkflowOutcome::Cancelled => "annulé",
+            WorkflowOutcome::Done => "done",
+            WorkflowOutcome::Failed(_) => "failed",
+            WorkflowOutcome::Cancelled => "cancelled",
         }
     }
 }

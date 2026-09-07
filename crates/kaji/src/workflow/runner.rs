@@ -149,13 +149,13 @@ impl SubagentRunner {
             AgentSource::Prompt(prompt) => Recipe::builder()
                 .version("1.0.0")
                 .title(format!("Workflow: {}", request.label()))
-                .description(format!("Agent « {} » du workflow", request.agent))
+                .description(format!("Agent \"{}\" of the workflow", request.agent))
                 .prompt(format!("{prompt}{}", request.inputs_block()))
                 .build()
                 .map_err(|error| error.to_string()),
             AgentSource::Recipe(path) => {
                 let recipe = request.recipe.as_ref().ok_or_else(|| {
-                    format!("recette « {} » non résolue par l'exécuteur", path.display())
+                    format!("recipe \"{}\" not resolved by the executor", path.display())
                 })?;
                 let parameters: Vec<(String, String)> = request
                     .inputs
@@ -215,7 +215,7 @@ impl AgentRunner for SubagentRunner {
         let provider_name = parent
             .provider_name
             .clone()
-            .ok_or_else(|| "aucun provider configuré sur la session parente".to_string())?;
+            .ok_or_else(|| "no provider configured on the parent session".to_string())?;
 
         let mut model_config = match parent.model_config.clone() {
             Some(config) => config,
@@ -330,7 +330,7 @@ impl AgentRunner for ReplayRunner {
     async fn prepare(&self, request: &AgentRunRequest) -> Result<String, String> {
         let Some(done) = self.recorded(request) else {
             return Err(format!(
-                "agent « {} » absent du journal : le rejeu ne lance aucun sous-agent",
+                "agent \"{}\" missing from the journal: replay starts no subagent",
                 request.label()
             ));
         };
@@ -340,7 +340,7 @@ impl AgentRunner for ReplayRunner {
             // le rejeu rejoue cet échec-là, avec son message.
             (None, AgentState::Failed(FailureCause::Error(error))) => Err(error.clone()),
             (None, state) => Err(format!(
-                "agent « {} » enregistré {} sans session enfant",
+                "agent \"{}\" recorded {} without a child session",
                 request.label(),
                 state.label()
             )),
@@ -354,7 +354,7 @@ impl AgentRunner for ReplayRunner {
         _cancel: CancellationToken,
     ) -> Result<String, String> {
         Err(format!(
-            "agent « {} » : le rejeu sert le journal, il ne lance pas de sous-agent",
+            "agent \"{}\": replay serves the journal, it starts no subagent",
             request.label()
         ))
     }
@@ -375,7 +375,7 @@ impl AgentRunner for ReplayRunner {
         // par du vide : les descendants la substituent dans leur prompt.
         let state = match (&done.state, &output) {
             (AgentState::Done, None) => AgentState::Failed(FailureCause::Error(format!(
-                "sortie de « {}.{} » purgée du journal : le rejeu n'a rien à substituer",
+                "output of \"{}.{}\" purged from the journal: replay has nothing to substitute",
                 request.stage, request.agent
             ))),
             (state, _) => state.clone(),

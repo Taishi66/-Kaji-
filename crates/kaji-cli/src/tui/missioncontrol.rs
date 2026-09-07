@@ -348,10 +348,10 @@ fn forge_mark(status: ForgeStatus) -> CardMark {
 
 fn forge_label(status: ForgeStatus) -> &'static str {
     match status {
-        ForgeStatus::Running => "en cours",
-        ForgeStatus::Done => "terminé",
-        ForgeStatus::Failed => "échec",
-        ForgeStatus::Cancelled => "annulé",
+        ForgeStatus::Running => "running",
+        ForgeStatus::Done => "done",
+        ForgeStatus::Failed => "failed",
+        ForgeStatus::Cancelled => "cancelled",
     }
 }
 
@@ -801,15 +801,15 @@ mod tests {
         );
         assert_eq!(
             agent_status(&AgentState::Pending, &StageState::Paused),
-            "en pause"
+            "paused"
         );
         assert_eq!(
             agent_status(&AgentState::Pending, &StageState::Running),
-            "en attente"
+            "pending"
         );
         assert_eq!(
             agent_status(&AgentState::Running, &StageState::Waiting),
-            "en cours"
+            "running"
         );
     }
 
@@ -840,7 +840,7 @@ mod tests {
             key: "k".to_string(),
             name: "scanner".to_string(),
             mark: CardMark::Running,
-            status: "en cours".to_string(),
+            status: "running".to_string(),
             tool: None,
             usage: None,
             elapsed_secs: 75,
@@ -855,7 +855,7 @@ mod tests {
             key: "k".to_string(),
             name: "scanner".to_string(),
             mark: CardMark::Done,
-            status: "terminé".to_string(),
+            status: "done".to_string(),
             tool: None,
             usage: Some(AgentUsage {
                 input: 12_300,
@@ -879,7 +879,7 @@ mod tests {
                 key: "k".to_string(),
                 name: name.to_string(),
                 mark: CardMark::Running,
-                status: "en cours".to_string(),
+                status: "running".to_string(),
                 tool: Some("developer__shell_with_a_very_long_name".to_string()),
                 usage: None,
                 elapsed_secs: 3,
@@ -1034,13 +1034,13 @@ mod tests {
             columns: vec![Column {
                 stage: None,
                 name: "collecte".to_string(),
-                state: "en cours".to_string(),
+                state: "running".to_string(),
                 cards: vec![
                     Card {
                         key: "k".to_string(),
                         name: "long".to_string(),
                         mark: CardMark::Running,
-                        status: "en cours".to_string(),
+                        status: "running".to_string(),
                         tool: None,
                         usage: None,
                         elapsed_secs: 100,
@@ -1049,7 +1049,7 @@ mod tests {
                         key: "k".to_string(),
                         name: "court".to_string(),
                         mark: CardMark::Done,
-                        status: "terminé".to_string(),
+                        status: "done".to_string(),
                         tool: None,
                         usage: None,
                         elapsed_secs: 25,
@@ -1076,7 +1076,7 @@ mod tests {
                 key: "k".to_string(),
                 name: format!("agent-{rank}"),
                 mark: CardMark::Done,
-                status: "terminé".to_string(),
+                status: "done".to_string(),
                 tool: None,
                 usage: None,
                 elapsed_secs: 10,
@@ -1087,7 +1087,7 @@ mod tests {
             columns: vec![Column {
                 stage: None,
                 name: "collecte".to_string(),
-                state: "terminé".to_string(),
+                state: "done".to_string(),
                 cards,
             }],
         };
@@ -1109,13 +1109,13 @@ mod tests {
                 columns: vec![Column {
                     stage: None,
                     name: "collecte".to_string(),
-                    state: "en cours".to_string(),
+                    state: "running".to_string(),
                     cards: (0..agents)
                         .map(|rank| Card {
                             key: "k".to_string(),
                             name: format!("agent-{rank}"),
                             mark: CardMark::Done,
-                            status: "terminé".to_string(),
+                            status: "done".to_string(),
                             tool: None,
                             usage: None,
                             elapsed_secs: 10,
@@ -1215,7 +1215,7 @@ mod tests {
                 key: "k".to_string(),
                 name: format!("agent-{rank}"),
                 mark: CardMark::Running,
-                status: "en cours".to_string(),
+                status: "running".to_string(),
                 tool: None,
                 usage: None,
                 elapsed_secs: 3,
@@ -1224,7 +1224,7 @@ mod tests {
         let column = Column {
             stage: None,
             name: "libre".to_string(),
-            state: "en cours".to_string(),
+            state: "running".to_string(),
             cards,
         };
         let rows = COLUMN_HEADER_ROWS + 2 * CARD_ROWS;

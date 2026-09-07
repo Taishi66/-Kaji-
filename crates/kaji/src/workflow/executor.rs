@@ -79,14 +79,14 @@ impl Shared {
     fn mark_fan_out_left(&self, stage: &str) {
         self.launched
             .lock()
-            .expect("stages lancés empoisonnés")
+            .expect("started stages poisoned")
             .insert(stage.to_string());
     }
 
     fn fan_out_left(&self, stage: &str) -> bool {
         self.launched
             .lock()
-            .expect("stages lancés empoisonnés")
+            .expect("started stages poisoned")
             .contains(stage)
     }
 
@@ -95,7 +95,7 @@ impl Shared {
     /// démarré : sans elle, une annulation posée pendant la préparation se
     /// perdrait entre la demande et l'armement.
     fn request_agent_cancel(&self, key: (String, String)) {
-        let mut cancels = self.agent_cancels.lock().expect("annulations empoisonnées");
+        let mut cancels = self.agent_cancels.lock().expect("cancellations poisoned");
         if let Some(token) = cancels.tokens.get(&key) {
             token.cancel();
         }
@@ -103,7 +103,7 @@ impl Shared {
     }
 
     fn arm_agent_cancel(&self, key: (String, String), token: &CancellationToken) {
-        let mut cancels = self.agent_cancels.lock().expect("annulations empoisonnées");
+        let mut cancels = self.agent_cancels.lock().expect("cancellations poisoned");
         if cancels.requested.contains(&key) {
             token.cancel();
         }
@@ -113,7 +113,7 @@ impl Shared {
     fn disarm_agent_cancel(&self, key: &(String, String)) {
         self.agent_cancels
             .lock()
-            .expect("annulations empoisonnées")
+            .expect("cancellations poisoned")
             .tokens
             .remove(key);
     }
@@ -149,7 +149,7 @@ impl Default for PauseSwitch {
 impl PauseSwitch {
     fn set(&self, stage: &str, paused: bool) {
         {
-            let mut table = self.paused.lock().expect("pauses empoisonnées");
+            let mut table = self.paused.lock().expect("pauses poisoned");
             if paused {
                 table.insert(stage.to_string());
             } else {
@@ -160,10 +160,7 @@ impl PauseSwitch {
     }
 
     fn is_paused(&self, stage: &str) -> bool {
-        self.paused
-            .lock()
-            .expect("pauses empoisonnées")
-            .contains(stage)
+        self.paused.lock().expect("pauses poisoned").contains(stage)
     }
 
     async fn wait_until_resumed(&self, stage: &str) {
@@ -212,11 +209,11 @@ impl PauseVerdict {
 
     pub fn label(&self) -> &'static str {
         match self {
-            PauseVerdict::Applied => "demande enregistrée",
-            PauseVerdict::UnknownStage => "stage inconnu",
-            PauseVerdict::Settled => "stage déjà terminé",
+            PauseVerdict::Applied => "request recorded",
+            PauseVerdict::UnknownStage => "unknown stage",
+            PauseVerdict::Settled => "stage already finished",
             PauseVerdict::AlreadyLaunched => {
-                "stage déjà lancé, aucun point d'arrêt restant — `x` coupe un agent"
+                "stage already started, no breakpoint left — `x` cuts an agent"
             }
         }
     }
@@ -232,7 +229,7 @@ pub struct WorkflowHandle {
 
 impl WorkflowHandle {
     pub fn snapshot(&self) -> WorkflowState {
-        self.shared.state.lock().expect("état empoisonné").clone()
+        self.shared.state.lock().expect("state poisoned").clone()
     }
 
     pub fn approve(&self, stage: &str) -> GateVerdict {
@@ -294,7 +291,7 @@ impl WorkflowHandle {
             .pauses
             .paused
             .lock()
-            .expect("pauses empoisonnées")
+            .expect("pauses poisoned")
             .clone()
     }
 
@@ -341,7 +338,7 @@ impl WorkflowHandle {
         self.shared
             .artifacts
             .lock()
-            .expect("artefacts empoisonnés")
+            .expect("artifacts poisoned")
             .get(stage, agent)
             .map(str::to_string)
     }
@@ -758,7 +755,7 @@ impl WorkflowExecutor {
                         agent = %agent.name,
                         session_id = %session_id,
                         %error,
-                        "workflow: erreur d'agent masquée par l'interruption en cours"
+                        "workflow: agent error masked by the interruption in progress"
                     );
                     state
                 }
@@ -771,7 +768,7 @@ impl WorkflowExecutor {
                         stage = %stage.name,
                         agent = %agent.name,
                         session_id = %session_id,
-                        "workflow: agent toujours en vol après la grâce d'annulation — abandonné"
+                        "workflow: agent still in flight after the cancellation grace period — abandoned"
                     );
                 }
                 match interrupt {
@@ -799,7 +796,7 @@ impl WorkflowExecutor {
     /// Un agent qui rend une erreur **parce qu'il vient d'être coupé** n'est
     /// pas un agent en échec : le jeton tiré fait foi sur le message rendu.
     /// Sans cette précédence, `cancel()` donnerait tantôt `Cancelled`, tantôt
-    /// `Failed(Error("annulé"))`, au gré du `select!`.
+    /// `Failed(Error("cancelled"))`, au gré du `select!`.
     ///
     /// Le budget passe avant le jeton de l'agent : le dépassement tire ce
     /// jeton lui-même, et « coupé faute de tokens » est plus informatif
@@ -856,11 +853,11 @@ impl WorkflowExecutor {
                 .map(|recipe| Some(ResolvedRecipe::from(recipe)))
                 .ok_or_else(|| {
                     format!(
-                        "recette « {path} » absente du journal : le rejeu ne relit pas le disque"
+                        "recipe \"{path}\" missing from the journal: replay does not re-read the disk"
                     )
                 }),
             RecipeSource::Disk(read) => {
-                if let Some(recipe) = read.lock().expect("recettes empoisonnées").get(&path) {
+                if let Some(recipe) = read.lock().expect("recipes poisoned").get(&path) {
                     return Ok(Some(ResolvedRecipe::from(recipe)));
                 }
                 let file = load_local_recipe_file(&path).map_err(|error| error.to_string())?;
@@ -871,7 +868,7 @@ impl WorkflowExecutor {
                 };
                 let first_read = read
                     .lock()
-                    .expect("recettes empoisonnées")
+                    .expect("recipes poisoned")
                     .insert(path, recipe.clone())
                     .is_none();
                 if first_read {
@@ -886,7 +883,7 @@ impl WorkflowExecutor {
         self.shared
             .artifacts
             .lock()
-            .expect("artefacts empoisonnés")
+            .expect("artifacts poisoned")
             .insert(stage, agent, output.to_string());
         self.recorder.artifact(stage, agent, output).await;
     }
@@ -918,7 +915,7 @@ impl WorkflowExecutor {
 
     async fn stage_tokens(&self, stage_index: usize) -> i64 {
         let sessions: Vec<String> = {
-            let workflow = self.shared.state.lock().expect("état empoisonné");
+            let workflow = self.shared.state.lock().expect("state poisoned");
             workflow.stages[stage_index]
                 .agents
                 .iter()
@@ -933,7 +930,7 @@ impl WorkflowExecutor {
     }
 
     fn substituted_inputs(&self, agent: &AgentSpec) -> std::collections::BTreeMap<String, String> {
-        let artifacts = self.shared.artifacts.lock().expect("artefacts empoisonnés");
+        let artifacts = self.shared.artifacts.lock().expect("artifacts poisoned");
         agent
             .inputs
             .iter()
@@ -951,7 +948,7 @@ impl WorkflowExecutor {
         duration_ms: i64,
     ) {
         {
-            let mut workflow = self.shared.state.lock().expect("état empoisonné");
+            let mut workflow = self.shared.state.lock().expect("state poisoned");
             if let Some(status) = workflow.stages[stage_index]
                 .agents
                 .iter_mut()
@@ -975,17 +972,17 @@ impl WorkflowExecutor {
     }
 
     fn snapshot(&self) -> WorkflowState {
-        self.shared.state.lock().expect("état empoisonné").clone()
+        self.shared.state.lock().expect("state poisoned").clone()
     }
 
     fn set_stage(&self, index: usize, state: StageState) {
-        self.shared.state.lock().expect("état empoisonné").stages[index].state = state;
+        self.shared.state.lock().expect("state poisoned").stages[index].state = state;
     }
 
     /// Les agents d'un stage annulé n'ont jamais tourné : leur état suit celui
     /// du stage plutôt que de rester `Pending` dans la vue.
     fn cancel_stage_agents(&self, index: usize) {
-        let mut workflow = self.shared.state.lock().expect("état empoisonné");
+        let mut workflow = self.shared.state.lock().expect("state poisoned");
         for agent in &mut workflow.stages[index].agents {
             if !agent.state.is_terminal() {
                 agent.state = AgentState::Cancelled;
@@ -994,7 +991,7 @@ impl WorkflowExecutor {
     }
 
     fn set_agent(&self, stage_index: usize, agent: &str, state: AgentState) {
-        let mut workflow = self.shared.state.lock().expect("état empoisonné");
+        let mut workflow = self.shared.state.lock().expect("state poisoned");
         if let Some(status) = workflow.stages[stage_index]
             .agents
             .iter_mut()
@@ -1005,7 +1002,7 @@ impl WorkflowExecutor {
     }
 
     fn set_agent_session(&self, stage_index: usize, agent: &str, session_id: &str) {
-        let mut workflow = self.shared.state.lock().expect("état empoisonné");
+        let mut workflow = self.shared.state.lock().expect("state poisoned");
         if let Some(status) = workflow.stages[stage_index]
             .agents
             .iter_mut()

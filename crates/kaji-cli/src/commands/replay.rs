@@ -247,7 +247,7 @@ async fn replay_workflow(
     let started = cursor
         .workflow
         .clone()
-        .ok_or_else(|| anyhow!("workflow « {workflow} » sans payload workflow_started"))?;
+        .ok_or_else(|| anyhow!("workflow \"{workflow}\" sans payload workflow_started"))?;
 
     let recorder =
         WorkflowRecorder::open(session_manager, derived_session_id.to_string(), workflow).await?;
@@ -263,13 +263,13 @@ async fn replay_workflow(
 
     let state = executor.run().await?;
     let mut lines = vec![format!(
-        "workflow « {workflow} » rejoué — {}",
+        "workflow \"{workflow}\" rejoué — {}",
         state.outcome().label()
     )];
     let verdict = workflow_verdict(cursor.workflow_final.as_ref(), &state, workflow, lenient);
     if matches!(verdict, TurnVerdict::Faithful) {
         lines.push(format!(
-            "workflow « {workflow} » identique à l'enregistrement"
+            "workflow \"{workflow}\" identique à l'enregistrement"
         ));
     }
     Ok(WorkflowReplay { lines, verdict })
@@ -316,14 +316,14 @@ fn workflow_verdict(
 ) -> TurnVerdict {
     let divergence = match recorded {
         None => format!(
-            "journal incomplet — workflow « {workflow} » clos sans état final \
+            "journal incomplet — workflow \"{workflow}\" clos sans état final \
              enregistré : le rejeu n'a rien contre quoi se mesurer"
         ),
         Some(recorded) if recorded.topology() == replayed.topology() => {
             return TurnVerdict::Faithful
         }
         Some(recorded) => format!(
-            "état du workflow « {workflow} » différent de l'enregistrement — \
+            "état du workflow \"{workflow}\" différent de l'enregistrement — \
              enregistré {:?}, rejoué {:?}",
             recorded.topology(),
             replayed.topology()

@@ -135,7 +135,7 @@ impl AgentRunner for FixtureRunner {
             Script::Fail(error) => Err(error),
             Script::Hang => {
                 cancel.cancelled().await;
-                Err("annulé".to_string())
+                Err("cancelled".to_string())
             }
             Script::Burn { tokens } => {
                 self.journal
@@ -144,7 +144,7 @@ impl AgentRunner for FixtureRunner {
                     .tokens
                     .insert(session_id.to_string(), tokens);
                 cancel.cancelled().await;
-                Err("annulé".to_string())
+                Err("cancelled".to_string())
             }
             Script::Rendezvous(barrier) => {
                 barrier.wait().await;
@@ -955,7 +955,7 @@ async fn a_denied_gate_is_not_a_cancellation_and_keeps_the_strict_mode_armed() {
             state.stage("deploie").unwrap().state
         );
     };
-    assert!(message.contains("absente du journal"), "{message}");
+    assert!(message.contains("missing from the journal"), "{message}");
 
     let lenient = Fixture::new().await;
     let state = replay_gated(&lenient, &cursor, true).await;
@@ -1553,7 +1553,7 @@ async fn two_concurrent_opens_leave_exactly_one_workflow_on_the_session() {
         (Err(left), Err(right)) => panic!("aucun gagnant : {left} / {right}"),
     };
     assert!(
-        loser.to_string().contains("porte déjà"),
+        loser.to_string().contains("already carries"),
         "le perdant est refusé par un nom, pas par un tour de plus : {loser}"
     );
 
@@ -1668,7 +1668,7 @@ async fn a_purged_artifact_fails_the_replay_instead_of_substituting_nothing() {
     else {
         panic!("une sortie purgée doit nommer sa cause");
     };
-    assert!(message.contains("purgée"), "{message}");
+    assert!(message.contains("purged"), "{message}");
     assert_eq!(
         state.stage("synthese").unwrap().state,
         StageState::Cancelled
@@ -2069,7 +2069,7 @@ async fn a_pause_asked_after_the_fan_out_left_is_refused_by_name() {
     assert_eq!(verdict, PauseVerdict::AlreadyLaunched);
     assert!(!verdict.applied());
     assert!(
-        verdict.label().contains("déjà lancé"),
+        verdict.label().contains("already started"),
         "le refus se lit : {}",
         verdict.label()
     );

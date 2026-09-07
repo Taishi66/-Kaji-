@@ -1180,9 +1180,9 @@ fn forge_mark(task: &ForgeTask) -> (String, Style) {
 fn forge_verdict(task: &ForgeTask) -> String {
     match task.status {
         ForgeStatus::Running => forge_phase(task.current_tool.as_deref()),
-        ForgeStatus::Done => "terminé".to_string(),
-        ForgeStatus::Failed => "échec".to_string(),
-        ForgeStatus::Cancelled => "annulé".to_string(),
+        ForgeStatus::Done => "done".to_string(),
+        ForgeStatus::Failed => "failed".to_string(),
+        ForgeStatus::Cancelled => "cancelled".to_string(),
     }
 }
 
@@ -3082,7 +3082,7 @@ mod tests {
             "developer__shell",
             theme::THINKING_GLYPH,
             "✓",
-            "terminé",
+            "done",
             "7s",
             "x coupe · f plein",
         ] {

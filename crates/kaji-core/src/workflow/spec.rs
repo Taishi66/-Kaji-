@@ -196,63 +196,63 @@ pub enum WorkflowSpecError {
 impl fmt::Display for WorkflowSpecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WorkflowSpecError::Yaml(error) => write!(f, "YAML illisible : {error}"),
-            WorkflowSpecError::EmptyWorkflowName => write!(f, "le workflow n'a pas de nom"),
-            WorkflowSpecError::NoStages => write!(f, "le workflow ne déclare aucun stage"),
+            WorkflowSpecError::Yaml(error) => write!(f, "unreadable YAML: {error}"),
+            WorkflowSpecError::EmptyWorkflowName => write!(f, "the workflow has no name"),
+            WorkflowSpecError::NoStages => write!(f, "the workflow declares no stage"),
             WorkflowSpecError::EmptyStageName { index } => {
-                write!(f, "le stage n°{index} n'a pas de nom")
+                write!(f, "stage #{index} has no name")
             }
             WorkflowSpecError::DuplicateStageName { name } => {
-                write!(f, "deux stages portent le nom « {name} »")
+                write!(f, "two stages share the name \"{name}\"")
             }
             WorkflowSpecError::StageNameContainsDot { name } => write!(
                 f,
-                "le nom de stage « {name} » contient un point, interdit dans les identifiants"
+                "stage name \"{name}\" contains a dot, which identifiers forbid"
             ),
             WorkflowSpecError::StageWithoutAgents { stage } => {
-                write!(f, "le stage « {stage} » ne déclare aucun agent")
+                write!(f, "stage \"{stage}\" declares no agent")
             }
             WorkflowSpecError::AgentsShape { stage } => write!(
                 f,
-                "les agents du stage « {stage} » ne sont ni une liste ni une map nommée"
+                "the agents of stage \"{stage}\" are neither a list nor a named map"
             ),
             WorkflowSpecError::AgentNameMissing { stage, index } => write!(
                 f,
-                "l'agent n°{index} du stage « {stage} » n'a pas de nom"
+                "agent #{index} of stage \"{stage}\" has no name"
             ),
             WorkflowSpecError::AgentNameConflict { stage, key, name } => write!(
                 f,
-                "l'agent « {key} » du stage « {stage} » se renomme « {name} »"
+                "agent \"{key}\" of stage \"{stage}\" renames itself \"{name}\""
             ),
             WorkflowSpecError::DuplicateAgentName { stage, name } => write!(
                 f,
-                "deux agents du stage « {stage} » portent le nom « {name} »"
+                "two agents of stage \"{stage}\" share the name \"{name}\""
             ),
             WorkflowSpecError::AgentNameContainsDot { stage, agent } => write!(
                 f,
-                "le nom de l'agent « {agent} » du stage « {stage} » contient un point, interdit dans les identifiants"
+                "agent name \"{agent}\" of stage \"{stage}\" contains a dot, which identifiers forbid"
             ),
             WorkflowSpecError::AgentSourceMissing { stage, agent } => write!(
                 f,
-                "l'agent « {agent} » du stage « {stage} » n'a ni recipe ni prompt"
+                "agent \"{agent}\" of stage \"{stage}\" has neither recipe nor prompt"
             ),
             WorkflowSpecError::AgentSourceAmbiguous { stage, agent } => write!(
                 f,
-                "l'agent « {agent} » du stage « {stage} » déclare à la fois recipe et prompt"
+                "agent \"{agent}\" of stage \"{stage}\" declares both recipe and prompt"
             ),
             WorkflowSpecError::EmptyAgentSource { stage, agent } => write!(
                 f,
-                "la source de l'agent « {agent} » du stage « {stage} » est vide"
+                "the source of agent \"{agent}\" of stage \"{stage}\" is empty"
             ),
             WorkflowSpecError::UnknownDependency { stage, depends_on } => write!(
                 f,
-                "le stage « {stage} » dépend de « {depends_on} », qui n'existe pas"
+                "stage \"{stage}\" depends on \"{depends_on}\", which does not exist"
             ),
             WorkflowSpecError::SelfDependency { stage } => {
-                write!(f, "le stage « {stage} » dépend de lui-même")
+                write!(f, "stage \"{stage}\" depends on itself")
             }
             WorkflowSpecError::DependencyCycle { stages } => {
-                write!(f, "cycle de dépendances : {}", stages.join(" → "))
+                write!(f, "dependency cycle: {}", stages.join(" → "))
             }
             WorkflowSpecError::InputReferenceMalformed {
                 stage,
@@ -261,7 +261,7 @@ impl fmt::Display for WorkflowSpecError {
                 reference,
             } => write!(
                 f,
-                "l'entrée « {input} » de « {stage}.{agent} » référence « {reference} » au lieu de stage.agent.output"
+                "input \"{input}\" of \"{stage}.{agent}\" references \"{reference}\" instead of stage.agent.output"
             ),
             WorkflowSpecError::UnknownInputStage {
                 stage,
@@ -270,7 +270,7 @@ impl fmt::Display for WorkflowSpecError {
                 referenced,
             } => write!(
                 f,
-                "l'entrée « {input} » de « {stage}.{agent} » référence le stage « {referenced} », qui n'existe pas"
+                "input \"{input}\" of \"{stage}.{agent}\" references stage \"{referenced}\", which does not exist"
             ),
             WorkflowSpecError::UnknownInputAgent {
                 stage,
@@ -280,7 +280,7 @@ impl fmt::Display for WorkflowSpecError {
                 referenced_agent,
             } => write!(
                 f,
-                "l'entrée « {input} » de « {stage}.{agent} » référence « {referenced_agent} », absent du stage « {referenced_stage} »"
+                "input \"{input}\" of \"{stage}.{agent}\" references \"{referenced_agent}\", absent from stage \"{referenced_stage}\""
             ),
             WorkflowSpecError::InputReferenceNotEarlier {
                 stage,
@@ -289,7 +289,7 @@ impl fmt::Display for WorkflowSpecError {
                 referenced_stage,
             } => write!(
                 f,
-                "l'entrée « {input} » de « {stage}.{agent} » référence « {referenced_stage} », qui n'est pas un ancêtre (via depends_on)"
+                "input \"{input}\" of \"{stage}.{agent}\" references \"{referenced_stage}\", which is not an ancestor (via depends_on)"
             ),
             WorkflowSpecError::NonPositiveBudget {
                 stage,
@@ -297,7 +297,7 @@ impl fmt::Display for WorkflowSpecError {
                 value,
             } => write!(
                 f,
-                "le budget {field} du stage « {stage} » vaut {value} au lieu d'un entier positif"
+                "budget {field} of stage \"{stage}\" is {value} instead of a positive integer"
             ),
         }
     }

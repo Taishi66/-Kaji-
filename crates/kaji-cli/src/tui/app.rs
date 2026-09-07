@@ -4457,7 +4457,7 @@ fn workflow_agent_sheet(
 fn agent_state_label(state: &kaji::workflow::AgentState) -> String {
     match state {
         kaji::workflow::AgentState::Failed(kaji::workflow::FailureCause::Budget(limit)) => {
-            format!("échoué : budget {} dépassé", limit.field())
+            format!("échoué : budget {} exceeded", limit.field())
         }
         kaji::workflow::AgentState::Failed(kaji::workflow::FailureCause::Error(error)) => {
             format!("échoué : {error}")
@@ -4478,10 +4478,10 @@ fn forge_sheet_verdict(task: &forge::ForgeTask) -> Option<(&'static str, &str)> 
 
 fn forge_status_label(status: forge::ForgeStatus) -> &'static str {
     match status {
-        forge::ForgeStatus::Running => "en cours",
-        forge::ForgeStatus::Done => "terminé",
-        forge::ForgeStatus::Failed => "échec",
-        forge::ForgeStatus::Cancelled => "annulé",
+        forge::ForgeStatus::Running => "running",
+        forge::ForgeStatus::Done => "done",
+        forge::ForgeStatus::Failed => "failed",
+        forge::ForgeStatus::Cancelled => "cancelled",
     }
 }
 
@@ -10074,7 +10074,7 @@ mod tests {
         let viewer = app.viewer.as_ref().expect("fiche ouverte");
         assert!(viewer.path.contains("auditer les tests"), "{}", viewer.path);
         let sheet = viewer.lines.join("\n");
-        for expected in ["tâche", "statut", "en cours", "7s", "tours", "2", "outil"] {
+        for expected in ["tâche", "statut", "running", "7s", "tours", "2", "outil"] {
             assert!(sheet.contains(expected), "{expected} manquant :\n{sheet}");
         }
         assert_eq!(app.focus, Focus::Viewer);
@@ -10094,7 +10094,7 @@ mod tests {
         app.on_event(&key(KeyCode::Enter));
 
         let sheet = app.viewer.as_ref().expect("fiche").lines.join("\n");
-        assert!(sheet.contains("échec"), "{sheet}");
+        assert!(sheet.contains("failed"), "{sheet}");
         assert!(sheet.contains("erreur"), "{sheet}");
         assert!(sheet.contains("compilation cassée"), "{sheet}");
         assert!(!sheet.contains("outil"), "une lame morte ne brûle rien");
@@ -10151,7 +10151,7 @@ mod tests {
 
         let viewer = app.viewer.as_ref().expect("fiche toujours ouverte");
         assert_eq!(viewer.scroll, 2);
-        assert!(viewer.lines.join("\n").contains("terminé"));
+        assert!(viewer.lines.join("\n").contains("done"));
     }
 
     #[test]

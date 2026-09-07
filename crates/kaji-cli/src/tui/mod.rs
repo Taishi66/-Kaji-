@@ -1005,7 +1005,7 @@ async fn shutdown_workflow(live: LiveWorkflow) {
 fn workflow_outcome_line(state: &kaji::workflow::WorkflowState) -> String {
     let outcome = match state.outcome() {
         kaji::workflow::WorkflowOutcome::Failed(kaji::workflow::FailureCause::Budget(limit)) => {
-            format!("échoué : budget {} dépassé", limit.field())
+            format!("échoué : budget {} exceeded", limit.field())
         }
         kaji::workflow::WorkflowOutcome::Failed(kaji::workflow::FailureCause::Error(error)) => {
             format!("échoué : {error}")
@@ -1437,7 +1437,7 @@ async fn event_loop(
                                 } else {
                                     live.handle.deny(&stage)
                                 };
-                                let decision = if approve { "approuvée" } else { "refusée" };
+                                let decision = if approve { "approved" } else { "denied" };
                                 if verdict.applied() {
                                     app.push_mission_notice(&format!("gate « {stage} » {decision}"));
                                 } else {
@@ -2476,7 +2476,7 @@ mod tests {
                 cancel: CancellationToken,
             ) -> Result<String, String> {
                 cancel.cancelled().await;
-                Err("annulé".to_string())
+                Err("cancelled".to_string())
             }
         }
 

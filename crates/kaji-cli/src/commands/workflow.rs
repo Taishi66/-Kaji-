@@ -58,7 +58,7 @@ pub async fn handle_workflow_run(path: PathBuf, approve_all: bool) -> Result<()>
     let spec = match read_spec(&path) {
         Ok(spec) => spec,
         Err(error) => {
-            eprintln!("kaji workflow : {error}");
+            eprintln!("kaji workflow: {error}");
             std::process::exit(EXIT_SPEC);
         }
     };
@@ -67,10 +67,10 @@ pub async fn handle_workflow_run(path: PathBuf, approve_all: bool) -> Result<()>
     let config = Config::global();
     let provider_name = config
         .get_kaji_provider()
-        .map_err(|_| anyhow!("aucun provider configuré — lancer `kaji configure`"))?;
+        .map_err(|_| anyhow!("no provider configured — run `kaji configure`"))?;
     let model_name = config
         .get_kaji_model()
-        .map_err(|_| anyhow!("aucun modèle configuré — lancer `kaji configure`"))?;
+        .map_err(|_| anyhow!("no model configured — run `kaji configure`"))?;
     let model_config =
         kaji::model_config::model_config_from_user_config(&provider_name, &model_name)?;
 
@@ -105,7 +105,7 @@ pub async fn handle_workflow_run(path: PathBuf, approve_all: bool) -> Result<()>
     let handle = executor.handle();
 
     println!(
-        "kaji workflow : « {} » → session « {} »",
+        "kaji workflow: \"{}\" → session \"{}\"",
         spec.name, session.id
     );
     let control = gate_control(approve_all, std::io::stdin().is_terminal());
@@ -124,7 +124,7 @@ pub async fn handle_workflow_run(path: PathBuf, approve_all: bool) -> Result<()>
 
     let outcome = drive.state.outcome();
     println!(
-        "kaji workflow : « {} » {}",
+        "kaji workflow: \"{}\" {}",
         drive.state.workflow,
         outcome_label(&outcome)
     );
@@ -231,7 +231,7 @@ where
                 // Réarmée pour le second appui, la boucle étant désormais
                 // sondée en continu : aucune fenêtre d'aveuglement.
                 interrupt.set(interrupts());
-                eprintln!("kaji workflow : annulation demandée — arrêt des agents en vol");
+                eprintln!("kaji workflow: cancellation requested — stopping the agents in flight");
             }
             Step::Gate(stage, decision) => {
                 pending = None;
@@ -257,7 +257,7 @@ pub async fn handle_workflow_list() -> Result<()> {
     let session_manager = SessionManager::instance();
     let runs = list_workflow_runs(&session_manager).await?;
     if runs.is_empty() {
-        println!("kaji workflow : aucun workflow enregistré");
+        println!("kaji workflow: no workflow recorded");
         return Ok(());
     }
     for run in &runs {
@@ -291,22 +291,22 @@ pub async fn handle_workflow_status(session_id: String) -> Result<()> {
 fn missing_run_message(session_id: &str, known: bool) -> String {
     if known {
         format!(
-            "la session « {session_id} » existe mais n'a jamais lancé de workflow — \
-             `kaji workflow list` donne celles qui en portent un"
+            "session \"{session_id}\" exists but never started a workflow — \
+             `kaji workflow list` shows the ones that carry one"
         )
     } else {
         format!(
-            "aucune session « {session_id} » — vérifier l'identifiant, \
-             `kaji workflow list` donne ceux des workflows enregistrés"
+            "no session \"{session_id}\" — check the id, \
+             `kaji workflow list` shows the ids of the recorded workflows"
         )
     }
 }
 
 fn read_spec(path: &Path) -> Result<WorkflowSpec> {
     let yaml = std::fs::read_to_string(path)
-        .map_err(|error| anyhow!("spec « {} » illisible : {error}", path.display()))?;
+        .map_err(|error| anyhow!("spec \"{}\" unreadable: {error}", path.display()))?;
     WorkflowSpec::from_yaml(&yaml)
-        .map_err(|error| anyhow!("spec « {} » invalide : {error}", path.display()))
+        .map_err(|error| anyhow!("spec \"{}\" invalid: {error}", path.display()))
 }
 
 fn gate_control(approve_all: bool, interactive: bool) -> GateControl {
@@ -356,7 +356,7 @@ fn apply_gate_decision(handle: &WorkflowHandle, stage: &str, answered: Option<Ga
         Some(decision) => decision,
         None => {
             let (decision, message) = unattended_verdict(stage);
-            eprintln!("kaji workflow : {message}");
+            eprintln!("kaji workflow: {message}");
             decision
         }
     };
@@ -367,7 +367,7 @@ fn apply_gate_decision(handle: &WorkflowHandle, stage: &str, answered: Option<Ga
     };
     if !verdict.applied() {
         println!(
-            "kaji workflow : gate « {stage} » non tranchée — {}",
+            "kaji workflow: gate \"{stage}\" not settled — {}",
             verdict.label()
         );
     }
@@ -379,7 +379,7 @@ fn apply_gate_decision(handle: &WorkflowHandle, stage: &str, answered: Option<Ga
 async fn ask_gate(stage: &str) -> Option<GateDecision> {
     let stage = stage.to_string();
     tokio::task::spawn_blocking(move || loop {
-        print!("kaji workflow : gate « {stage} » — approuver ? [o/n] ");
+        print!("kaji workflow: gate \"{stage}\" — approve? [y/n] ");
         let _ = std::io::stdout().flush();
         let mut answer = String::new();
         match std::io::stdin().read_line(&mut answer) {
@@ -397,8 +397,8 @@ async fn ask_gate(stage: &str) -> Option<GateDecision> {
 
 fn gate_answer(input: &str) -> Option<GateDecision> {
     match input.trim().to_lowercase().as_str() {
-        "o" | "oui" | "y" | "yes" => Some(GateDecision::Approve),
-        "n" | "non" | "no" => Some(GateDecision::Deny),
+        "y" | "yes" => Some(GateDecision::Approve),
+        "n" | "no" => Some(GateDecision::Deny),
         _ => None,
     }
 }
@@ -415,8 +415,8 @@ fn unattended_verdict(stage: &str) -> (GateDecision, String) {
     (
         GateDecision::Deny,
         format!(
-            "gate « {stage} » ouverte sans personne pour décider (entrée non interactive) — \
-             refusée ; relancer avec --approve-all pour approuver sans demander"
+            "gate \"{stage}\" opened with nobody to decide (non-interactive input) — \
+             denied; re-run with --approve-all to approve without asking"
         ),
     )
 }
@@ -476,17 +476,17 @@ fn progress_lines(
 
 fn stage_line(stage: &StageStatus) -> String {
     match &stage.state {
-        StageState::Waiting => format!("stage « {} » — gate : décision attendue", stage.name),
+        StageState::Waiting => format!("stage \"{}\" — gate: decision pending", stage.name),
         StageState::Failed(cause) => {
-            format!("stage « {} » — échoué : {}", stage.name, cause_label(cause))
+            format!("stage \"{}\" — failed: {}", stage.name, cause_label(cause))
         }
-        state => format!("stage « {} » — {}", stage.name, state.label()),
+        state => format!("stage \"{}\" — {}", stage.name, state.label()),
     }
 }
 
 fn agent_line(stage: &str, agent: &AgentStatus, artifact: Option<usize>) -> String {
     let state = match &agent.state {
-        AgentState::Failed(cause) => format!("échoué : {}", cause_label(cause)),
+        AgentState::Failed(cause) => format!("failed: {}", cause_label(cause)),
         state => state.label().to_string(),
     };
     let mut line = format!("  {stage}.{} — {state}", agent.name);
@@ -497,7 +497,7 @@ fn agent_line(stage: &str, agent: &AgentStatus, artifact: Option<usize>) -> Stri
         line.push_str(&format!(" · {}", duration_label(agent.duration_ms)));
     }
     if let Some(chars) = artifact {
-        line.push_str(&format!(" · artefact {chars} car."));
+        line.push_str(&format!(" · artifact {chars} chars"));
     }
     line
 }
@@ -506,7 +506,7 @@ fn agent_line(stage: &str, agent: &AgentStatus, artifact: Option<usize>) -> Stri
 /// pointer la ligne YAML à corriger, pas seulement dire « échoué ».
 fn cause_label(cause: &FailureCause) -> String {
     match cause {
-        FailureCause::Budget(limit) => format!("budget {} dépassé", limit.field()),
+        FailureCause::Budget(limit) => format!("budget {} exceeded", limit.field()),
         FailureCause::Error(error) => error.clone(),
     }
 }
@@ -521,7 +521,7 @@ fn duration_label(ms: i64) -> String {
 
 fn outcome_label(outcome: &WorkflowOutcome) -> String {
     match outcome {
-        WorkflowOutcome::Failed(cause) => format!("échoué : {}", cause_label(cause)),
+        WorkflowOutcome::Failed(cause) => format!("failed: {}", cause_label(cause)),
         other => other.label().to_string(),
     }
 }
@@ -541,7 +541,7 @@ fn exit_code(outcome: &WorkflowOutcome, interrupted: bool) -> i32 {
 fn run_state_label(run: &WorkflowRun) -> String {
     match run.outcome() {
         Some(outcome) => outcome_label(&outcome),
-        None => "en cours".to_string(),
+        None => "running".to_string(),
     }
 }
 
@@ -557,7 +557,7 @@ fn list_line(run: &WorkflowRun) -> String {
 
 fn status_report(run: &WorkflowRun) -> Vec<String> {
     let mut lines = vec![format!(
-        "workflow « {} » · session {} · démarré {} · {}",
+        "workflow \"{}\" · session {} · started {} · {}",
         run.workflow,
         run.session_id,
         local_date(run.started_at_ms),
@@ -574,7 +574,7 @@ fn status_report(run: &WorkflowRun) -> Vec<String> {
     }
     let pending = run.pending_gates();
     if !pending.is_empty() {
-        lines.push(format!("gate(s) en attente : {}", pending.join(", ")));
+        lines.push(format!("pending gate(s): {}", pending.join(", ")));
     }
     lines
 }
@@ -587,7 +587,7 @@ fn local_date(ms: i64) -> String {
                 .format("%Y-%m-%d %H:%M")
                 .to_string()
         })
-        .unwrap_or_else(|| "date inconnue".to_string())
+        .unwrap_or_else(|| "unknown date".to_string())
 }
 
 #[cfg(test)]
@@ -662,7 +662,7 @@ stages:
 
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("collecte"), "{lines:?}");
-        assert!(lines[0].contains("en cours"), "{lines:?}");
+        assert!(lines[0].contains("running"), "{lines:?}");
         assert!(
             progress_lines(&current, &current, &no_artifact).is_empty(),
             "un état inchangé n'imprime rien"
@@ -745,13 +745,13 @@ stages:
 
     #[test]
     fn a_gate_answer_reads_both_languages_and_re_asks_on_anything_else() {
-        assert_eq!(gate_answer("o"), Some(GateDecision::Approve));
-        assert_eq!(gate_answer("Oui"), Some(GateDecision::Approve));
+        assert_eq!(gate_answer("y"), Some(GateDecision::Approve));
+        assert_eq!(gate_answer("Yes"), Some(GateDecision::Approve));
         assert_eq!(gate_answer(" y \n"), Some(GateDecision::Approve));
         assert_eq!(gate_answer("n"), Some(GateDecision::Deny));
-        assert_eq!(gate_answer("non"), Some(GateDecision::Deny));
+        assert_eq!(gate_answer("no"), Some(GateDecision::Deny));
         assert_eq!(gate_answer(""), None);
-        assert_eq!(gate_answer("peut-être"), None);
+        assert_eq!(gate_answer("maybe"), None);
     }
 
     fn run(finished: bool, state: WorkflowState) -> WorkflowRun {
@@ -778,7 +778,7 @@ stages:
 
         assert!(line.contains("abc123"), "{line}");
         assert!(line.contains("revue"), "{line}");
-        assert!(line.contains("terminé"), "{line}");
+        assert!(line.contains("done"), "{line}");
         assert!(line.contains("2026"), "{line}");
     }
 
@@ -787,7 +787,7 @@ stages:
     #[test]
     fn an_unfinished_run_is_listed_as_in_flight() {
         let line = list_line(&run(false, state()));
-        assert!(line.contains("en cours"), "{line}");
+        assert!(line.contains("running"), "{line}");
     }
 
     #[test]
@@ -806,7 +806,7 @@ stages:
         assert!(report.contains("120"), "{report}");
         assert!(report.contains("deploie"), "{report}");
         assert!(
-            report.contains("gate(s) en attente : deploie"),
+            report.contains("pending gate(s): deploie"),
             "{report}: la gate qui attend une décision doit ressortir"
         );
     }
@@ -823,11 +823,11 @@ stages:
         assert!(unknown.contains("abc123"), "{unknown}");
         assert!(known.contains("abc123"), "{known}");
         assert!(
-            unknown.contains("aucune session"),
+            unknown.contains("no session"),
             "{unknown}: l'identifiant est à revoir"
         );
         assert!(
-            known.contains("existe") && known.contains("jamais lancé"),
+            known.contains("exists") && known.contains("never started"),
             "{known}: la session existe, elle n'a simplement rien à montrer"
         );
     }
@@ -849,7 +849,7 @@ stages:
             cancel: CancellationToken,
         ) -> Result<String, String> {
             cancel.cancelled().await;
-            Err("annulé".to_string())
+            Err("cancelled".to_string())
         }
     }
 
