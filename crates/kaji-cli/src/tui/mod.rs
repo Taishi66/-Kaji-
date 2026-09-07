@@ -1016,6 +1016,20 @@ fn workflow_outcome_line(state: &kaji::workflow::WorkflowState) -> String {
     format!("workflow \"{}\" {outcome}", state.workflow)
 }
 
+/// Un run qui n'a pas pu partir, ou qui est mort en route. Deux helpers là où
+/// deux `format!` en ligne suffiraient : la bannière est la surface anglophone
+/// du produit, et un littéral posé au fil du code échappe à toute relecture —
+/// nommé, il se teste.
+fn workflow_failure_line(error: &str) -> String {
+    format!("workflow failed: {error}")
+}
+
+/// Le join de la tâche de fond a lâché : le workflow n'a pas rendu de verdict,
+/// il a été coupé.
+fn workflow_interrupted_line(error: &str) -> String {
+    format!("workflow interrupted: {error}")
+}
+
 async fn session_working_dir(session_manager: &SessionManager, session_id: &str) -> PathBuf {
     match session_manager.get_session(session_id, false).await {
         Ok(session) => session.working_dir,
@@ -1423,7 +1437,9 @@ async fn event_loop(
                                     app.open_mission_control();
                                     app.push_mission_notice(&format!("workflow \"{name}\" started"));
                                 }
-                                Err(error) => app.push_system(&format!("workflow : {error:#}")),
+                                Err(error) => {
+                                    app.push_system(&workflow_failure_line(&format!("{error:#}")))
+                                }
                             }
                         }
                     }
@@ -1591,8 +1607,12 @@ async fn event_loop(
                         app.push_mission_notice(&workflow_outcome_line(&state));
                         app.apply_workflow_snapshot(Some(state));
                     }
-                    Ok(Err(error)) => app.push_mission_notice(&format!("workflow : {error:#}")),
-                    Err(error) => app.push_mission_notice(&format!("workflow interrupted: {error}")),
+                    Ok(Err(error)) => {
+                        app.push_mission_notice(&workflow_failure_line(&format!("{error:#}")))
+                    }
+                    Err(error) => {
+                        app.push_mission_notice(&workflow_interrupted_line(&error.to_string()))
+                    }
                 }
             }
         }
@@ -2062,6 +2082,15 @@ mod tests {
 
         assert_eq!(GateVerdict::NoGate.label(), "stage has no gate");
         assert_eq!(PauseVerdict::Settled.label(), "stage already finished");
+        assert_eq!(
+            workflow_failure_line("provider timeout"),
+            "workflow failed: provider timeout"
+        );
+        assert_eq!(
+            workflow_interrupted_line("task panicked"),
+            "workflow interrupted: task panicked"
+        );
+
         for reason in [
             GateVerdict::Applied.label(),
             GateVerdict::UnknownStage.label(),
@@ -2074,6 +2103,34 @@ mod tests {
                 !reason.chars().any(|c| "àâçéèêëîïôùûü".contains(c)),
                 "un verdict user-facing ne parle plus français : {reason:?}"
             );
+        }
+    }
+
+    /// Le trou que le round précédent a laissé : la traduction couvrait les
+    /// helpers, pas les littéraux posés en ligne sur le même chemin. Ce scan
+    /// lit la source des deux fichiers qui alimentent la bannière et refuse
+    /// tout littéral accentué sur une ligne d'appel — un helper oublié se voit
+    /// désormais sans qu'un humain relise le diff.
+    #[test]
+    fn no_banner_call_site_still_carries_a_french_literal() {
+        const SOURCES: [(&str, &str); 2] = [
+            ("mod.rs", include_str!("mod.rs")),
+            ("app.rs", include_str!("app.rs")),
+        ];
+        const CALLS: [&str; 2] = ["push_mission_notice(", "push_action_notice("];
+
+        for (name, source) in SOURCES {
+            for (number, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or(line);
+                if !CALLS.iter().any(|call| code.contains(call)) {
+                    continue;
+                }
+                assert!(
+                    !code.chars().any(|c| "àâçéèêëîïôùûü«»".contains(c)),
+                    "{name}:{} pousse encore une bannière française : {code:?}",
+                    number + 1
+                );
+            }
         }
     }
 
