@@ -2240,11 +2240,35 @@ mod tests {
         for width in [80u16, 100, 120, 200] {
             app.mission.stage = 0;
             let content = rendered(&app, width, 30);
-            for line in content.lines() {
+            let rows: Vec<&str> = content.lines().collect();
+            let last = rows.len() - 1;
+
+            for (rank, line) in rows.iter().enumerate() {
                 assert_eq!(
                     line.chars().count(),
                     usize::from(width),
                     "à {width} colonnes : {line:?}"
+                );
+
+                // Le compte de cellules seul ne peut pas échouer : ratatui
+                // écrête, et chaque cellule rend un caractère quoi qu'on y
+                // écrive. Ce sont les colonnes du cadre qui disent la vérité —
+                // une carte trop large les recouvre au lieu de déborder.
+                let (left, right) = match rank {
+                    0 => ('┌', '┐'),
+                    rank if rank == last => ('└', '┘'),
+                    _ => ('│', '│'),
+                };
+                let mut chars = line.chars();
+                assert_eq!(
+                    chars.next(),
+                    Some(left),
+                    "à {width} colonnes, ligne {rank} : {line:?}"
+                );
+                assert_eq!(
+                    chars.next_back(),
+                    Some(right),
+                    "à {width} colonnes, ligne {rank} : {line:?}"
                 );
             }
         }
