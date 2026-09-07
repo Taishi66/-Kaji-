@@ -669,10 +669,10 @@ pub fn docker_table_lines(raw_output: &str) -> Vec<RoledLine> {
         .collect();
 
     if raw_rows.is_empty() {
-        return vec![vec![RoledSpan::dim("docker : aucun conteneur en cours")]];
+        return vec![vec![RoledSpan::dim("docker: no running container")]];
     }
 
-    let headers = ["nom", "image", "statut", "ports"];
+    let headers = ["name", "image", "status", "ports"];
     let right_align = [false, false, false, false];
 
     let rows: Vec<Vec<String>> = raw_rows
@@ -991,27 +991,21 @@ mod tests {
             "web\tnginx:latest\tUp 3 hours\t0.0.0.0:80->80/tcp\ndb\tpostgres:16\tUp 3 hours\t";
         let lines = docker_table_lines(fixture);
         let text = plain_lines(&lines);
-        assert_eq!(text[0], " nom  image         statut      ports");
-        assert_eq!(text[1], " ────────────────────────────────────");
+        assert_eq!(text[0], " name  image         status      ports");
+        assert_eq!(text[1], " ─────────────────────────────────────");
         assert_eq!(
             text[2],
-            " web  nginx:latest  Up 3 hours  0.0.0.0:80->80/tcp"
+            " web   nginx:latest  Up 3 hours  0.0.0.0:80->80/tcp"
         );
-        assert_eq!(text[3], " db   postgres:16   Up 3 hours  ");
+        assert_eq!(text[3], " db    postgres:16   Up 3 hours  ");
     }
 
     #[test]
     fn docker_table_lines_empty_output_reports_no_containers() {
         let lines = docker_table_lines("");
-        assert_eq!(
-            plain_lines(&lines),
-            vec!["docker : aucun conteneur en cours"]
-        );
+        assert_eq!(plain_lines(&lines), vec!["docker: no running container"]);
         let lines = docker_table_lines("\n\n");
-        assert_eq!(
-            plain_lines(&lines),
-            vec!["docker : aucun conteneur en cours"]
-        );
+        assert_eq!(plain_lines(&lines), vec!["docker: no running container"]);
     }
 
     #[test]

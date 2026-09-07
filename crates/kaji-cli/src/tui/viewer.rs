@@ -86,9 +86,9 @@ pub(crate) fn human_size(bytes: u64) -> String {
     const KO: u64 = 1024;
     const MO: u64 = KO * KO;
     if bytes >= MO {
-        format!("{:.1} Mo", bytes as f64 / MO as f64)
+        format!("{:.1} MB", bytes as f64 / MO as f64)
     } else if bytes >= KO {
-        format!("{} Ko", bytes / KO)
+        format!("{} KB", bytes / KO)
     } else {
         format!("{bytes} o")
     }
@@ -161,7 +161,7 @@ mod tests {
         );
         let kept: usize = viewer.lines.iter().map(String::len).sum();
         assert!(kept <= READ_LIMIT, "{kept} octets gardés");
-        assert_eq!(read_limit_label(), "256 Ko");
+        assert_eq!(read_limit_label(), "256 KB");
     }
 
     /// A reader that blows up past `remaining` bytes: an unbounded
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn human_size_scales_with_the_file() {
         assert_eq!(human_size(12), "12 o");
-        assert_eq!(human_size(4096), "4 Ko");
-        assert_eq!(human_size(3 * 1024 * 1024), "3.0 Mo");
+        assert_eq!(human_size(4096), "4 KB");
+        assert_eq!(human_size(3 * 1024 * 1024), "3.0 MB");
     }
 }

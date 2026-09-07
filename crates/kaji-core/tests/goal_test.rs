@@ -175,8 +175,8 @@ fn max_iterations_defaults_when_the_env_value_is_absent_or_invalid() {
 #[test]
 fn prompts_carry_the_condition_and_the_feedback() {
     let work = goal::work_prompt("les tests passent");
-    assert!(work.contains("Objectif : les tests passent"));
-    assert!(work.contains("Commence (ou continue) à travailler"));
+    assert!(work.contains("Goal: les tests passent"));
+    assert!(work.contains("Start (or keep) working"));
 
     let evaluator = goal::evaluator_prompt("les tests passent");
     assert!(evaluator.contains("les tests passent"));
@@ -186,16 +186,16 @@ fn prompts_carry_the_condition_and_the_feedback() {
 
     let continuation = goal::continuation_prompt("les tests passent", "il reste X");
     assert!(continuation.contains("il reste X"));
-    assert!(continuation.contains("Continue le travail vers : les tests passent"));
+    assert!(continuation.contains("Keep working toward: les tests passent"));
 }
 
 #[test]
 fn phases_and_outcomes_have_display_labels() {
-    assert_eq!(GoalPhase::Working.label(), "travail");
-    assert_eq!(GoalPhase::Evaluating.label(), "évaluation");
-    assert_eq!(GoalOutcome::Met.label(), "atteint");
-    assert_eq!(GoalOutcome::Unreachable.label(), "inatteignable");
-    assert_eq!(GoalOutcome::Cleared.label(), "effacé");
-    assert_eq!(GoalOutcome::Interrupted.label(), "interrompu");
-    assert_eq!(GoalOutcome::IterationCap.label(), "cap d'itérations");
+    assert_eq!(GoalPhase::Working.label(), "working");
+    assert_eq!(GoalPhase::Evaluating.label(), "evaluating");
+    assert_eq!(GoalOutcome::Met.label(), "met");
+    assert_eq!(GoalOutcome::Unreachable.label(), "unreachable");
+    assert_eq!(GoalOutcome::Cleared.label(), "cleared");
+    assert_eq!(GoalOutcome::Interrupted.label(), "interrupted");
+    assert_eq!(GoalOutcome::IterationCap.label(), "iteration cap");
 }

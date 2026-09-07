@@ -224,7 +224,7 @@ fn chat_title(app: &App) -> String {
     }
     if app.scroll_offset > 0 {
         parts.push(format!(
-            "{} défilement — End pour revenir",
+            "{} scrolled — End to come back",
             theme::SCROLL_INDICATOR
         ));
     }
@@ -463,7 +463,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let (title, title_style) = if app.turn_active {
         let elapsed = app.turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         (
-            format!(" {} {elapsed}s — Esc annule ", theme::ELAPSED_GLYPH),
+            format!(" {} {elapsed}s — Esc cancels ", theme::ELAPSED_GLYPH),
             theme::accent(),
         )
     } else {
@@ -493,7 +493,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         } else if let Some(suggestion) = app.suggestion.as_ref() {
             Paragraph::new(suggestion.clone()).style(theme::dim())
         } else {
-            Paragraph::new("écris ici…").style(theme::dim())
+            Paragraph::new("type here…").style(theme::dim())
         }
     } else {
         Paragraph::new(app.input.as_str()).style(theme::text())
@@ -546,8 +546,8 @@ fn draw_palette(frame: &mut Frame, app: &App, input_area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(" commandes ")
-        .title_bottom(Line::from(" ↑↓ choisir · ⏎ valider · esc ").style(theme::dim()));
+        .title(" commands ")
+        .title_bottom(Line::from(" ↑↓ select · ⏎ confirm · esc ").style(theme::dim()));
     let lines: Vec<Line> = matches
         .iter()
         .enumerate()
@@ -586,9 +586,9 @@ fn draw_mentions(frame: &mut Frame, app: &App, input_area: Rect) {
         &app.mention_matches
     };
     let hint = if indexing {
-        Some("indexation…")
+        Some("indexing…")
     } else if app.mention_index_truncated() {
-        Some("… index tronqué (20 000 entrées)")
+        Some("… index truncated (20,000 entries)")
     } else {
         None
     };
@@ -623,8 +623,8 @@ fn draw_mentions(frame: &mut Frame, app: &App, input_area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(" fichiers ")
-        .title_bottom(Line::from(" ↑↓ choisir · ⏎/Tab compléter · esc ").style(theme::dim()));
+        .title(" files ")
+        .title_bottom(Line::from(" ↑↓ select · ⏎/Tab complete · esc ").style(theme::dim()));
     let mut lines: Vec<Line> = matches
         .iter()
         .enumerate()
@@ -687,7 +687,7 @@ fn draw_args(frame: &mut Frame, app: &App, input_area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .title(" arguments ")
-        .title_bottom(Line::from(" Tab/↑↓ choisir · esc ").style(theme::dim()));
+        .title_bottom(Line::from(" Tab/↑↓ select · esc ").style(theme::dim()));
     let lines: Vec<Line> = matches
         .iter()
         .enumerate()
@@ -740,10 +740,10 @@ fn draw_finder(frame: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme::border_active())
-        .title(Span::styled(" ⌕ fichiers ", theme::title()))
+        .title(Span::styled(" ⌕ files ", theme::title()))
         .title_bottom(
             Line::from(format!(
-                " Enter ouvrir · Tab attacher @ · Esc fermer · {position}/{total} "
+                " Enter open · Tab attach @ · Esc close · {position}/{total} "
             ))
             .style(theme::dim()),
         );
@@ -766,9 +766,9 @@ fn draw_finder(frame: &mut Frame, app: &App) {
     frame.set_cursor_position((cursor_x.min(rows[0].right().saturating_sub(1)), rows[0].y));
 
     let hint = if app.finder_indexing() {
-        Some("indexation…")
+        Some("indexing…")
     } else if app.mention_index_truncated() {
-        Some("… index tronqué (20 000 entrées)")
+        Some("… index truncated (20,000 entries)")
     } else {
         None
     };
@@ -805,7 +805,7 @@ fn draw_finder(frame: &mut Frame, app: &App) {
 /// Assez large pour que le pied tienne d'un tenant dans le cadre, et jamais
 /// plus de 90 % du terminal.
 const THEME_PICKER_WIDTH: u16 = 41;
-const THEME_PICKER_FOOTER: &str = "↑↓ aperçu · Enter valider · Esc annuler";
+const THEME_PICKER_FOOTER: &str = "↑↓ preview · Enter confirm · Esc cancel";
 
 /// Sélecteur de thème (`/theme`) — une liste nue, sans pastilles de couleur :
 /// la palette sélectionnée est déjà appliquée, donc tout ce qui entoure la
@@ -830,7 +830,7 @@ fn draw_theme_picker(frame: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme::border_active())
-        .title(Span::styled(" thème ", theme::title()));
+        .title(Span::styled(" theme ", theme::title()));
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
@@ -851,7 +851,7 @@ fn draw_theme_picker(frame: &mut Frame, app: &App) {
                 Span::styled(palette.name, style),
             ];
             if i == picker.initial {
-                spans.push(Span::styled(" (actuel)", theme::dim()));
+                spans.push(Span::styled(" (current)", theme::dim()));
             }
             Line::from(spans)
         })
@@ -863,7 +863,7 @@ fn draw_theme_picker(frame: &mut Frame, app: &App) {
 /// Plus large que le sélecteur de thème : une ligne y porte une commande, pas
 /// un nom de palette.
 const EDITOR_PICKER_WIDTH: u16 = 52;
-const EDITOR_PICKER_FOOTER: &str = "↑↓ · Enter choisir · Esc annuler";
+const EDITOR_PICKER_FOOTER: &str = "↑↓ · Enter select · Esc cancel";
 
 /// Sélecteur d'éditeur (`/editor`) — les éditeurs détectés sur le `PATH`, plus
 /// `$VISUAL`/`$EDITOR` quand l'environnement en propose un. Rien ne s'applique
@@ -888,7 +888,7 @@ fn draw_editor_picker(frame: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme::border_active())
-        .title(Span::styled(" éditeur ", theme::title()));
+        .title(Span::styled(" editor ", theme::title()));
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
@@ -913,7 +913,7 @@ fn draw_editor_picker(frame: &mut Frame, app: &App) {
                 spans.push(Span::styled(format!("  {detail}"), theme::dim()));
             }
             if picker.current == Some(i) {
-                spans.push(Span::styled(" (actuel)", theme::dim()));
+                spans.push(Span::styled(" (current)", theme::dim()));
             }
             Line::from(spans)
         })
@@ -1000,10 +1000,10 @@ fn draw_explorer(frame: &mut Frame, app: &App, explorer: &ExplorerState, area: R
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| explorer.root.to_string_lossy().into_owned());
     let footer = if explorer.filter.is_empty() {
-        " . dotfiles · a attacher · q fermer ".to_string()
+        " . dotfiles · a attach · q close ".to_string()
     } else {
         format!(
-            " ⌕ {} · {} éléments · Esc vide le filtre ",
+            " ⌕ {} · {} entries · Esc clears the filter ",
             sanitize_for_display(&explorer.filter),
             explorer.entry_count()
         )
@@ -1242,20 +1242,23 @@ fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
     // arbre derrière, `Esc`/`h` y ramènent et `q` seul ferme ; sans arbre les
     // trois font la même chose.
     let exits = if app.explorer.is_some() {
-        "Esc/h arbre · q fermer"
+        "Esc/h tree · q close"
     } else {
-        "Esc/h/q fermer"
+        "Esc/h/q close"
     };
     // `Ctrl+O` is only worth naming while the chat is folded behind the pane —
     // it is what brings it back.
     let focused = app.focus == Focus::Viewer;
     let keys = if focused {
-        format!("j/k défiler · e éditer · r recharger · a attacher @ · {exits} · Ctrl+O chat")
+        format!("j/k scroll · e edit · r reload · a attach @ · {exits} · Ctrl+O chat")
     } else {
-        format!("j/k défiler · e éditer · r recharger · a attacher @ · {exits}")
+        format!("j/k scroll · e edit · r reload · a attach @ · {exits}")
     };
     let footer = if viewer.truncated {
-        format!(" … tronqué ({} lus) · {keys} ", viewer::read_limit_label())
+        format!(
+            " … truncated ({} read) · {keys} ",
+            viewer::read_limit_label()
+        )
     } else {
         format!(" {keys} ")
     };
@@ -1302,12 +1305,12 @@ fn draw_spec(frame: &mut Frame, app: &App, area: Rect) {
         .spec
         .as_ref()
         .map(|spec| spec.title.clone())
-        .unwrap_or_else(|| "aucune SPEC".to_string());
+        .unwrap_or_else(|| "no SPEC".to_string());
 
     let mut lines = vec![Line::from(Span::styled(title, theme::title()))];
     if app.spec.is_none() {
         lines.push(Line::from(Span::styled(
-            "SPEC.md dans le dossier courant ou kaji tui --spec <fichier>",
+            "SPEC.md in the current folder, or kaji tui --spec <file>",
             theme::dim(),
         )));
     }
@@ -1351,10 +1354,10 @@ fn draw_restore_confirm_modal(frame: &mut Frame, files_only: bool) {
         .border_style(theme::title())
         .title(title);
     let body = if files_only {
-        "Filet de sécurité (pre-restore) : FICHIERS SEULS.
-L'arbre de travail sera rembobiné; la conversation est laissée telle quelle, ses messages supprimés sont irrécupérables."
+        "Safety net (pre-restore): FILES ONLY.
+The work tree will be rewound; the conversation is left as is, and its deleted messages are unrecoverable."
     } else {
-        "L'arbre de travail et la conversation seront ramenés à l'état de ce checkpoint."
+        "The work tree and the conversation will be brought back to this checkpoint's state."
     };
     let paragraph = Paragraph::new(body).block(block).wrap(Wrap { trim: true });
     frame.render_widget(Clear, area);
@@ -1370,12 +1373,12 @@ fn draw_workflow_gate_modal(frame: &mut Frame, stage: &str) {
         .borders(Borders::ALL)
         .border_style(theme::title())
         .title(format!(
-            " {} gate « {} » — approuver ? (y/n) ",
+            " {} gate \"{}\" — approve? (y/n) ",
             theme::GATE_GLYPH,
             sanitize_for_display(&stage.replace('\n', "␊"))
         ));
     let paragraph = Paragraph::new(
-        "y = approuver   n = refuser (le stage et sa descendance sont annulés)   Esc = laisser la porte ouverte",
+        "y = approve   n = deny (the stage and its descendants are cancelled)   Esc = leave the gate open",
     )
     .block(block)
     .wrap(Wrap { trim: true });
@@ -1390,7 +1393,7 @@ fn draw_cancel_confirm_modal(frame: &mut Frame, label: &str) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::title())
-        .title(format!(" {} annuler ? (y/n) ", theme::SUBAGENT_GLYPH));
+        .title(format!(" {} cancel? (y/n) ", theme::SUBAGENT_GLYPH));
     let paragraph = Paragraph::new(format!(
         "{}\n\ny = couper   toute autre touche = laisser tourner",
         sanitize_for_display(&label.replace('\n', "␊"))
@@ -1407,10 +1410,10 @@ fn draw_gate_modal(frame: &mut Frame) {
         .borders(Borders::ALL)
         .border_style(theme::title())
         .title(format!(
-            " {} Gate — approuver la SPEC ? (y/n) ",
+            " {} Gate — approve the SPEC? (y/n) ",
             theme::GATE_GLYPH
         ));
-    let paragraph = Paragraph::new("y = approuver   n / Esc = refuser")
+    let paragraph = Paragraph::new("y = approve   n / Esc = deny")
         .block(block)
         .wrap(Wrap { trim: true });
     frame.render_widget(Clear, area);
@@ -1536,12 +1539,12 @@ const MODAL_SCAN_CHARS_PER_CELL: usize = 8;
 /// before pressing the key that writes it.
 fn approval_answers(approval: &ToolApprovalRequest, detail_open: bool) -> String {
     let detail_key = if detail_open {
-        "Tab = masquer le détail"
+        "Tab = hide the detail"
     } else {
-        "Tab = détail"
+        "Tab = detail"
     };
     format!(
-        "y = une fois · n / Esc = refuser · {detail_key}\ns = pour la session · a = toujours : {}",
+        "y = once · n / Esc = deny · {detail_key}\ns = for the session · a = always: {}",
         sanitize_for_display(&approval.grant_label())
     )
 }
@@ -1560,7 +1563,7 @@ fn draw_tool_approval_modal(
         .borders(Borders::ALL)
         .border_style(theme::border_active())
         .title(format!(
-            " {} confirmation d'outil — {} (y/s/a/n) ",
+            " {} tool confirmation — {} (y/s/a/n) ",
             theme::GATE_GLYPH,
             tool_name
         ));
@@ -1675,7 +1678,7 @@ mod tests {
         terminal.draw(|f| draw(f, &app)).expect("draw");
         let content = buffer_as_string(terminal.backend().buffer());
 
-        assert!(content.contains("commandes"));
+        assert!(content.contains("commands"));
         assert!(content.contains("/sdd"));
         assert!(content.contains("/spec"));
         assert!(!content.contains("/quit"), "filtré hors de la liste");
@@ -1698,7 +1701,7 @@ mod tests {
             let content = buffer_as_string(terminal.backend().buffer());
 
             assert!(
-                !content.contains("commandes"),
+                !content.contains("commands"),
                 "input {input:?} ne doit pas ouvrir la palette"
             );
         }
@@ -2538,11 +2541,11 @@ mod tests {
         );
         for expected in [
             "(y/s/a/n)",
-            "y = une fois",
-            "n / Esc = refuser",
-            "Tab = détail",
-            "s = pour la session",
-            "a = toujours",
+            "y = once",
+            "n / Esc = deny",
+            "Tab = detail",
+            "s = for the session",
+            "a = always",
             "cargo test *",
         ] {
             assert!(
@@ -2564,7 +2567,7 @@ mod tests {
             "got:\n{content}"
         );
         assert!(
-            content.contains("Tab = masquer le détail"),
+            content.contains("Tab = hide the detail"),
             "an open panel must advertise how to close it, got:\n{content}"
         );
     }
@@ -2629,7 +2632,7 @@ mod tests {
         let content = rendered(&app, 100, 10);
         let mut rows = content.lines();
         let header = rows.next().expect("ligne de header");
-        let bar = rows.next_back().expect("barre d'état");
+        let bar = rows.next_back().expect("status bar");
 
         assert!(bar.contains("智"), "got:\n{content}");
         assert!(!bar.contains("smart"), "got:\n{content}");
@@ -2648,7 +2651,7 @@ mod tests {
         let content = rendered(&app, 120, 10);
         let mut rows = content.lines();
         let header = rows.next().expect("ligne de header");
-        let bar = rows.next_back().expect("barre d'état");
+        let bar = rows.next_back().expect("status bar");
 
         assert!(header.contains("abcdef"), "got:\n{content}");
         for gone in ["↑", "$", "claude-fable-5"] {
@@ -2670,7 +2673,7 @@ mod tests {
         });
 
         let content = rendered(&app, 120, 10);
-        let bar = content.lines().next_back().expect("barre d'état");
+        let bar = content.lines().next_back().expect("status bar");
 
         assert!(bar.contains(theme::DIR_GLYPH), "got:\n{content}");
         assert!(bar.contains("feat/kaji-init"), "got:\n{content}");
@@ -2697,7 +2700,7 @@ mod tests {
         assert!(badge.contains("目標"), "{badge}");
         assert!(badge.contains("les tests passent"), "{badge}");
         assert!(badge.contains("it 1/10"), "{badge}");
-        assert!(badge.contains("travail"), "{badge}");
+        assert!(badge.contains("working"), "{badge}");
 
         let backend = TestBackend::new(120, 10);
         let mut terminal = Terminal::new(backend).expect("test backend terminal");
@@ -2817,9 +2820,9 @@ mod tests {
 
         let content = rendered(&app, 80, 20);
 
-        assert!(content.contains("fichiers"), "got:\n{content}");
+        assert!(content.contains("files"), "got:\n{content}");
         assert!(content.contains("README.md"), "got:\n{content}");
-        assert!(content.contains("Tab attacher @"), "got:\n{content}");
+        assert!(content.contains("Tab attach @"), "got:\n{content}");
         assert!(content.contains("▸"), "marqueur de sélection visible");
     }
 
@@ -2832,7 +2835,7 @@ mod tests {
 
         let content = rendered(&app, 80, 20);
 
-        assert!(content.contains("thème"), "got:\n{content}");
+        assert!(content.contains("theme"), "got:\n{content}");
         for palette in &theme::THEMES {
             assert!(
                 content.contains(palette.name),
@@ -2840,9 +2843,9 @@ mod tests {
                 palette.name
             );
         }
-        assert!(content.contains("nord (actuel)"), "got:\n{content}");
+        assert!(content.contains("nord (current)"), "got:\n{content}");
         assert!(content.contains("▸ nord"), "sélection sur l'actif");
-        assert!(content.contains("Enter valider"), "got:\n{content}");
+        assert!(content.contains("Enter confirm"), "got:\n{content}");
     }
 
     #[test]
@@ -2861,7 +2864,7 @@ mod tests {
 
         let content = rendered(&app, 80, 20);
 
-        assert!(content.contains("éditeur"), "got:\n{content}");
+        assert!(content.contains("editor"), "got:\n{content}");
         assert!(content.contains("nvim"), "got:\n{content}");
         assert!(
             content.contains("▸ (env)"),
@@ -2873,10 +2876,10 @@ mod tests {
         );
         assert!(content.contains("(env)"), "got:\n{content}");
         assert!(
-            content.contains("$VISUAL = nvim (actuel)"),
+            content.contains("$VISUAL = nvim (current)"),
             "got:\n{content}"
         );
-        assert!(content.contains("Enter choisir"), "got:\n{content}");
+        assert!(content.contains("Enter select"), "got:\n{content}");
     }
 
     #[test]
@@ -2891,7 +2894,7 @@ mod tests {
         assert!(content.contains("a.rs"), "got:\n{content}");
         assert!(content.contains("fn main()"), "got:\n{content}");
         assert!(
-            content.contains("j/k défiler · e éditer · r recharger"),
+            content.contains("j/k scroll · e edit · r reload"),
             "got:\n{content}"
         );
         assert!(
@@ -3010,10 +3013,7 @@ mod tests {
 
         let content = rendered(&app, 120, 20);
         assert!(content.contains("▸ src"), "dossier replié, got:\n{content}");
-        assert!(
-            content.contains(". dotfiles · a attacher"),
-            "got:\n{content}"
-        );
+        assert!(content.contains(". dotfiles · a attach"), "got:\n{content}");
 
         let row = content
             .lines()
@@ -3421,7 +3421,7 @@ mod tests {
         let status = content.lines().next_back().expect("bordure basse");
         assert_eq!(
             status.trim_matches(|c: char| c == '└' || c == '┘' || c == '─' || c == ' '),
-            ". dotfiles · a attacher · q fermer",
+            ". dotfiles · a attach · q close",
             "got:\n{content}"
         );
     }
@@ -3522,14 +3522,11 @@ mod tests {
     fn the_reader_footer_names_the_keys_that_get_out_of_it() {
         let (with_tree, _dir) = app_with_a_focused_viewer(true);
         let content = rendered(&with_tree, 200, 40);
-        assert!(
-            content.contains("Esc/h arbre · q fermer"),
-            "got:\n{content}"
-        );
+        assert!(content.contains("Esc/h tree · q close"), "got:\n{content}");
 
         let (alone, _dir) = app_with_a_focused_viewer(false);
         let content = rendered(&alone, 200, 40);
-        assert!(content.contains("Esc/h/q fermer"), "got:\n{content}");
+        assert!(content.contains("Esc/h/q close"), "got:\n{content}");
     }
 
     #[test]
@@ -3664,7 +3661,7 @@ mod tests {
         let top = row_index(&content, "┌ message");
 
         assert_eq!(between_borders(rows[top + 1]), "", "got:\n{content}");
-        assert!(rows[top + 2].contains("écris ici…"), "got:\n{content}");
+        assert!(rows[top + 2].contains("type here…"), "got:\n{content}");
         assert_eq!(between_borders(rows[top + 3]), "", "got:\n{content}");
         assert!(rows[top + 4].contains('└'), "got:\n{content}");
     }

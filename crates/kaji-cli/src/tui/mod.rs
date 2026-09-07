@@ -144,7 +144,7 @@ fn apply_startup_theme() -> Option<String> {
     let requested = Config::global().get_param::<String>("KAJI_THEME").ok()?;
     let err = theme::set_active(&requested).err()?;
     let fallback = theme::resolve_theme(Some(&requested), None);
-    Some(format!("{err} — {fallback} appliqué"))
+    Some(format!("{err} — {fallback} applied"))
 }
 
 /// A session-wide or permanent grant must say what it just covered, in the
@@ -153,17 +153,15 @@ fn apply_startup_theme() -> Option<String> {
 fn tool_answer_note(req: &ToolApprovalRequest, permission: &Permission) -> String {
     match permission {
         Permission::AllowSession => format!(
-            "✓ {} autorisé pour la session : {}",
+            "✓ {} allowed for this session: {}",
             req.tool_name,
             req.grant_label()
         ),
-        Permission::AlwaysAllow => format!(
-            "✓ {} toujours autorisé : {}",
-            req.tool_name,
-            req.grant_label()
-        ),
-        other if other.allows_execution() => format!("✓ {} autorisé", req.tool_name),
-        _ => format!("✗ {} refusé", req.tool_name),
+        Permission::AlwaysAllow => {
+            format!("✓ {} always allowed: {}", req.tool_name, req.grant_label())
+        }
+        other if other.allows_execution() => format!("✓ {} allowed", req.tool_name),
+        _ => format!("✗ {} denied", req.tool_name),
     }
 }
 
@@ -205,7 +203,7 @@ fn push_welcome(app: &mut App, emphasized: bool) {
     };
 
     app.push_system_lines(vec![vec![RoledSpan::new(
-        "鍛冶 bienvenue dans kaji — tape ton message puis Entrée",
+        "鍛冶 welcome to kaji — type your message, then Enter",
         content_role,
     )]]);
     app.push_system_lines(commands_section(content_role));
@@ -218,7 +216,7 @@ fn commands_section(content_role: SpanRole) -> Vec<RoledLine> {
         .map(|cmd| cmd.name.chars().count())
         .max()
         .unwrap_or(0);
-    let mut lines = vec![vec![RoledSpan::title("commandes")]];
+    let mut lines = vec![vec![RoledSpan::title("commands")]];
     for cmd in crate::tui::app::COMMANDS {
         lines.push(vec![RoledSpan::new(
             format!(
@@ -241,18 +239,18 @@ fn commands_section(content_role: SpanRole) -> Vec<RoledLine> {
 /// here falls back to `cmd.desc` unchanged.
 fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
     match cmd.name {
-        "/sdd" => "démarre une passe SDD (SPEC.md ou --spec)",
-        "/goal" => "boucle évaluée vers un but (<condition> | clear)",
-        "/files" => "(Ctrl+P) recherche floue de fichiers",
-        "/explorer" => "(Ctrl+E) explorateur de fichiers",
-        "/forge" => "(Ctrl+F) volet forge — subagents en cours",
-        "/workflow" => "workflow déclaratif — /workflow <fichier.yaml>",
-        "/edit" => "(ou e) éditer un fichier — /edit <chemin>[:ligne]",
-        "/editor" => "choisir l'éditeur/IDE (<cmd> | list | reset | mode)",
-        "/spec" => "(F2) panneau SPEC on/off",
-        "/think" => "(F3) raisonnement du modèle (思考中)",
-        "/cost" => "usage tokens/coût — [modèles|jour|semaine|mois|cache|projection]",
-        "/docker" => "conteneurs en cours",
+        "/sdd" => "start an SDD pass (SPEC.md or --spec)",
+        "/goal" => "evaluated loop toward a goal (<condition> | clear)",
+        "/files" => "(Ctrl+P) fuzzy file search",
+        "/explorer" => "(Ctrl+E) file explorer",
+        "/forge" => "(Ctrl+F) forge pane — running subagents",
+        "/workflow" => "declarative workflow — /workflow <file.yaml>",
+        "/edit" => "(or e) edit a file — /edit <path>[:line]",
+        "/editor" => "pick the editor/IDE (<cmd> | list | reset | mode)",
+        "/spec" => "(F2) SPEC panel on/off",
+        "/think" => "(F3) the model's reasoning (思考中)",
+        "/cost" => "token/cost usage — [models|day|week|month|cache|projection]",
+        "/docker" => "running containers",
         _ => cmd.desc,
     }
 }
@@ -267,54 +265,54 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
     let mut lines = vec![vec![RoledSpan::title("navigation")]];
     if mouse_enabled {
         let rows: [(&str, &str); 18] = [
-            ("molette", "défile le chat (3 lignes/cran)"),
+            ("wheel", "scrolls the chat (3 lines/notch)"),
             (
                 "PageUp/PageDown",
-                "défile par page · Home/End quand le composer est vide",
+                "scrolls by page · Home/End when the composer is empty",
             ),
-            ("Ctrl+↑/↓", "saute au tour précédent/suivant"),
-            ("↑/↓", "historique de prompts"),
+            ("Ctrl+↑/↓", "jumps to the previous/next turn"),
+            ("↑/↓", "prompt history"),
             (
                 "←/→",
-                "déplace le caret dans le composer · Home/End (ou Ctrl+A) début/fin de ligne · Ctrl+W efface le mot",
+                "moves the caret in the composer · Home/End (or Ctrl+A) start/end of line · Ctrl+W deletes the word",
             ),
             (
                 "Tab",
-                "complète le nom de commande, puis son argument (/workflow → les recettes du dossier) — Tab/↑↓ cyclent, esc referme",
+                "completes the command name, then its argument (/workflow → the recipes in the folder) — Tab/↑↓ cycle, esc closes",
             ),
-            ("Ctrl+P", "recherche floue de fichiers (/files)"),
-            ("Ctrl+E", "explorateur de fichiers (/explorer)"),
+            ("Ctrl+P", "fuzzy file search (/files)"),
+            ("Ctrl+E", "file explorer (/explorer)"),
             (
                 "Ctrl+F",
-                "volet forge (/forge) — qui fait quoi : subagents, statut, outil en cours",
+                "forge pane (/forge) — who does what: subagents, status, running tool",
             ),
             (
                 "Ctrl+O",
-                "change de volet (composer → explorateur → lecteur → forge)",
+                "cycles panes (composer → explorer → reader → forge)",
             ),
-            ("", "le chat se replie quand le lecteur a le focus"),
+            ("", "the chat folds away when the reader takes focus"),
             (
                 "Esc/h/←",
-                "quitte le lecteur — retour à l'explorateur s'il est ouvert, sinon fermeture",
+                "leaves the reader — back to the explorer if it is open, otherwise closes",
             ),
             (
                 "e",
-                "éditer ($EDITOR, nvim hôte ou pane Zellij/tmux selon KAJI_EDIT_MODE) · /edit <chemin>",
+                "edit ($EDITOR, host nvim, or a Zellij/tmux pane per KAJI_EDIT_MODE) · /edit <path>",
             ),
             (
                 "Ctrl+S",
-                "steer : envoie les messages en file au tour en cours",
+                "steer: sends the queued messages into the running turn",
             ),
             (
                 "Shift+Tab",
-                "change le mode (承 approve → 智 smart → 自 auto) — sceau à gauche de la barre d'état",
+                "cycles the mode (承 approve → 智 smart → 自 auto) — seal on the left of the status bar",
             ),
             (
-                "barre d'état",
-                "sceau coloré = mode · 在 lieu ⟩ branche · 炭 tokens ↑entrée ↓sortie · $ coût · 火 outil en cours · 遣 subagents actifs",
+                "status bar",
+                "coloured seal = mode · 在 place ⟩ branch · 炭 tokens ↑in ↓out · $ cost · 火 running tool · 遣 active subagents",
             ),
-            ("Esc", "interrompt · Ctrl+C quitte"),
-            ("Option+glisser", "sélectionner du texte"),
+            ("Esc", "interrupts · Ctrl+C quits"),
+            ("Option+drag", "select text"),
         ];
         let key_width = rows
             .iter()
@@ -329,21 +327,21 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
         }
     } else {
         for text in [
-            "PageUp/PageDown font défiler le chat · Home/End aussi quand le composer est vide",
-            "←/→ déplace le caret dans le composer · Home/End (ou Ctrl+A) début/fin de ligne · Ctrl+W efface le mot",
-            "Tab complète le nom de commande, puis son argument (/workflow → les recettes du dossier) — Tab/↑↓ cyclent, esc referme",
-            "Ctrl+↑/↓ saute au tour précédent/suivant",
-            "Ctrl+P recherche floue de fichiers (/files)",
-            "Ctrl+E explorateur de fichiers (/explorer)",
-            "Ctrl+F volet forge (/forge) — qui fait quoi : subagents, statut, outil en cours",
-            "Ctrl+O change de volet (composer → explorateur → lecteur → forge)",
-            "  le chat se replie quand le lecteur a le focus",
-            "Esc/h/← quitte le lecteur — retour à l'explorateur s'il est ouvert, sinon fermeture",
-            "e éditer ($EDITOR, nvim hôte ou pane Zellij/tmux selon KAJI_EDIT_MODE) · /edit <chemin>",
-            "Ctrl+S steer : envoie les messages en file au tour en cours",
-            "Shift+Tab change le mode (承 approve → 智 smart → 自 auto) — sceau à gauche de la barre d'état",
-            "barre d'état sceau coloré = mode · 在 lieu ⟩ branche · 炭 tokens ↑entrée ↓sortie · $ coût · 火 outil en cours · 遣 subagents actifs",
-            "Esc interrompt · Ctrl+C quitte",
+            "PageUp/PageDown scroll the chat · Home/End too when the composer is empty",
+            "←/→ moves the caret in the composer · Home/End (or Ctrl+A) start/end of line · Ctrl+W deletes the word",
+            "Tab completes the command name, then its argument (/workflow → the recipes in the folder) — Tab/↑↓ cycle, esc closes",
+            "Ctrl+↑/↓ jumps to the previous/next turn",
+            "Ctrl+P fuzzy file search (/files)",
+            "Ctrl+E file explorer (/explorer)",
+            "Ctrl+F forge pane (/forge) — who does what: subagents, status, running tool",
+            "Ctrl+O cycles panes (composer → explorer → reader → forge)",
+            "  the chat folds away when the reader takes focus",
+            "Esc/h/← leaves the reader — back to the explorer if it is open, otherwise closes",
+            "e edit ($EDITOR, host nvim, or a Zellij/tmux pane per KAJI_EDIT_MODE) · /edit <path>",
+            "Ctrl+S steer: sends the queued messages into the running turn",
+            "Shift+Tab cycles the mode (承 approve → 智 smart → 自 auto) — seal on the left of the status bar",
+            "status bar coloured seal = mode · 在 place ⟩ branch · 炭 tokens ↑in ↓out · $ cost · 火 running tool · 遣 active subagents",
+            "Esc interrupts · Ctrl+C quits",
         ] {
             lines.push(vec![RoledSpan::new(text, content_role)]);
         }
@@ -477,7 +475,7 @@ fn docker_report() -> Vec<RoledLine> {
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            let first_line = stderr.lines().next().unwrap_or("erreur inconnue");
+            let first_line = stderr.lines().next().unwrap_or("unknown error");
             vec![vec![RoledSpan::dim(format!(
                 "docker indisponible — {first_line}"
             ))]]
@@ -531,7 +529,7 @@ fn checkpoints_lines(events: &[SessionEvent]) -> Vec<RoledLine> {
                         .and_then(|v| v.as_str())
                         .map(str::to_string)
                 })
-                .unwrap_or_else(|| "(sans aperçu)".to_string());
+                .unwrap_or_else(|| "(no preview)".to_string());
             let preview = crate::tui::ui::sanitize_for_display(&preview);
             Some(vec![RoledSpan::system(format!(
                 "tour {} · {id}{marker} · {preview}",
@@ -668,7 +666,7 @@ fn startup_edit_mode() -> (editors::EditMode, Option<String>) {
             Some(mode) => (mode, None),
             None => (
                 editors::EditMode::Auto,
-                Some(format!("KAJI_EDIT_MODE invalide ({value}) — auto appliqué")),
+                Some(format!("invalid KAJI_EDIT_MODE ({value}) — auto applied")),
             ),
         },
         Err(_) => (editors::EditMode::Auto, None),
@@ -704,9 +702,9 @@ fn edit_mode_fallback_note(mode: editors::EditMode, launch: &editors::Launch) ->
         return None;
     }
     let reason = match mode {
-        editors::EditMode::Remote => "$NVIM absent ou éditeur non-nvim",
-        editors::EditMode::Pane => "ni Zellij ni tmux détecté",
-        editors::EditMode::Gui => "éditeur non graphique",
+        editors::EditMode::Remote => "$NVIM missing or editor is not nvim",
+        editors::EditMode::Pane => "neither Zellij nor tmux detected",
+        editors::EditMode::Gui => "editor is not graphical",
         editors::EditMode::Auto | editors::EditMode::Suspend => return None,
     };
     Some(format!(
@@ -717,13 +715,13 @@ fn edit_mode_fallback_note(mode: editors::EditMode, launch: &editors::Launch) ->
 
 fn launch_spawn_failure(launch: &editors::Launch, editor: &editors::Editor, err: &str) -> String {
     format!(
-        "{} : échec ({err}) — repli sur $EDITOR ?",
+        "{}: failed ({err}) — fall back to $EDITOR?",
         editors::launch_label(launch, editor)
     )
 }
 
 fn editor_not_found(program: &str) -> String {
-    format!("éditeur introuvable : {program} — définis $EDITOR ou /editor pour en choisir un")
+    format!("editor not found: {program} — set $EDITOR or use /editor to pick one")
 }
 
 /// Suspends the TUI, hands the terminal to the user's editor, takes it back:
@@ -755,8 +753,8 @@ fn edit_file(
     match status {
         Ok(status) if status.success() => Ok(None),
         Ok(status) => Ok(Some(match status.code() {
-            Some(code) => format!("éditeur : code {code}"),
-            None => "éditeur : interrompu".to_string(),
+            Some(code) => format!("editor: exit code {code}"),
+            None => "editor: interrupted".to_string(),
         })),
         Err(_) => Err(editor_not_found(&editor.program)),
     }
@@ -849,7 +847,7 @@ fn run_suspend_edit(
             }
             app.on_file_edited(path);
             app.push_system(&format!(
-                "{} {} édité",
+                "{} {} edited",
                 theme::VIEWER_GLYPH,
                 shown.display()
             ));
@@ -952,9 +950,9 @@ async fn start_workflow(
     path: &Path,
 ) -> Result<(LiveWorkflow, String)> {
     let yaml = std::fs::read_to_string(path)
-        .with_context(|| format!("spec « {} » illisible", path.display()))?;
+        .with_context(|| format!("spec \"{}\" unreadable", path.display()))?;
     let spec = kaji_core::workflow::WorkflowSpec::from_yaml(&yaml)
-        .with_context(|| format!("spec « {} » invalide", path.display()))?;
+        .with_context(|| format!("spec \"{}\" invalid", path.display()))?;
     let name = spec.name.clone();
 
     let session_manager = Arc::new(SessionManager::instance());
@@ -997,7 +995,7 @@ async fn shutdown_workflow(live: LiveWorkflow) {
         .is_err()
     {
         tracing::warn!(
-            "workflow toujours en vol après la grâce d'annulation — session quittée sans lui"
+            "workflow still in flight after the cancellation grace period — session left without it"
         );
     }
 }
@@ -1005,14 +1003,14 @@ async fn shutdown_workflow(live: LiveWorkflow) {
 fn workflow_outcome_line(state: &kaji::workflow::WorkflowState) -> String {
     let outcome = match state.outcome() {
         kaji::workflow::WorkflowOutcome::Failed(kaji::workflow::FailureCause::Budget(limit)) => {
-            format!("échoué : budget {} exceeded", limit.field())
+            format!("failed: budget {} exceeded", limit.field())
         }
         kaji::workflow::WorkflowOutcome::Failed(kaji::workflow::FailureCause::Error(error)) => {
-            format!("échoué : {error}")
+            format!("failed: {error}")
         }
         outcome => outcome.label().to_string(),
     };
-    format!("workflow « {} » {outcome}", state.workflow)
+    format!("workflow \"{}\" {outcome}", state.workflow)
 }
 
 async fn session_working_dir(session_manager: &SessionManager, session_id: &str) -> PathBuf {
@@ -1163,13 +1161,13 @@ async fn event_loop(
                             app.turn_pending = false;
                             app.status.clear();
                             app.push_system(
-                                "démarrage du tour annulé — le message envoyé peut déjà avoir été enregistré côté session",
+                                "turn start cancelled — the message sent may already be recorded on the session",
                             );
                         }
                         if app.driver != PassDriver::Idle {
-                            app.pass_abort("tour annulé — passe interrompue");
+                            app.pass_abort("turn cancelled — pass interrupted");
                         }
-                        app.goal_abort("目標 tour annulé — but interrompu");
+                        app.goal_abort("目標 turn cancelled — goal interrupted");
                     }
                     Action::SteerNow => {
                         // Live guidance (item 2 ante): interrupt the running
@@ -1186,9 +1184,9 @@ async fn event_loop(
                             app.status.clear();
                         }
                         if app.driver != PassDriver::Idle {
-                            app.pass_abort("tour steeré — passe interrompue");
+                            app.pass_abort("turn steered — pass interrupted");
                         }
-                        app.goal_abort("目標 tour steeré — but interrompu");
+                        app.goal_abort("目標 turn steered — goal interrupted");
                         if !app.turn_active {
                             // No stream is running to drain the queue on
                             // teardown (cancel of a pending setup falls here) —
@@ -1203,7 +1201,7 @@ async fn event_loop(
                             );
                         }
                         app.push_system(&format!(
-                            "{} steering — message injecté comme guidance",
+                            "{} steering — message injected as guidance",
                             theme::STEER_GLYPH
                         ));
                     }
@@ -1238,7 +1236,7 @@ async fn event_loop(
                     }
                     Action::GateApprove => {
                         if let Some(prompt) = app.gate_approve() {
-                            app.push_system("Exec : envoi de la SPEC à l'agent");
+                            app.push_system("Exec: sending the SPEC to the agent");
                             let message = Message::user().with_text(&prompt);
                             pending = Some(begin_setup(&mut app, agent, &session_config, message, &mut cancel));
                         }
@@ -1262,17 +1260,17 @@ async fn event_loop(
                     Action::Mode(mode) => {
                         if let Err(e) = agent.update_kaji_mode(mode, session_id).await {
                             app.kaji_mode = agent.kaji_mode().await;
-                            app.push_system(&format!("mode non appliqué : {e}"));
+                            app.push_system(&format!("mode not applied: {e}"));
                         } else if matches!(mode, KajiMode::Approve | KajiMode::SmartApprove) {
                             if let Err(e) = Config::global().set_kaji_mode(mode) {
-                                app.push_system(&format!("mode appliqué mais non enregistré : {e}"));
+                                app.push_system(&format!("mode applied but not saved: {e}"));
                             }
                         }
                     }
                     Action::Help => push_welcome(&mut app, true),
                     Action::Theme(name) => {
                         if let Err(e) = Config::global().set_param("KAJI_THEME", &name) {
-                            app.push_system(&format!("thème appliqué mais non enregistré : {e}"));
+                            app.push_system(&format!("theme applied but not saved: {e}"));
                         }
                     }
                     // `App` a déjà changé d'éditeur pour la session — comme le
@@ -1280,12 +1278,12 @@ async fn event_loop(
                     // prochain `e`.
                     Action::Editor(command) => {
                         if let Err(e) = Config::global().set_param("KAJI_EDITOR", &command) {
-                            app.push_system(&format!("éditeur appliqué mais non enregistré : {e}"));
+                            app.push_system(&format!("editor applied but not saved: {e}"));
                         }
                     }
                     Action::EditorReset => {
                         if let Err(e) = Config::global().delete("KAJI_EDITOR") {
-                            app.push_system(&format!("éditeur oublié mais config inchangée : {e}"));
+                            app.push_system(&format!("editor forgotten but config unchanged: {e}"));
                         }
                     }
                     // Comme `Action::Editor` — `App` a déjà basculé le mode
@@ -1293,7 +1291,7 @@ async fn event_loop(
                     Action::EditMode(value) => {
                         if let Err(e) = Config::global().set_param("KAJI_EDIT_MODE", &value) {
                             app.push_system(&format!(
-                                "mode d'édition appliqué mais non enregistré : {e}"
+                                "edit mode applied but not saved: {e}"
                             ));
                         }
                     }
@@ -1369,12 +1367,12 @@ async fn event_loop(
                                             }
                                             if outcome.files_only {
                                                 app.push_system(&format!(
-                                                    "⚠ filet de sécurité restauré (tour {}) — arbre de travail rembobiné, conversation laissée telle quelle (messages supprimés irrécupérables)",
+                                                    "⚠ safety net restored (turn {}) — work tree rewound, conversation left as is (deleted messages are unrecoverable)",
                                                     outcome.restored_turn
                                                 ));
                                             } else {
                                                 app.push_system(&format!(
-                                                    "⚠ restauré au tour {} — arbre et conversation alignés",
+                                                    "⚠ restored to turn {} — work tree and conversation aligned",
                                                     outcome.restored_turn
                                                 ));
                                             }
@@ -1388,7 +1386,7 @@ async fn event_loop(
                             }
                         }
                     }
-                    Action::RestoreCancel => app.push_system("restore annulé"),
+                    Action::RestoreCancel => app.push_system("restore cancelled"),
                     // Le summon fait foi : une lame qui a fini pendant que la
                     // question était à l'écran refuse d'être annulée, et le
                     // volet ne doit pas prétendre le contraire.
@@ -1403,24 +1401,24 @@ async fn event_loop(
                             if agent.cancel_subagent(&id).await {
                                 app.forge.mark_cancelled(&id);
                                 app.push_action_notice(&format!(
-                                    "{} {description} — annulée",
+                                    "{} {description} — cancelled",
                                     theme::SUBAGENT_GLYPH
                                 ));
                             } else {
-                                app.push_action_notice("forge : tâche déjà terminée");
+                                app.push_action_notice("forge: task already finished");
                             }
                         }
                     }
                     Action::WorkflowRun(path) => {
                         if workflow.is_some() {
-                            app.push_mission_notice("workflow : un run est déjà en vol dans cette session");
+                            app.push_mission_notice("workflow: a run is already in flight in this session");
                         } else {
                             match start_workflow(session_id, &working_dir, &path).await {
                                 Ok((live, name)) => {
                                     app.apply_workflow_snapshot(Some(live.handle.snapshot()));
                                     workflow = Some(live);
                                     app.open_mission_control();
-                                    app.push_mission_notice(&format!("workflow « {name} » lancé"));
+                                    app.push_mission_notice(&format!("workflow \"{name}\" started"));
                                 }
                                 Err(error) => app.push_system(&format!("workflow : {error:#}")),
                             }
@@ -1439,10 +1437,10 @@ async fn event_loop(
                                 };
                                 let decision = if approve { "approved" } else { "denied" };
                                 if verdict.applied() {
-                                    app.push_mission_notice(&format!("gate « {stage} » {decision}"));
+                                    app.push_mission_notice(&format!("gate \"{stage}\" {decision}"));
                                 } else {
                                     app.push_mission_notice(&format!(
-                                        "gate « {stage} » non tranchée — {}",
+                                        "gate \"{stage}\" not settled — {}",
                                         verdict.label()
                                     ));
                                 }
@@ -1458,16 +1456,16 @@ async fn event_loop(
                                 } else {
                                     live.handle.resume(&stage)
                                 };
-                                let verb = if paused { "suspendu" } else { "relâché" };
+                                let verb = if paused { "suspendu" } else { "resumed" };
                                 // Relu tout de suite : la table de l'exécuteur
                                 // décide du sens du prochain `p`, et le tick
                                 // qui la rafraîchit est une seconde plus loin.
                                 app.apply_workflow_pauses(live.handle.paused_stages());
                                 if verdict.applied() {
-                                    app.push_mission_notice(&format!("stage « {stage} » {verb}"));
+                                    app.push_mission_notice(&format!("stage \"{stage}\" {verb}"));
                                 } else {
                                     app.push_mission_notice(&format!(
-                                        "stage « {stage} » non {verb} — {}",
+                                        "stage \"{stage}\" not {verb} — {}",
                                         verdict.label()
                                     ));
                                 }
@@ -1479,9 +1477,9 @@ async fn event_loop(
                         match workflow.as_ref() {
                             Some(live) => {
                                 if live.handle.cancel_agent(&stage, &agent) {
-                                    app.push_mission_notice(&format!("{stage}.{agent} — annulation demandée"));
+                                    app.push_mission_notice(&format!("{stage}.{agent} — cancellation requested"));
                                 } else {
-                                    app.push_mission_notice(&format!("{stage}.{agent} — déjà terminé"));
+                                    app.push_mission_notice(&format!("{stage}.{agent} — already finished"));
                                 }
                             }
                             None => app.push_mission_notice("aucun workflow en vol"),
@@ -1511,9 +1509,9 @@ async fn event_loop(
                 let started = install_turn(&mut app, &mut turn, &mut cancel, res);
                 if !started {
                     if app.driver != PassDriver::Idle {
-                        app.pass_abort("échec du démarrage du tour — passe interrompue");
+                        app.pass_abort("turn failed to start — pass interrupted");
                     }
-                    app.goal_abort("目標 échec du démarrage du tour — but interrompu");
+                    app.goal_abort("目標 turn failed to start — goal interrupted");
                 }
             }
             item = next_turn_event(&mut turn), if turn.is_some() => {
@@ -1525,9 +1523,9 @@ async fn event_loop(
                         cancel = None;
                         teardown_turn(&mut app);
                         if app.driver != PassDriver::Idle {
-                            app.pass_abort("erreur pendant la passe — passe interrompue");
+                            app.pass_abort("error during the pass — pass interrupted");
                         }
-                        app.goal_abort("目標 erreur pendant le tour — but interrompu");
+                        app.goal_abort("目標 error during the turn — goal interrupted");
                     }
                     None => {
                         turn = None;
@@ -1583,7 +1581,7 @@ async fn event_loop(
             // ira alors se faire refuser par le recorder, qui est seul à savoir
             // qu'une session ne porte qu'un workflow — le dire ici en
             // dupliquerait la règle.
-            finished = async { (&mut workflow.as_mut().expect("workflow armé").run).await }, if workflow.is_some() => {
+            finished = async { (&mut workflow.as_mut().expect("workflow armed").run).await }, if workflow.is_some() => {
                 workflow = None;
                 match finished {
                     Ok(Ok(state)) => {
@@ -1591,7 +1589,7 @@ async fn event_loop(
                         app.apply_workflow_snapshot(Some(state));
                     }
                     Ok(Err(error)) => app.push_mission_notice(&format!("workflow : {error:#}")),
-                    Err(error) => app.push_mission_notice(&format!("workflow interrompu : {error}")),
+                    Err(error) => app.push_mission_notice(&format!("workflow interrupted: {error}")),
                 }
             }
         }
@@ -1733,7 +1731,7 @@ fn begin_setup<'a>(
     message: Message,
     cancel: &mut Option<CancellationToken>,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'a>>> + 'a>> {
-    app.status = "démarrage du tour…".to_string();
+    app.status = "starting the turn…".to_string();
     app.turn_pending = true;
     app.reset_turn_visibility();
     let token = CancellationToken::new();
@@ -1854,9 +1852,9 @@ async fn suggest_next_prompt(
         .join("\n\n");
     let tx = suggestion_tx.clone();
     tokio::task::spawn(async move {
-        let system = "Tu es kaji, un agent de terminal. Après cet échange, propose un seul prochain prompt (une phrase, action concrète, sans préfixe ni citation) que l'utilisateur voudrait probablement envoyer.";
+        let system = "You are kaji, a terminal agent. After this exchange, suggest a single next prompt (one sentence, a concrete action, with no prefix or quoting) that the user would likely want to send.";
         let messages = vec![Message::user().with_text(if context.trim().is_empty() {
-            "L'échange est vide — suggère un point de départ pour une nouvelle session."
+            "The exchange is empty — suggest a starting point for a new session."
         } else {
             context.trim()
         })];
@@ -1934,7 +1932,7 @@ fn maybe_push_welcome(app: &mut App) {
 /// (no `App`/`SessionManager`) so the wording is unit-testable on its own.
 fn interrupted_turn_line(it: &InterruptedTurn) -> String {
     let mut line = format!(
-        "⚠ tour interrompu au resume — {} événements journalisés non terminés",
+        "⚠ turn interrupted at resume — {} journaled events left unfinished",
         it.event_count
     );
     if let Some(preview) = &it.query_preview {
@@ -1960,7 +1958,7 @@ fn apply_interrupted_turn_marker(app: &mut App, interrupted: Result<Option<Inter
     match interrupted {
         Ok(Some(it)) => app.push_system(&interrupted_turn_line(&it)),
         Ok(None) => {}
-        Err(e) => tracing::warn!("échec de la détection de tour interrompu au resume: {e}"),
+        Err(e) => tracing::warn!("failed to detect an interrupted turn at resume: {e}"),
     }
 }
 
@@ -1986,7 +1984,7 @@ fn interrupted_goal_line(events: &[SessionEvent]) -> Option<String> {
         .and_then(|v| v.as_i64())
         .unwrap_or(kaji_core::goal::DEFAULT_MAX_ITERATIONS as i64);
     Some(format!(
-        "⚠ goal interrompu : {condition} (it {iteration}/{max_iterations}) — `/goal <condition>` pour relancer"
+        "⚠ goal interrupted: {condition} (it {iteration}/{max_iterations}) — `/goal <condition>` to restart it"
     ))
 }
 
@@ -2015,7 +2013,7 @@ async fn apply_interrupted_goal_marker(
                 app.push_system(&line);
             }
         }
-        Err(e) => tracing::warn!("échec de la détection de goal interrompu au resume: {e}"),
+        Err(e) => tracing::warn!("failed to detect an interrupted goal at resume: {e}"),
     }
 }
 
@@ -2336,7 +2334,7 @@ mod tests {
         assert!(app
             .chat
             .iter()
-            .any(|l| l.text.contains("interrompu") && l.text.contains("shell")));
+            .any(|l| l.text.contains("interrupted") && l.text.contains("shell")));
     }
 
     /// Finding 1: a session interrupted mid-approval persists its
@@ -2384,7 +2382,7 @@ mod tests {
         );
         assert!(app.chat.iter().any(|l| l.text.contains('✗')
             && l.text.contains("shell")
-            && l.text.contains("interrompu")));
+            && l.text.contains("interrupted")));
     }
 
     #[tokio::test]
@@ -2415,7 +2413,7 @@ mod tests {
         assert!(app
             .chat
             .iter()
-            .any(|l| l.sender == Sender::System && l.text.contains("tour interrompu")));
+            .any(|l| l.sender == Sender::System && l.text.contains("turn interrupted")));
     }
 
     #[tokio::test]
@@ -2443,7 +2441,7 @@ mod tests {
         let mut app = App::new(None);
         apply_interrupted_turn_marker(&mut app, sm.last_turn_is_interrupted(&sid).await);
 
-        assert!(!app.chat.iter().any(|l| l.text.contains("tour interrompu")));
+        assert!(!app.chat.iter().any(|l| l.text.contains("turn interrupted")));
     }
 
     /// I1 : quitter la TUI (`q`, `Ctrl+C`, terminal fermé) droppait le
@@ -2561,7 +2559,7 @@ mod tests {
 
         let line = interrupted_turn_line(&it);
 
-        assert!(line.contains("tour interrompu"));
+        assert!(line.contains("turn interrupted"));
         assert!(line.contains('3'));
         assert!(line.contains("q2"));
     }
@@ -2631,7 +2629,7 @@ mod tests {
         let line = app
             .chat
             .iter()
-            .find(|l| l.text.contains("goal interrompu"))
+            .find(|l| l.text.contains("goal interrupted"))
             .expect("une ligne d'avertissement");
         assert!(line.text.contains("les tests passent"), "{}", line.text);
         assert!(line.text.contains("2/10"), "{}", line.text);
@@ -2670,7 +2668,7 @@ mod tests {
         let mut app = App::new(None);
         apply_interrupted_goal_marker(&mut app, &sm, &sid).await;
 
-        assert!(!app.chat.iter().any(|l| l.text.contains("goal interrompu")));
+        assert!(!app.chat.iter().any(|l| l.text.contains("goal interrupted")));
     }
 
     #[tokio::test]
@@ -2848,7 +2846,7 @@ mod tests {
         assert!(
             app.chat
                 .iter()
-                .any(|line| line.text.contains("d.png") && line.text.contains("non attachée")),
+                .any(|line| line.text.contains("d.png") && line.text.contains("not attached")),
             "{:?}",
             app.chat.iter().map(|l| &l.text).collect::<Vec<_>>()
         );
@@ -2933,9 +2931,9 @@ mod tests {
         push_welcome(&mut app, false);
 
         let text = welcome_text(&app);
-        assert!(text.contains("molette"));
+        assert!(text.contains("wheel"));
         assert!(text.contains("↑/↓"));
-        assert!(text.contains("historique de prompts"));
+        assert!(text.contains("prompt history"));
     }
 
     /// Souris OFF (`KAJI_MOUSE=0`) — the arrows go back to line-scrolling
@@ -2950,12 +2948,12 @@ mod tests {
         push_welcome(&mut app, false);
 
         let text = welcome_text(&app);
-        assert!(!text.contains("molette"));
+        assert!(!text.contains("wheel"));
         assert!(!text.contains("↑/↓ rappelle"));
-        assert!(text.contains("PageUp/PageDown font défiler le chat"));
+        assert!(text.contains("PageUp/PageDown scroll the chat"));
         assert!(text.contains("Ctrl+↑/↓"));
         assert!(
-            text.contains("←/→ déplace le caret"),
+            text.contains("←/→ moves the caret"),
             "le caret du composer ne dépend pas de la souris"
         );
     }
@@ -2987,11 +2985,11 @@ mod tests {
 
             let text = welcome_text(&app);
             assert!(
-                text.contains("barre d'état"),
+                text.contains("status bar"),
                 "souris={mouse_enabled} : {text}"
             );
             assert!(
-                text.contains(&format!("{} outil en cours", theme::FIRE_GLYPH)),
+                text.contains(&format!("{} running tool", theme::FIRE_GLYPH)),
                 "souris={mouse_enabled} : {text}"
             );
             assert!(
@@ -3014,7 +3012,7 @@ mod tests {
             let text = welcome_text(&app);
             for needle in [
                 "Ctrl+F",
-                "volet forge",
+                "forge pane",
                 "/forge",
                 "→ forge",
                 theme::SUBAGENT_GLYPH,
@@ -3126,7 +3124,7 @@ mod tests {
         let rows = rendered_rows(&app);
         let commands_row = rows
             .iter()
-            .position(|r| r.contains("commandes"))
+            .position(|r| r.contains("commands"))
             .expect("commandes section header must render");
         let navigation_row = rows
             .iter()
@@ -3184,9 +3182,9 @@ mod tests {
             .find(|r| r.contains("/docker"))
             .expect("/docker row must render");
 
-        let sdd_desc_col = sdd_row.find("démarre").expect("/sdd description text");
+        let sdd_desc_col = sdd_row.find("start").expect("/sdd description text");
         let docker_desc_col = docker_row
-            .find("conteneurs")
+            .find("running")
             .expect("/docker description text");
         assert_eq!(
             sdd_desc_col, docker_desc_col,
@@ -3202,7 +3200,7 @@ mod tests {
         push_welcome(&mut app, true);
 
         assert_eq!(
-            welcome_line_fg(&app, "bienvenue"),
+            welcome_line_fg(&app, "welcome"),
             theme::text_color(),
             "/help must render like a normal answer, not the dim welcome ambiance"
         );
@@ -3216,7 +3214,7 @@ mod tests {
         push_welcome(&mut app, false);
 
         assert_eq!(
-            welcome_line_fg(&app, "bienvenue"),
+            welcome_line_fg(&app, "welcome"),
             ratatui::style::Color::DarkGray,
             "the startup banner must keep its dim ambiance style"
         );

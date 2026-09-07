@@ -69,7 +69,7 @@ pub struct FinderState {
 pub struct ThemePicker {
     pub selected: usize,
     /// Palette active à l'ouverture : Esc la remet, et la liste la marque
-    /// `(actuel)`.
+    /// `(current)`.
     pub initial: usize,
 }
 
@@ -110,7 +110,7 @@ impl EditorRow {
 pub struct EditorPicker {
     pub selected: usize,
     pub rows: Vec<EditorRow>,
-    /// Rang de la résolution courante, marqué `(actuel)`. `None` quand
+    /// Rang de la résolution courante, marqué `(current)`. `None` quand
     /// `KAJI_EDITOR` désigne une commande qui n'est dans aucune ligne.
     pub current: Option<usize>,
 }
@@ -351,13 +351,13 @@ pub fn kaji_mode_badge(mode: KajiMode) -> &'static str {
 /// Shift+Tab, seule source du libellé pour les deux.
 pub fn mode_line(mode: KajiMode) -> String {
     let promise = match mode {
-        KajiMode::Approve => "kaji demande avant chaque outil",
-        KajiMode::SmartApprove => "kaji demande pour les outils risqués",
-        KajiMode::Auto => "kaji agit sans demander",
-        KajiMode::Chat => "aucun outil",
+        KajiMode::Approve => "kaji asks before every tool",
+        KajiMode::SmartApprove => "kaji asks for risky tools",
+        KajiMode::Auto => "kaji acts without asking",
+        KajiMode::Chat => "no tools",
     };
     format!(
-        "mode : {} {} — {promise}",
+        "mode: {} {} — {promise}",
         kaji_mode_badge(mode),
         kaji_mode_seal(mode)
     )
@@ -477,17 +477,17 @@ impl Command {
 pub const COMMANDS: &[Command] = &[
     Command {
         name: "/sdd",
-        desc: "démarre une passe SDD (SPEC.md auto-détecté ou --spec <fichier>)",
+        desc: "start an SDD pass (SPEC.md auto-detected, or --spec <file>)",
         run: |_| Action::StartPass,
     },
     Command {
         name: "/goal",
-        desc: "goal session — /goal <condition> lance la boucle évaluée, /goal seul le statut, /goal clear arrête",
+        desc: "goal session — /goal <condition> starts the evaluated loop, /goal alone shows status, /goal clear stops it",
         run: |_| Action::GoalStatus,
     },
     Command {
         name: "/files",
-        desc: "(ou Ctrl+P) recherche floue de fichiers — ⏎ ouvre le lecteur, Tab attache @",
+        desc: "(or Ctrl+P) fuzzy file search — ⏎ opens the reader, Tab attaches @",
         run: |app| {
             app.open_finder();
             Action::None
@@ -495,7 +495,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/explorer",
-        desc: "(ou Ctrl+E) explorateur de fichiers — j/k naviguer, ⏎ ouvrir, a attacher @",
+        desc: "(or Ctrl+E) file explorer — j/k move, ⏎ open, a attach @",
         run: |app| {
             app.toggle_explorer();
             Action::None
@@ -503,7 +503,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/forge",
-        desc: "(ou Ctrl+F) volet forge — ↑/↓ choisir, ⏎ la fiche, x annuler, f (ou /forge full) plein écran",
+        desc: "(or Ctrl+F) forge pane — ↑/↓ select, ⏎ the sheet, x cancel, f (or /forge full) fullscreen",
         run: |app| {
             app.toggle_forge();
             Action::None
@@ -511,22 +511,22 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/workflow",
-        desc: "lance un workflow déclaratif — /workflow <fichier.yaml>, piloté depuis le mission-control",
+        desc: "run a declarative workflow — /workflow <file.yaml>, driven from mission control",
         run: |app| app.run_workflow_command(""),
     },
     Command {
         name: "/edit",
-        desc: "éditer un fichier — /edit <chemin>[:ligne], ou e depuis le lecteur/explorateur",
+        desc: "edit a file — /edit <path>[:line], or e from the reader/explorer",
         run: |app| app.run_edit_command(""),
     },
     Command {
         name: "/editor",
-        desc: "choisir l'éditeur (détectés) — /editor <cmd> · reset · mode <auto|suspend|remote|pane|gui>",
+        desc: "pick the editor (detected) — /editor <cmd> · reset · mode <auto|suspend|remote|pane|gui>",
         run: |app| app.run_editor_command(""),
     },
     Command {
         name: "/spec",
-        desc: "(ou F2) affiche/masque le panneau SPEC",
+        desc: "(or F2) show/hide the SPEC panel",
         run: |app| {
             app.toggle_spec_panel();
             Action::None
@@ -534,7 +534,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/think",
-        desc: "(ou F3) affiche/masque le raisonnement du modèle (思考中)",
+        desc: "(or F3) show/hide the model's reasoning (思考中)",
         run: |app| {
             app.toggle_thinking();
             Action::None
@@ -542,37 +542,37 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/cost",
-        desc: "usage tokens/coût — `/cost [modèles|jour|semaine|mois|cache|projection]`, budgets via KAJI_BUDGET_5H / KAJI_BUDGET_7J / KAJI_BUDGET_MONTHLY_USD",
+        desc: "token/cost usage — `/cost [models|day|week|month|cache|projection]`, budgets via KAJI_BUDGET_5H / KAJI_BUDGET_7J / KAJI_BUDGET_MONTHLY_USD",
         run: |_| Action::Cost(report::CostView::Windows),
     },
     Command {
         name: "/context",
-        desc: "répartition du contexte par catégorie",
+        desc: "context breakdown by category",
         run: |_| Action::Context,
     },
     Command {
         name: "/docker",
-        desc: "liste les conteneurs en cours",
+        desc: "list the running containers",
         run: |_| Action::Docker,
     },
     Command {
         name: "/checkpoints",
-        desc: "liste les snapshots pris avant chaque tour",
+        desc: "list the snapshots taken before each turn",
         run: |_| Action::Checkpoints,
     },
     Command {
         name: "/theme",
-        desc: "choisir un thème (aperçu en direct) — /theme <nom> · next",
+        desc: "pick a theme (live preview) — /theme <name> · next",
         run: |app| app.run_theme_command(""),
     },
     Command {
         name: "/help",
-        desc: "réaffiche l'aide",
+        desc: "show the help again",
         run: |_| Action::Help,
     },
     Command {
         name: "/quit",
-        desc: "quitte kaji",
+        desc: "quit kaji",
         run: |_| Action::Quit,
     },
 ];
@@ -1110,19 +1110,19 @@ impl App {
 
     pub fn start_pass(&mut self) {
         if self.goal_driver() != GoalDriver::Idle {
-            self.push_system("but en cours — /goal clear avant de lancer une passe SDD");
+            self.push_system("goal running — /goal clear before starting an SDD pass");
             return;
         }
         let Some(spec) = self.spec.as_ref() else {
-            self.push_system("aucune SPEC chargée — /sdd nécessite un fichier SPEC.md");
+            self.push_system("no SPEC loaded — /sdd needs a SPEC.md file");
             return;
         };
         if spec.is_empty() {
-            self.push_system("SPEC vide — rien à exécuter");
+            self.push_system("empty SPEC — nothing to run");
             return;
         }
         if self.pass.is_running() {
-            self.push_system("passe déjà en cours");
+            self.push_system("pass already running");
             return;
         }
         if self.pass.is_complete() || self.pass.drifted() {
@@ -1143,7 +1143,7 @@ impl App {
         self.pass.advance();
         self.driver = PassDriver::Executing;
         Some(format!(
-            "Exécute la SPEC suivante. Réponds directement, sans sortir du périmètre.\n\n{body}"
+            "Execute the SPEC below. Answer directly, without going out of scope.\n\n{body}"
         ))
     }
 
@@ -1161,7 +1161,7 @@ impl App {
         self.gate_open = false;
         self.pass.fail_current();
         self.driver = PassDriver::Idle;
-        self.push_system("gate refusée — passe interrompue");
+        self.push_system("gate denied — pass interrupted");
     }
 
     pub fn goal_driver(&self) -> GoalDriver {
@@ -1179,11 +1179,11 @@ impl App {
     /// from the same `turn_end`.
     pub fn goal_set(&mut self, condition: &str, max_iterations: usize) -> Option<String> {
         if self.driver != PassDriver::Idle {
-            self.push_system("passe SDD en cours — termine-la avant de fixer un but");
+            self.push_system("SDD pass running — finish it before setting a goal");
             return None;
         }
         if self.goal_driver() != GoalDriver::Idle {
-            self.end_goal(GoalOutcome::Cleared, "目標 but remplacé");
+            self.end_goal(GoalOutcome::Cleared, "目標 goal replaced");
         }
         self.goal = Some(GoalState::new(condition.to_string(), max_iterations));
         self.goal_buffer.clear();
@@ -1192,7 +1192,7 @@ impl App {
             serde_json::json!({ "condition": condition, "max_iterations": max_iterations }),
         );
         self.push_system(&format!(
-            "目標 but fixé : {} — évaluateur après chaque tour, cap {max_iterations} itérations",
+            "目標 goal set: {} — evaluator after each turn, cap {max_iterations} iterations",
             sanitize_for_display(condition)
         ));
         Some(goal::work_prompt(condition))
@@ -1203,10 +1203,10 @@ impl App {
     /// unrelated turn.
     pub fn goal_clear(&mut self) -> bool {
         if self.goal_driver() == GoalDriver::Idle {
-            self.push_system("aucun but en cours");
+            self.push_system("no goal running");
             return false;
         }
-        self.end_goal(GoalOutcome::Cleared, "目標 but effacé");
+        self.end_goal(GoalOutcome::Cleared, "目標 goal cleared");
         true
     }
 
@@ -1222,7 +1222,7 @@ impl App {
 
     pub fn push_goal_status(&mut self) {
         let Some(goal) = self.goal.as_ref() else {
-            self.push_system("aucun but — /goal <condition> pour en fixer un");
+            self.push_system("no goal — /goal <condition> to set one");
             return;
         };
         let condition = sanitize_for_display(&goal.condition);
@@ -1235,7 +1235,7 @@ impl App {
                 goal.phase.label()
             ),
             Some(outcome) => format!(
-                "目標 {} · terminé : {} (it {}/{})",
+                "目標 {} · finished: {} (it {}/{})",
                 condition,
                 outcome.label(),
                 goal.iteration,
@@ -1289,7 +1289,7 @@ impl App {
                 let max_iterations = goal.max_iterations;
                 self.goal_buffer.clear();
                 self.push_system(&format!(
-                    "目標 évaluation — itération {iteration}/{max_iterations}"
+                    "目標 evaluating — iteration {iteration}/{max_iterations}"
                 ));
                 Some(goal::evaluator_prompt(&condition))
             }
@@ -1326,26 +1326,26 @@ impl App {
             GoalStep::Continue(feedback) => {
                 let next = iteration + 1;
                 self.push_system(&format!(
-                    "目標 but non atteint — itération {next}/{max_iterations}"
+                    "目標 goal not met — iteration {next}/{max_iterations}"
                 ));
                 Some(goal::continuation_prompt(&condition, &feedback))
             }
             GoalStep::Finished(outcome) => {
                 let message = match outcome {
                     GoalOutcome::Met => format!(
-                        "✓ 目標 but atteint en {iteration} itération(s) : {}",
+                        "✓ 目標 goal met in {iteration} iteration(s): {}",
                         sanitize_for_display(&condition)
                     ),
                     GoalOutcome::Unreachable => format!(
-                        "⚠ 目標 but jugé inatteignable : {}",
+                        "⚠ 目標 goal judged unreachable: {}",
                         sanitize_for_display(&feedback)
                     ),
                     GoalOutcome::IterationCap => format!(
-                        "⚠ 目標 cap de {max_iterations} itérations atteint — but non atteint : {}",
+                        "⚠ 目標 cap of {max_iterations} iterations reached — goal not met: {}",
                         sanitize_for_display(&condition)
                     ),
-                    GoalOutcome::Cleared => "目標 but effacé".to_string(),
-                    GoalOutcome::Interrupted => "目標 but interrompu".to_string(),
+                    GoalOutcome::Cleared => "目標 goal cleared".to_string(),
+                    GoalOutcome::Interrupted => "目標 goal interrupted".to_string(),
                 };
                 self.push_goal_end(outcome, iteration);
                 self.push_system(&message);
@@ -1361,9 +1361,9 @@ impl App {
     /// provider that just failed, up to the iteration cap.
     fn abort_drivers_on_provider_error(&mut self) {
         if self.driver != PassDriver::Idle {
-            self.pass_abort("erreur provider — passe interrompue");
+            self.pass_abort("provider error — pass interrupted");
         }
-        self.goal_abort("目標 erreur provider — but interrompu");
+        self.goal_abort("目標 provider error — goal interrupted");
     }
 
     pub fn turn_end(&mut self) -> Option<String> {
@@ -1379,7 +1379,7 @@ impl App {
                 self.driver = PassDriver::Validating;
                 self.validate_buffer.clear();
                 Some(format!(
-                    "Tu es un juge de conformité SDD, pas un assistant complaisant : ton biais par défaut doit être DRIFT, pas VALIDE. Liste chaque exigence de la SPEC ci-dessous une par une et vérifie-la individuellement contre la réponse précédente — cherche activement les écarts, ne les suppose pas absents. Ne conclus VALIDE que si CHAQUE exigence est vérifiablement satisfaite ; au moindre doute ou à la moindre exigence non démontrée, le verdict est DRIFT. Justifie ton verdict exigence par exigence (l'écart constaté, ou l'absence d'écart) avant la ligne finale. Dernière ligne, exactement : `VERDICT: VALIDE` ou `VERDICT: DRIFT`.\n\n{body}"
+                    "You are an SDD conformance judge, not an agreeable assistant: your default bias must be DRIFT, not VALID. List every requirement of the SPEC below one by one and check each individually against the previous answer — actively hunt for gaps, do not assume they are absent. Conclude VALID only if EVERY requirement is verifiably satisfied; at the slightest doubt, or on any requirement not demonstrated, the verdict is DRIFT. Justify your verdict requirement by requirement (the gap found, or the absence of a gap) before the final line. Last line, exactly: `VERDICT: VALID` or `VERDICT: DRIFT`.\n\n{body}"
                 ))
             }
             PassDriver::Validating => {
@@ -1387,13 +1387,13 @@ impl App {
                 let last_line = goal::last_verdict_line(&self.validate_buffer)
                     .map(|(_, line)| line)
                     .unwrap_or_default();
-                if last_line.contains("VERDICT: VALIDE") {
+                if last_line.contains("VERDICT: VALID") {
                     self.pass.advance();
-                    self.push_system("✓ passe SDD complète — spec verrouillée");
+                    self.push_system("✓ SDD pass complete — spec locked");
                 } else {
                     self.pass.fail_current();
                     if last_line.contains("VERDICT: DRIFT") {
-                        self.push_system("⚠ drift détecté — spec non verrouillée");
+                        self.push_system("⚠ drift detected — spec not locked");
                     } else {
                         self.push_system("⚠ verdict absent ou imparsable — DRIFT par prudence");
                     }
@@ -1872,7 +1872,7 @@ impl App {
             KeyCode::Enter => {
                 self.theme_picker = None;
                 let applied = theme::active().name;
-                self.push_system(&format!("thème : {applied}"));
+                self.push_system(&format!("theme: {applied}"));
                 return Action::Theme(applied.to_string());
             }
             KeyCode::Esc | KeyCode::Char('q') if !ctrl => {
@@ -1903,7 +1903,7 @@ impl App {
             rows.push(EditorRow::Env(label));
         }
         if rows.is_empty() {
-            self.push_system("aucun éditeur détecté — /editor <commande>");
+            self.push_system("no editor detected — /editor <command>");
             return;
         }
         let current = self.current_editor_row(&rows);
@@ -1966,7 +1966,7 @@ impl App {
 
     fn select_editor(&mut self, command: &str, label: &str) -> Action {
         self.editors.selected = Some(command.to_string());
-        self.push_system(&format!("éditeur : {label}"));
+        self.push_system(&format!("editor: {label}"));
         Action::Editor(command.to_string())
     }
 
@@ -1976,10 +1976,10 @@ impl App {
             Ok(_) => self
                 .editors
                 .env_label()
-                .unwrap_or_else(|| "détection du PATH".to_string()),
+                .unwrap_or_else(|| "PATH detection".to_string()),
             Err(note) => note,
         };
-        self.push_system(&format!("éditeur : {source}"));
+        self.push_system(&format!("editor: {source}"));
         Action::EditorReset
     }
 
@@ -2007,7 +2007,7 @@ impl App {
     fn run_editor_mode_command(&mut self, arg: &str) -> Action {
         if arg.is_empty() {
             self.push_system(&format!(
-                "éditeur : {} (effectif : {})",
+                "editor: {} (effective: {})",
                 self.edit_mode.as_str(),
                 self.effective_edit_mode_label()
             ));
@@ -2015,12 +2015,12 @@ impl App {
         }
         let Some(mode) = EditMode::parse(arg) else {
             self.push_system(&format!(
-                "mode inconnu : {arg} — auto | suspend | remote | pane | gui"
+                "unknown mode: {arg} — auto | suspend | remote | pane | gui"
             ));
             return Action::None;
         };
         self.edit_mode = mode;
-        self.push_system(&format!("éditeur : {}", mode.as_str()));
+        self.push_system(&format!("editor: {}", mode.as_str()));
         Action::EditMode(mode.as_str().to_string())
     }
 
@@ -2039,7 +2039,7 @@ impl App {
                 );
                 editors::launch_label(&launch, &editor)
             }
-            Err(_) => "aucun éditeur".to_string(),
+            Err(_) => "no editor".to_string(),
         }
     }
 
@@ -2104,12 +2104,12 @@ impl App {
             )
         });
         if busy && !non_blocking {
-            self.push_system("un tour est en cours — attends la fin");
+            self.push_system("a turn is running — wait for it to finish");
             return Action::None;
         }
         if busy {
             self.push_system_lines(vec![vec![RoledSpan::dim(
-                "le tour continue — éditions concurrentes à ta charge",
+                "the turn keeps running — concurrent edits are on you",
             )]]);
         }
         Action::EditFile {
@@ -2120,7 +2120,7 @@ impl App {
 
     fn run_edit_command(&mut self, arg: &str) -> Action {
         if arg.is_empty() {
-            self.push_system("usage : /edit <chemin>[:ligne]");
+            self.push_system("usage: /edit <path>[:line]");
             return Action::None;
         }
         let (path, line) = self.split_line_suffix(arg);
@@ -2192,7 +2192,7 @@ impl App {
         };
         let resolved = crate::tui::mentions::resolve(&display, &self.working_dir);
         match self.reload_viewer_content(&display, &resolved, scroll) {
-            Ok(()) => self.push_system(&format!("{} {display} rechargé", theme::VIEWER_GLYPH)),
+            Ok(()) => self.push_system(&format!("{} {display} reloaded", theme::VIEWER_GLYPH)),
             Err(e) => self.push_system(&format!("lecture impossible : {e}")),
         }
         if let Some(explorer) = self.explorer.as_mut() {
@@ -2338,7 +2338,7 @@ impl App {
     /// un cadre muet pour toute réponse.
     pub fn toggle_forge(&mut self) {
         if self.forge.tasks.is_empty() && !self.forge.visible() {
-            self.push_system("forge : aucune tâche");
+            self.push_system("forge: no task");
             return;
         }
         self.forge.toggle();
@@ -2362,7 +2362,7 @@ impl App {
         match arg.trim() {
             "" => self.toggle_forge(),
             "full" => self.open_mission_control(),
-            other => self.push_system(&format!("usage : /forge [full] (reçu « {other} »)")),
+            other => self.push_system(&format!("usage: /forge [full] (got \"{other}\")")),
         }
         Action::None
     }
@@ -2423,12 +2423,12 @@ impl App {
     fn run_workflow_command(&mut self, arg: &str) -> Action {
         let arg = arg.trim();
         if arg.is_empty() {
-            self.push_system("usage : /workflow <fichier.yaml>");
+            self.push_system("usage: /workflow <file.yaml>");
             return Action::None;
         }
         if self.turn_active || self.turn_pending {
             self.push_system(
-                "workflow : un tour est en cours — attends la fin du tour pour lancer un workflow",
+                "workflow: a turn is running — wait for the turn to finish before starting a workflow",
             );
             return Action::None;
         }
@@ -2534,7 +2534,7 @@ impl App {
                     .and_then(|stage| stage.agents.iter().find(|status| status.name == agent))
                     .is_some_and(|status| status.state.is_terminal());
                 if terminal {
-                    self.push_mission_notice(&format!("{agent} : agent déjà terminé"));
+                    self.push_mission_notice(&format!("{agent}: agent already finished"));
                     return;
                 }
                 self.pending_workflow_cancel = Some((stage, agent));
@@ -2549,14 +2549,14 @@ impl App {
     /// n'aurait pas de raison de rejuger ce que la vue affiche.
     fn mission_pause(&mut self) -> Action {
         let Some(missioncontrol::MissionTarget::Agent { stage, .. }) = self.mission_target() else {
-            self.push_mission_notice("pause : réservée aux stages d'un workflow");
+            self.push_mission_notice("pause: workflow stages only");
             return Action::None;
         };
         let Some(status) = self.mission_stage(&stage) else {
             return Action::None;
         };
         if status.state.is_terminal() {
-            self.push_mission_notice(&format!("stage « {stage} » déjà terminé"));
+            self.push_mission_notice(&format!("stage \"{stage}\" already finished"));
             return Action::None;
         }
         // Un stage pas encore démarré ne porte pas `Paused` : sa suspension ne
@@ -2574,14 +2574,14 @@ impl App {
     /// s'ouvre pas silencieusement — le pied de la vue dit pourquoi.
     fn ask_mission_gate(&mut self) {
         let Some(missioncontrol::MissionTarget::Agent { stage, .. }) = self.mission_target() else {
-            self.push_mission_notice("gate : réservée aux stages d'un workflow");
+            self.push_mission_notice("gate: workflow stages only");
             return;
         };
         let waiting = self
             .mission_stage(&stage)
             .is_some_and(|status| status.state == kaji::workflow::StageState::Waiting);
         if !waiting {
-            self.push_mission_notice(&format!("gate « {stage} » : aucune décision attendue"));
+            self.push_mission_notice(&format!("gate \"{stage}\": no decision expected"));
             return;
         }
         self.pending_workflow_gate = Some(stage);
@@ -2748,7 +2748,7 @@ impl App {
             return;
         };
         if task.status != forge::ForgeStatus::Running {
-            self.push_action_notice("forge : tâche déjà terminée");
+            self.push_action_notice("forge: task already finished");
             return;
         }
         let question = format!(
@@ -2945,9 +2945,9 @@ impl App {
     pub fn toggle_thinking(&mut self) {
         self.show_thinking = !self.show_thinking;
         let msg = if self.show_thinking {
-            "思考中 affiché — /think ou F3 pour masquer"
+            "思考中 shown — /think or F3 to hide"
         } else {
-            "思考中 masqué — /think ou F3 pour afficher"
+            "思考中 hidden — /think or F3 to show"
         };
         self.push_system(msg);
     }
@@ -3269,11 +3269,11 @@ impl App {
     pub fn open_restore_confirm(&mut self, id: String, files_only: bool) {
         if files_only {
             self.push_system(&format!(
-                "restaurer le filet {id} ? l'arbre de travail sera rembobiné (fichiers seuls — la conversation ne sera pas touchée) — y/n"
+                "restore safety net {id}? the work tree will be rewound (files only — the conversation is untouched) — y/n"
             ));
         } else {
             self.push_system(&format!(
-                "restaurer le checkpoint {id} ? l'arbre de travail et la conversation seront ramenés à cet état — y/n"
+                "restore checkpoint {id}? the work tree and the conversation will be brought back to this state — y/n"
             ));
         }
         // The prompt was just pushed — make sure the user sees it even if
@@ -3709,7 +3709,7 @@ impl App {
                     }
                     KeyCode::Esc => {
                         self.pending_workflow_gate = None;
-                        self.push_mission_notice(&format!("gate « {stage} » laissée ouverte"));
+                        self.push_mission_notice(&format!("gate \"{stage}\" left open"));
                         Action::None
                     }
                     _ => Action::None,
@@ -3737,9 +3737,7 @@ impl App {
             // turn and submits the queued message as live guidance.
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.steer_queue.is_empty() {
-                    self.push_system(
-                        "rien en file — tape un message pendant un tour pour le steer",
-                    );
+                    self.push_system("nothing queued — type a message during a turn to steer it");
                     Action::None
                 } else {
                     Action::SteerNow
@@ -3900,12 +3898,12 @@ impl App {
                     let when = if self.driver == PassDriver::Idle
                         && self.goal_driver() == GoalDriver::Idle
                     {
-                        "envoi auto en fin de tour"
+                        "sent automatically at the end of the turn"
                     } else {
-                        "envoi à la fin de la boucle (but/passe en cours)"
+                        "sent at the end of the loop (goal/pass running)"
                     };
                     self.push_system(&format!(
-                        "{} mis en file ({depth}) — Ctrl+S pour steer, {when}",
+                        "{} queued ({depth}) — Ctrl+S to steer, {when}",
                         theme::STEER_GLYPH
                     ));
                     Action::None
@@ -3930,14 +3928,14 @@ impl App {
                     self.push_history(&text);
                     if let Some(arg) = restore_command_arg(&text) {
                         if arg.is_empty() {
-                            self.push_system("usage : /restore <id>");
+                            self.push_system("usage: /restore <id>");
                             return Action::None;
                         }
                         // premortem PM6: the store's bare-repo index is not
                         // safe under concurrent git ops — refuse rather than
                         // let a restore race a snapshot still in flight.
                         if self.turn_active || self.turn_pending {
-                            self.push_system("termine ou annule le tour avant de restaurer");
+                            self.push_system("finish or cancel the turn before restoring");
                             return Action::None;
                         }
                         return Action::Restore(arg.to_string());
@@ -4032,7 +4030,7 @@ impl App {
             };
         }
         if self.turn_active || self.turn_pending {
-            self.push_system("un tour est en cours — attends la fin, ou /goal clear");
+            self.push_system("a turn is running — wait for it to finish, or /goal clear");
             return Action::None;
         }
         Action::GoalSet(arg.to_string())
@@ -4054,7 +4052,7 @@ impl App {
         match theme::set_active(requested) {
             Ok(()) => {
                 let applied = theme::active().name;
-                self.push_system(&format!("thème : {applied}"));
+                self.push_system(&format!("theme: {applied}"));
                 Action::Theme(applied.to_string())
             }
             Err(err) => {
@@ -4129,7 +4127,7 @@ impl App {
             AgentEvent::McpNotification((_, notification)) => {
                 self.apply_mcp_notification(notification)
             }
-            AgentEvent::HistoryReplaced(_) => self.push_system("— historique compacté —"),
+            AgentEvent::HistoryReplaced(_) => self.push_system("— history compacted —"),
         }
     }
 
@@ -4205,7 +4203,7 @@ impl App {
                         .tool_call
                         .as_ref()
                         .map(|call| call.name.as_ref())
-                        .unwrap_or("outil")
+                        .unwrap_or("tool")
                         .to_string();
                     self.chat.push(ChatLine {
                         sender: Sender::System,
@@ -4268,7 +4266,7 @@ impl App {
                                 .tool
                                 .as_ref()
                                 .map(|t| (t.name.clone(), t.started.elapsed()))
-                                .unwrap_or_else(|| ("outil".to_string(), Duration::ZERO));
+                                .unwrap_or_else(|| ("tool".to_string(), Duration::ZERO));
                             let symbol = if resp.tool_result.is_ok() {
                                 "✓"
                             } else {
@@ -4278,7 +4276,7 @@ impl App {
                                 format!("{symbol} {name} ({:.1}s)", elapsed.as_secs_f64());
                             self.chat[idx].tool = None;
                         }
-                        None => self.push_system("✓ outil terminé"),
+                        None => self.push_system("✓ tool finished"),
                     }
                     self.reset_agent_merge_ids();
                 }
@@ -4304,13 +4302,13 @@ impl App {
                 .tool
                 .as_ref()
                 .map(|t| t.name.clone())
-                .unwrap_or_else(|| "outil".to_string());
-            line.text = format!("✗ {name} (interrompu)");
+                .unwrap_or_else(|| "tool".to_string());
+            line.text = format!("✗ {name} (interrupted)");
             line.tool = None;
         }
         if let Some(req) = self.take_tool_approval() {
             self.push_system(&format!(
-                "✗ {} — approbation abandonnée (session interrompue)",
+                "✗ {} — approval abandoned (session interrupted)",
                 req.tool_name
             ));
         }
@@ -4386,18 +4384,18 @@ fn forge_sheet_title(description: &str) -> String {
 }
 
 fn forge_sheet(task: &forge::ForgeTask, scroll: usize) -> crate::tui::viewer::Viewer {
-    let mut lines = forge_sheet_field("tâche", &task.description);
+    let mut lines = forge_sheet_field("task", &task.description);
     lines.extend(forge_sheet_field(
-        "statut",
+        "status",
         &format!(
             "{} · {}",
             forge_status_label(task.status),
             crate::tui::ui::forge_duration(task.elapsed_secs)
         ),
     ));
-    lines.extend(forge_sheet_field("tours", &task.turns.to_string()));
+    lines.extend(forge_sheet_field("turns", &task.turns.to_string()));
     if let Some(tool) = task.current_tool.as_deref() {
-        lines.extend(forge_sheet_field("outil", tool));
+        lines.extend(forge_sheet_field("tool", tool));
     }
     if let Some((label, body)) = forge_sheet_verdict(task) {
         lines.push(String::new());
@@ -4429,12 +4427,12 @@ fn workflow_agent_sheet(
 ) -> crate::tui::viewer::Viewer {
     let mut lines = forge_sheet_field("agent", &format!("{stage}.{}", status.name));
     lines.extend(forge_sheet_field(
-        "statut",
+        "status",
         &agent_state_label(&status.state),
     ));
     lines.extend(forge_sheet_field("tokens", &status.tokens.to_string()));
     lines.extend(forge_sheet_field(
-        "durée",
+        "duration",
         &crate::tui::ui::forge_duration((status.duration_ms.max(0) / 1000) as u64),
     ));
     if let Some(session) = status.session_id.as_deref() {
@@ -4457,10 +4455,10 @@ fn workflow_agent_sheet(
 fn agent_state_label(state: &kaji::workflow::AgentState) -> String {
     match state {
         kaji::workflow::AgentState::Failed(kaji::workflow::FailureCause::Budget(limit)) => {
-            format!("échoué : budget {} exceeded", limit.field())
+            format!("failed: budget {} exceeded", limit.field())
         }
         kaji::workflow::AgentState::Failed(kaji::workflow::FailureCause::Error(error)) => {
-            format!("échoué : {error}")
+            format!("failed: {error}")
         }
         state => state.label().to_string(),
     }
@@ -4470,8 +4468,8 @@ fn agent_state_label(state: &kaji::workflow::AgentState) -> String {
 /// lirait le résultat partiel avant la cause se raconterait à l'envers.
 fn forge_sheet_verdict(task: &forge::ForgeTask) -> Option<(&'static str, &str)> {
     match (task.error.as_deref(), task.result.as_deref()) {
-        (Some(error), _) => Some(("erreur", error)),
-        (None, Some(result)) => Some(("résultat", result)),
+        (Some(error), _) => Some(("error", error)),
+        (None, Some(result)) => Some(("result", result)),
         (None, None) => None,
     }
 }
@@ -4838,9 +4836,9 @@ mod tests {
     #[test]
     fn tab_completes_a_keyword_argument_too() {
         let (mut app, _dir) = app_with_recipes();
-        type_text(&mut app, "/cost jo");
+        type_text(&mut app, "/cost da");
         app.on_event(&key(KeyCode::Tab));
-        assert_eq!(app.input, "/cost jour");
+        assert_eq!(app.input, "/cost day");
     }
 
     /// Le nom de commande reste à la palette : la complétion d'argument ne se
@@ -4950,7 +4948,7 @@ mod tests {
 
         assert_eq!(action, Action::Theme("light".to_string()));
         assert_eq!(theme::active().name, "light");
-        assert!(app.chat.iter().any(|l| l.text.contains("thème : light")));
+        assert!(app.chat.iter().any(|l| l.text.contains("theme: light")));
     }
 
     #[test]
@@ -4997,7 +4995,7 @@ mod tests {
         assert_eq!(action, Action::Theme("light".to_string()));
         assert_eq!(theme::active().name, "light");
         assert!(app.theme_picker.is_none(), "le sélecteur se ferme");
-        assert!(app.chat.iter().any(|l| l.text.contains("thème : light")));
+        assert!(app.chat.iter().any(|l| l.text.contains("theme: light")));
     }
 
     #[test]
@@ -5010,7 +5008,7 @@ mod tests {
         let action = app.on_event(&key(KeyCode::Enter));
 
         assert_eq!(action, Action::Theme("nord".to_string()));
-        assert!(app.chat.iter().any(|l| l.text.contains("thème : nord")));
+        assert!(app.chat.iter().any(|l| l.text.contains("theme: nord")));
     }
 
     #[test]
@@ -5090,7 +5088,7 @@ mod tests {
 
         assert_eq!(action, Action::Theme("nord".to_string()));
         assert_eq!(theme::active().name, "nord");
-        assert!(app.chat.iter().any(|l| l.text.contains("thème : nord")));
+        assert!(app.chat.iter().any(|l| l.text.contains("theme: nord")));
     }
 
     #[test]
@@ -5134,7 +5132,7 @@ mod tests {
         assert!(app
             .chat
             .iter()
-            .any(|l| l.text.contains("termine ou annule le tour")));
+            .any(|l| l.text.contains("finish or cancel the turn")));
     }
 
     #[test]
@@ -5162,9 +5160,9 @@ mod tests {
         assert_eq!(app.input, "");
         assert_eq!(app.steer_len(), 1);
         assert_eq!(app.next_steer().as_deref(), Some("hi"));
-        assert!(app.chat.iter().any(|l| l.text.contains("mis en file")
+        assert!(app.chat.iter().any(|l| l.text.contains("queued")
             && l.text.contains("Ctrl+S")
-            && l.text.contains("fin de tour")));
+            && l.text.contains("end of the turn")));
     }
 
     /// Sous un but (ou une passe), le tour qui se termine en relance un autre :
@@ -5179,7 +5177,7 @@ mod tests {
         assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::None);
 
         let line = &app.chat.last().expect("ligne de mise en file").text;
-        assert!(line.contains("fin de la boucle"), "{line}");
+        assert!(line.contains("end of the loop"), "{line}");
     }
 
     #[test]
@@ -5218,7 +5216,7 @@ mod tests {
         app.turn_active = true;
         assert_eq!(app.on_event(&ctrl_key(KeyCode::Char('s'))), Action::None);
         assert_eq!(app.steer_len(), 0);
-        assert!(app.chat.iter().any(|l| l.text.contains("rien en file")));
+        assert!(app.chat.iter().any(|l| l.text.contains("nothing queued")));
     }
 
     #[test]
@@ -6047,7 +6045,7 @@ mod tests {
             .last()
             .expect("ligne système")
             .text
-            .contains("usage : /edit"));
+            .contains("usage: /edit"));
     }
 
     #[test]
@@ -6061,7 +6059,7 @@ mod tests {
             .last()
             .expect("ligne système")
             .text
-            .contains("un tour est en cours"));
+            .contains("a turn is running"));
     }
 
     /// Mid-turn, the blanket Enter guard queues everything as steering — a
@@ -6079,7 +6077,7 @@ mod tests {
             .last()
             .expect("ligne système")
             .text
-            .contains("un tour est en cours"));
+            .contains("a turn is running"));
     }
 
     fn editor_state(ids: &[&str]) -> EditorState {
@@ -6130,7 +6128,7 @@ mod tests {
         );
         assert!(app.editor_picker.is_none(), "le sélecteur se ferme");
         assert_eq!(app.editors.selected.as_deref(), Some("code"));
-        assert_eq!(last_line(&app), "éditeur : code");
+        assert_eq!(last_line(&app), "editor: code");
     }
 
     #[test]
@@ -6150,7 +6148,7 @@ mod tests {
         app.on_event(&key(KeyCode::End));
         assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::EditorReset);
         assert_eq!(app.editors.selected, None);
-        assert_eq!(last_line(&app), "éditeur : $VISUAL = nvim");
+        assert_eq!(last_line(&app), "editor: $VISUAL = nvim");
     }
 
     #[test]
@@ -6178,7 +6176,7 @@ mod tests {
             Action::Editor("kak -e".to_string())
         );
         assert_eq!(app.editors.selected.as_deref(), Some("kak -e"));
-        assert_eq!(last_line(&app), "éditeur : kak -e");
+        assert_eq!(last_line(&app), "editor: kak -e");
     }
 
     #[test]
@@ -6191,7 +6189,7 @@ mod tests {
 
         assert_eq!(submit(&mut app, "/editor reset"), Action::EditorReset);
         assert_eq!(app.editors.selected, None);
-        assert_eq!(last_line(&app), "éditeur : détection du PATH");
+        assert_eq!(last_line(&app), "editor: PATH detection");
     }
 
     /// Le cul-de-sac que la tâche 19a existe pour supprimer : sans rien de
@@ -6202,7 +6200,7 @@ mod tests {
         assert_eq!(submit(&mut app, "/editor"), Action::None);
         assert!(app.editor_picker.is_none());
         assert!(
-            last_line(&app).contains("/editor <commande>"),
+            last_line(&app).contains("/editor <command>"),
             "{}",
             last_line(&app)
         );
@@ -6225,7 +6223,7 @@ mod tests {
             }
         );
         assert!(
-            last_line(&app).contains("le tour continue"),
+            last_line(&app).contains("the turn keeps running"),
             "{}",
             last_line(&app)
         );
@@ -6241,7 +6239,7 @@ mod tests {
         app.turn_active = true;
 
         assert_eq!(app.on_event(&key(KeyCode::Char('e'))), Action::None);
-        assert!(last_line(&app).contains("un tour est en cours"));
+        assert!(last_line(&app).contains("a turn is running"));
     }
 
     /// Task 19b : un lancement non bloquant (nvim hôte, pane Zellij/tmux) ne
@@ -6268,7 +6266,7 @@ mod tests {
             }
         );
         assert!(
-            last_line(&app).contains("le tour continue"),
+            last_line(&app).contains("the turn keeps running"),
             "{}",
             last_line(&app)
         );
@@ -6283,7 +6281,7 @@ mod tests {
             Action::EditMode("pane".to_string())
         );
         assert_eq!(app.edit_mode, EditMode::Pane);
-        assert!(last_line(&app).contains("éditeur : pane"));
+        assert!(last_line(&app).contains("editor: pane"));
     }
 
     /// Comme `list`/`reset`, `mode` est insensible à la casse.
@@ -6305,12 +6303,12 @@ mod tests {
 
         assert_eq!(submit(&mut app, "/editor mode"), Action::None);
         assert!(
-            last_line(&app).contains("éditeur : auto"),
+            last_line(&app).contains("editor: auto"),
             "{}",
             last_line(&app)
         );
         assert!(
-            last_line(&app).contains("effectif : suspend"),
+            last_line(&app).contains("effective: suspend"),
             "{}",
             last_line(&app)
         );
@@ -6322,7 +6320,7 @@ mod tests {
 
         assert_eq!(submit(&mut app, "/editor mode bogus"), Action::None);
         assert!(
-            last_line(&app).contains("mode inconnu"),
+            last_line(&app).contains("unknown mode"),
             "{}",
             last_line(&app)
         );
@@ -6341,7 +6339,7 @@ mod tests {
         let viewer = app.viewer.as_ref().expect("le lecteur reste ouvert");
         assert_eq!(viewer.lines, vec!["court"]);
         assert_eq!(viewer.scroll, 0, "scroll ramené dans le nouveau fichier");
-        assert!(last_line(&app).contains("rechargé"), "{}", last_line(&app));
+        assert!(last_line(&app).contains("reloaded"), "{}", last_line(&app));
     }
 
     /// Un lancement non bloquant a pu toucher plus que le seul fichier
@@ -7033,7 +7031,7 @@ mod tests {
         assert!(validate_prompt.contains("VERDICT"));
 
         app.turn_active = true;
-        agent_says(&mut app, "m2", "VERDICT: VALIDE — conforme");
+        agent_says(&mut app, "m2", "VERDICT: VALID — conforme");
         assert!(app.turn_end().is_none());
         assert!(app.pass.is_complete());
         assert!(!app.pass.drifted());
@@ -7053,7 +7051,7 @@ mod tests {
             &mut app,
             "m2",
             "Exigence 1 : ok.\n\
-             Exigence 2 : on ne peut pas conclure VERDICT: VALIDE ici, il manque X.\n\
+             Exigence 2 : on ne peut pas conclure VERDICT: VALID ici, il manque X.\n\
              VERDICT: DRIFT",
         );
         assert!(app.turn_end().is_none());
@@ -7077,7 +7075,7 @@ mod tests {
             "m2",
             "Exigence 1 : satisfaite.\n\
              Exigence 2 : satisfaite.\n\
-             VERDICT: VALIDE",
+             VERDICT: VALID",
         );
         assert!(app.turn_end().is_none());
 
@@ -7104,7 +7102,7 @@ mod tests {
 
         assert!(app.pass.drifted());
         assert!(!app.pass.is_complete());
-        assert!(app.chat.iter().any(|l| l.text.contains("drift détecté")));
+        assert!(app.chat.iter().any(|l| l.text.contains("drift detected")));
         assert!(!app.chat.iter().any(|l| l.text.contains("verdict absent")));
     }
 
@@ -7117,12 +7115,12 @@ mod tests {
         agent_says(&mut app, "m1", "c'est fait");
         let validate_prompt = app.turn_end().expect("prompt validate");
 
-        assert!(validate_prompt.contains("défaut"));
+        assert!(validate_prompt.contains("default bias"));
         assert!(validate_prompt.contains("DRIFT"));
-        assert!(validate_prompt.contains("exigence par exigence"));
-        assert!(validate_prompt.contains("CHAQUE exigence"));
-        assert!(validate_prompt.contains("avant la ligne finale"));
-        assert!(validate_prompt.contains("VERDICT: VALIDE"));
+        assert!(validate_prompt.contains("requirement by requirement"));
+        assert!(validate_prompt.contains("EVERY requirement"));
+        assert!(validate_prompt.contains("before the final line"));
+        assert!(validate_prompt.contains("VERDICT: VALID"));
         assert!(validate_prompt.contains("VERDICT: DRIFT"));
     }
 
@@ -7202,15 +7200,12 @@ mod tests {
         app.gate_approve();
         assert_eq!(app.driver, PassDriver::Executing);
 
-        app.pass_abort("échec du démarrage du tour — passe interrompue");
+        app.pass_abort("turn failed to start — pass interrupted");
 
         assert_eq!(app.driver, PassDriver::Idle);
         assert!(app.pass.drifted());
         assert!(app.validate_buffer.is_empty());
-        assert!(app
-            .chat
-            .iter()
-            .any(|l| l.text.contains("échec du démarrage")));
+        assert!(app.chat.iter().any(|l| l.text.contains("failed to start")));
     }
 
     #[test]
@@ -7223,7 +7218,7 @@ mod tests {
         // Esc → Action::CancelTurn : la boucle annule le token puis appelle
         // pass_abort (driver != Idle). Le stream cancelled se termine ensuite
         // proprement (None), et la boucle appelle turn_end() sans effet.
-        app.pass_abort("tour annulé — passe interrompue");
+        app.pass_abort("turn cancelled — pass interrupted");
         assert!(app.turn_end().is_none());
 
         assert_eq!(app.driver, PassDriver::Idle);
@@ -7242,7 +7237,7 @@ mod tests {
         agent_says(&mut app, "m2", "début de verdict tronqué");
 
         // Some(Err(e)) mid-stream → la boucle appelle pass_abort (driver != Idle).
-        app.pass_abort("erreur pendant la passe — passe interrompue");
+        app.pass_abort("error during the pass — pass interrupted");
 
         assert_eq!(app.driver, PassDriver::Idle);
         assert!(app.validate_buffer.is_empty());
@@ -7253,7 +7248,7 @@ mod tests {
     fn push_system_between_same_id_chunks_keeps_them_separate() {
         let mut app = App::new(None);
         agent_says(&mut app, "m1", "Bon");
-        app.push_system(&format!("{} outil", theme::TOOL_GLYPH));
+        app.push_system(&format!("{} tool", theme::TOOL_GLYPH));
         agent_says(&mut app, "m1", "jour");
 
         let agent_lines: Vec<_> = app
@@ -7267,7 +7262,7 @@ mod tests {
         assert!(app
             .chat
             .iter()
-            .any(|l| matches!(l.sender, Sender::System) && l.text.contains("outil")));
+            .any(|l| matches!(l.sender, Sender::System) && l.text.contains("tool")));
     }
 
     #[test]
@@ -8179,20 +8174,17 @@ mod tests {
         assert!(!app.seal_unfolded());
     }
 
-    #[test_case(KajiMode::Approve, "approve", "承", "kaji demande avant chaque outil"; "approve")]
-    #[test_case(KajiMode::SmartApprove, "smart", "智", "kaji demande pour les outils risqués"; "smart")]
-    #[test_case(KajiMode::Auto, "auto", "自", "kaji agit sans demander"; "auto")]
-    #[test_case(KajiMode::Chat, "chat", "話", "aucun outil"; "chat")]
+    #[test_case(KajiMode::Approve, "approve", "承", "kaji asks before every tool"; "approve")]
+    #[test_case(KajiMode::SmartApprove, "smart", "智", "kaji asks for risky tools"; "smart")]
+    #[test_case(KajiMode::Auto, "auto", "自", "kaji acts without asking"; "auto")]
+    #[test_case(KajiMode::Chat, "chat", "話", "no tools"; "chat")]
     fn mode_line_says_the_word_the_kanji_and_what_the_mode_allows(
         mode: KajiMode,
         word: &str,
         kanji: &str,
         promise: &str,
     ) {
-        assert_eq!(
-            mode_line(mode),
-            format!("mode : {word} {kanji} — {promise}")
-        );
+        assert_eq!(mode_line(mode), format!("mode: {word} {kanji} — {promise}"));
     }
 
     /// Le feu de la barre d'état dit l'outil en cours — le dernier demandé qui
@@ -8702,7 +8694,7 @@ mod tests {
         assert_eq!(submit(&mut app, "/goal"), Action::GoalStatus);
 
         app.push_goal_status();
-        assert!(app.chat.iter().any(|l| l.text.contains("aucun but")));
+        assert!(app.chat.iter().any(|l| l.text.contains("no goal")));
     }
 
     #[test]
@@ -8713,7 +8705,7 @@ mod tests {
             .goal_set("les tests passent", 10)
             .expect("prompt de travail");
 
-        assert!(prompt.contains("Objectif : les tests passent"));
+        assert!(prompt.contains("Goal: les tests passent"));
         assert_eq!(app.goal_driver(), GoalDriver::Working);
         let goal = app.goal.as_ref().expect("un but");
         assert_eq!(goal.iteration, 1);
@@ -8825,7 +8817,7 @@ mod tests {
         let prompt = app.turn_end().expect("prompt de continuation");
 
         assert!(prompt.contains("il manque le cas nul"));
-        assert!(prompt.contains("Continue le travail vers : les tests passent"));
+        assert!(prompt.contains("Keep working toward: les tests passent"));
         let goal = app.goal.as_ref().expect("un but");
         assert_eq!(goal.iteration, 2);
         assert_eq!(app.goal_driver(), GoalDriver::Working);
@@ -8853,7 +8845,7 @@ mod tests {
             app.goal.as_ref().and_then(|g| g.outcome),
             Some(kaji_core::goal::GoalOutcome::Met)
         );
-        assert!(app.chat.iter().any(|l| l.text.contains("but atteint")));
+        assert!(app.chat.iter().any(|l| l.text.contains("goal met")));
         let events = goal_events(&mut app);
         assert_eq!(events.last().expect("goal_end").0, "goal_end");
     }
@@ -8874,7 +8866,7 @@ mod tests {
             app.goal.as_ref().and_then(|g| g.outcome),
             Some(kaji_core::goal::GoalOutcome::Unreachable)
         );
-        assert!(app.chat.iter().any(|l| l.text.contains("inatteignable")));
+        assert!(app.chat.iter().any(|l| l.text.contains("unreachable")));
     }
 
     /// ⛔ BARRIÈRE — fail-closed : un évaluateur qui oublie la ligne de
@@ -8977,7 +8969,7 @@ mod tests {
         app.turn_active = true;
 
         assert_eq!(app.on_event(&key(KeyCode::Esc)), Action::CancelTurn);
-        app.goal_abort("目標 tour annulé — but interrompu");
+        app.goal_abort("目標 turn cancelled — goal interrupted");
 
         assert_eq!(app.goal_driver(), GoalDriver::Idle);
         assert_eq!(
@@ -8998,7 +8990,7 @@ mod tests {
 
         assert!(app.goal_set("les tests passent", 10).is_none());
         assert!(app.goal.is_none());
-        assert!(app.chat.iter().any(|l| l.text.contains("passe SDD")));
+        assert!(app.chat.iter().any(|l| l.text.contains("SDD pass")));
     }
 
     #[test]
@@ -9010,7 +9002,7 @@ mod tests {
 
         assert!(!app.pass.is_running());
         assert!(!app.gate_open);
-        assert!(app.chat.iter().any(|l| l.text.contains("but en cours")));
+        assert!(app.chat.iter().any(|l| l.text.contains("goal running")));
     }
 
     #[test]
@@ -9038,7 +9030,7 @@ mod tests {
         app.turn_active = true;
 
         assert_eq!(submit(&mut app, "/goal clear"), Action::None);
-        assert!(app.chat.iter().any(|l| l.text.contains("aucun but")));
+        assert!(app.chat.iter().any(|l| l.text.contains("no goal")));
     }
 
     /// Ruling 6 : un but ne se fixe pas au milieu d'un tour (il faut le
@@ -9056,7 +9048,7 @@ mod tests {
         assert!(app
             .chat
             .iter()
-            .any(|l| l.text.contains("tour est en cours")));
+            .any(|l| l.text.contains("a turn is running")));
     }
 
     #[test]
@@ -9072,7 +9064,7 @@ mod tests {
         let status = app.chat.last().expect("une ligne de statut");
         assert!(status.text.contains("les tests passent"));
         assert!(status.text.contains("1/10"));
-        assert!(status.text.contains("évaluation"));
+        assert!(status.text.contains("evaluating"));
     }
 
     #[test]
@@ -9265,7 +9257,7 @@ mod tests {
             .last()
             .expect("une ligne système")
             .text
-            .contains("usage : /forge [full]"));
+            .contains("usage: /forge [full]"));
     }
 
     /// Plein écran veut dire plein écran : tant qu'il est ouvert, la vue prend
@@ -9522,7 +9514,7 @@ mod tests {
             .last()
             .expect("une ligne système")
             .text
-            .contains("usage : /workflow"));
+            .contains("usage: /workflow"));
     }
 
     /// C2 : l'agent réserve son `turn_seq` au début de `reply()` mais n'écrit
@@ -9557,7 +9549,7 @@ mod tests {
                     .last()
                     .expect("une ligne de refus")
                     .text
-                    .contains("attends la fin du tour"),
+                    .contains("wait for the turn to finish"),
                 "le refus se dit : {:?}",
                 app.chat.last().map(|line| &line.text)
             );
@@ -9659,7 +9651,7 @@ mod tests {
             app.mission
                 .notice
                 .as_deref()
-                .is_some_and(|notice| notice.contains("déjà terminé")),
+                .is_some_and(|notice| notice.contains("already finished")),
             "{:?}",
             app.mission.notice
         );
@@ -9730,7 +9722,7 @@ mod tests {
         );
         assert_eq!(
             missioncontrol::board(&app).columns[1].state,
-            "pause demandée",
+            "pause requested",
             "la vue dit qu'une pause attend son point d'arrêt"
         );
     }
@@ -9752,7 +9744,7 @@ mod tests {
             app.mission
                 .notice
                 .as_deref()
-                .is_some_and(|notice| notice.contains("aucune décision attendue")),
+                .is_some_and(|notice| notice.contains("no decision expected")),
             "{:?}",
             app.mission.notice
         );
@@ -9801,12 +9793,12 @@ mod tests {
     /// Ce que l'écran montre quand cette modale a la main.
     fn modal_needle(modal: Modal) -> &'static str {
         match modal {
-            Modal::ToolApproval => "confirmation d'outil",
-            Modal::Gate => "approuver la SPEC",
-            Modal::Restore => "restaurer le checkpoint",
+            Modal::ToolApproval => "tool confirmation",
+            Modal::Gate => "approve the SPEC",
+            Modal::Restore => "restore checkpoint",
             Modal::ForgeCancel => "lame-1",
             Modal::WorkflowCancel => "collecte.scanner",
-            Modal::WorkflowGate => "gate « deploie »",
+            Modal::WorkflowGate => "gate \"deploie\"",
         }
     }
 
@@ -9862,7 +9854,7 @@ mod tests {
         app.ask_forge_cancel("t1");
         assert_eq!(
             app.mission.notice.as_deref(),
-            Some("forge : tâche déjà terminée"),
+            Some("forge: task already finished"),
             "le pied de la vue doit porter le refus"
         );
 
@@ -9875,7 +9867,7 @@ mod tests {
             .last()
             .expect("une ligne système")
             .text
-            .contains("déjà terminée"));
+            .contains("already finished"));
     }
 
     /// m2 : la notice répond à une carte précise. Elle ne doit pas survivre au
@@ -10036,7 +10028,7 @@ mod tests {
             .last()
             .expect("une ligne système")
             .text
-            .contains("forge : aucune tâche"));
+            .contains("forge: no task"));
     }
 
     #[test]
@@ -10074,7 +10066,7 @@ mod tests {
         let viewer = app.viewer.as_ref().expect("fiche ouverte");
         assert!(viewer.path.contains("auditer les tests"), "{}", viewer.path);
         let sheet = viewer.lines.join("\n");
-        for expected in ["tâche", "statut", "running", "7s", "tours", "2", "outil"] {
+        for expected in ["task", "status", "running", "7s", "turns", "2", "tool"] {
             assert!(sheet.contains(expected), "{expected} manquant :\n{sheet}");
         }
         assert_eq!(app.focus, Focus::Viewer);
@@ -10095,9 +10087,9 @@ mod tests {
 
         let sheet = app.viewer.as_ref().expect("fiche").lines.join("\n");
         assert!(sheet.contains("failed"), "{sheet}");
-        assert!(sheet.contains("erreur"), "{sheet}");
+        assert!(sheet.contains("error"), "{sheet}");
         assert!(sheet.contains("compilation cassée"), "{sheet}");
-        assert!(!sheet.contains("outil"), "une lame morte ne brûle rien");
+        assert!(!sheet.contains("tool"), "une lame morte ne brûle rien");
     }
 
     /// Le lecteur rogne les lignes trop longues sans le dire : une description
@@ -10112,7 +10104,7 @@ mod tests {
         app.on_event(&key(KeyCode::Enter));
 
         let lines = &app.viewer.as_ref().expect("fiche").lines;
-        assert!(lines[0].starts_with("tâche    : "), "{:?}", lines[0]);
+        assert!(lines[0].starts_with("task     : "), "{:?}", lines[0]);
         assert!(
             lines.iter().all(|line| line.chars().count() <= 76 + 11),
             "{lines:?}"
@@ -10123,14 +10115,14 @@ mod tests {
             lines[1]
         );
         assert_eq!(
-            format!("{}{}", lines[0].trim_start_matches("tâche    : "), lines[1])
+            format!("{}{}", lines[0].trim_start_matches("task     : "), lines[1])
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" "),
             long,
             "repliée, pas tronquée"
         );
-        assert!(lines[2].starts_with("statut"), "{:?}", lines[2]);
+        assert!(lines[2].starts_with("status"), "{:?}", lines[2]);
     }
 
     /// La fiche est une vue, pas une copie : le tick la réécrit sous les yeux
@@ -10235,7 +10227,7 @@ mod tests {
             .expect("fiche")
             .lines
             .join("\n")
-            .contains("outil"));
+            .contains("tool"));
 
         app.apply_agent_event(&logging_notification(serde_json::json!({
             "type": SUBAGENT_TOOL_REQUEST_TYPE,
@@ -10244,7 +10236,7 @@ mod tests {
         })));
 
         let sheet = app.viewer.as_ref().expect("fiche").lines.join("\n");
-        assert!(sheet.contains("outil    : developer__shell"), "{sheet}");
+        assert!(sheet.contains("tool     : developer__shell"), "{sheet}");
     }
 
     /// Une fiche ouverte puis remplacée par un fichier : le tick n'a plus rien à
@@ -10294,7 +10286,7 @@ mod tests {
 
         let sheet = app.viewer.as_ref().expect("fiche").lines.join("\n");
         assert!(
-            sheet.contains("tours    : 3"),
+            sheet.contains("turns    : 3"),
             "la fiche doit porter t2, pas sa jumelle :\n{sheet}"
         );
     }
@@ -10323,7 +10315,7 @@ mod tests {
         assert_eq!(viewer.path, "遣 relire le diff");
         let sheet = viewer.lines.join("\n");
         assert!(sheet.contains("relire le diff"), "{sheet}");
-        assert!(sheet.contains("tours    : 4"), "{sheet}");
+        assert!(sheet.contains("turns    : 4"), "{sheet}");
     }
 
     /// Un résultat ou une erreur arrive d'un agent : rien ne garantit qu'il soit
@@ -10348,7 +10340,7 @@ mod tests {
             lines.iter().all(|line| line.chars().count() <= 76 + 11),
             "{lines:?}"
         );
-        assert!(lines.iter().any(|line| line.starts_with("résultat")));
+        assert!(lines.iter().any(|line| line.starts_with("result")));
         assert!(lines.iter().filter(|line| line.contains("verdict")).count() > 1);
     }
 
@@ -10392,7 +10384,7 @@ mod tests {
             .last()
             .expect("une ligne système")
             .text
-            .contains("déjà terminée"));
+            .contains("already finished"));
     }
 
     #[test]

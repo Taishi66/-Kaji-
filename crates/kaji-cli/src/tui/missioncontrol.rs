@@ -69,8 +69,7 @@ const TIMELINE_DURATION_CELLS: usize = 8;
 /// Les touches vraiment branchées, et elles seules : `s` (steer) attend un
 /// changement du chemin de spawn partagé avec summon, l'annoncer ici
 /// promettrait une action qui ne se produit pas.
-const FOOTER: &str =
-    " h/l stages · j/k cartes · ⏎ fiche · x annuler · p pause · g gate · q retour ";
+const FOOTER: &str = " h/l stages · j/k cards · ⏎ sheet · x cancel · p pause · g gate · q back ";
 
 const BAR_FULL: char = '█';
 const BAR_EMPTY: char = '░';
@@ -242,7 +241,7 @@ fn stage_label(stage: &kaji::workflow::StageStatus, paused: &HashSet<String>) ->
         && !stage.state.is_terminal()
         && paused.contains(&stage.name)
     {
-        return "pause demandée".to_string();
+        return "pause requested".to_string();
     }
     stage.state.label().to_string()
 }

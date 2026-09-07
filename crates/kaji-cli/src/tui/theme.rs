@@ -137,7 +137,7 @@ pub fn set_active(name: &str) -> Result<()> {
     let Some(idx) = index_of(name) else {
         let available: Vec<&str> = THEMES.iter().map(|p| p.name).collect();
         bail!(
-            "thème inconnu « {} » — disponibles : {}",
+            "unknown theme \"{}\" — available: {}",
             name.trim(),
             available.join(", ")
         );

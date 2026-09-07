@@ -18,8 +18,8 @@ pub enum GoalPhase {
 impl GoalPhase {
     pub fn label(&self) -> &'static str {
         match self {
-            GoalPhase::Working => "travail",
-            GoalPhase::Evaluating => "évaluation",
+            GoalPhase::Working => "working",
+            GoalPhase::Evaluating => "evaluating",
         }
     }
 }
@@ -36,11 +36,11 @@ pub enum GoalOutcome {
 impl GoalOutcome {
     pub fn label(&self) -> &'static str {
         match self {
-            GoalOutcome::Met => "atteint",
-            GoalOutcome::Unreachable => "inatteignable",
-            GoalOutcome::Cleared => "effacé",
-            GoalOutcome::Interrupted => "interrompu",
-            GoalOutcome::IterationCap => "cap d'itérations",
+            GoalOutcome::Met => "met",
+            GoalOutcome::Unreachable => "unreachable",
+            GoalOutcome::Cleared => "cleared",
+            GoalOutcome::Interrupted => "interrupted",
+            GoalOutcome::IterationCap => "iteration cap",
         }
     }
 }
@@ -126,7 +126,7 @@ pub fn max_iterations(raw: Option<&str>) -> usize {
 
 pub fn work_prompt(condition: &str) -> String {
     format!(
-        "Objectif : {condition}\n\nCommence (ou continue) à travailler vers cet objectif. Quand tu penses avoir terminé, arrête-toi et résume ce qui a été fait."
+        "Goal: {condition}\n\nStart (or keep) working toward this goal. When you believe it is done, stop and summarise what was done."
     )
 }
 
@@ -134,18 +134,18 @@ pub fn work_prompt(condition: &str) -> String {
 /// et l'évaluateur dispose des outils pour vérifier au lieu de supposer.
 pub fn evaluator_prompt(condition: &str) -> String {
     format!(
-        "Tu es un évaluateur de but, pas un assistant complaisant : ton biais par défaut doit être CONTINUE, pas MET. But à juger : {condition}\n\nVérifie-le activement contre l'état réel du projet — lance les outils dont tu as besoin (tests, lecture de fichiers, commandes) pour le prouver au lieu de le supposer. Ne conclus MET que si le but est vérifiablement atteint, démonstration à l'appui ; au moindre doute ou à la moindre preuve manquante, le verdict est CONTINUE et tu listes précisément ce qu'il reste à faire. Ne conclus UNREACHABLE que si le but est intrinsèquement inatteignable (contradictoire, hors du périmètre du projet, dépendant de quelque chose d'indisponible) — jamais parce que c'est difficile ou long. Justifie ton verdict avant la ligne finale : tout ce qui la précède est le retour transmis au tour suivant. Dernière ligne, exactement : `VERDICT: MET` ou `VERDICT: CONTINUE` ou `VERDICT: UNREACHABLE`."
+        "You are a goal evaluator, not an agreeable assistant: your default bias must be CONTINUE, not MET. Goal to judge: {condition}\n\nCheck it actively against the real state of the project — run whatever tools you need (tests, file reads, commands) to prove it instead of assuming it. Conclude MET only if the goal is verifiably reached, with the demonstration to back it; at the slightest doubt, or on any missing evidence, the verdict is CONTINUE and you list precisely what is left to do. Conclude UNREACHABLE only if the goal is intrinsically unreachable (contradictory, out of the project's scope, dependent on something unavailable) — never because it is hard or long. Justify your verdict before the final line: everything preceding it is the feedback carried into the next turn. Last line, exactly: `VERDICT: MET` or `VERDICT: CONTINUE` or `VERDICT: UNREACHABLE`."
     )
 }
 
 pub fn continuation_prompt(condition: &str, feedback: &str) -> String {
     format!(
-        "Le but n'est pas encore atteint. Retour de l'évaluateur :\n{feedback}\n\nContinue le travail vers : {condition}"
+        "The goal is not met yet. Evaluator feedback:\n{feedback}\n\nKeep working toward: {condition}"
     )
 }
 
 /// Le sous-scan partagé avec le juge SDD de la TUI, dont la taxonomie diffère
-/// (`VALIDE`/`DRIFT`) mais qui lit la même ligne : index de la dernière ligne
+/// (`VALID`/`DRIFT`) mais qui lit la même ligne : index de la dernière ligne
 /// non vide, et son contenu en majuscules.
 pub fn last_verdict_line(text: &str) -> Option<(usize, String)> {
     text.lines()

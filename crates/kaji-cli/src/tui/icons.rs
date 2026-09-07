@@ -40,7 +40,7 @@ pub fn resolve(value: Option<&str>) -> (IconSet, Option<String>) {
         "text" => (IconSet::Text, None),
         _ => (
             IconSet::Nerd,
-            Some(format!("KAJI_ICONS invalide ({value}) — nerd appliqué")),
+            Some(format!("invalid KAJI_ICONS ({value}) — nerd applied")),
         ),
     }
 }
@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(set, IconSet::Nerd);
         assert_eq!(
             warning.expect("un avertissement"),
-            "KAJI_ICONS invalide (emoji) — nerd appliqué"
+            "invalid KAJI_ICONS (emoji) — nerd applied"
         );
     }
 }

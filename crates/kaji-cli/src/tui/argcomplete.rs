@@ -40,7 +40,7 @@ const ARG_COMPLETIONS: &[ArgSpec] = &[
     },
     ArgSpec {
         command: "/cost",
-        kind: ArgKind::Keywords(&["modèles", "jour", "semaine", "mois", "cache", "projection"]),
+        kind: ArgKind::Keywords(&["models", "day", "week", "month", "cache", "projection"]),
     },
     ArgSpec {
         command: "/goal",
@@ -261,10 +261,7 @@ mod tests {
     #[test]
     fn keyword_commands_complete_their_vocabulary_case_insensitively() {
         let (_dir, root) = demo_dir();
-        assert_eq!(
-            complete("/cost jo", &root).unwrap().candidates,
-            vec!["jour"]
-        );
+        assert_eq!(complete("/cost da", &root).unwrap().candidates, vec!["day"]);
         assert_eq!(
             complete("/forge FU", &root).unwrap().candidates,
             vec!["full"]

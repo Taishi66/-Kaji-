@@ -275,7 +275,7 @@ fn lookup(program: &str) -> Option<&'static EditorSpec> {
 pub fn no_editor_message() -> String {
     let programs: Vec<&str> = EDITORS.iter().map(|spec| spec.program).collect();
     format!(
-        "aucun éditeur : définis $EDITOR ou /editor — cherché : {}",
+        "no editor: set $EDITOR or use /editor — searched: {}",
         programs.join(", ")
     )
 }

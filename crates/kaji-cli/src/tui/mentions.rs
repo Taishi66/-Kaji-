@@ -391,7 +391,7 @@ fn load_image(path: &Path, mime: &str, already_attached: usize) -> Result<Mentio
         return Err(refused(
             &name,
             &format!(
-                "{} dépasse la limite de {} par image",
+                "{} exceeds the {} per-image limit",
                 human_size(bytes),
                 human_size(MAX_IMAGE_BYTES)
             ),
@@ -401,7 +401,7 @@ fn load_image(path: &Path, mime: &str, already_attached: usize) -> Result<Mentio
     if mime == GIF_MIME && gif_is_animated(&raw) {
         return Err(refused(
             &name,
-            "GIF animé : S1 n'attache que des images fixes — exporter une image du GIF",
+            "animated GIF: S1 only attaches still images — export a frame from the GIF",
         ));
     }
     Ok(MentionImage {
@@ -413,7 +413,7 @@ fn load_image(path: &Path, mime: &str, already_attached: usize) -> Result<Mentio
 }
 
 fn refused(name: &str, reason: &str) -> String {
-    format!("{} {name} — non attachée : {reason}", theme::IMAGE_GLYPH)
+    format!("{} {name} — not attached: {reason}", theme::IMAGE_GLYPH)
 }
 
 /// Un GIF porte-t-il plus d'une image ? S1 n'attache que des GIF fixes, et le
@@ -851,7 +851,7 @@ mod tests {
         assert!(out.images.is_empty(), "{out:?}");
         assert_eq!(out.notices.len(), 1);
         assert!(out.notices[0].contains("boucle.gif"), "{}", out.notices[0]);
-        assert!(out.notices[0].contains("animé"), "{}", out.notices[0]);
+        assert!(out.notices[0].contains("animated"), "{}", out.notices[0]);
     }
 
     #[test]
@@ -910,9 +910,9 @@ mod tests {
         assert_eq!(out.text, "compare @enorme.png à ça");
         assert_eq!(out.notices.len(), 1, "{:?}", out.notices);
         assert!(out.notices[0].contains("enorme.png"), "{}", out.notices[0]);
-        assert!(out.notices[0].contains("5.5 Mo"), "{}", out.notices[0]);
+        assert!(out.notices[0].contains("5.5 MB"), "{}", out.notices[0]);
         assert!(
-            out.notices[0].contains("limite de 5.0 Mo"),
+            out.notices[0].contains("5.0 MB per-image limit"),
             "{}",
             out.notices[0]
         );
@@ -959,7 +959,7 @@ mod tests {
             data: String::new(),
             bytes: 1_258_291,
         };
-        assert_eq!(image.placeholder(), "画 capture.png (1.2 Mo)");
+        assert_eq!(image.placeholder(), "画 capture.png (1.2 MB)");
     }
 
     #[test]
