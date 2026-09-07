@@ -123,6 +123,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_input(frame, app, column[1]);
     draw_palette(frame, app, column[1]);
     draw_mentions(frame, app, column[1]);
+    draw_args(frame, app, column[1]);
     if let Some(area) = right_area {
         match &app.viewer {
             Some(viewer) => draw_viewer(frame, app, viewer, area),
@@ -646,6 +647,66 @@ fn draw_mentions(frame: &mut Frame, app: &App, input_area: Rect) {
     if let Some(hint) = hint {
         lines.push(Line::from(Span::styled(hint, theme::dim())));
     }
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+}
+
+/// Liste des arguments possibles armée par Tab — même encadré au-dessus du
+/// composer que la palette et les mentions. Dessinée après elles : la palette
+/// du NOM de commande reste visible sous `/workflow <arg>`, et c'est
+/// l'argument qu'on est en train de choisir.
+fn draw_args(frame: &mut Frame, app: &App, input_area: Rect) {
+    if !app.arg_dropdown_visible() {
+        return;
+    }
+    let matches = app.arg_matches();
+    let inner_w = matches
+        .iter()
+        .map(|m| gitstatus::display_width(m))
+        .max()
+        .unwrap_or(0) as u16;
+    // Plancher taillé sur le pied de l'encadré : plus étroit, la ligne de
+    // touches est tronquée et ne dit plus comment sortir de la liste.
+    let width = (inner_w + 4)
+        .max(24)
+        .min(input_area.width.saturating_sub(2));
+    let height = (matches.len() as u16 + 2).min(input_area.y);
+    if width < 4 || height < 3 {
+        return;
+    }
+    let rows = (height - 2) as usize;
+    let selected = app.arg_selected();
+    let first = selected.unwrap_or(0).saturating_sub(rows.saturating_sub(1));
+    let area = Rect {
+        x: input_area.x + 1,
+        y: input_area.y - height,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" arguments ")
+        .title_bottom(Line::from(" Tab/↑↓ choisir · esc ").style(theme::dim()));
+    let lines: Vec<Line> = matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows)
+        .map(|(i, candidate)| {
+            let is_selected = selected == Some(i);
+            let marker = if is_selected { "▸ " } else { "  " };
+            let style = if is_selected {
+                theme::accent()
+            } else {
+                theme::text()
+            };
+            Line::from(vec![
+                Span::styled(marker, theme::accent()),
+                Span::styled(candidate.clone(), style),
+            ])
+        })
+        .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
 }
 

@@ -715,6 +715,21 @@ pub const MODAL_PRECEDENCE: [Modal; 6] = [
     Modal::WorkflowGate,
 ];
 
+/// Cycle de complétion d'argument armé par Tab (`/workflow ` → les recettes
+/// du dossier). Il porte la ligne et le caret sous lesquels il a été calculé :
+/// tout écart le périme, ce qui fait sortir de la complétion en continuant
+/// simplement à taper — sans une remise à zéro à semer dans chaque touche.
+struct ArgCycle {
+    line: String,
+    cursor: usize,
+    /// Octet où l'argument commence dans la ligne.
+    start: usize,
+    candidates: Vec<String>,
+    /// `None` juste après l'écriture du préfixe commun : rien n'est encore
+    /// choisi, et le Tab suivant prend le premier candidat.
+    selected: Option<usize>,
+}
+
 pub struct App {
     pub header: String,
     /// Model name shown by the status bar's telemetry — set once at startup by
@@ -726,6 +741,8 @@ pub struct App {
     /// derrière insérerait au milieu du prompt suivant. Écrire `input`
     /// directement casse l'invariant : passer par [`App::set_input`].
     pub input_cursor: usize,
+    /// Cycle de complétion d'argument, voir [`ArgCycle`].
+    arg_completion: Option<ArgCycle>,
     pub chat: Vec<ChatLine>,
     pub status: String,
     pub turn_active: bool,
@@ -978,6 +995,7 @@ impl App {
             model: String::new(),
             input: String::new(),
             input_cursor: 0,
+            arg_completion: None,
             chat: Vec::new(),
             status: String::new(),
             turn_active: false,
@@ -1460,6 +1478,122 @@ impl App {
         if let Some(index) = &self.mention_index {
             self.mention_matches = index.complete(&fragment);
         }
+    }
+
+    /// Le cycle vivant : celui calculé sous la ligne et le caret actuels. Une
+    /// frappe, une suppression ou un déplacement du caret le périment tout
+    /// seuls — pas de remise à zéro à semer dans chaque touche.
+    fn live_arg_cycle(&self) -> Option<&ArgCycle> {
+        self.arg_completion
+            .as_ref()
+            .filter(|cycle| cycle.line == self.input && cycle.cursor == self.input_cursor)
+    }
+
+    /// La liste des candidats est à l'écran : plusieurs choix restent ouverts.
+    /// Un candidat unique est écrit directement, sans rien à afficher.
+    pub fn arg_dropdown_visible(&self) -> bool {
+        !self.modal_active()
+            && !self.mention_dropdown_visible()
+            && self
+                .live_arg_cycle()
+                .is_some_and(|cycle| cycle.candidates.len() > 1)
+    }
+
+    pub fn arg_matches(&self) -> &[String] {
+        match self.live_arg_cycle() {
+            Some(cycle) => &cycle.candidates,
+            None => &[],
+        }
+    }
+
+    pub fn arg_selected(&self) -> Option<usize> {
+        self.live_arg_cycle().and_then(|cycle| cycle.selected)
+    }
+
+    /// Tab sur l'argument d'une commande connue : écrit le plus long préfixe
+    /// commun, puis — s'il reste plusieurs candidats — arme le cycle que les
+    /// Tab suivants et les flèches parcourent. Aucun candidat : rien ne
+    /// bouge, et rien ne se dit.
+    fn complete_argument(&mut self) {
+        if let Some(cycle) = self.live_arg_cycle() {
+            if cycle.candidates.len() > 1 {
+                let next = cycle
+                    .selected
+                    .map_or(0, |idx| (idx + 1) % cycle.candidates.len());
+                self.select_arg_candidate(next);
+                return;
+            }
+        }
+        let head = head_to(&self.input, self.input_cursor_byte());
+        let Some(found) = crate::tui::argcomplete::complete(head, &self.working_dir) else {
+            return;
+        };
+        self.arg_completion = None;
+        if found.candidates.is_empty() {
+            return;
+        }
+        self.exit_history_navigation();
+        let common = crate::tui::argcomplete::common_prefix(&found.candidates);
+        if !common.is_empty() && common != found.prefix {
+            let at = self.input_cursor_byte();
+            self.input.replace_range(found.start..at, &common);
+            self.input_cursor = head_to(&self.input, found.start + common.len())
+                .chars()
+                .count();
+        }
+        if found.candidates.len() > 1 {
+            self.arg_completion = Some(ArgCycle {
+                line: self.input.clone(),
+                cursor: self.input_cursor,
+                start: found.start,
+                candidates: found.candidates,
+                selected: None,
+            });
+        }
+    }
+
+    /// Remplace l'argument par le candidat de rang `index` et suit le caret.
+    /// Le cycle réenregistre la ligne qu'il vient d'écrire : c'est elle, et
+    /// elle seule, qui le garde vivant pour le Tab suivant.
+    fn select_arg_candidate(&mut self, index: usize) {
+        let Some(cycle) = self.live_arg_cycle() else {
+            return;
+        };
+        let Some(candidate) = cycle.candidates.get(index).cloned() else {
+            return;
+        };
+        let start = cycle.start;
+        let at = self.input_cursor_byte();
+        self.input.replace_range(start..at, &candidate);
+        self.input_cursor = head_to(&self.input, start + candidate.len())
+            .chars()
+            .count();
+        let line = self.input.clone();
+        let cursor = self.input_cursor;
+        if let Some(cycle) = self.arg_completion.as_mut() {
+            cycle.selected = Some(index);
+            cycle.line = line;
+            cycle.cursor = cursor;
+        }
+    }
+
+    /// ↑/↓ sur la liste d'arguments — cyclique, comme la palette et les
+    /// mentions. Rien de sélectionné encore : ↓ prend le premier, ↑ le
+    /// dernier.
+    fn arg_step(&mut self, delta: isize) {
+        let Some(cycle) = self.live_arg_cycle() else {
+            return;
+        };
+        let count = cycle.candidates.len();
+        if count == 0 {
+            return;
+        }
+        let next = match cycle.selected {
+            Some(idx) => (idx as isize + delta).rem_euclid(count as isize) as usize,
+            None if delta > 0 => 0,
+            None => count - 1,
+        };
+        self.select_arg_candidate(next);
     }
 
     /// Le fragment `@` que la complétion vise : celui qui finit AU caret, pas
@@ -3241,8 +3375,14 @@ impl App {
     /// The palette is on screen: no modal is stealing the keyboard, and the
     /// current prefix filter has at least one match (a filter with zero
     /// matches closes the palette rather than showing an empty box).
+    ///
+    /// La liste d'arguments lui prend la place : `/workflow <arg>` filtre
+    /// encore `/workflow`, mais le nom est déjà écrit et c'est l'argument
+    /// qu'on choisit. Une seule chaîne de décision pour les deux, sinon le
+    /// rendu et le clavier divergent — les deux encadrés s'ancrent au même
+    /// coin et se recouvrent.
     pub fn palette_visible(&self) -> bool {
-        !self.modal_active() && !self.palette_matches().is_empty()
+        !self.modal_active() && !self.palette_matches().is_empty() && !self.arg_dropdown_visible()
     }
 
     /// Called wherever `input` mutates so a narrower/wider filter always
@@ -3413,7 +3553,9 @@ impl App {
             // legacy line-scroll behavior and leaves history unbound to the
             // arrows (documented degradation).
             KeyCode::Up => {
-                if self.mention_dropdown_visible() {
+                if self.arg_dropdown_visible() {
+                    self.arg_step(-1);
+                } else if self.mention_dropdown_visible() {
                     let n = self.mention_matches.len();
                     self.mention_selected = (self.mention_selected + n - 1) % n;
                 } else if self.palette_visible() {
@@ -3428,7 +3570,9 @@ impl App {
                 return Action::None;
             }
             KeyCode::Down => {
-                if self.mention_dropdown_visible() {
+                if self.arg_dropdown_visible() {
+                    self.arg_step(1);
+                } else if self.mention_dropdown_visible() {
                     let n = self.mention_matches.len();
                     self.mention_selected = (self.mention_selected + 1) % n;
                 } else if self.palette_visible() {
@@ -3661,6 +3805,21 @@ impl App {
                 self.apply_mention_completion();
                 Action::None
             }
+            // Complétion d'argument (`/workflow ` → les recettes du dossier) :
+            // avant la palette, qui ne complète que le NOM et effacerait
+            // l'argument déjà tapé. Le garde est syntaxique — la commande est
+            // connue et son argument a commencé —, donc Tab reste inerte quand
+            // rien ne correspond au lieu de retomber sur la palette.
+            KeyCode::Tab
+                if self.live_arg_cycle().is_some()
+                    || crate::tui::argcomplete::expects_argument(head_to(
+                        &self.input,
+                        self.input_cursor_byte(),
+                    )) =>
+            {
+                self.complete_argument();
+                Action::None
+            }
             KeyCode::Tab if self.palette_visible() => {
                 let matches = self.palette_matches();
                 let name = matches[self.palette_selected.min(matches.len() - 1)].name;
@@ -3675,6 +3834,13 @@ impl App {
             // suggestion is ready — it reads as "Tab fills the blank".
             KeyCode::Tab if self.suggestion.is_some() && self.input.is_empty() => {
                 self.accept_suggestion();
+                Action::None
+            }
+            // Esc referme la liste d'arguments sans toucher à la ligne — avant
+            // le Esc de la palette, qui l'effacerait : les deux sont à l'écran
+            // en même temps sur `/workflow <arg>`.
+            KeyCode::Esc if self.arg_dropdown_visible() => {
+                self.arg_completion = None;
                 Action::None
             }
             KeyCode::Esc if self.palette_visible() => {
@@ -4569,6 +4735,161 @@ mod tests {
         assert_eq!(app.input_cursor_cells(), 4);
         app.on_event(&key(KeyCode::Left));
         assert_eq!(app.input_cursor_cells(), 2);
+    }
+
+    /// Dossier de travail à deux recettes, comme celui de la démo.
+    fn app_with_recipes() -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("flow.yaml"), "name: flow\n").unwrap();
+        std::fs::write(dir.path().join("tache.yaml"), "name: tache\n").unwrap();
+        std::fs::write(dir.path().join("notes.md"), "salut\n").unwrap();
+        let mut app = App::new(None);
+        app.set_working_dir(dir.path().to_path_buf());
+        (app, dir)
+    }
+
+    #[test]
+    fn tab_completes_a_workflow_recipe_from_its_prefix() {
+        let (mut app, _dir) = app_with_recipes();
+        type_text(&mut app, "/workflow fl");
+        assert_eq!(app.on_event(&key(KeyCode::Tab)), Action::None);
+        assert_eq!(app.input, "/workflow flow.yaml");
+        assert_eq!(app.input_cursor, app.input.chars().count());
+        assert!(
+            !app.arg_dropdown_visible(),
+            "un seul candidat : rien à choisir"
+        );
+    }
+
+    #[test]
+    fn tab_on_a_bare_workflow_lists_the_recipes_then_cycles_them() {
+        let (mut app, _dir) = app_with_recipes();
+        type_text(&mut app, "/workflow ");
+        app.on_event(&key(KeyCode::Tab));
+        assert!(app.arg_dropdown_visible());
+        assert_eq!(app.arg_matches(), ["flow.yaml", "tache.yaml"]);
+        assert_eq!(app.input, "/workflow ", "aucun préfixe commun à écrire");
+
+        app.on_event(&key(KeyCode::Tab));
+        assert_eq!(app.input, "/workflow flow.yaml");
+        app.on_event(&key(KeyCode::Tab));
+        assert_eq!(app.input, "/workflow tache.yaml");
+        app.on_event(&key(KeyCode::Tab));
+        assert_eq!(app.input, "/workflow flow.yaml", "le cycle boucle");
+    }
+
+    #[test]
+    fn tab_writes_the_common_prefix_before_offering_the_list() {
+        let (mut app, dir) = app_with_recipes();
+        std::fs::write(dir.path().join("flotte.yaml"), "name: flotte\n").unwrap();
+        type_text(&mut app, "/workflow f");
+        app.on_event(&key(KeyCode::Tab));
+        assert_eq!(app.input, "/workflow flo");
+        assert_eq!(app.input_cursor, "/workflow flo".chars().count());
+        assert!(app.arg_dropdown_visible());
+    }
+
+    #[test]
+    fn esc_leaves_the_argument_list_without_touching_the_line() {
+        let (mut app, _dir) = app_with_recipes();
+        type_text(&mut app, "/workflow ");
+        app.on_event(&key(KeyCode::Tab));
+        assert!(app.arg_dropdown_visible());
+        assert_eq!(app.on_event(&key(KeyCode::Esc)), Action::None);
+        assert!(!app.arg_dropdown_visible());
+        assert_eq!(app.input, "/workflow ");
+    }
+
+    #[test]
+    fn typing_on_closes_the_argument_list() {
+        let (mut app, _dir) = app_with_recipes();
+        type_text(&mut app, "/workflow ");
+        app.on_event(&key(KeyCode::Tab));
+        type_text(&mut app, "t");
+        assert!(!app.arg_dropdown_visible());
+        app.on_event(&key(KeyCode::Tab));
+        assert_eq!(app.input, "/workflow tache.yaml");
+    }
+
+    #[test]
+    fn tab_is_inert_when_nothing_matches_the_argument() {
+        let (mut app, _dir) = app_with_recipes();
+        type_text(&mut app, "/workflow zz");
+        assert_eq!(app.on_event(&key(KeyCode::Tab)), Action::None);
+        assert_eq!(app.input, "/workflow zz");
+        assert!(!app.arg_dropdown_visible());
+        assert!(app.chat.is_empty(), "pas de bip d'état");
+    }
+
+    /// Les deux encadrés s'ancrent au même coin : la liste d'arguments prend
+    /// la place de la palette, clavier compris.
+    #[test]
+    fn the_argument_list_takes_the_palettes_place() {
+        let (mut app, _dir) = app_with_recipes();
+        type_text(&mut app, "/workflow ");
+        assert!(app.palette_visible(), "le nom filtre encore /workflow");
+        app.on_event(&key(KeyCode::Tab));
+        assert!(app.arg_dropdown_visible());
+        assert!(!app.palette_visible());
+        app.on_event(&key(KeyCode::Esc));
+        assert!(app.palette_visible(), "la palette revient derrière");
+    }
+
+    #[test]
+    fn tab_completes_a_keyword_argument_too() {
+        let (mut app, _dir) = app_with_recipes();
+        type_text(&mut app, "/cost jo");
+        app.on_event(&key(KeyCode::Tab));
+        assert_eq!(app.input, "/cost jour");
+    }
+
+    /// Le nom de commande reste à la palette : la complétion d'argument ne se
+    /// déclenche qu'après l'espace.
+    #[test]
+    fn tab_still_completes_the_command_name_when_no_argument_started() {
+        let (mut app, _dir) = app_with_recipes();
+        type_text(&mut app, "/workfl");
+        assert_eq!(app.on_event(&key(KeyCode::Tab)), Action::None);
+        assert_eq!(app.input, "/workflow");
+        assert!(!app.arg_dropdown_visible());
+    }
+
+    /// L'argument d'`/edit` est un chemin, mais un fragment `@` vivant garde
+    /// Tab : les deux listes ne peuvent pas se disputer le composer.
+    #[test]
+    fn a_live_mention_fragment_keeps_tab_for_the_file_dropdown() {
+        let (mut app, dir) = app_with_recipes();
+        app.on_mention_index_ready(crate::tui::mentions::MentionIndex::build(
+            dir.path().to_path_buf(),
+        ));
+        type_text(&mut app, "/edit @not");
+        assert!(app.mention_dropdown_visible());
+        app.on_event(&key(KeyCode::Tab));
+        assert_eq!(app.input, "/edit @notes.md");
+        assert!(!app.arg_dropdown_visible());
+    }
+
+    #[test]
+    fn the_argument_list_is_walked_by_the_arrows_as_well() {
+        let (mut app, _dir) = app_with_recipes();
+        type_text(&mut app, "/workflow ");
+        app.on_event(&key(KeyCode::Tab));
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.input, "/workflow flow.yaml");
+        app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.input, "/workflow tache.yaml");
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.input, "/workflow flow.yaml");
+    }
+
+    /// Précédence : ↑/↓ hors complétion restent l'historique de prompts.
+    #[test]
+    fn the_argument_list_never_steals_the_prompt_history_arrows() {
+        let mut app = App::new(None);
+        app.mouse_enabled = true;
+        app.push_history("un prompt");
+        app.on_event(&key(KeyCode::Up));
+        assert_eq!(app.input, "un prompt");
     }
 
     /// Précédence : le composer prend ←/→, jamais au détriment du lecteur.

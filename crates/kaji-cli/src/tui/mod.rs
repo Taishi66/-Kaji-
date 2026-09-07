@@ -1,4 +1,5 @@
 pub mod app;
+pub mod argcomplete;
 pub mod diff;
 pub mod editors;
 pub mod explorer;
@@ -265,7 +266,7 @@ fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
 fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledLine> {
     let mut lines = vec![vec![RoledSpan::title("navigation")]];
     if mouse_enabled {
-        let rows: [(&str, &str); 17] = [
+        let rows: [(&str, &str); 18] = [
             ("molette", "défile le chat (3 lignes/cran)"),
             (
                 "PageUp/PageDown",
@@ -276,6 +277,10 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             (
                 "←/→",
                 "déplace le caret dans le composer · Home/End (ou Ctrl+A) début/fin de ligne · Ctrl+W efface le mot",
+            ),
+            (
+                "Tab",
+                "complète le nom de commande, puis son argument (/workflow → les recettes du dossier) — Tab/↑↓ cyclent, esc referme",
             ),
             ("Ctrl+P", "recherche floue de fichiers (/files)"),
             ("Ctrl+E", "explorateur de fichiers (/explorer)"),
@@ -326,6 +331,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
         for text in [
             "PageUp/PageDown font défiler le chat · Home/End aussi quand le composer est vide",
             "←/→ déplace le caret dans le composer · Home/End (ou Ctrl+A) début/fin de ligne · Ctrl+W efface le mot",
+            "Tab complète le nom de commande, puis son argument (/workflow → les recettes du dossier) — Tab/↑↓ cyclent, esc referme",
             "Ctrl+↑/↓ saute au tour précédent/suivant",
             "Ctrl+P recherche floue de fichiers (/files)",
             "Ctrl+E explorateur de fichiers (/explorer)",
@@ -3025,7 +3031,7 @@ mod tests {
     fn the_forge_row_follows_the_explorer_row_in_the_navigation_table() {
         let lines = navigation_section(true, SpanRole::Text);
 
-        assert_eq!(lines.len(), 18, "un titre puis 17 lignes de navigation");
+        assert_eq!(lines.len(), 19, "un titre puis 18 lignes de navigation");
 
         let rows: Vec<String> = lines
             .iter()
