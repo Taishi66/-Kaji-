@@ -44,7 +44,7 @@ impl RecordSink {
                 error = %e,
                 kind,
                 session_id = %self.session_id,
-                "event log v2: écriture échouée — session marquée non rejouable"
+                "event log v2: write failed — session marked not replayable"
             );
             if let Err(e2) = self
                 .session_manager
@@ -54,7 +54,7 @@ impl RecordSink {
                 warn!(
                     error = %e2,
                     session_id = %self.session_id,
-                    "event log v2: mark_not_replayable a aussi échoué"
+                    "event log v2: mark_not_replayable also failed"
                 );
             }
         }

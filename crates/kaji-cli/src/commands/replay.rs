@@ -53,7 +53,7 @@ pub async fn handle_replay_subcommand(
     let source = session_manager
         .get_session(&session_id, false)
         .await
-        .with_context(|| format!("session « {session_id} » introuvable"))?;
+        .with_context(|| format!("session \"{session_id}\" not found"))?;
 
     let cursor = match EventCursor::load_until(&session_manager, &session_id, until).await {
         Ok(cursor) => cursor,
@@ -62,7 +62,7 @@ pub async fn handle_replay_subcommand(
                 return Err(error);
             };
             let (message, code) = unavailable_report(unavailable, retention_days());
-            eprintln!("kaji replay : {message}");
+            eprintln!("kaji replay: {message}");
             std::process::exit(code);
         }
     };
@@ -73,7 +73,7 @@ pub async fn handle_replay_subcommand(
         .iter()
         .any(|(_, planned)| matches!(planned, PlannedTurn::Replay(_) | PlannedTurn::Workflow(_)))
     {
-        println!("kaji replay : aucun tour à rejouer dans « {session_id} »");
+        println!("kaji replay: no turn to replay in \"{session_id}\"");
         return Ok(());
     }
 
@@ -118,7 +118,7 @@ pub async fn handle_replay_subcommand(
         .await?;
 
     println!(
-        "kaji replay : rejeu de « {session_id} » → session dérivée « {} »",
+        "kaji replay: replaying \"{session_id}\" → derived session \"{}\"",
         derived.id
     );
 
@@ -145,17 +145,17 @@ pub async fn handle_replay_subcommand(
                     Ok(replay) => {
                         replayed += 1;
                         for line in replay.lines {
-                            println!("[tour {turn_seq}] {line}");
+                            println!("[turn {turn_seq}] {line}");
                         }
                         match replay.verdict {
                             TurnVerdict::Faithful => {}
                             TurnVerdict::Tolerated(divergence) => {
                                 tolerated += 1;
-                                println!("[tour {turn_seq}] divergence tolérée — {divergence}");
+                                println!("[turn {turn_seq}] tolerated divergence — {divergence}");
                             }
                             TurnVerdict::Fatal(divergence) => {
                                 eprintln!(
-                                    "kaji replay : divergence au tour {turn_seq} — {divergence}"
+                                    "kaji replay: divergence at turn {turn_seq} — {divergence}"
                                 );
                                 std::process::exit(EXIT_DIVERGENCE);
                             }
@@ -167,7 +167,7 @@ pub async fn handle_replay_subcommand(
                     // disant autrement.
                     Err(error) => {
                         eprintln!(
-                            "kaji replay : rejeu du workflow impossible au tour {turn_seq} — {error}"
+                            "kaji replay: cannot replay the workflow at turn {turn_seq} — {error}"
                         );
                         std::process::exit(EXIT_DIVERGENCE);
                     }
@@ -176,7 +176,7 @@ pub async fn handle_replay_subcommand(
             }
             PlannedTurn::Skipped => {
                 skipped += 1;
-                println!("[tour {turn_seq}] aucun message user enregistré — tour sauté");
+                println!("[turn {turn_seq}] no recorded user message — turn skipped");
                 continue;
             }
         };
@@ -186,7 +186,7 @@ pub async fn handle_replay_subcommand(
         for divergence in divergences.drain() {
             tolerated += 1;
             println!(
-                "[tour {turn_seq}] divergence tolérée (appel {}) — requête enregistrée {}, rejouée {}",
+                "[turn {turn_seq}] tolerated divergence (call {}) — recorded request {}, replayed {}",
                 divergence.call_idx, divergence.recorded_hash, divergence.replayed_hash
             );
         }
@@ -199,14 +199,14 @@ pub async fn handle_replay_subcommand(
                 }
             }
             Err(error) => {
-                eprintln!("kaji replay : divergence au tour {turn_seq} — {error}");
+                eprintln!("kaji replay: divergence at turn {turn_seq} — {error}");
                 std::process::exit(EXIT_DIVERGENCE);
             }
         }
     }
 
     println!(
-        "kaji replay : {}",
+        "kaji replay: {}",
         replay_summary(replayed, skipped, tolerated)
     );
     Ok(())
@@ -217,15 +217,15 @@ pub async fn handle_replay_subcommand(
 /// pas de quoi rejouer — sinon « N tour(s) rejoué(s) » ne serait vérifiable
 /// contre rien.
 fn replay_summary(replayed: usize, skipped: usize, divergences: usize) -> String {
-    let mut summary = format!("{replayed} tour(s) rejoué(s)");
+    let mut summary = format!("{replayed} turn(s) replayed");
     if divergences == 0 {
-        summary.push_str(" sans divergence");
+        summary.push_str(" with no divergence");
     } else {
-        summary.push_str(&format!(", {divergences} divergence(s) tolérée(s)"));
+        summary.push_str(&format!(", {divergences} tolerated divergence(s)"));
     }
     if skipped > 0 {
         summary.push_str(&format!(
-            ", {skipped} tour(s) sauté(s) faute de message user enregistré"
+            ", {skipped} turn(s) skipped for lack of a recorded user message"
         ));
     }
     summary
@@ -247,7 +247,7 @@ async fn replay_workflow(
     let started = cursor
         .workflow
         .clone()
-        .ok_or_else(|| anyhow!("workflow \"{workflow}\" sans payload workflow_started"))?;
+        .ok_or_else(|| anyhow!("workflow \"{workflow}\" without a workflow_started payload"))?;
 
     let recorder =
         WorkflowRecorder::open(session_manager, derived_session_id.to_string(), workflow).await?;
@@ -263,13 +263,13 @@ async fn replay_workflow(
 
     let state = executor.run().await?;
     let mut lines = vec![format!(
-        "workflow \"{workflow}\" rejoué — {}",
+        "workflow \"{workflow}\" replayed — {}",
         state.outcome().label()
     )];
     let verdict = workflow_verdict(cursor.workflow_final.as_ref(), &state, workflow, lenient);
     if matches!(verdict, TurnVerdict::Faithful) {
         lines.push(format!(
-            "workflow \"{workflow}\" identique à l'enregistrement"
+            "workflow \"{workflow}\" identical to the recording"
         ));
     }
     Ok(WorkflowReplay { lines, verdict })
@@ -316,15 +316,15 @@ fn workflow_verdict(
 ) -> TurnVerdict {
     let divergence = match recorded {
         None => format!(
-            "journal incomplet — workflow \"{workflow}\" clos sans état final \
-             enregistré : le rejeu n'a rien contre quoi se mesurer"
+            "incomplete journal — workflow \"{workflow}\" closed without a recorded \
+             final state: replay has nothing to measure itself against"
         ),
         Some(recorded) if recorded.topology() == replayed.topology() => {
             return TurnVerdict::Faithful
         }
         Some(recorded) => format!(
-            "état du workflow \"{workflow}\" différent de l'enregistrement — \
-             enregistré {:?}, rejoué {:?}",
+            "workflow \"{workflow}\" state differs from the recording — \
+             recorded {:?}, replayed {:?}",
             recorded.topology(),
             replayed.topology()
         ),
@@ -385,7 +385,7 @@ fn render_message(turn_seq: i64, message: &Message) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "[tour {turn_seq}] {role}: {}",
+        "[turn {turn_seq}] {role}: {}",
         truncate_chars(&content, TRANSCRIPT_MAX_CHARS)
     )
 }
@@ -407,13 +407,13 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 pub fn unavailable_report(error: &ReplayUnavailable, retention_days: i64) -> (String, i32) {
     match error {
         ReplayUnavailable::PreV2 => (
-            "session enregistrée avant le replay v2 — son journal ne porte pas de quoi rejouer"
+            "session recorded before replay v2 — its journal carries nothing to replay"
                 .to_string(),
             EXIT_UNAVAILABLE,
         ),
         ReplayUnavailable::Purged => (
             format!(
-                "payloads purgés (rétention {retention_days} j) — la session n'est plus rejouable"
+                "payloads purged (retention {retention_days} d) — the session is no longer replayable"
             ),
             EXIT_UNAVAILABLE,
         ),
@@ -421,11 +421,11 @@ pub fn unavailable_report(error: &ReplayUnavailable, retention_days: i64) -> (St
             let last_complete = turn - 1;
             let message = if last_complete >= 1 {
                 format!(
-                    "log tronqué au tour {turn} — replay jusqu'au tour {last_complete} possible \
-                     avec --until {last_complete}"
+                    "log truncated at turn {turn} — replay up to turn {last_complete} is possible \
+                     with --until {last_complete}"
                 )
             } else {
-                format!("log tronqué au tour {turn} — aucun tour complet à rejouer")
+                format!("log truncated at turn {turn} — no complete turn to replay")
             };
             (message, EXIT_TRUNCATED)
         }
@@ -440,7 +440,7 @@ mod tests {
     fn pre_v2_maps_to_unavailable() {
         let (message, code) = unavailable_report(&ReplayUnavailable::PreV2, 30);
         assert_eq!(code, EXIT_UNAVAILABLE);
-        assert!(message.contains("avant le replay v2"), "{message}");
+        assert!(message.contains("before replay v2"), "{message}");
     }
 
     #[test]
@@ -448,16 +448,16 @@ mod tests {
         let (message, code) = unavailable_report(&ReplayUnavailable::Purged, 45);
         assert_eq!(code, EXIT_UNAVAILABLE);
         assert!(message.contains("45"), "{message}");
-        assert!(message.contains("purgés"), "{message}");
+        assert!(message.contains("purged"), "{message}");
     }
 
     #[test]
     fn truncated_at_names_the_turn_and_the_until_workaround() {
         let (message, code) = unavailable_report(&ReplayUnavailable::TruncatedAt(5), 30);
         assert_eq!(code, EXIT_TRUNCATED);
-        assert!(message.contains("tour 5"), "{message}");
+        assert!(message.contains("turn 5"), "{message}");
         assert!(message.contains("--until"), "{message}");
-        assert!(message.contains("tour 4"), "{message}: N-1 doit être nommé");
+        assert!(message.contains("turn 4"), "{message}: N-1 doit être nommé");
     }
 
     #[test]
@@ -473,7 +473,7 @@ mod tests {
         assert!(summary.contains('3'), "{summary}");
         assert!(summary.contains('2'), "{summary}");
         assert!(
-            !summary.contains("sans divergence"),
+            !summary.contains("no divergence"),
             "{summary}: le rejeu a divergé"
         );
     }
@@ -481,14 +481,14 @@ mod tests {
     #[test]
     fn the_summary_claims_fidelity_only_without_divergence() {
         let summary = replay_summary(3, 0, 0);
-        assert!(summary.contains("sans divergence"), "{summary}");
+        assert!(summary.contains("no divergence"), "{summary}");
     }
 
     #[test]
     fn the_summary_distinguishes_replayed_from_skipped_turns() {
         let summary = replay_summary(2, 1, 0);
-        assert!(summary.contains("2 tour(s) rejoué(s)"), "{summary}");
-        assert!(summary.contains("1 tour(s) sauté(s)"), "{summary}");
+        assert!(summary.contains("2 turn(s) replayed"), "{summary}");
+        assert!(summary.contains("1 turn(s) skipped"), "{summary}");
     }
 
     fn state_with_stage(stage_state: serde_json::Value) -> kaji::workflow::WorkflowState {
@@ -534,7 +534,7 @@ mod tests {
             panic!("sans état final enregistré, le rejeu n'a rien vérifié");
         };
         assert!(
-            message.contains("journal incomplet") && message.contains("livraison"),
+            message.contains("incomplete journal") && message.contains("livraison"),
             "{message}"
         );
 

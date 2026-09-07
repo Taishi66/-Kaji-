@@ -177,7 +177,7 @@ impl ReplaySource {
                 warn!(
                     turn_seq = self.turn(),
                     %request_id,
-                    "replay: aucune approbation enregistrée pour cet appel — refusé"
+                    "replay: no approval recorded for this call — denied"
                 );
                 Permission::DenyOnce
             }

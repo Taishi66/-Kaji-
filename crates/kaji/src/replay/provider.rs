@@ -175,7 +175,7 @@ impl Provider for ReplayProvider {
             .get(&(turn_seq, call_idx))
             .ok_or_else(|| {
                 ProviderError::ExecutionError(format!(
-                    "replay: journal tronqué ou divergent — aucune réponse enregistrée au tour {turn_seq}, appel {call_idx}"
+                    "replay: journal truncated or divergent — no recorded response at turn {turn_seq}, call {call_idx}"
                 ))
             })?;
 
@@ -183,8 +183,8 @@ impl Provider for ReplayProvider {
         if replayed_hash != exchange.request_hash {
             if !self.lenient {
                 return Err(ProviderError::ExecutionError(format!(
-                    "replay: requête divergente au tour {turn_seq}, appel {call_idx} — \
-                     enregistré {}, rejoué {replayed_hash}",
+                    "replay: divergent request at turn {turn_seq}, call {call_idx} — \
+                     recorded {}, replayed {replayed_hash}",
                     exchange.request_hash
                 )));
             }
@@ -193,7 +193,7 @@ impl Provider for ReplayProvider {
                 call_idx,
                 recorded = %exchange.request_hash,
                 replayed = %replayed_hash,
-                "replay lenient: requête divergente, réponse enregistrée servie quand même"
+                "replay lenient: divergent request, recorded response served anyway"
             );
             self.divergences.record(Divergence {
                 turn_seq,

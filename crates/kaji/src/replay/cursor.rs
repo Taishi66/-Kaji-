@@ -32,13 +32,13 @@ use crate::workflow::state::WorkflowState;
 /// une erreur brute.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ReplayUnavailable {
-    #[error("session enregistrée avant le replay v2 (aucun log_meta dans le journal)")]
+    #[error("session recorded before replay v2 (no log_meta in the journal)")]
     PreV2,
 
-    #[error("journal purgé ou incomplet : la session est marquée non rejouable")]
+    #[error("journal purged or incomplete: the session is marked not replayable")]
     Purged,
 
-    #[error("journal tronqué au tour {0} : le tour n'a pas de turn_end")]
+    #[error("journal truncated at turn {0}: the turn has no turn_end")]
     TruncatedAt(i64),
 }
 

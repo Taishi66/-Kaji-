@@ -409,7 +409,7 @@ fn replayed_tool_result(
         ));
     };
     let Some(recorded) = cursor.tool_results.get(tool_call_id) else {
-        warn!(%tool_call_id, "replay: tool_result absent du journal");
+        warn!(%tool_call_id, "replay: tool_result missing from the journal");
         return Err(ErrorData::new(
             ErrorCode::INTERNAL_ERROR,
             format!("replay: tool_result absent pour {tool_call_id} — log tronqué ou divergent"),
