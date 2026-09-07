@@ -147,7 +147,7 @@ pub async fn compact_messages(
         Some(source) => {
             let summary = source.condense_summary().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "replay: aucun résumé de compaction enregistré au tour {}",
+                    "replay: no compaction summary recorded at turn {}",
                     source.turn()
                 )
             })?;
@@ -677,7 +677,7 @@ pub async fn summarize_tool_call(
     if let Some(source) = replay {
         return source.tool_pair_summary(tool_id).ok_or_else(|| {
             anyhow::anyhow!(
-                "replay: aucun résumé de paire d'outils enregistré au tour {} pour {tool_id}",
+                "replay: no tool-pair summary recorded at turn {} for {tool_id}",
                 source.turn()
             )
         });

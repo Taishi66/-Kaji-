@@ -3361,7 +3361,7 @@ impl SessionStorage {
         // the tree, so this is defense-in-depth, not the first line.
         let Some((boundary_id, boundary_timestamp)) = boundary else {
             bail!(
-                "troncature conversation impossible : la frontière ({message_id}) n'existe pas dans messages"
+                "conversation truncation impossible: the boundary ({message_id}) does not exist in messages"
             );
         };
 

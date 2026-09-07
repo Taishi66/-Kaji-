@@ -114,7 +114,7 @@ pub fn user_entries() -> Vec<HookEntry> {
         Ok(entries) => entries,
         Err(crate::config::ConfigError::NotFound(_)) => Vec::new(),
         Err(error) => {
-            warn!(%error, "config `hooks` illisible — hooks utilisateur ignorés");
+            warn!(%error, "unreadable `hooks` config — user hooks ignored");
             Vec::new()
         }
     }
@@ -139,7 +139,7 @@ pub fn project_entries(project_root: Option<&Path>) -> Vec<HookEntry> {
     if !project_hooks_enabled() {
         debug!(
             path = %path.display(),
-            "hooks projet présents mais désactivés — poser KAJI_PROJECT_HOOKS=1 pour les activer"
+            "project hooks present but disabled — set KAJI_PROJECT_HOOKS=1 to enable them"
         );
         return Vec::new();
     }
@@ -157,7 +157,7 @@ fn parse_document(path: &Path) -> Vec<HookEntry> {
     match serde_yaml::from_str::<HooksDocument>(&text) {
         Ok(document) => document.entries(),
         Err(error) => {
-            warn!(path = %path.display(), %error, "hooks projet mal formés — ignorés");
+            warn!(path = %path.display(), %error, "malformed project hooks — ignored");
             Vec::new()
         }
     }

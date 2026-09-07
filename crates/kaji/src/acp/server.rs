@@ -2599,7 +2599,7 @@ print(\"hello, world\")
     fn test_credits_exhausted_error_block_reports_the_kind_as_reason() {
         let content = MessageContent::Error(crate::conversation::message::ErrorContent {
             kind: crate::conversation::message::MessageErrorKind::CreditsExhausted,
-            message: "crédits épuisés — out of credits".to_string(),
+            message: "credits exhausted — out of credits".to_string(),
         });
 
         let error = prompt_error_from_message_content(&content).expect("expected prompt error");

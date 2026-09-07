@@ -66,7 +66,7 @@ async fn old_tool_result_is_condensed_by_the_third_turn() -> Result<()> {
 
     let last = api.last_call();
     assert!(
-        last.input_contains("lignes omises"),
+        last.input_contains("lines omitted"),
         "old tool-result from turn one should be condensed by turn three's inference"
     );
     assert!(
@@ -121,7 +121,7 @@ async fn previous_turn_tool_result_stays_raw_despite_real_turn_context_events() 
 
     let last = api.last_call();
     assert!(
-        last.input_contains("lignes omises"),
+        last.input_contains("lines omitted"),
         "turn one's tool-result is outside the freshness window and should be condensed"
     );
     assert_eq!(

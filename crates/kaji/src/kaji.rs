@@ -32,7 +32,7 @@ use crate::session::redact_text;
 const BLOCK_HEADER: &str = "## KAJI memory — recalled across sessions";
 
 /// Rendered prefix for the curated facts, spliced above the raw journal.
-const FACTS_HEADER: &str = "## Faits mémorisés";
+const FACTS_HEADER: &str = "## Memorized facts";
 
 /// Curated facts injected per turn. Kept small on purpose: a fact is dense and
 /// competes with the raw journal for the same prompt budget.
@@ -332,7 +332,7 @@ fn import_legacy_txt_dir(dir: &Path, store: &FactStore, redact: bool) {
                 fact_type: FactType::Reference,
                 slug: slugify(category),
                 description: format!(
-                    "Importé de l'extension memory héritée ({} entrées)",
+                    "Imported from the legacy memory extension ({} entries)",
                     records.len()
                 ),
                 date: today.clone(),
@@ -559,7 +559,7 @@ pub async fn run_curation(
             created = outcome.created,
             updated = outcome.updated,
             failed = outcome.failed,
-            "記 {} faits mémorisés",
+            "記 {} facts memorized",
             outcome.created + outcome.updated
         ),
         Ok(_) => {}

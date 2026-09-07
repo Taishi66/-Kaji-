@@ -892,7 +892,7 @@ fn checkpoints_disabled_line(has_store: bool, reason: Option<&str>) -> Option<St
     if has_store {
         return None;
     }
-    reason.map(|reason| format!("checkpoints désactivés — {reason}"))
+    reason.map(|reason| format!("checkpoints disabled — {reason}"))
 }
 
 /// L'usage ledger par session d'agent, tel que le mission-control le lit. La
@@ -2192,12 +2192,12 @@ mod tests {
     #[test]
     fn checkpoints_disabled_line_speaks_only_for_an_explicit_refusal() {
         assert_eq!(
-            checkpoints_disabled_line(false, Some("hors dépôt git")).as_deref(),
-            Some("checkpoints désactivés — hors dépôt git")
+            checkpoints_disabled_line(false, Some("outside a git work tree")).as_deref(),
+            Some("checkpoints disabled — outside a git work tree")
         );
         assert_eq!(checkpoints_disabled_line(false, None), None);
         assert_eq!(
-            checkpoints_disabled_line(true, Some("répertoire home")),
+            checkpoints_disabled_line(true, Some("home directory")),
             None
         );
     }

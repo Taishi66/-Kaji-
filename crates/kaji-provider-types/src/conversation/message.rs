@@ -256,20 +256,20 @@ impl MessageErrorKind {
     /// (TUI, CLI, ACP) names the failure the same way.
     pub fn label(self) -> &'static str {
         match self {
-            MessageErrorKind::ContextLengthExceeded => "contexte dépassé",
-            MessageErrorKind::CreditsExhausted => "crédits épuisés",
-            MessageErrorKind::Authentication => "authentification",
-            MessageErrorKind::RateLimited => "limite de débit",
-            MessageErrorKind::ServerError => "erreur serveur",
-            MessageErrorKind::Network => "réseau",
-            MessageErrorKind::InvalidRequest => "requête invalide",
-            MessageErrorKind::Refusal => "refus",
-            MessageErrorKind::NotConfigured => "non configuré",
-            MessageErrorKind::Execution => "exécution",
+            MessageErrorKind::ContextLengthExceeded => "context exceeded",
+            MessageErrorKind::CreditsExhausted => "credits exhausted",
+            MessageErrorKind::Authentication => "authentication",
+            MessageErrorKind::RateLimited => "rate limited",
+            MessageErrorKind::ServerError => "server error",
+            MessageErrorKind::Network => "network",
+            MessageErrorKind::InvalidRequest => "invalid request",
+            MessageErrorKind::Refusal => "refusal",
+            MessageErrorKind::NotConfigured => "not configured",
+            MessageErrorKind::Execution => "execution",
             MessageErrorKind::Usage => "usage",
-            MessageErrorKind::NotImplemented => "non implémenté",
-            MessageErrorKind::EndpointNotFound => "endpoint introuvable",
-            MessageErrorKind::Other => "erreur",
+            MessageErrorKind::NotImplemented => "not implemented",
+            MessageErrorKind::EndpointNotFound => "endpoint not found",
+            MessageErrorKind::Other => "error",
         }
     }
 }
@@ -2195,7 +2195,7 @@ mod error_kind_tests {
             .expect("error block")
             .message
             .clone();
-        assert!(text.starts_with("limite de débit — "), "{text}");
+        assert!(text.starts_with("rate limited — "), "{text}");
         assert!(text.contains("slow down"), "{text}");
     }
 }

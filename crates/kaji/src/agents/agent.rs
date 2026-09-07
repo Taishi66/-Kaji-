@@ -920,7 +920,7 @@ impl Agent {
                         debug!(
                             %event,
                             bytes = output.len(),
-                            "rejeu : sortie de hook journalisée — déjà portée par le message rejoué",
+                            "replay: hook output journaled — already carried by the replayed message",
                         );
                     }
                 }
@@ -949,7 +949,7 @@ impl Agent {
             Err(error) => {
                 warn!(
                     ?error,
-                    session_id, "hooks: session illisible — hooks de prompt non émis"
+                    session_id, "hooks: unreadable session — prompt hooks not emitted"
                 );
                 return user_message;
             }
@@ -6953,7 +6953,10 @@ echo start >> "$PLUGIN_ROOT/hook.log"
             "un dossier hors dépôt git ne doit jamais être snapshotté ({})",
             project_dir.path().display()
         );
-        assert_eq!(agent.checkpoint_disabled_reason(), Some("hors dépôt git"));
+        assert_eq!(
+            agent.checkpoint_disabled_reason(),
+            Some("outside a git work tree")
+        );
         Ok(())
     }
 

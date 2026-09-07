@@ -570,7 +570,7 @@ pub(crate) async fn stream_response_from_provider(
             bytes_before = stats.bytes_before,
             bytes_after = stats.bytes_after,
             per_tool = ?stats.per_tool,
-            "condense: historique compressé"
+            "condense: history compressed"
         );
         crate::context_mgmt::condense::record_totals(&stats);
     }

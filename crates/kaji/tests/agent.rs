@@ -4130,7 +4130,7 @@ mod tests {
                 "old tool-result should still be present (condensed) in the outbound history",
             );
             assert!(
-                condensed_text.contains("lignes omises"),
+                condensed_text.contains("lines omitted"),
                 "old tool-result from turn one should be condensed by turn three's inference: {condensed_text:?}"
             );
             assert!(

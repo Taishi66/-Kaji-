@@ -6943,7 +6943,7 @@ mod tests {
 
         let line = app.chat.last().expect("error line");
         assert_eq!(line.sender, Sender::System);
-        assert!(line.text.contains("limite de débit"), "{}", line.text);
+        assert!(line.text.contains("rate limited"), "{}", line.text);
         assert!(line.text.starts_with('✗'), "{}", line.text);
         assert!(line.rendered.is_some(), "error lines carry their own style");
     }

@@ -8,15 +8,15 @@ use std::sync::LazyLock;
 
 pub const DEFAULT_KEEP_RAW_TURNS: usize = 2;
 pub const DEFAULT_MAX_LINES: usize = 40;
-const OMISSION_SUFFIX: &str = "résultat complet conservé en session";
+const OMISSION_SUFFIX: &str = "full result kept in session";
 
-/// French singular/plural agreement for the omission count: "1 ligne omise"
-/// vs "N lignes omises".
+/// Singular/plural agreement for the omission count: "1 line omitted"
+/// vs "N lines omitted".
 fn omission_phrase(omitted: usize) -> String {
     if omitted == 1 {
-        format!("1 ligne omise — {OMISSION_SUFFIX}")
+        format!("1 line omitted — {OMISSION_SUFFIX}")
     } else {
-        format!("{omitted} lignes omises — {OMISSION_SUFFIX}")
+        format!("{omitted} lines omitted — {OMISSION_SUFFIX}")
     }
 }
 
@@ -382,7 +382,7 @@ mod tests {
         ];
         let (out, stats) = condense_history(&msgs, 2, &CondenseBudget::default());
         let old = tool_text(&out[1]);
-        assert!(old.contains("lignes omises"));
+        assert!(old.contains("lines omitted"));
         assert!(old.contains("line_1\n") && old.contains("line_200"));
         assert!(!old.contains("line_100\n")); // milieu omis
         assert_eq!(tool_text(&out[3]), numbered(200)); // dans la fenêtre → brut
@@ -408,7 +408,7 @@ mod tests {
         let (out, _) = condense_history(&msgs, 2, &CondenseBudget::default());
         // Real boundaries from the end: q3, q2 → cutoff at q2's index (3) →
         // the toolresp at index 1 lies before it and is condensed.
-        assert!(tool_text(&out[1]).contains("lignes omises"));
+        assert!(tool_text(&out[1]).contains("lines omitted"));
     }
 
     #[test]
@@ -566,7 +566,7 @@ mod tests {
             };
             let result = response.tool_result.as_ref().unwrap();
             let text = result.content[0].as_text().unwrap().text.as_str();
-            assert!(text.contains("lignes omises"));
+            assert!(text.contains("lines omitted"));
         }
     }
 
@@ -574,15 +574,15 @@ mod tests {
     fn omission_phrase_uses_singular_for_one_line() {
         assert_eq!(
             omission_phrase(1),
-            "1 ligne omise — résultat complet conservé en session"
+            "1 line omitted — full result kept in session"
         );
         assert_eq!(
             omission_phrase(2),
-            "2 lignes omises — résultat complet conservé en session"
+            "2 lines omitted — full result kept in session"
         );
         assert_eq!(
             omission_phrase(166),
-            "166 lignes omises — résultat complet conservé en session"
+            "166 lines omitted — full result kept in session"
         );
     }
 
@@ -632,7 +632,7 @@ mod tests {
             .as_text()
             .unwrap()
             .text
-            .contains("lignes omises"));
+            .contains("lines omitted"));
         assert!(matches!(result.content[1], ContentBlock::Image(_)));
         assert_eq!(stats.results_touched, 1);
     }
@@ -675,7 +675,7 @@ mod tests {
         ];
         let (out, stats) = condense_history(&msgs, 2, &CondenseBudget::default());
         assert_eq!(tool_text(&out[2]), numbered(200)); // load_skill jamais condensé
-        assert!(tool_text(&out[4]).contains("lignes omises")); // shell condensé normalement
+        assert!(tool_text(&out[4]).contains("lines omitted")); // shell condensé normalement
         assert_eq!(stats.results_touched, 1);
     }
 
@@ -695,7 +695,7 @@ mod tests {
         let (out, _) = condense_history(&msgs, 2, &CondenseBudget::default());
         // Override replaces the default entirely: load_skill loses its
         // exemption, shell gains one.
-        assert!(tool_text(&out[2]).contains("lignes omises"));
+        assert!(tool_text(&out[2]).contains("lines omitted"));
         assert_eq!(tool_text(&out[4]), numbered(200));
     }
 
@@ -711,7 +711,7 @@ mod tests {
             user_text("q3"),
         ];
         let (out, stats) = condense_history(&msgs, 2, &CondenseBudget::default());
-        assert!(tool_text(&out[2]).contains("lignes omises"));
+        assert!(tool_text(&out[2]).contains("lines omitted"));
         assert_eq!(stats.results_touched, 1);
     }
 
@@ -750,7 +750,7 @@ mod tests {
             ];
             let (out, stats) = condense_history(&msgs, 2, &CondenseBudget::default());
             assert!(
-                tool_text(&out[2]).contains("lignes omises"),
+                tool_text(&out[2]).contains("lines omitted"),
                 "{unrelated} must NOT be exempt (bare substring match, not a delimited suffix)"
             );
             assert_eq!(stats.results_touched, 1);

@@ -422,14 +422,14 @@ impl HookManager {
     ) {
         for entry in entries {
             let Some(event) = HookEvent::from_name(&entry.event) else {
-                warn!(event = %entry.event, source, "hook ignoré : événement inconnu");
+                warn!(event = %entry.event, source, "hook ignored: unknown event");
                 continue;
             };
             let matcher = match entry.matcher.as_deref().filter(|s| !s.is_empty()) {
                 Some(pattern) => match Regex::new(pattern) {
                     Ok(regex) => Some(regex),
                     Err(error) => {
-                        warn!(pattern, source, %error, "hook ignoré : matcher invalide");
+                        warn!(pattern, source, %error, "hook ignored: invalid matcher");
                         continue;
                     }
                 },
@@ -777,14 +777,14 @@ impl HookManager {
                         command = %command,
                         code = ?output.status.code(),
                         stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                        "hook en échec — sortie ignorée",
+                        "hook failed — output ignored",
                     ),
                     Err(error) => warn!(
                         plugin = %rule.plugin_name,
                         event = %event,
                         command = %command,
                         %error,
-                        "hook en échec — sortie ignorée",
+                        "hook failed — output ignored",
                     ),
                 }
             }
@@ -843,7 +843,7 @@ fn announce_project_hook(rule: &LoadedRule, session_id: &str) {
     info!(
         path = %rule.plugin_root.join(config::PROJECT_HOOKS_FILE).display(),
         session.id = %session_id,
-        "hooks du dépôt actifs : premier hook projet exécuté de cette session",
+        "repository hooks active: first project hook run of this session",
     );
 }
 

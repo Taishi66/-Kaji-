@@ -665,7 +665,7 @@ pub(crate) fn write_remembered_note(
 pub(crate) fn remember_reply(fact: Option<&Fact>) -> Message {
     match fact {
         Some(fact) => {
-            user_only_assistant_text(format!("記 1 fait mémorisé : {}", fact.file_name()))
+            user_only_assistant_text(format!("記 1 fact memorized: {}", fact.file_name()))
         }
         None => user_only_assistant_text(
             "Usage: /remember [decision:|gotcha:|preference:|reference:] <note>",

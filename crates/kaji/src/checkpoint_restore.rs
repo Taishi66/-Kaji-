@@ -229,7 +229,7 @@ pub async fn restore_checkpoint(
             .await;
         }
         run_store_blocking(|| store.restore(target))
-            .context("restore de l'arbre a échoué — conversation intacte")?;
+            .context("restoring the work tree failed — conversation untouched")?;
         return Ok(RestoreOutcome {
             restored_turn: turn_seq,
             files_only: true,
@@ -237,11 +237,11 @@ pub async fn restore_checkpoint(
     }
 
     let Some(message_id) = boundary_message_id else {
-        bail!("restore couplé impossible : frontière conversation absente pour ce checkpoint");
+        bail!("coupled restore impossible: conversation boundary missing for this checkpoint");
     };
     if !sm.message_exists(session_id, &message_id).await? {
         bail!(
-            "restore couplé impossible : la frontière conversation ({message_id}) a été supprimée depuis (compaction ?) — arbre et conversation laissés intacts"
+            "coupled restore impossible: the conversation boundary ({message_id}) has been deleted since (compaction?) — work tree and conversation left untouched"
         );
     }
 
@@ -259,12 +259,12 @@ pub async fn restore_checkpoint(
     }
 
     run_store_blocking(|| store.restore(target))
-        .context("restore de l'arbre a échoué — conversation intacte")?;
+        .context("restoring the work tree failed — conversation untouched")?;
 
     sm.truncate_conversation_from_message(session_id, &message_id)
         .await
         .context(
-            "restore: troncature conversation échouée APRÈS restore de l'arbre — état incohérent, re-tenter /restore",
+            "restore: conversation truncation failed AFTER the work tree restore — inconsistent state, run /restore again",
         )?;
 
     Ok(RestoreOutcome {
@@ -511,7 +511,7 @@ mod tests {
         let error =
             result.expect_err("a vanished boundary message must refuse the coupled restore");
         assert!(
-            error.to_string().contains("supprimée"),
+            error.to_string().contains("has been deleted"),
             "error must name the deleted boundary: {error}"
         );
         assert_eq!(
@@ -797,7 +797,7 @@ mod tests {
 
         let error = result.expect_err("a null boundary_message_id must refuse the coupled restore");
         assert!(
-            error.to_string().contains("frontière conversation absente"),
+            error.to_string().contains("conversation boundary missing"),
             "error must explain why: {error}"
         );
         assert_eq!(

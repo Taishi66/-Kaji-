@@ -404,7 +404,8 @@ fn replayed_tool_result(
     let Some(tool_call_id) = tool_call_id else {
         return Err(ErrorData::new(
             ErrorCode::INVALID_REQUEST,
-            "replay: appel d'outil sans tool_call_id — rien à adresser dans le journal".to_string(),
+            "replay: tool call without a tool_call_id — nothing to address in the journal"
+                .to_string(),
             None,
         ));
     };
@@ -412,7 +413,7 @@ fn replayed_tool_result(
         warn!(%tool_call_id, "replay: tool_result missing from the journal");
         return Err(ErrorData::new(
             ErrorCode::INTERNAL_ERROR,
-            format!("replay: tool_result absent pour {tool_call_id} — log tronqué ou divergent"),
+            format!("replay: tool_result missing for {tool_call_id} — log truncated or divergent"),
             None,
         ));
     };
@@ -437,7 +438,7 @@ async fn append_tool_result(capture: &ToolCapture, response: &ToolResponse) {
         Err(error) => warn!(
             %error,
             tool_call_id = %capture.tool_call_id,
-            "event log v2: tool_result non sérialisable"
+            "event log v2: tool_result not serializable"
         ),
     }
 }

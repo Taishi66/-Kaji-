@@ -90,12 +90,12 @@ pub enum CheckpointIneligible {
 
 impl CheckpointIneligible {
     /// Short user-facing wording, surfaced by the TUI next to
-    /// `checkpoints désactivés`.
+    /// `checkpoints disabled`.
     pub fn reason(self) -> &'static str {
         match self {
-            Self::NotAGitWorkTree => "hors dépôt git",
-            Self::HomeDirectory => "répertoire home",
-            Self::FilesystemRoot => "racine du système",
+            Self::NotAGitWorkTree => "outside a git work tree",
+            Self::HomeDirectory => "home directory",
+            Self::FilesystemRoot => "filesystem root",
         }
     }
 }
@@ -202,7 +202,7 @@ fn acquire_store_lock(git_dir: &Path) -> Result<File> {
                 attempts += 1;
                 if attempts >= 4 {
                     bail!(
-                        "store occupé par une autre instance kaji (snapshot ou restore en cours) — opération refusée, réessaye dans un instant"
+                        "store busy with another kaji instance (snapshot or restore in progress) — operation refused, try again in a moment"
                     )
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
@@ -343,7 +343,7 @@ fn refuse_on_destructive_type_conflict(
             };
             if !created.contains(relative) {
                 bail!(
-                    "restore refusé : le chemin {} est un dossier avec des fichiers non-suivis que le restore écraserait",
+                    "restore refused: path {} is a directory holding untracked files that the restore would overwrite",
                     path.display()
                 );
             }
@@ -360,7 +360,7 @@ fn refuse_on_destructive_type_conflict(
         }
         if !created.contains(*dir) {
             bail!(
-                "restore refusé : le chemin {} est un fichier non-suivi que le restore écraserait pour créer un dossier",
+                "restore refused: path {} is an untracked file that the restore would overwrite to create a directory",
                 dir.display()
             );
         }
@@ -967,7 +967,7 @@ mod tests {
         let error =
             result.expect_err("un store tenu par un autre processus doit refuser le snapshot");
         assert!(
-            error.to_string().contains("occupé"),
+            error.to_string().contains("busy"),
             "le refus doit être explicite, pas un deadlock git: {error}"
         );
     }
@@ -1003,7 +1003,7 @@ mod tests {
         let error =
             result.expect_err("un store tenu par un autre processus doit refuser le restore");
         assert!(
-            error.to_string().contains("occupé"),
+            error.to_string().contains("busy"),
             "le refus doit nommer la cause: {error}"
         );
         assert_eq!(

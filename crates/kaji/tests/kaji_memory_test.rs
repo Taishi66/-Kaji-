@@ -466,7 +466,7 @@ fn splice_prepends_curated_facts_then_raw_journal() {
         let (out, _) = splice_memory_block("SYSTEM", session, "cache ttl", &working_dir);
         assert!(out.starts_with("SYSTEM"), "system prompt stays first");
 
-        let facts_at = out.find("## Faits mémorisés").expect("curated block");
+        let facts_at = out.find("## Memorized facts").expect("curated block");
         let journal_at = out.find("KAJI memory").expect("raw journal block");
         assert!(
             facts_at < journal_at,
@@ -628,7 +628,7 @@ fn unopenable_index_drops_facts_and_keeps_the_journal() {
 
         let (out, _) = splice_memory_block("SYSTEM", session, "cache ttl", &working_dir);
         assert!(
-            !out.contains("## Faits mémorisés"),
+            !out.contains("## Memorized facts"),
             "no curated block on a dead index:\n{out}"
         );
         assert!(out.contains("vidé à la main"), "raw journal still spliced");
@@ -669,7 +669,7 @@ fn legacy_txt_categories_become_reference_facts_and_are_renamed() {
         );
         assert!(fact.body.contains("data2"), "{}", fact.body);
         assert!(
-            fact.description.contains("2 entrées"),
+            fact.description.contains("2 entries"),
             "{}",
             fact.description
         );
@@ -856,7 +856,7 @@ impl Provider for RecordingProvider {
 
 /// Marker of the memory splice inside a system prompt: everything from there on
 /// is what the two agent loops must agree on.
-const FACTS_HEADER: &str = "## Faits mémorisés";
+const FACTS_HEADER: &str = "## Memorized facts";
 
 /// Run one full turn on the loop `state_machine` selects and return the memory
 /// block the provider saw, with the generated session id normalized so two runs

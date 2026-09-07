@@ -144,9 +144,9 @@ fn truncate_content_for_budget(skill_name: &str, content: &str, limit: usize) ->
     let truncated: String = content.chars().take(keep_chars).collect();
 
     format!(
-        "{truncated}\n\n[… contenu tronqué : skill de ~{estimated_tokens} tokens, limite {limit}. \
-         Fichiers précis chargeables via load_skill(name: \"{skill_name}/<chemin>\") — voir la \
-         liste ci-dessus. Limite ajustable via KAJI_SKILL_MAX_TOKENS.]"
+        "{truncated}\n\n[… content truncated: skill of ~{estimated_tokens} tokens, limit {limit}. \
+         Load specific files with load_skill(name: \"{skill_name}/<path>\") — see the list \
+         above. Adjust the limit with KAJI_SKILL_MAX_TOKENS.]"
     )
 }
 
@@ -677,7 +677,7 @@ mod tests {
         let rendered = loaded_skill_context_with_args(&skill, None).unwrap();
 
         assert!(rendered.contains("## Content\n\nShort instructions that stay well under budget."));
-        assert!(!rendered.contains("contenu tronqué"));
+        assert!(!rendered.contains("content truncated"));
     }
 
     #[test]
@@ -690,11 +690,12 @@ mod tests {
 
         assert!(rendered.contains("# Loaded Skill: test-skill (skill)"));
         assert!(rendered.contains("Test skill"));
-        assert!(rendered.contains("[… contenu tronqué : skill de ~"));
-        assert!(rendered.contains("tokens, limite 10."));
-        assert!(rendered
-            .contains("Fichiers précis chargeables via load_skill(name: \"test-skill/<chemin>\")"));
-        assert!(rendered.contains("Limite ajustable via KAJI_SKILL_MAX_TOKENS."));
+        assert!(rendered.contains("[… content truncated: skill of ~"));
+        assert!(rendered.contains("tokens, limit 10."));
+        assert!(
+            rendered.contains("Load specific files with load_skill(name: \"test-skill/<path>\")")
+        );
+        assert!(rendered.contains("Adjust the limit with KAJI_SKILL_MAX_TOKENS."));
         assert!(rendered.len() < huge_content.len());
     }
 
