@@ -472,7 +472,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let (title, title_style) = if app.steer_len() > 0 {
         (
             format!(
-                "{title} {} {} en file — Ctrl+S ",
+                "{title} {} {} queued — Ctrl+S ",
                 theme::STEER_GLYPH,
                 app.steer_len()
             ),
@@ -1067,7 +1067,7 @@ fn draw_explorer(frame: &mut Frame, app: &App, explorer: &ExplorerState, area: R
 
 /// Ce que le volet promet en pied, et qui n'a de sens qu'avec une lame à
 /// désigner — les touches sont celles de la task 4.
-const FORGE_FOOTER: &str = " ⏎ fiche · x coupe · f plein ";
+const FORGE_FOOTER: &str = " ⏎ sheet · x cut · f full ";
 
 /// Deux lignes par lame : la première la nomme, la seconde dit ce qu'elle
 /// brûle. Le main agent ouvre la liste sur le même patron, sans être
@@ -3084,7 +3084,7 @@ mod tests {
             "✓",
             "done",
             "7s",
-            "x coupe · f plein",
+            "x cut · f full",
         ] {
             assert!(
                 content.contains(expected),

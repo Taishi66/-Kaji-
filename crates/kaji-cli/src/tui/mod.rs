@@ -532,7 +532,7 @@ fn checkpoints_lines(events: &[SessionEvent]) -> Vec<RoledLine> {
                 .unwrap_or_else(|| "(no preview)".to_string());
             let preview = crate::tui::ui::sanitize_for_display(&preview);
             Some(vec![RoledSpan::system(format!(
-                "tour {} · {id}{marker} · {preview}",
+                "turn {} · {id}{marker} · {preview}",
                 checkpoint.turn_seq
             ))])
         })
@@ -1316,7 +1316,7 @@ async fn event_loop(
                             Ok(events) => {
                                 let lines = checkpoints_lines(&events);
                                 if lines.is_empty() {
-                                    app.push_system("aucun checkpoint");
+                                    app.push_system("no checkpoint");
                                 } else {
                                     app.push_system_lines(lines);
                                 }
@@ -1377,11 +1377,11 @@ async fn event_loop(
                                                 ));
                                             }
                                         }
-                                        Err(e) => app.push_system(&format!("erreur restore : {e}")),
+                                        Err(e) => app.push_system(&format!("restore error: {e}")),
                                     }
                                 }
                                 None => app.push_system(
-                                    "restore indisponible : aucun store de checkpoints pour cette session",
+                                    "restore unavailable: no checkpoint store for this session",
                                 ),
                             }
                         }
@@ -1445,7 +1445,7 @@ async fn event_loop(
                                     ));
                                 }
                             }
-                            None => app.push_mission_notice("aucun workflow en vol"),
+                            None => app.push_mission_notice("no workflow in flight"),
                         }
                     }
                     Action::WorkflowPause { stage, paused } => {
@@ -1456,7 +1456,7 @@ async fn event_loop(
                                 } else {
                                     live.handle.resume(&stage)
                                 };
-                                let verb = if paused { "suspendu" } else { "resumed" };
+                                let verb = if paused { "paused" } else { "resumed" };
                                 // Relu tout de suite : la table de l'exécuteur
                                 // décide du sens du prochain `p`, et le tick
                                 // qui la rafraîchit est une seconde plus loin.
@@ -1470,7 +1470,7 @@ async fn event_loop(
                                     ));
                                 }
                             }
-                            None => app.push_mission_notice("aucun workflow en vol"),
+                            None => app.push_mission_notice("no workflow in flight"),
                         }
                     }
                     Action::WorkflowCancelAgent { stage, agent } => {
@@ -1482,7 +1482,7 @@ async fn event_loop(
                                     app.push_mission_notice(&format!("{stage}.{agent} — already finished"));
                                 }
                             }
-                            None => app.push_mission_notice("aucun workflow en vol"),
+                            None => app.push_mission_notice("no workflow in flight"),
                         }
                     }
                     Action::EditFile { path, line } => edit_request = Some((path, line)),
@@ -1915,13 +1915,13 @@ fn seed_chat(app: &mut App, conversation: &kaji::conversation::Conversation) {
 }
 
 /// Skips the first-run welcome banner once a `--resume`d conversation has
-/// replayed messages into the chat — repeating "bienvenue dans kaji" after
+/// replayed messages into the chat — repeating "welcome to kaji" after
 /// pages of history reads as a bug, not onboarding.
 fn maybe_push_welcome(app: &mut App) {
     if app.chat.is_empty() {
         push_welcome(app, false);
         app.push_system(&format!(
-            "{} · Shift+Tab pour changer",
+            "{} · Shift+Tab to change",
             app::mode_line(app.kaji_mode)
         ));
         app.unfold_seal();
@@ -2969,7 +2969,7 @@ mod tests {
 
         let text = welcome_text(&app);
         assert!(text.contains(&app::mode_line(KajiMode::Approve)), "{text}");
-        assert!(text.contains("Shift+Tab pour changer"), "{text}");
+        assert!(text.contains("Shift+Tab to change"), "{text}");
     }
 
     /// La légende de la barre reste en texte pur : un `/help` qui rendrait des
