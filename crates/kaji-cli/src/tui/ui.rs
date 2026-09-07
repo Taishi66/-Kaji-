@@ -1378,7 +1378,7 @@ fn draw_workflow_gate_modal(frame: &mut Frame, stage: &str) {
             sanitize_for_display(&stage.replace('\n', "␊"))
         ));
     let paragraph = Paragraph::new(
-        "y = approve   n = deny (the stage and its descendants are cancelled)   Esc = leave the gate open",
+        "y = approve   n = deny (the stage and everything downstream is cancelled)   Esc = leave the gate open",
     )
     .block(block)
     .wrap(Wrap { trim: true });
@@ -1395,7 +1395,7 @@ fn draw_cancel_confirm_modal(frame: &mut Frame, label: &str) {
         .border_style(theme::title())
         .title(format!(" {} cancel? (y/n) ", theme::SUBAGENT_GLYPH));
     let paragraph = Paragraph::new(format!(
-        "{}\n\ny = couper   toute autre touche = laisser tourner",
+        "{}\n\ny = cut   any other key = let it run",
         sanitize_for_display(&label.replace('\n', "␊"))
     ))
     .block(block)

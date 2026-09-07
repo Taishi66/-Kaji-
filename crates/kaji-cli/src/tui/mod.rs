@@ -1000,15 +1000,18 @@ async fn shutdown_workflow(live: LiveWorkflow) {
     }
 }
 
+/// Le verdict d'un run tel que la bannière du mission-control le lit :
+/// `WorkflowOutcome::label` s'arrête à `failed`, on veut aussi la cause.
 fn workflow_outcome_line(state: &kaji::workflow::WorkflowState) -> String {
     let outcome = match state.outcome() {
+        kaji::workflow::WorkflowOutcome::Done => "done".to_string(),
+        kaji::workflow::WorkflowOutcome::Cancelled => "cancelled".to_string(),
         kaji::workflow::WorkflowOutcome::Failed(kaji::workflow::FailureCause::Budget(limit)) => {
             format!("failed: budget {} exceeded", limit.field())
         }
         kaji::workflow::WorkflowOutcome::Failed(kaji::workflow::FailureCause::Error(error)) => {
             format!("failed: {error}")
         }
-        outcome => outcome.label().to_string(),
     };
     format!("workflow \"{}\" {outcome}", state.workflow)
 }
@@ -2022,6 +2025,57 @@ mod tests {
     use super::*;
     use app::Sender;
     use kaji::conversation::Conversation;
+
+    /// Le mission-control est anglophone de bout en bout : ce que la bannière
+    /// affiche vient d'ici, et les verdicts qu'elle relaie viennent du cœur —
+    /// un label retombé en français y ressortirait tel quel.
+    #[test]
+    fn every_workflow_answer_the_banner_shows_is_english() {
+        use kaji::workflow::{
+            FailureCause, GateVerdict, PauseVerdict, StageState, StageStatus, WorkflowState,
+        };
+
+        let failed = WorkflowState {
+            workflow: "demo".to_string(),
+            stages: vec![StageStatus {
+                name: "build".to_string(),
+                state: StageState::Failed(FailureCause::Error("provider timeout".to_string())),
+                gate: kaji_core::workflow::Gate::Auto,
+                agents: vec![],
+            }],
+        };
+        assert_eq!(
+            workflow_outcome_line(&failed),
+            "workflow \"demo\" failed: provider timeout"
+        );
+
+        let done = WorkflowState {
+            workflow: "demo".to_string(),
+            stages: vec![StageStatus {
+                name: "build".to_string(),
+                state: StageState::Done,
+                gate: kaji_core::workflow::Gate::Auto,
+                agents: vec![],
+            }],
+        };
+        assert_eq!(workflow_outcome_line(&done), "workflow \"demo\" done");
+
+        assert_eq!(GateVerdict::NoGate.label(), "stage has no gate");
+        assert_eq!(PauseVerdict::Settled.label(), "stage already finished");
+        for reason in [
+            GateVerdict::Applied.label(),
+            GateVerdict::UnknownStage.label(),
+            GateVerdict::Settled.label(),
+            PauseVerdict::Applied.label(),
+            PauseVerdict::UnknownStage.label(),
+            PauseVerdict::AlreadyLaunched.label(),
+        ] {
+            assert!(
+                !reason.chars().any(|c| "àâçéèêëîïôùûü".contains(c)),
+                "un verdict user-facing ne parle plus français : {reason:?}"
+            );
+        }
+    }
 
     #[test]
     fn resolve_spec_errors_when_explicit_flag_path_is_missing() {

@@ -9434,11 +9434,11 @@ mod tests {
         app.open_mission_control();
         app.mission.card = 2;
 
-        app.push_mission_notice("forge.c — annulation demandée");
+        app.push_mission_notice("forge.c — cancellation requested");
         app.clamp_mission_selection();
         assert_eq!(
             app.mission.notice.as_deref(),
-            Some("forge.c — annulation demandée"),
+            Some("forge.c — cancellation requested"),
             "un reclamp qui ne bouge rien ne prend pas la notice"
         );
 
@@ -9884,7 +9884,7 @@ mod tests {
             KeyCode::Char('h'),
             KeyCode::Char('l'),
         ] {
-            app.push_mission_notice("stage « deploie » suspendu");
+            app.push_mission_notice("stage \"deploie\" paused");
             app.on_event(&key(navigation));
             assert!(
                 app.mission.notice.is_none(),
@@ -9892,7 +9892,7 @@ mod tests {
             );
         }
 
-        app.push_mission_notice("stage « deploie » suspendu");
+        app.push_mission_notice("stage \"deploie\" paused");
         app.close_mission_control();
         assert!(app.mission.notice.is_none());
     }
@@ -9913,7 +9913,7 @@ mod tests {
 
         app.pending_workflow_gate = None;
         app.open_mission_control();
-        app.push_mission_notice("gate « de\nploie » laissée ouverte");
+        app.push_mission_notice("gate \"de\nploie\" left open");
 
         assert!(
             full_screen(&app).contains("de␊ploie"),
