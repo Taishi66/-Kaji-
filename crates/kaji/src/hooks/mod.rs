@@ -1076,9 +1076,14 @@ async fn hook_path() -> Option<String> {
 async fn resolve_hook_path() -> Option<String> {
     #[cfg(not(windows))]
     {
-        tokio::task::spawn_blocking(|| {
-            crate::agents::platform_extensions::developer::shell::resolve_login_shell_path()
-                .map(|login| merge_paths(&login, &std::env::var("PATH").unwrap_or_default()))
+        let environment =
+            crate::agents::platform_extensions::developer::shell::filtered_shell_environment()
+                .await;
+        tokio::task::spawn_blocking(move || {
+            crate::agents::platform_extensions::developer::shell::resolve_login_shell_path(
+                &environment,
+            )
+            .map(|login| merge_paths(&login, &std::env::var("PATH").unwrap_or_default()))
         })
         .await
         .ok()

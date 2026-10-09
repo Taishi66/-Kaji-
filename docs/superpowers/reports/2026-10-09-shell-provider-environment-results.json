@@ -1,0 +1,71 @@
+{
+  "results": [
+    {
+      "engine": "legacy",
+      "provider_auth_preserved": true,
+      "shell_and_descendant_filtered": true,
+      "dev_environment_preserved": true
+    },
+    {
+      "engine": "state",
+      "provider_auth_preserved": true,
+      "shell_and_descendant_filtered": true,
+      "dev_environment_preserved": true
+    }
+  ],
+  "requests": [
+    {
+      "auth_verified": true,
+      "main": true,
+      "tool_result": false,
+      "shell_output_verified": false,
+      "tool_content": ""
+    },
+    {
+      "auth_verified": true,
+      "main": true,
+      "tool_result": true,
+      "shell_output_verified": true,
+      "tool_content": "shell:unset:unset:unset:unset:preserved-development-value\nchild:unset:unset"
+    },
+    {
+      "auth_verified": true,
+      "main": true,
+      "tool_result": false,
+      "shell_output_verified": false,
+      "tool_content": ""
+    },
+    {
+      "auth_verified": true,
+      "main": true,
+      "tool_result": true,
+      "shell_output_verified": true,
+      "tool_content": "shell:unset:unset:unset:unset:preserved-development-value\nchild:unset:unset"
+    }
+  ],
+  "date": "2026-10-09",
+  "binary_sha256": "fcf9a017a810a10be0238ce51450adb990c5e3c7f9ae4870c98f866e0e410314",
+  "shell_unit_tests": {
+    "passed": 28,
+    "failed": 0
+  },
+  "hooks_unit_tests": {
+    "passed": 10,
+    "failed": 0
+  },
+  "provider_init_unit_tests": {
+    "passed": 8,
+    "failed": 0
+  },
+  "isolated_integration_tests": {
+    "passed": 1,
+    "failed": 0,
+    "ignored_helper": 1,
+    "helper_executed_in_controlled_child": true
+  },
+  "core_and_cli_all_targets_strict_clippy": true,
+  "lean_cli_build_passed": true,
+  "cli_library_suite_repeated": false,
+  "source": "isolated localhost provider and real terminal, both engines; full working tree before subsequent UI edits; no external model",
+  "self_test_recipe_retired_model_retried": false
+}

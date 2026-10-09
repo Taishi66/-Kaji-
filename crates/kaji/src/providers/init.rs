@@ -235,11 +235,31 @@ pub async fn providers() -> Vec<(ProviderMetadata, ProviderType)> {
         .all_metadata_with_types()
 }
 
+pub(crate) async fn secret_environment_keys() -> Vec<String> {
+    get_registry()
+        .await
+        .read()
+        .unwrap()
+        .secret_environment_keys()
+}
+
+fn replace_custom_providers(
+    registry: &mut ProviderRegistry,
+    load: impl FnOnce(&mut ProviderRegistry) -> Result<()>,
+) -> Result<()> {
+    let mut replacement = registry.clone();
+    replacement.remove_custom_providers();
+    load(&mut replacement)?;
+    *registry = replacement;
+    Ok(())
+}
+
 pub async fn refresh_custom_providers() -> Result<()> {
     let registry = get_registry().await;
-    registry.write().unwrap().remove_custom_providers();
-
-    if let Err(e) = load_custom_providers_into_registry(&mut registry.write().unwrap()) {
+    if let Err(e) = replace_custom_providers(
+        &mut registry.write().unwrap(),
+        load_custom_providers_into_registry,
+    ) {
         tracing::warn!("Failed to refresh custom providers: {}", e);
         return Err(e);
     }

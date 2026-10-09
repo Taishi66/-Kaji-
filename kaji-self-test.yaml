@@ -246,6 +246,11 @@ prompt: |
   Test comprehensive shell workflow: command chaining (mkdir test && cd test && echo "test" > file.txt),
   error handling (false || echo "handled"), and environment variables (export VAR=test && echo $VAR).
   Verify both success and failure paths work correctly.
+  From a kaji source checkout, run `cargo test -p kaji --test shell_environment_security
+  --no-default-features --locked --offline` to verify fake provider credentials and
+  startup injection variables are not inherited by the shell or descendants,
+  including refreshed custom providers. Never print or change real credentials.
+  This checks environment inheritance only; shell profiles/files remain accessible.
 
   ### Code Analysis Testing
   1. Create sample code files in Python, JavaScript, and Go

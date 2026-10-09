@@ -161,7 +161,8 @@ Evidence and limitations:
 
 The maintainer explicitly requested maximum security robustness and an honest
 comparison with other harnesses. Permissions alone are not OS isolation. The
-current native shell path executes a host shell and inherits its environment;
+current native shell path executes a host shell. Declared provider credential
+environment inheritance is filtered in the new shared shell path;
 `configure_subprocess` manages process groups, not filesystem/network confinement.
 
 - [ ] Define and enforce a sandbox boundary for shell commands and their child
@@ -169,6 +170,12 @@ current native shell path executes a host shell and inherits its environment;
   attempts. Keep an explicit, reviewable path for authorised exceptions.
 - [ ] Keep provider credentials outside untrusted subprocesses; audit logs,
   exports, memory recall and MCP boundaries using fake-secret fixtures.
+  Limited shell inheritance filtering is implemented: current builtin/custom
+  provider secret-key names plus BASH_ENV/ENV are removed from native children,
+  Flatpak host/launcher and login-PATH probes; custom refresh is transactional.
+  This leaves profiles, files/keychain, undeclared keys and MCP/hooks outside its
+  boundary. The broader milestone remains open. Evidence:
+  [shell environment validation](docs/superpowers/reports/2026-10-09-shell-provider-environment-validation.md).
 - [ ] Verify denied requests stay denied in both engines, including delegation,
   retries and chained/substituted shell commands. Five existing security tests
   pass; this does not constitute a complete audit.

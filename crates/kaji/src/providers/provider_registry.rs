@@ -96,7 +96,7 @@ impl ProviderEntry {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ProviderRegistry {
     pub(crate) entries: HashMap<String, ProviderEntry>,
     tls_config: Option<TlsConfig>,
@@ -354,6 +354,15 @@ impl ProviderRegistry {
         self.entries
             .values()
             .map(|e| (e.metadata.clone(), e.provider_type))
+            .collect()
+    }
+
+    pub(crate) fn secret_environment_keys(&self) -> Vec<String> {
+        self.entries
+            .values()
+            .flat_map(|entry| entry.metadata.config_keys.iter())
+            .filter(|key| key.secret)
+            .map(|key| key.name.clone())
             .collect()
     }
 

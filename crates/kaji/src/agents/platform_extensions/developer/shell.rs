@@ -212,22 +212,15 @@ pub struct ShellOutput {
 /// a minimal PATH like `/usr/bin:/bin`. This function spawns a login shell to
 /// source the user's profile and recover the full PATH.
 #[cfg(not(windows))]
-pub(crate) fn resolve_login_shell_path() -> Option<String> {
+pub(crate) fn resolve_login_shell_path(filtered_environment: &[String]) -> Option<String> {
     use process_wrap::std::{CommandWrap, ProcessSession};
 
     let shell = unix_shell();
-    let login_args = unix_login_shell_command_args(&shell);
-
-    // Build the command, varying only the flatpak vs direct invocation.
-    let mut cmd = if is_flatpak() {
-        let mut c = flatpak_spawn_process();
-        c.arg(&shell).args(login_args);
-        CommandWrap::from(c)
-    } else {
-        let mut c = std::process::Command::new(&shell);
-        c.args(login_args);
-        CommandWrap::from(c)
-    };
+    let mut cmd = CommandWrap::from(login_shell_probe(
+        &shell,
+        filtered_environment,
+        is_flatpak(),
+    ));
 
     cmd.command_mut()
         .stdin(Stdio::null())
@@ -273,6 +266,25 @@ pub(crate) fn resolve_login_shell_path() -> Option<String> {
     }
 }
 
+#[cfg(not(windows))]
+fn login_shell_probe(shell: &str, keys: &[String], flatpak: bool) -> std::process::Command {
+    let mut command = if flatpak {
+        let mut command = flatpak_spawn_process();
+        for key in keys {
+            command.arg(format!("--unset-env={key}"));
+        }
+        command.arg(shell);
+        command
+    } else {
+        std::process::Command::new(shell)
+    };
+    command.args(unix_login_shell_command_args(shell));
+    for key in keys {
+        command.env_remove(key);
+    }
+    command
+}
+
 /// Resolves the user's login-shell PATH in the background.
 ///
 /// Spawned at `ShellTool` construction so the ~hundreds-of-ms cost of sourcing
@@ -288,7 +300,13 @@ struct LoginPath {
 #[cfg(not(windows))]
 impl LoginPath {
     fn spawn() -> Self {
-        let handle = tokio::task::spawn_blocking(resolve_login_shell_path);
+        let handle = tokio::spawn(async {
+            let environment = filtered_shell_environment().await;
+            tokio::task::spawn_blocking(move || resolve_login_shell_path(&environment))
+                .await
+                .ok()
+                .flatten()
+        });
         Self {
             cell: OnceCell::new(),
             handle: Mutex::new(Some(handle)),
@@ -570,7 +588,14 @@ async fn run_command(
 ) -> Result<ExecutionOutput, String> {
     let timeout_secs = Some(resolve_shell_timeout(timeout_secs));
 
-    let mut command = build_shell_command(command_line, working_dir, login_path, session_id);
+    let environment = filtered_shell_environment().await;
+    let mut command = build_shell_command(
+        command_line,
+        working_dir,
+        login_path,
+        session_id,
+        &environment,
+    );
 
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -686,6 +711,7 @@ fn build_shell_command(
     working_dir: Option<&std::path::Path>,
     login_path: Option<&str>,
     session_id: Option<&str>,
+    filtered_environment: &[String],
 ) -> tokio::process::Command {
     #[cfg(windows)]
     let mut command = {
@@ -726,6 +752,7 @@ fn build_shell_command(
                 command.arg(format!("--env=PATH={}", path));
             }
             apply_flatpak_session_environment(&mut command, session_id);
+            apply_flatpak_filtered_environment(&mut command, filtered_environment);
             command
                 .arg(&shell)
                 .args(unix_shell_command_args(command_line));
@@ -746,8 +773,35 @@ fn build_shell_command(
 
     #[cfg(windows)]
     apply_session_environment(&mut command, session_id);
+    remove_shell_environment(&mut command, filtered_environment);
     configure_subprocess(&mut command);
     command
+}
+
+fn shell_environment_keys(provider_keys: &[String]) -> Vec<String> {
+    let mut keys = std::collections::BTreeSet::from(["BASH_ENV".to_owned(), "ENV".to_owned()]);
+    for key in provider_keys {
+        keys.insert(key.clone());
+        keys.insert(key.to_uppercase());
+    }
+    keys.into_iter().collect()
+}
+
+pub(crate) async fn filtered_shell_environment() -> Vec<String> {
+    shell_environment_keys(&crate::providers::secret_environment_keys().await)
+}
+
+#[cfg(not(windows))]
+fn apply_flatpak_filtered_environment(command: &mut tokio::process::Command, keys: &[String]) {
+    for key in keys {
+        command.arg(format!("--unset-env={key}"));
+    }
+}
+
+fn remove_shell_environment(command: &mut tokio::process::Command, keys: &[String]) {
+    for key in keys {
+        command.env_remove(key);
+    }
 }
 
 fn apply_session_environment(command: &mut tokio::process::Command, session_id: Option<&str>) {
@@ -1043,6 +1097,110 @@ mod tests {
         let observed = std::fs::canonicalize(extract_text(&result)).unwrap();
         let expected = std::fs::canonicalize(dir.path()).unwrap();
         assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn provider_environment_keys_include_custom_keys_and_config_uppercase() {
+        use crate::providers::base::{ConfigKey, ProviderMetadata, ProviderType};
+        let metadata = ProviderMetadata::new(
+            "fixture",
+            "Fixture",
+            "",
+            "model",
+            vec![],
+            "",
+            vec![
+                ConfigKey::new("custom_key", true, true, None, true),
+                ConfigKey::new("BUILD_FLAG", false, false, None, false),
+            ],
+        );
+        let providers = [(metadata, ProviderType::Custom)];
+        let provider_keys = providers
+            .iter()
+            .flat_map(|(metadata, _)| &metadata.config_keys)
+            .filter(|key| key.secret)
+            .map(|key| key.name.clone())
+            .collect::<Vec<_>>();
+        let keys = shell_environment_keys(&provider_keys);
+        assert_eq!(keys, ["BASH_ENV", "CUSTOM_KEY", "ENV", "custom_key"]);
+        assert_eq!(shell_environment_keys(&[]), ["BASH_ENV", "ENV"]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn flatpak_and_login_probe_remove_host_and_launcher_environment() {
+        let keys = vec!["OPENAI_API_KEY".to_owned(), "BASH_ENV".to_owned()];
+        let mut launcher = flatpak_spawn_command();
+        apply_flatpak_filtered_environment(&mut launcher, &keys);
+        remove_shell_environment(&mut launcher, &keys);
+        assert_eq!(
+            launcher
+                .as_std()
+                .get_args()
+                .map(|s| s.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "--host",
+                "--watch-bus",
+                "--unset-env=OPENAI_API_KEY",
+                "--unset-env=BASH_ENV"
+            ]
+        );
+        for flatpak in [false, true] {
+            let probe = login_shell_probe("/bin/bash", &keys, flatpak);
+            for key in &keys {
+                assert!(probe
+                    .get_envs()
+                    .any(|(name, value)| name == key.as_str() && value.is_none()));
+            }
+            if flatpak {
+                let args = probe
+                    .get_args()
+                    .map(|arg| arg.to_str().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    &args[..5],
+                    [
+                        "--host",
+                        "--watch-bus",
+                        "--unset-env=OPENAI_API_KEY",
+                        "--unset-env=BASH_ENV",
+                        "/bin/bash"
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn secret_environment_removals_take_precedence_over_session_overrides() {
+        let keys = vec!["AGENT_SESSION_ID".to_owned(), "PATH".to_owned()];
+        let mut command = tokio::process::Command::new("ignored");
+        command.env("PATH", "override");
+        apply_session_environment(&mut command, Some("session"));
+        remove_shell_environment(&mut command, &keys);
+        for key in &keys {
+            assert!(command
+                .as_std()
+                .get_envs()
+                .any(|(name, value)| name == key.as_str() && value.is_none()));
+        }
+        #[cfg(not(windows))]
+        {
+            let mut host = flatpak_spawn_command();
+            host.arg("--env=PATH=override");
+            apply_flatpak_session_environment(&mut host, Some("session"));
+            apply_flatpak_filtered_environment(&mut host, &keys);
+            let args = host
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                &args[args.len() - 2..],
+                ["--unset-env=AGENT_SESSION_ID", "--unset-env=PATH"]
+            );
+        }
     }
 
     #[test]
