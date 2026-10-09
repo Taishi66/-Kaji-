@@ -121,3 +121,16 @@ v8 = { path = "vendor/v8" }
 # full debug info and stay fully debuggable; release builds are unaffected.
 [profile.dev.package."*"]
 debug = false
+
+# Rust 1.96 stripping can misalign proc-macro dylibs rejected by macOS 27.
+# Keep the SQLx macro loadable without retaining dependency DWARF.
+[profile.dev.package.sqlx-macros]
+strip = "none"
+
+[profile.lean]
+inherits = "release"
+lto = "thin"
+strip = "debuginfo"
+
+[profile.lean.build-override]
+strip = "none"

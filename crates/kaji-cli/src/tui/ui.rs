@@ -1,4 +1,5 @@
 use crate::tui::app::{self, App, ChatLine, Focus, Modal, RoledLine, Sender, ToolApprovalRequest};
+use crate::tui::chatcache::AgentRender;
 use crate::tui::explorer::ExplorerState;
 use crate::tui::forge::{ForgeStatus, ForgeTask};
 use crate::tui::viewer::{self, Viewer};
@@ -289,40 +290,76 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
     let chat_rect = chat_content_rect(inner);
 
     app.user_turn_rows.borrow_mut().clear();
-    let mut running_rows: u16 = 0;
+    let mut running_rows: usize = 0;
     let mut lines: Vec<Line> = Vec::new();
+    let mut cache = app.chat_cache.borrow_mut();
+    cache.prepare(chat_rect.width, theme::active_index(), app.chat.len());
     let streaming_idx = app.streaming_agent_line();
     let elapsed = app.turn_started.map(|t| t.elapsed()).unwrap_or_default();
     for (i, chat_line) in app.chat.iter().enumerate() {
         if chat_line.sender == Sender::User {
-            app.user_turn_rows.borrow_mut().push(running_rows);
+            app.user_turn_rows
+                .borrow_mut()
+                .push(scroll_offset_u16(running_rows));
         }
         let blade = (streaming_idx == Some(i)).then(|| theme::blade_frame(elapsed));
+        if chat_line.sender == Sender::Agent {
+            let mut rendered = match cache.get(i, &chat_line.text) {
+                Some(rendered) => rendered,
+                None => {
+                    let rendered = render_agent_block(&chat_line.text, chat_rect.width);
+                    cache.insert(i, &chat_line.text, &rendered);
+                    rendered
+                }
+            };
+            if let (Some(glyph), Some(last)) = (blade, rendered.lines.last_mut()) {
+                last.spans
+                    .push(Span::styled(glyph.to_string(), theme::accent()));
+                rendered.rows =
+                    rendered.rows - rendered.last_rows + line_wrapped_rows(last, chat_rect.width);
+            }
+            running_rows = running_rows.saturating_add(rendered.rows).saturating_add(1);
+            lines.extend(rendered.lines);
+            lines.push(Line::from(""));
+            continue;
+        }
         let start = lines.len();
         push_chat_line(&mut lines, chat_line, chat_rect.width, blade);
         lines.push(Line::from(""));
         for line in &lines[start..] {
-            running_rows =
-                running_rows.saturating_add(line_wrapped_rows(line, chat_rect.width) as u16);
+            running_rows = running_rows.saturating_add(line_wrapped_rows(line, chat_rect.width));
         }
     }
     if let Some(loader) = loader_line(app) {
+        running_rows = running_rows.saturating_add(line_wrapped_rows(&loader, chat_rect.width));
         lines.push(loader);
     }
 
-    let wrapped_rows: usize = lines
-        .iter()
-        .map(|line| line_wrapped_rows(line, chat_rect.width))
-        .sum();
-    let base_scroll = wrapped_rows.saturating_sub(chat_rect.height as usize);
+    let base_scroll = running_rows.saturating_sub(chat_rect.height as usize);
     app.chat_overflow.set(scroll_offset_u16(base_scroll));
-    let scroll = base_scroll.saturating_sub(app.scroll_offset as usize) as u16;
+    let scroll = scroll_offset_u16(base_scroll.saturating_sub(app.scroll_offset as usize));
 
     frame.render_widget(block, area);
     let paragraph = Paragraph::new(Text::from(lines))
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     frame.render_widget(paragraph, chat_rect);
+}
+
+fn render_agent_block(text: &str, width: u16) -> AgentRender {
+    let mut lines = Vec::new();
+    push_agent_lines(&mut lines, text, width, None);
+    let mut rows: usize = 0;
+    let mut last_rows = 0;
+    for line in &lines {
+        last_rows = line_wrapped_rows(line, width);
+        rows = rows.saturating_add(last_rows);
+    }
+    AgentRender {
+        lines,
+        rows,
+        last_rows,
+    }
 }
 
 /// `blade` is the ninja-cursor glyph (T4) to append to this chat line's last
@@ -348,7 +385,7 @@ fn push_chat_line(
     }
 }
 
-/// Loader zen — the chat's trailing `{ensō} 思考中 · {N}s` line while a turn
+/// The chat's trailing `{ensō} 思 thinking · {N}s` line while a turn
 /// is in flight with nothing readable yet (`App::show_loader`). `None` once
 /// the first visible chunk lands or the turn ends; no special redraw is
 /// needed for the animation since the 250ms tick already re-renders
@@ -359,7 +396,7 @@ fn loader_line(app: &App) -> Option<Line<'static>> {
     }
     let elapsed = app.turn_started.map(|t| t.elapsed()).unwrap_or_default();
     let content = format!(
-        "{} 思考中 · {}s",
+        "{} 思 thinking · {}s",
         theme::enso_frame(elapsed),
         elapsed.as_secs()
     );
@@ -493,7 +530,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         } else if let Some(suggestion) = app.suggestion.as_ref() {
             Paragraph::new(suggestion.clone()).style(theme::dim())
         } else {
-            Paragraph::new("type here…").style(theme::dim())
+            Paragraph::new("Describe a task… (/ for commands)").style(theme::dim())
         }
     } else {
         Paragraph::new(app.input.as_str()).style(theme::text())
@@ -507,6 +544,9 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.set_cursor_position((cursor_x, content.y));
 }
 
+const PALETTE_MAX_VISIBLE_COMMANDS: usize = 6;
+const PALETTE_MIN_INLINE_DESCRIPTION: usize = 24;
+
 /// Command palette (T5) — overlay anchored just above the input box, drawn
 /// after `draw_input` like the y/n modals: it reads `input_area` only to
 /// position itself and never touches the chat's own `chat_overflow`/
@@ -516,10 +556,14 @@ fn draw_palette(frame: &mut Frame, app: &App, input_area: Rect) {
         return;
     }
     let matches = app.palette_matches();
-    let name_w = matches.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    let name_w = matches
+        .iter()
+        .map(|c| gitstatus::display_width(c.name))
+        .max()
+        .unwrap_or(0);
     let inner_w = matches
         .iter()
-        .map(|c| name_w + 2 + c.desc.chars().count() + 4)
+        .map(|c| name_w + 2 + gitstatus::display_width(c.desc) + 2)
         .max()
         .unwrap_or(0) as u16;
     // Ceiling last: the 20-column floor must never win over the space
@@ -528,14 +572,21 @@ fn draw_palette(frame: &mut Frame, app: &App, input_area: Rect) {
     let width = (inner_w + 2)
         .max(20)
         .min(input_area.width.saturating_sub(2));
-    let height = (matches.len() as u16 + 2).min(input_area.y);
-    if width < 4 || height < 3 {
+    let content_width = usize::from(width.saturating_sub(2));
+    let inline = content_width >= name_w + 4 + PALETTE_MIN_INLINE_DESCRIPTION;
+    let description_below = !inline && input_area.y >= 4;
+    let rows_per_command = if description_below { 2 } else { 1 };
+    let slots = matches
+        .len()
+        .min(PALETTE_MAX_VISIBLE_COMMANDS)
+        .min(usize::from(input_area.y.saturating_sub(2)) / rows_per_command);
+    if width < 8 || slots == 0 {
         return;
     }
-    let rows = (height - 2) as usize;
+    let height = (slots * rows_per_command + 2) as u16;
     // Sliding window: keep the selection visible when the filtered list is
     // taller than the space available above the input.
-    let first = app.palette_selected.saturating_sub(rows.saturating_sub(1));
+    let first = app.palette_selected.saturating_sub(slots.saturating_sub(1));
     let area = Rect {
         x: input_area.x + 1,
         y: input_area.y - height,
@@ -543,31 +594,52 @@ fn draw_palette(frame: &mut Frame, app: &App, input_area: Rect) {
         height,
     };
     frame.render_widget(Clear, area);
+    let position = format!("{}/{}", app.palette_selected + 1, matches.len());
+    let footer = if width >= 48 {
+        format!(" ↑↓ select · Enter run · Esc close · {position} ")
+    } else if width >= 30 {
+        format!(" ↑↓ · Enter · Esc · {position} ")
+    } else if width >= 14 {
+        " ↑↓ ↵ Esc ".to_string()
+    } else {
+        " ↵ Esc ".to_string()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .title(" commands ")
-        .title_bottom(Line::from(" ↑↓ select · ⏎ confirm · esc ").style(theme::dim()));
-    let lines: Vec<Line> = matches
-        .iter()
-        .enumerate()
-        .skip(first)
-        .take(rows)
-        .map(|(i, cmd)| {
-            let selected = i == app.palette_selected;
-            let marker = if selected { "▸ " } else { "  " };
-            let name_style = if selected {
-                theme::accent()
-            } else {
-                Style::default()
-            };
-            Line::from(vec![
+        .title_bottom(Line::from(footer).style(theme::dim()));
+    let mut lines = Vec::with_capacity(slots * rows_per_command);
+    for (i, cmd) in matches.iter().enumerate().skip(first).take(slots) {
+        let selected = i == app.palette_selected;
+        let marker = if selected { "▸ " } else { "  " };
+        let name_style = if selected {
+            theme::accent()
+        } else {
+            theme::text()
+        };
+        if inline {
+            let description = gitstatus::truncate_cells(cmd.desc, content_width - name_w - 4);
+            lines.push(Line::from(vec![
                 Span::styled(marker, theme::accent()),
                 Span::styled(format!("{:<name_w$}", cmd.name), name_style),
-                Span::styled(format!("  {}", cmd.desc), theme::dim()),
-            ])
-        })
-        .collect();
+                Span::styled(format!("  {description}"), theme::dim()),
+            ]));
+        } else {
+            let name = gitstatus::truncate_cells(cmd.name, content_width - 2);
+            let description = gitstatus::truncate_cells(cmd.desc, content_width - 2);
+            lines.push(Line::from(vec![
+                Span::styled(marker, theme::accent()),
+                Span::styled(name, name_style),
+            ]));
+            if description_below {
+                lines.push(Line::from(Span::styled(
+                    format!("  {description}"),
+                    theme::dim(),
+                )));
+            }
+        }
+    }
     frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
 }
 
@@ -1216,13 +1288,23 @@ fn forge_description(description: &str, width: u16) -> String {
 }
 
 /// Read-only file pane (task 8). Lines are already sanitized and tab-expanded
-/// by `viewer::load`; long ones are clipped rather than wrapped, so line
-/// numbers keep matching the file's.
+/// by `viewer::load`. Code keeps its line numbers; extracted document prose
+/// uses a bounded layout cached for the current width.
 fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
     app.viewer_area.set(area);
     let visible = area.height.saturating_sub(2 + PANE_VERTICAL_MARGIN * 2) as usize;
-    let total = viewer.lines.len();
-    let first = viewer.scroll.min(total.saturating_sub(1));
+    viewer.prepare_layout(usize::from(area.width.saturating_sub(3 + 5)));
+    let layout = viewer.layout.borrow();
+    let source = layout
+        .as_ref()
+        .map_or(&viewer.lines, |layout| &layout.lines);
+    let total = source.len();
+    let last_page = if layout.is_some() {
+        total.saturating_sub(visible.max(1))
+    } else {
+        total.saturating_sub(1)
+    };
+    let first = viewer.scroll.min(last_page);
     let title = if viewer.binary {
         format!(
             " {} {} ",
@@ -1249,16 +1331,14 @@ fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
     // `Ctrl+O` is only worth naming while the chat is folded behind the pane —
     // it is what brings it back.
     let focused = app.focus == Focus::Viewer;
+    let edit = if viewer.editable() { " · e edit" } else { "" };
     let keys = if focused {
-        format!("j/k scroll · e edit · r reload · a attach @ · {exits} · Ctrl+O chat")
+        format!("j/k scroll{edit} · r reload · a attach @ · {exits} · Ctrl+O chat")
     } else {
-        format!("j/k scroll · e edit · r reload · a attach @ · {exits}")
+        format!("j/k scroll{edit} · r reload · a attach @ · {exits}")
     };
-    let footer = if viewer.truncated {
-        format!(
-            " … truncated ({} read) · {keys} ",
-            viewer::read_limit_label()
-        )
+    let footer = if viewer.truncated || layout.as_ref().is_some_and(|layout| layout.truncated) {
+        format!(" … {} · {keys} ", viewer::preview_limit_label())
     } else {
         format!(" {keys} ")
     };
@@ -1274,15 +1354,15 @@ fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
         .title_bottom(Line::from(footer).style(theme::dim()));
 
     let lines: Vec<Line> = if viewer.binary {
-        viewer
-            .lines
+        source
             .iter()
-            .map(|text| Line::from(Span::styled(text.clone(), theme::dim())))
+            .skip(first)
+            .take(visible)
+            .map(|text| Line::from(Span::styled(text.as_str(), theme::dim())))
             .collect()
     } else {
         let number_width = total.to_string().len();
-        viewer
-            .lines
+        source
             .iter()
             .enumerate()
             .skip(first)
@@ -1290,14 +1370,57 @@ fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
             .map(|(i, text)| {
                 Line::from(vec![
                     Span::styled(format!("{:>number_width$} ", i + 1), theme::dim()),
-                    Span::styled(text.clone(), theme::text()),
+                    Span::styled(text.as_str(), theme::text()),
                 ])
             })
             .collect()
     };
     let content = pane_content_rect(block.inner(area));
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(Text::from(lines)), content);
+    if let Some(image) = &viewer.image {
+        draw_image(frame.buffer_mut(), image, content);
+    } else {
+        frame.render_widget(Paragraph::new(Text::from(lines)), content);
+    }
+}
+
+fn draw_image(
+    buffer: &mut ratatui::buffer::Buffer,
+    image: &super::documents::ImagePreview,
+    area: Rect,
+) {
+    use ratatui::style::Color;
+    let (iw, ih) = image.pixels.dimensions();
+    if area.width == 0 || area.height == 0 || iw == 0 || ih == 0 {
+        return;
+    }
+    let scale = (f64::from(area.width) / f64::from(iw))
+        .min(f64::from(area.height) * 2.0 / f64::from(ih))
+        .min(1.0);
+    let width = (f64::from(iw) * scale).ceil() as u16;
+    let height = (f64::from(ih) * scale).ceil() as u16;
+    let left = area.x + area.width.saturating_sub(width) / 2;
+    let top = area.y + area.height.saturating_sub(height.div_ceil(2)) / 2;
+    for y in 0..height.div_ceil(2) {
+        for x in 0..width {
+            let sx = (u32::from(x) * iw / u32::from(width)).min(iw - 1);
+            let sy = (u32::from(y) * 2 * ih / u32::from(height)).min(ih - 1);
+            let bottom = ((u32::from(y) * 2 + 1) * ih / u32::from(height)).min(ih - 1);
+            let fg = image.pixels.get_pixel(sx, sy).0;
+            let bg = image.pixels.get_pixel(sx, bottom).0;
+            let blend = |p: [u8; 4]| {
+                Color::Rgb(
+                    (u16::from(p[0]) * u16::from(p[3]) / 255) as u8,
+                    (u16::from(p[1]) * u16::from(p[3]) / 255) as u8,
+                    (u16::from(p[2]) * u16::from(p[3]) / 255) as u8,
+                )
+            };
+            buffer[(left + x, top + y)]
+                .set_symbol("▀")
+                .set_fg(blend(fg))
+                .set_bg(blend(bg));
+        }
+    }
 }
 
 fn draw_spec(frame: &mut Frame, app: &App, area: Rect) {
@@ -1556,7 +1679,7 @@ fn draw_tool_approval_modal(
 ) {
     let area = match detail {
         Some(_) => centered_rect(80, 60, frame.area()),
-        None => centered_rect(60, 20, frame.area()),
+        None => centered_rect(80, 40, frame.area()),
     };
     let tool_name = sanitize_for_display(&approval.tool_name);
     let block = Block::default()
@@ -1638,6 +1761,65 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resizing_a_document_at_the_end_keeps_the_last_page_filled() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = App::new(None);
+        app.viewer = Some(Viewer {
+            path: "document.docx".to_owned(),
+            lines: vec!["une longue phrase lisible ".repeat(1000)],
+            scroll: 0,
+            truncated: false,
+            binary: false,
+            image: None,
+            layout: Default::default(),
+        });
+        app.focus = Focus::Viewer;
+        let mut narrow = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        narrow.draw(|frame| draw(frame, &app)).unwrap();
+        let viewport = app.viewer_area.get().height.saturating_sub(4) as usize;
+        app.viewer.as_mut().unwrap().scroll_to_end(viewport);
+        let mut wide = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        wide.draw(|frame| draw(frame, &app)).unwrap();
+        let area = app.viewer_area.get();
+        for y in area.y + 2..area.bottom() - 2 {
+            assert!((area.x + 3..area.right() - 1)
+                .any(|x| wide.backend().buffer()[(x, y)].symbol() != " "));
+        }
+    }
+
+    #[test]
+    fn image_preview_uses_two_pixel_colours_per_cell_and_stays_in_its_viewport() {
+        let image = super::super::documents::ImagePreview {
+            pixels: image::RgbaImage::from_fn(2, 2, |x, y| {
+                if y == 0 {
+                    image::Rgba([255, (x * 100) as u8, 0, 255])
+                } else {
+                    image::Rgba([0, 0, 255, 255])
+                }
+            }),
+        };
+        let area = Rect::new(2, 3, 2, 1);
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 8, 8));
+        draw_image(&mut buffer, &image, area);
+        assert_eq!(buffer[(2, 3)].symbol(), "▀");
+        assert_eq!(buffer[(2, 3)].fg, ratatui::style::Color::Rgb(255, 0, 0));
+        assert_eq!(buffer[(2, 3)].bg, ratatui::style::Color::Rgb(0, 0, 255));
+        for y in 0..8 {
+            for x in 0..8 {
+                if !area.contains(ratatui::layout::Position::new(x, y)) {
+                    assert_eq!(buffer[(x, y)].symbol(), " ");
+                }
+            }
+        }
+        for (w, h) in [(0, 0), (1, 1), (40, 24), (120, 30)] {
+            let area = Rect::new(0, 0, w, h);
+            let mut buffer = ratatui::buffer::Buffer::empty(area);
+            draw_image(&mut buffer, &image, area);
+        }
+    }
+
     use super::*;
     use ratatui::crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
@@ -1701,10 +1883,87 @@ mod tests {
             let content = buffer_as_string(terminal.backend().buffer());
 
             assert!(
-                !content.contains("commands"),
+                !content.contains("╭ commands"),
                 "input {input:?} ne doit pas ouvrir la palette"
             );
         }
+    }
+
+    #[test]
+    fn palette_keeps_six_commands_and_follows_selection_to_the_last_one() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        app.on_event(&key(KeyCode::Char('/')));
+        for _ in 1..app::COMMANDS.len() {
+            app.on_event(&key(KeyCode::Down));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| draw_palette(frame, &app, Rect::new(0, 18, 80, 5)))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let content = buffer_as_string(buffer);
+
+        assert_eq!(
+            (0..24).filter(|&y| buffer[(4, y)].symbol() == "/").count(),
+            6
+        );
+        assert!(content.contains("▸ /quit"), "{content}");
+        assert!(!content.contains("/sdd"), "{content}");
+        assert!(
+            content.contains(&format!("{0}/{0}", app::COMMANDS.len())),
+            "{content}"
+        );
+        assert!(matches!(
+            app.on_event(&key(KeyCode::Enter)),
+            app::Action::Quit
+        ));
+    }
+
+    #[test]
+    fn a_narrow_palette_places_the_description_below_the_command_and_marks_the_cut() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        for glyph in "/files".chars() {
+            app.on_event(&key(KeyCode::Char(glyph)));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(28, 24)).expect("terminal");
+        terminal
+            .draw(|frame| draw_palette(frame, &app, Rect::new(0, 18, 28, 5)))
+            .expect("draw");
+        let content = buffer_as_string(terminal.backend().buffer());
+        let rows: Vec<_> = content.lines().collect();
+        let command = rows
+            .iter()
+            .position(|row| row.contains("▸ /files"))
+            .expect("selected command");
+
+        assert!(rows[command + 1].contains("find a file"), "{content}");
+        assert!(rows[command + 1].contains('…'), "{content}");
+        assert!(content.contains("Esc"), "{content}");
+    }
+
+    #[test]
+    fn a_short_palette_keeps_the_selected_command_when_only_one_row_fits() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        for glyph in "/files".chars() {
+            app.on_event(&key(KeyCode::Char(glyph)));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(28, 8)).expect("terminal");
+        terminal
+            .draw(|frame| draw_palette(frame, &app, Rect::new(0, 3, 28, 5)))
+            .expect("draw");
+        let content = buffer_as_string(terminal.backend().buffer());
+
+        assert!(content.contains("▸ /files"), "{content}");
+        assert!(!content.contains("find a file"), "{content}");
     }
 
     /// Regression for the wrap-measure divergence: `line_wrapped_rows` must
@@ -1755,11 +2014,8 @@ mod tests {
         assert_eq!(chat_width(80), 80);
     }
 
-    /// `running_rows` already saturates (`saturating_add`) rather than
-    /// wrapping past `u16::MAX` — `base_scroll` (a `usize`) must clamp the
-    /// same way when narrowed to `u16` for `chat_overflow`, instead of `as
-    /// u16` truncating (e.g. 70000 → 4464) and silently under-reporting how
-    /// far the chat can scroll.
+    /// Terminal scroll coordinates must clamp instead of wrapping past
+    /// `u16::MAX` (e.g. 70000 → 4464).
     #[test]
     fn scroll_offset_u16_saturates_instead_of_truncating() {
         assert_eq!(scroll_offset_u16(70_000), u16::MAX);
@@ -1875,7 +2131,30 @@ mod tests {
 
         let line = loader_line(&app).expect("loader must show while nothing is visible yet");
         let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(content.contains("思考中"));
+        assert!(content.contains("thinking"));
+    }
+
+    #[test]
+    fn chat_scroll_includes_the_loader_row() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None);
+        app.push_user("hello");
+        let mut terminal = Terminal::new(TestBackend::new(80, 6)).expect("terminal");
+        terminal
+            .draw(|frame| draw_chat(frame, &app, frame.area()))
+            .expect("draw");
+        assert_eq!(app.chat_overflow.get(), 0);
+
+        app.turn_pending = true;
+        terminal
+            .draw(|frame| draw_chat(frame, &app, frame.area()))
+            .expect("draw");
+
+        assert_eq!(app.chat_overflow.get(), 1);
+        assert!(buffer_as_string(terminal.backend().buffer()).contains("thinking"));
+        assert_eq!(*app.user_turn_rows.borrow(), vec![0]);
     }
 
     #[test]
@@ -1949,15 +2228,120 @@ mod tests {
     /// Buffer du chat seul dessiné dans une grille 80×20 — ce que le terminal
     /// affiche, pas les `Line` construites.
     fn drawn_chat(app: &App) -> ratatui::buffer::Buffer {
+        drawn_chat_at(app, 80, 20)
+    }
+
+    fn drawn_chat_at(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        let backend = TestBackend::new(80, 20);
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test backend terminal");
         terminal
             .draw(|frame| draw_chat(frame, app, frame.area()))
             .expect("draw must succeed against a TestBackend");
         terminal.backend().buffer().clone()
+    }
+
+    fn assert_cached_chat_matches_fresh_render(app: &App, width: u16, height: u16) {
+        let cached = drawn_chat_at(app, width, height);
+        let turns = app.user_turn_rows.borrow().clone();
+        let overflow = app.chat_overflow.get();
+        app.chat_cache.borrow_mut().clear();
+        assert_eq!(cached, drawn_chat_at(app, width, height));
+        assert_eq!(turns, *app.user_turn_rows.borrow());
+        assert_eq!(overflow, app.chat_overflow.get());
+    }
+
+    #[test]
+    fn cached_markdown_preserves_cells_styles_and_turn_positions_after_resize_and_theme_change() {
+        let _theme = theme::test_guard();
+        let mut app = App::new(None);
+        let markdown = "# Résumé\n\n**Clair** et `simple` 日本語 🐈\n\n| Fichier | État |\n| --- | --- |\n| main.rs | prêt |\n\n```rust\nlet answer = 42;\n```\n\n- étape une\n- étape deux";
+        for index in 0..3 {
+            app.chat.push(ChatLine {
+                sender: Sender::User,
+                text: format!("Question {index}"),
+                tool: None,
+                rendered: None,
+            });
+            app.apply_agent_event(&text_message(&format!("m{index}"), markdown));
+        }
+        for name in ["zen", "nord", "mono"] {
+            theme::set_active(name).expect("built-in theme");
+            for (width, height) in [(80, 24), (32, 12), (120, 30)] {
+                drawn_chat_at(&app, width, height);
+                assert_cached_chat_matches_fresh_render(&app, width, height);
+            }
+        }
+        app.chat[1].text = "# Nouveau\n\nLe contenu a changé au même index.".to_string();
+        assert_cached_chat_matches_fresh_render(&app, 80, 24);
+    }
+
+    #[test]
+    fn cached_streaming_answer_tracks_new_text_and_drops_its_cursor_when_the_turn_ends() {
+        let _theme = theme::test_guard();
+        let mut app = App::new(None);
+        app.begin_turn();
+        app.turn_started = None;
+        app.apply_agent_event(&text_message("m1", "**Réponse** 日本語"));
+        let first = drawn_chat_at(&app, 32, 12);
+        assert!(any_blade_glyph(&first));
+        assert_cached_chat_matches_fresh_render(&app, 32, 12);
+
+        app.apply_agent_event(&text_message(
+            "m1",
+            " avec une suite longue qui passe à la ligne.",
+        ));
+        let streamed = drawn_chat_at(&app, 32, 12);
+        assert_ne!(first, streamed);
+        assert!(any_blade_glyph(&streamed));
+        assert_cached_chat_matches_fresh_render(&app, 32, 12);
+
+        app.turn_active = false;
+        let finished = drawn_chat_at(&app, 32, 12);
+        assert!(!any_blade_glyph(&finished));
+        assert_cached_chat_matches_fresh_render(&app, 32, 12);
+    }
+
+    #[test]
+    #[ignore = "manual render timing; run with --ignored --nocapture"]
+    fn measure_chat_render_cache() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use std::time::Instant;
+
+        let _theme = theme::test_guard();
+        theme::set_active("zen").expect("built-in theme");
+        let markdown = "## Résultat\n\n**Clair**, `simple`, 日本語.\n\n| Fichier | État |\n| --- | --- |\n| main.rs | prêt |\n\n```rust\nlet answer = 42;\n```\n\n- étape une\n- étape deux";
+        for count in [32, 128] {
+            let mut app = App::new(None);
+            for index in 0..count {
+                app.apply_agent_event(&text_message(&format!("m{index}"), markdown));
+            }
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+            let mut elapsed = [std::time::Duration::ZERO; 2];
+            for pass in 0..4 {
+                for variant in [pass % 2, (pass + 1) % 2] {
+                    app.chat_cache.borrow_mut().set_disabled(variant == 0);
+                    terminal
+                        .draw(|frame| draw_chat(frame, &app, frame.area()))
+                        .expect("warm up");
+                    let started = Instant::now();
+                    for _ in 0..50 {
+                        terminal
+                            .draw(|frame| draw_chat(frame, &app, frame.area()))
+                            .expect("render");
+                    }
+                    elapsed[variant] += started.elapsed();
+                }
+            }
+            println!(
+                "{count} answers, 80x24, 200 frames: no_cache={:.3} ms/frame, cache={:.3} ms/frame",
+                elapsed[0].as_secs_f64() * 5.0,
+                elapsed[1].as_secs_f64() * 5.0,
+            );
+        }
     }
 
     fn row_containing(buffer: &ratatui::buffer::Buffer, needle: &str) -> u16 {
@@ -2530,6 +2914,21 @@ mod tests {
         render_approval_at(tool_name, arguments, detail, (100, 30))
     }
 
+    #[test]
+    fn approval_names_the_shell_grant_without_opening_details() {
+        for size in [(80, 24), (40, 24)] {
+            let content = render_approval_at(
+                "shell",
+                rmcp::object!({ "command": "echo KAJI_PREVIEW_OK" }),
+                false,
+                size,
+            );
+            assert!(content.contains("KAJI_PREVIEW_OK"), "{size:?}:\n{content}");
+            assert!(content.contains("deny"), "{size:?}:\n{content}");
+            assert!(content.contains("always"), "{size:?}:\n{content}");
+        }
+    }
+
     /// An approver pressing `s` or `a` writes a permission list entry — the
     /// modal has to show which one before the key is pressed, not after.
     #[test]
@@ -2635,8 +3034,9 @@ mod tests {
         let bar = rows.next_back().expect("status bar");
 
         assert!(bar.contains("智"), "got:\n{content}");
-        assert!(!bar.contains("smart"), "got:\n{content}");
+        assert!(bar.contains("smart"), "got:\n{content}");
         assert!(!header.contains("智"), "got:\n{content}");
+        assert!(!header.contains("smart"), "got:\n{content}");
     }
 
     /// The telemetry lives on the bar alone since the « hanko & forge » task:
@@ -2890,6 +3290,8 @@ mod tests {
         assert!(rendered(&app, 100, 20).contains("SPEC"));
 
         app.open_viewer("a.rs");
+
+        app.complete_viewer_load();
         let content = rendered(&app, 100, 20);
         assert!(content.contains("a.rs"), "got:\n{content}");
         assert!(content.contains("fn main()"), "got:\n{content}");
@@ -2914,6 +3316,7 @@ mod tests {
         let file: String = (1..=60).map(|i| format!("ligne{i}\n")).collect();
         let (mut app, _dir) = app_on_a_project("n.txt", &file);
         app.open_viewer("n.txt");
+        app.complete_viewer_load();
         assert!(rendered(&app, 100, 20).contains(" 1 ligne1"));
 
         app.viewer.as_mut().unwrap().scroll = 40;
@@ -2981,6 +3384,7 @@ mod tests {
     fn an_empty_file_renders_without_a_line_range_and_without_panicking() {
         let (mut app, _dir) = app_on_a_project("vide.txt", "");
         app.open_viewer("vide.txt");
+        app.complete_viewer_load();
         assert!(app.viewer.as_ref().unwrap().lines.is_empty());
         let content = rendered(&app, 100, 20);
         assert!(content.contains("L0-0/0"), "got:\n{content}");
@@ -3010,6 +3414,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         app.toggle_explorer();
         app.open_viewer("README.md");
+        app.complete_viewer_load();
 
         let content = rendered(&app, 120, 20);
         assert!(content.contains("▸ src"), "dossier replié, got:\n{content}");
@@ -3473,6 +3878,7 @@ mod tests {
             app.toggle_explorer();
         }
         app.open_viewer("README.md");
+        app.complete_viewer_load();
         assert_eq!(app.focus, Focus::Viewer);
         (app, dir)
     }
@@ -3661,7 +4067,10 @@ mod tests {
         let top = row_index(&content, "┌ message");
 
         assert_eq!(between_borders(rows[top + 1]), "", "got:\n{content}");
-        assert!(rows[top + 2].contains("type here…"), "got:\n{content}");
+        assert!(
+            rows[top + 2].contains("Describe a task…"),
+            "got:\n{content}"
+        );
         assert_eq!(between_borders(rows[top + 3]), "", "got:\n{content}");
         assert!(rows[top + 4].contains('└'), "got:\n{content}");
     }
@@ -3700,6 +4109,7 @@ mod tests {
         let file: String = (1..=100).map(|i| format!("ligne{i}\n")).collect();
         let (mut app, _dir) = app_on_a_project("n.txt", &file);
         app.open_viewer("n.txt");
+        app.complete_viewer_load();
 
         let content = drawn_at(60, 20, |frame| {
             draw_viewer(

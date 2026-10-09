@@ -19,6 +19,10 @@ release-binary:
     @echo "Building release version..."
     cargo build --release -p kaji-cli --bin kaji
 
+# API-backed terminal build; optional heavy subsystems stay out of the binary.
+release-lean:
+    cargo build --profile lean -p kaji-cli --bin kaji --no-default-features --features tui,rustls-tls,system-keyring,update
+
 # Build Windows executable on a Windows host
 [unix]
 release-windows:

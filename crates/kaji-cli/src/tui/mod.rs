@@ -1,8 +1,11 @@
 pub mod app;
 pub mod argcomplete;
+mod chatcache;
 pub mod diff;
+mod documents;
 pub mod editors;
 pub mod explorer;
+mod fileio;
 pub mod forge;
 pub mod fuzzy;
 pub mod gitstatus;
@@ -12,6 +15,7 @@ pub mod mentions;
 pub mod missioncontrol;
 pub mod report;
 pub mod statusbar;
+mod suggestions;
 pub mod theme;
 pub mod ui;
 pub mod viewer;
@@ -178,36 +182,31 @@ fn model_label() -> String {
         .unwrap_or_else(|_| "?".to_string())
 }
 
-/// Each welcome/help section renders as ONE `ChatLine` (via
-/// `App::push_system_lines`), never one `ChatLine` per row: `ui::draw_chat`
-/// appends a blank line after every `ChatLine`, so one row per push used to
-/// blow a blank line in between every single command and nav hint. Grouping
-/// rows into a block keeps that blank line where the approved mockup wants
-/// it — between sections, not inside them.
-///
-/// `emphasized` selects the content register: `false` is the startup banner
-/// (dim ambiance); `true` is `/help` invoked on-demand, which must read as a
-/// normal answer instead of background noise. Section titles (`commandes`,
-/// `navigation`) always take the `Title` role (or patiné) in both registers —
-/// only the row content switches between `Dim` and `Text`.
-///
-/// `App::push_system_lines` splices the `· ` system marker onto the first
-/// line of each block only (`ui::push_rendered_lines`), landing it on the
-/// welcome banner line and on each section's title row — the same spot
-/// `/cost`/`/docker` already put it, not something new here.
-fn push_welcome(app: &mut App, emphasized: bool) {
-    let content_role = if emphasized {
-        SpanRole::Text
-    } else {
-        SpanRole::Dim
-    };
+/// Keep each help section in one message: the chat separates messages with
+/// a blank line, which should separate sections rather than every shortcut.
+fn push_help(app: &mut App) {
+    app.push_system_lines(vec![vec![RoledSpan::title("commands and shortcuts")]]);
+    app.push_system_lines(commands_section(SpanRole::Text));
+    app.push_system_lines(navigation_section(app.mouse_enabled, SpanRole::Text));
+}
 
-    app.push_system_lines(vec![vec![RoledSpan::new(
-        "鍛冶 welcome to kaji — type your message, then Enter",
-        content_role,
-    )]]);
-    app.push_system_lines(commands_section(content_role));
-    app.push_system_lines(navigation_section(app.mouse_enabled, content_role));
+fn push_startup_welcome(app: &mut App) {
+    app.push_system_lines(vec![
+        vec![RoledSpan::title("welcome to kaji")],
+        vec![],
+        vec![RoledSpan::new(
+            "Describe a task or ask a question. Enter to send.",
+            SpanRole::Text,
+        )],
+        vec![RoledSpan::new(
+            "/ commands · /help keyboard shortcuts",
+            SpanRole::Dim,
+        )],
+        vec![RoledSpan::new(
+            "@ attach a file · Ctrl+P find a file",
+            SpanRole::Dim,
+        )],
+    ]);
 }
 
 fn commands_section(content_role: SpanRole) -> Vec<RoledLine> {
@@ -219,40 +218,11 @@ fn commands_section(content_role: SpanRole) -> Vec<RoledLine> {
     let mut lines = vec![vec![RoledSpan::title("commands")]];
     for cmd in crate::tui::app::COMMANDS {
         lines.push(vec![RoledSpan::new(
-            format!(
-                "  {:<name_width$}   {}",
-                cmd.name,
-                welcome_command_desc(cmd)
-            ),
+            format!("  {:<name_width$}   {}", cmd.name, cmd.desc),
             content_role,
         )]);
     }
     lines
-}
-
-/// The command palette (`ui::draw_palette`) and
-/// `push_welcome_lists_every_command_from_the_table` both read
-/// `Command::desc` straight off `COMMANDS` — that table stays the single
-/// source of command copy. A few descriptions overflow the welcome's
-/// aligned column layout (env var asides, "affiche/masque" duplication), so
-/// this shortens just those for the welcome/help block; anything not listed
-/// here falls back to `cmd.desc` unchanged.
-fn welcome_command_desc(cmd: &crate::tui::app::Command) -> &'static str {
-    match cmd.name {
-        "/sdd" => "start an SDD pass (SPEC.md or --spec)",
-        "/goal" => "evaluated loop toward a goal (<condition> | clear)",
-        "/files" => "(Ctrl+P) fuzzy file search",
-        "/explorer" => "(Ctrl+E) file explorer",
-        "/forge" => "(Ctrl+F) forge pane — running subagents",
-        "/workflow" => "declarative workflow — /workflow <file.yaml>",
-        "/edit" => "(or e) edit a file — /edit <path>[:line]",
-        "/editor" => "pick the editor/IDE (<cmd> | list | reset | mode)",
-        "/spec" => "(F2) SPEC panel on/off",
-        "/think" => "(F3) the model's reasoning (思考中)",
-        "/cost" => "token/cost usage — [models|day|week|month|cache|projection]",
-        "/docker" => "running containers",
-        _ => cmd.desc,
-    }
 }
 
 /// Souris OFF (`KAJI_MOUSE=0`): the wheel isn't captured and ↑/↓ go back to
@@ -309,7 +279,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             ),
             (
                 "status bar",
-                "coloured seal = mode · 在 place ⟩ branch · 炭 tokens ↑in ↓out · $ cost · 火 running tool · 遣 active subagents",
+                "named mode · 在 place ⟩ branch · 炭 tokens ↑in ↓out · $ cost · 火 running tool · 遣 active agents",
             ),
             ("Esc", "interrupts · Ctrl+C quits"),
             ("Option+drag", "select text"),
@@ -340,7 +310,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             "e edit ($EDITOR, host nvim, or a Zellij/tmux pane per KAJI_EDIT_MODE) · /edit <path>",
             "Ctrl+S steer: sends the queued messages into the running turn",
             "Shift+Tab cycles the mode (承 approve → 智 smart → 自 auto) — seal on the left of the status bar",
-            "status bar coloured seal = mode · 在 place ⟩ branch · 炭 tokens ↑in ↓out · $ cost · 火 running tool · 遣 active subagents",
+            "status bar named mode · 在 place ⟩ branch · 炭 tokens ↑in ↓out · $ cost · 火 running tool · 遣 active agents",
             "Esc interrupts · Ctrl+C quits",
         ] {
             lines.push(vec![RoledSpan::new(text, content_role)]);
@@ -1071,6 +1041,9 @@ async fn event_loop(
     app.edit_mode = edit_mode;
     let (icons, icons_warning) = startup_icons();
     app.icons = icons;
+    app.suggestions_enabled = Config::global()
+        .get_param::<bool>("KAJI_SUGGESTIONS")
+        .unwrap_or(false);
     app.launch_ctx = launch_context(&working_dir);
     app.request_git_refresh();
     let theme_warning = apply_startup_theme();
@@ -1113,7 +1086,8 @@ async fn event_loop(
     let mut cancel: Option<CancellationToken> = None;
     let mut pending: Option<Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'_>>> + '_>>> =
         None;
-    let (suggestion_tx, mut suggestion_rx) = mpsc::channel::<String>(1);
+    let mut suggestions = suggestions::Suggestions::default();
+    let mut preview_reader = viewer::Reader::new()?;
     let (index_tx, mut index_rx) = mpsc::channel::<mentions::MentionIndex>(1);
     let (git_tx, mut git_rx) = mpsc::channel::<Option<gitstatus::GitStatus>>(1);
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -1284,10 +1258,16 @@ async fn event_loop(
                             }
                         }
                     }
-                    Action::Help => push_welcome(&mut app, true),
+                    Action::Help => push_help(&mut app),
                     Action::Theme(name) => {
                         if let Err(e) = Config::global().set_param("KAJI_THEME", &name) {
                             app.push_system(&format!("theme applied but not saved: {e}"));
+                        }
+                    }
+                    Action::Suggestions(enabled) => {
+                        suggestions.cancel();
+                        if let Err(e) = Config::global().set_param("KAJI_SUGGESTIONS", enabled) {
+                            app.push_system(&format!("suggestions applied but not saved: {e}"));
                         }
                     }
                     // `App` a déjà changé d'éditeur pour la session — comme le
@@ -1564,24 +1544,21 @@ async fn event_loop(
                             // Queued steering message auto-submitted as a new
                             // turn (item 2 ante "do nothing — queued messages
                             // are submitted automatically once the turn ends").
-                        } else {
+                        } else if app.suggestions_ready() {
                             app.suggestion_loading = true;
-                            suggest_next_prompt(agent, session_id, &conversation, &suggestion_tx).await;
+                            suggest_next_prompt(agent, session_id, suggestions::context(&app.chat), &mut suggestions).await;
+                            if !suggestions.pending() {
+                                app.suggestion_loading = false;
+                            }
                         }
                     }
                 }
             }
-            // Next-prompt ghost (item 7): the generation task resolves here,
-            // off the input/turn critical path. A stale suggestion that
-            // outlived an input edit is cleared by `exit_history_navigation`,
-            // so a fresh turn can't be polluted — the draw reads `app.state`.
-            maybe = suggestion_rx.recv(), if !app.turn_pending && !app.turn_active => {
-                if let Some(text) = maybe {
-                    app.suggestion = Some(text);
-                    app.suggestion_loading = false;
-                } else {
-                    app.suggestion_loading = false;
+            maybe = suggestions.finish(), if suggestions.pending() => {
+                if app.suggestion_loading && app.suggestions_ready() && !app.turn_pending && !app.turn_active {
+                    app.suggestion = maybe;
                 }
+                app.suggestion_loading = false;
             }
             // Freshly built index snapshot: swaps in and re-runs the current
             // fragment, so a completion typed before the walk finished lights
@@ -1595,6 +1572,10 @@ async fn event_loop(
                 if let Some(status) = maybe {
                     app.on_git_status(status);
                 }
+            }
+            Some(loaded) = preview_reader.results.recv() => {
+                preview_reader.completed();
+                app.on_viewer_loaded(loaded);
             }
             // Le DAG a conclu. Le handle est relâché : un second `/workflow`
             // ira alors se faire refuser par le recorder, qui est seul à savoir
@@ -1618,6 +1599,18 @@ async fn event_loop(
                     Err(error) => {
                         app.push_mission_notice(&workflow_interrupted_line(&error.to_string()))
                     }
+                }
+            }
+        }
+        if !app.suggestion_loading || app.turn_pending || app.turn_active || !app.input.is_empty() {
+            suggestions.cancel();
+            app.suggestion_loading = false;
+        }
+        if !preview_reader.busy() {
+            if let Some(request) = app.take_viewer_request() {
+                if let Err(error) = preview_reader.start(request) {
+                    app.close_viewer();
+                    app.push_system(&format!("preview unavailable: {error}"));
                 }
             }
         }
@@ -1848,59 +1841,29 @@ fn flush_steer_queue<'a>(
     true
 }
 
-/// Next-prompt ghost (item 7): spawns a best-effort, off-critical-path task
-/// that asks the active provider for a short "what to do next" suggestion
-/// after a turn ends cleanly, delivering it over `suggestion_tx`. Strictly
-/// optional: a missing provider, a slow call, or a generation error silently
-/// produce no ghost (the channel just never yields). Uses a small window of
-/// the recent user-visible conversation as context, never the whole transcript.
 async fn suggest_next_prompt(
     agent: &Agent,
     session_id: &str,
-    conversation: &kaji::conversation::Conversation,
-    suggestion_tx: &mpsc::Sender<String>,
+    context: String,
+    jobs: &mut suggestions::Suggestions,
 ) {
-    // Resolve these here — `agent` borrows the event loop, so nothing tied to
-    // its lifetime can move into the spawned task. The Arc clone and model
-    // config are 'static, rendezvous the network call to the task below.
+    if context.is_empty() {
+        return;
+    }
     let Ok(provider) = agent.provider().await else {
         return;
     };
-    let Ok(model_config) = agent.model_config_for_session(session_id).await else {
+    let Ok(mut model_config) = agent.model_config_for_session(session_id).await else {
         return;
     };
-    let context = conversation
-        .messages()
-        .iter()
-        .filter(|m| m.is_user_visible())
-        .rev()
-        .take(4)
-        .map(|m| m.as_concat_text())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let tx = suggestion_tx.clone();
-    tokio::task::spawn(async move {
+    model_config.max_tokens = Some(model_config.max_tokens.unwrap_or(256).min(256));
+    jobs.start(async move {
         let system = "You are kaji, a terminal agent. After this exchange, suggest a single next prompt (one sentence, a concrete action, with no prefix or quoting) that the user would likely want to send.";
-        let messages = vec![Message::user().with_text(if context.trim().is_empty() {
-            "The exchange is empty — suggest a starting point for a new session."
-        } else {
-            context.trim()
-        })];
-        if let Ok(Ok((response, _))) = tokio::time::timeout(
-            Duration::from_secs(10),
-            provider.complete(&model_config, system, &messages, &[]),
-        )
-        .await
-        {
-            let text = response
-                .user_visible_content()
-                .as_concat_text()
-                .trim()
-                .to_string();
-            if !text.is_empty() {
-                let _ = tx.send(text).await;
-            }
-        }
+        let messages = vec![Message::user().with_text(context)];
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let stream = provider.stream(&model_config, system, &messages, &[]).await.ok()?;
+            suggestions::collect(stream).await
+        }).await.ok().flatten()
     });
 }
 
@@ -1947,7 +1910,7 @@ fn seed_chat(app: &mut App, conversation: &kaji::conversation::Conversation) {
 /// pages of history reads as a bug, not onboarding.
 fn maybe_push_welcome(app: &mut App) {
     if app.chat.is_empty() {
-        push_welcome(app, false);
+        push_startup_welcome(app);
         app.push_system(&format!(
             "{} · Shift+Tab to change",
             app::mode_line(app.kaji_mode)
@@ -2398,6 +2361,31 @@ mod tests {
         assert_eq!(app.chat[0].text, "salut");
         assert_eq!(app.chat[1].sender, Sender::Agent);
         assert_eq!(app.chat[1].text, "bonjour");
+    }
+
+    #[test]
+    fn resume_and_restore_hide_internal_context_but_keep_user_text() {
+        use kaji::conversation::message::MessageMetadata;
+
+        let user_text = "<turn-context>explain this example</turn-context>";
+        let conversation = Conversation::new_unvalidated([
+            Message::user().with_text("hello"),
+            Message::user()
+                .with_text("internal clock and working directory")
+                .with_metadata(MessageMetadata::default().with_turn_context()),
+            Message::assistant().with_text("ready"),
+            Message::user().with_text(user_text),
+        ]);
+        let renderers: [fn(&mut App, &Conversation); 2] = [seed_chat, App::reseed_chat];
+        for render in renderers {
+            let mut app = App::new(None);
+            render(&mut app, &conversation);
+            assert_eq!(app.chat.len(), 3);
+            assert_eq!(app.chat[0].text, "hello");
+            assert_eq!(app.chat[1].text, "ready");
+            assert_eq!(app.chat[2].text, user_text);
+            assert_eq!(conversation.messages().len(), 4);
+        }
     }
 
     /// `show_thinking` defaults off — a persisted `Thinking` block replayed
@@ -3020,6 +3008,55 @@ mod tests {
     }
 
     #[test]
+    fn startup_fits_without_scrolling_and_keeps_the_mode_and_help_visible() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        for mode in [
+            KajiMode::Approve,
+            KajiMode::SmartApprove,
+            KajiMode::Auto,
+            KajiMode::Chat,
+        ] {
+            for (width, height) in [(60, 24), (80, 24), (120, 30)] {
+                let mut app = App::new(None);
+                app.kaji_mode = mode;
+                maybe_push_welcome(&mut app);
+
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                terminal.draw(|frame| ui::draw(frame, &app)).expect("draw");
+                let buffer = terminal.backend().buffer();
+                let content = (0..height)
+                    .map(|y| {
+                        (0..width)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                assert_eq!(app.chat_overflow.get(), 0, "{width}x{height}: {content}");
+                for hint in [
+                    "welcome to kaji",
+                    "Enter to send",
+                    "/help",
+                    "@ attach a file",
+                    "Shift+Tab",
+                ] {
+                    assert!(content.contains(hint), "{hint} missing: {content}");
+                }
+                assert!(
+                    content.contains(&format!("mode: {}", app::kaji_mode_badge(mode))),
+                    "{content}"
+                );
+                assert!(!content.contains("/workflow"), "{content}");
+                assert!(!content.contains("navigation"), "{content}");
+            }
+        }
+    }
+
+    #[test]
     fn maybe_push_welcome_stays_silent_after_replayed_history() {
         let mut app = App::new(None);
         let conversation = Conversation::new_unvalidated([Message::user().with_text("salut")]);
@@ -3040,11 +3077,11 @@ mod tests {
     }
 
     #[test]
-    fn push_welcome_mentions_wheel_and_history_arrows_when_mouse_is_enabled() {
+    fn push_help_mentions_wheel_and_history_arrows_when_mouse_is_enabled() {
         let mut app = App::new(None);
         app.mouse_enabled = true;
 
-        push_welcome(&mut app, false);
+        push_help(&mut app);
 
         let text = welcome_text(&app);
         assert!(text.contains("wheel"));
@@ -3057,11 +3094,11 @@ mod tests {
     /// history is unreachable from the keyboard, so advertising the wheel
     /// or ↑/↓ recall would describe controls that don't work.
     #[test]
-    fn push_welcome_falls_back_to_legacy_scroll_hint_when_mouse_is_disabled() {
+    fn push_help_falls_back_to_legacy_scroll_hint_when_mouse_is_disabled() {
         let mut app = App::new(None);
         app.mouse_enabled = false;
 
-        push_welcome(&mut app, false);
+        push_help(&mut app);
 
         let text = welcome_text(&app);
         assert!(!text.contains("wheel"));
@@ -3092,12 +3129,12 @@ mod tests {
     /// glyphes PUA serait illisible sur le terminal qui a justement besoin de
     /// la légende.
     #[test]
-    fn push_welcome_explains_the_status_bar_without_a_private_use_glyph() {
+    fn push_help_explains_the_status_bar_without_a_private_use_glyph() {
         for mouse_enabled in [true, false] {
             let mut app = App::new(None);
             app.mouse_enabled = mouse_enabled;
 
-            push_welcome(&mut app, true);
+            push_help(&mut app);
 
             let text = welcome_text(&app);
             assert!(
@@ -3118,12 +3155,12 @@ mod tests {
     /// Le volet forge n'a aucune trace à l'écran tant qu'aucune lame ne tourne :
     /// l'aide est le seul endroit où l'on apprend qu'il existe.
     #[test]
-    fn push_welcome_names_the_forge_chord_in_both_forms() {
+    fn push_help_names_the_forge_chord_in_both_forms() {
         for mouse_enabled in [true, false] {
             let mut app = App::new(None);
             app.mouse_enabled = mouse_enabled;
 
-            push_welcome(&mut app, true);
+            push_help(&mut app);
 
             let text = welcome_text(&app);
             for needle in [
@@ -3163,9 +3200,9 @@ mod tests {
     }
 
     #[test]
-    fn push_welcome_lists_every_command_from_the_table() {
+    fn push_help_lists_every_command_from_the_table() {
         let mut app = App::new(None);
-        push_welcome(&mut app, false);
+        push_help(&mut app);
         let text = welcome_text(&app);
         for cmd in crate::tui::app::COMMANDS {
             assert!(
@@ -3173,6 +3210,7 @@ mod tests {
                 "{} absent du welcome/help",
                 cmd.name
             );
+            assert!(text.contains(cmd.desc), "{} description missing", cmd.name);
         }
     }
 
@@ -3228,14 +3266,14 @@ mod tests {
     /// The old design pushed one `ChatLine` per row, so `draw_chat`'s
     /// per-`ChatLine` trailing blank line landed after every single command
     /// and nav hint — flat and over-aired. Grouping rows into one
-    /// `ChatLine` per section (see `push_welcome`) means that blank line
+    /// `ChatLine` per section (see `push_help`) means that blank line
     /// only falls between sections now; this locks that shape in.
     #[test]
     fn welcome_renders_as_compact_sections() {
         let mut app = App::new(None);
         app.mouse_enabled = true;
 
-        push_welcome(&mut app, false);
+        push_help(&mut app);
 
         let rows = rendered_rows(&app);
         let commands_row = rows
@@ -3254,7 +3292,8 @@ mod tests {
         for (name, next_name) in [
             ("/sdd", "/goal"),
             ("/goal", "/files"),
-            ("/files", "/explorer"),
+            ("/files", "/open"),
+            ("/open", "/explorer"),
             ("/explorer", "/forge"),
             ("/forge", "/workflow"),
             ("/workflow", "/edit"),
@@ -3267,7 +3306,8 @@ mod tests {
             ("/docker", "/checkpoints"),
             ("/checkpoints", "/theme"),
             ("/theme", "/help"),
-            ("/help", "/quit"),
+            ("/help", "/suggest"),
+            ("/suggest", "/quit"),
         ] {
             let row = rows
                 .iter()
@@ -3286,7 +3326,7 @@ mod tests {
     fn welcome_command_names_are_column_aligned() {
         let mut app = App::new(None);
 
-        push_welcome(&mut app, false);
+        push_help(&mut app);
 
         let rows = rendered_rows(&app);
         let sdd_row = rows
@@ -3299,9 +3339,7 @@ mod tests {
             .expect("/docker row must render");
 
         let sdd_desc_col = sdd_row.find("start").expect("/sdd description text");
-        let docker_desc_col = docker_row
-            .find("running")
-            .expect("/docker description text");
+        let docker_desc_col = docker_row.find("list").expect("/docker description text");
         assert_eq!(
             sdd_desc_col, docker_desc_col,
             "command descriptions must start at the same column regardless of name length"
@@ -3313,26 +3351,29 @@ mod tests {
         let _theme = theme::test_guard();
         let mut app = App::new(None);
 
-        push_welcome(&mut app, true);
+        push_help(&mut app);
 
         assert_eq!(
-            welcome_line_fg(&app, "welcome"),
+            welcome_line_fg(&app, "/sdd"),
             theme::text_color(),
-            "/help must render like a normal answer, not the dim welcome ambiance"
+            "help commands must remain readable"
         );
     }
 
     #[test]
-    fn startup_welcome_stays_dim() {
+    fn startup_invitation_is_readable_and_secondary_hints_are_dim() {
         let _theme = theme::test_guard();
         let mut app = App::new(None);
 
-        push_welcome(&mut app, false);
+        push_startup_welcome(&mut app);
 
         assert_eq!(
-            welcome_line_fg(&app, "welcome"),
+            welcome_line_fg(&app, "Describe a task"),
+            theme::text_color(),
+        );
+        assert_eq!(
+            welcome_line_fg(&app, "/help"),
             ratatui::style::Color::DarkGray,
-            "the startup banner must keep its dim ambiance style"
         );
     }
 }

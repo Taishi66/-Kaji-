@@ -1,7 +1,4 @@
-//! The bottom bar (« hanko & forge ») — the mode's vermilion seal, then the
-//! place (directory ⟩ branch and repository state), an empty middle, and the
-//! forge's telemetry pinned right: model, 炭 tokens, cost, 遣 the blades running
-//! behind a folded 炉 panel, and 火 while a turn burns.
+//! Permission mode and project on the left, labelled usage and activity on the right.
 //!
 //! Pure like [`crate::tui::gitstatus::render`], which it delegates the place
 //! to: the whole line is built and fitted here, so it is unit-testable without
@@ -10,7 +7,7 @@
 use crate::tui::app::{self, App};
 use crate::tui::{gitstatus, icons, theme};
 use kaji::config::KajiMode;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// Two spaces (間) rather than a bullet: the bar separates by breathing.
@@ -26,10 +23,13 @@ pub fn render(app: &App, width: u16) -> Line<'static> {
     let seal = seal_spans(app);
     let seal_width = total_width(&seal);
 
-    let mut telemetry = telemetry_spans(app, true);
+    let mut telemetry = telemetry_spans(app, TelemetryDetail::Full);
     let mut place = place_spans(app, width, seal_width, &telemetry);
-    if !fits(width, seal_width, &place, &telemetry) {
-        telemetry = telemetry_spans(app, false);
+    for detail in [TelemetryDetail::Usage, TelemetryDetail::Activity] {
+        if fits(width, seal_width, &place, &telemetry) {
+            break;
+        }
+        telemetry = telemetry_spans(app, detail);
         place = place_spans(app, width, seal_width, &telemetry);
     }
     if !fits(width, seal_width, &place, &telemetry) {
@@ -45,7 +45,7 @@ pub fn render(app: &App, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The telemetry gives way — its model first, then itself — when the place is
+/// The telemetry gives way — model, usage, then activity — when the place is
 /// left under `MIN_PLACE_WIDTH` cells, or when the line would not fit at all
 /// because the repository state is too wide to shrink.
 fn fits(
@@ -72,10 +72,7 @@ fn place_spans(
     )
 }
 
-/// The seal names the mode with its kanji, `REVERSED` in the mode's colour so
-/// it stays legible on a light theme as on a dark one; the icon (unless
-/// `KAJI_ICONS=text`) and, while unfolded, the mode's word ride beside it in
-/// that same colour, not reversed.
+/// The word always explains the seal; bold briefly marks a mode change.
 fn seal_spans(app: &App) -> Vec<Span<'static>> {
     let color = mode_color(app.kaji_mode);
     let mut spans = vec![Span::styled(
@@ -87,12 +84,14 @@ fn seal_spans(app: &App) -> Vec<Span<'static>> {
         spans.push(Span::styled(format!(" {icon}"), Style::default().fg(color)));
     }
 
+    let mut word_style = Style::default().fg(color);
     if app.seal_unfolded() {
-        spans.push(Span::styled(
-            format!(" {}", app::kaji_mode_badge(app.kaji_mode)),
-            Style::default().fg(color),
-        ));
+        word_style = word_style.add_modifier(Modifier::BOLD);
     }
+    spans.push(Span::styled(
+        format!(" {}", app::kaji_mode_badge(app.kaji_mode)),
+        word_style,
+    ));
 
     spans.push(Span::raw("  "));
     spans
@@ -112,42 +111,53 @@ pub(crate) fn mode_color(mode: KajiMode) -> Color {
 
 /// The forge's numbers, right to left of the trailing margin. The fire burns
 /// for the current turn only: at rest the silence is the information.
-fn telemetry_spans(app: &App, with_model: bool) -> Vec<Span<'static>> {
+#[derive(Clone, Copy)]
+enum TelemetryDetail {
+    Full,
+    Usage,
+    Activity,
+}
+
+fn telemetry_spans(app: &App, detail: TelemetryDetail) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    if with_model && !app.model.is_empty() {
+    if matches!(detail, TelemetryDetail::Full) && !app.model.is_empty() {
         push_group(&mut spans, Span::styled(app.model.clone(), theme::dim()));
     }
 
-    let (input, output) = if app.turn_active {
-        (app.tokens_turn_in, app.tokens_turn_out)
-    } else {
-        (app.tokens_total_in, app.tokens_total_out)
-    };
-    push_group(
-        &mut spans,
-        Span::styled(
-            format!(
-                "{} {}↑ {}↓",
-                theme::TOKENS_GLYPH,
-                compact_count(input),
-                compact_count(output)
-            ),
-            theme::dim(),
-        ),
-    );
-
-    if let Some(cost) = app.cost_total {
+    if !matches!(detail, TelemetryDetail::Activity) {
+        let (input, output) = if app.turn_active {
+            (app.tokens_turn_in, app.tokens_turn_out)
+        } else {
+            (app.tokens_total_in, app.tokens_total_out)
+        };
         push_group(
             &mut spans,
-            Span::styled(format!("${cost:.2}"), theme::gold()),
+            Span::styled(
+                format!(
+                    "{} {}↑ {}↓ tokens",
+                    theme::TOKENS_GLYPH,
+                    compact_count(input),
+                    compact_count(output)
+                ),
+                theme::dim(),
+            ),
         );
+        if let Some(cost) = app.cost_total {
+            push_group(
+                &mut spans,
+                Span::styled(format!("${cost:.2}"), theme::gold()),
+            );
+        }
     }
 
     let blades = app.forge.running_count();
     if blades > 0 && !app.forge.visible() {
         push_group(
             &mut spans,
-            Span::styled(format!("{} {blades}", theme::SUBAGENT_GLYPH), theme::dim()),
+            Span::styled(
+                format!("{} {blades} agents", theme::SUBAGENT_GLYPH),
+                theme::dim(),
+            ),
         );
     }
 
@@ -156,7 +166,7 @@ fn telemetry_spans(app: &App, with_model: bool) -> Vec<Span<'static>> {
         let phase = app
             .current_tool()
             .map(truncate_tool_name)
-            .unwrap_or_else(|| theme::THINKING_GLYPH.to_string());
+            .unwrap_or_else(|| format!("{} thinking", theme::THINKING_GLYPH));
         push_group(
             &mut spans,
             Span::styled(
@@ -170,7 +180,10 @@ fn telemetry_spans(app: &App, with_model: bool) -> Vec<Span<'static>> {
         );
     }
 
-    spans.push(Span::raw(" "));
+    if !spans.is_empty() {
+        spans.insert(0, Span::raw(SEPARATOR));
+        spans.push(Span::raw(" "));
+    }
     spans
 }
 
@@ -288,7 +301,7 @@ mod tests {
     #[test_case(KajiMode::Approve, "承"; "approve")]
     #[test_case(KajiMode::SmartApprove, "智"; "smart")]
     #[test_case(KajiMode::Chat, "話"; "chat")]
-    fn the_seal_carries_the_mode_as_a_kanji_folded_over_its_word(mode: KajiMode, kanji: &str) {
+    fn the_seal_keeps_the_mode_word_visible_at_rest(mode: KajiMode, kanji: &str) {
         let _theme = theme::test_guard();
         let mut app = app_at("/tmp/project");
         app.kaji_mode = mode;
@@ -297,12 +310,13 @@ mod tests {
         let rendered = text(&line);
 
         assert!(rendered.starts_with(&format!(" {kanji} ")), "{rendered:?}");
-        for word in ["auto", "approve", "smart", "chat"] {
-            assert!(
-                !rendered.contains(word),
-                "le mot du mode reste replié : {rendered:?}"
-            );
-        }
+        assert!(
+            rendered.contains(app::kaji_mode_badge(mode)),
+            "{rendered:?}"
+        );
+        assert!(!rendered
+            .chars()
+            .any(|c| ('\u{e000}'..='\u{f8ff}').contains(&c)));
     }
 
     /// La couleur est la seconde traduction du kanji, et elle dit qui décide :
@@ -315,6 +329,7 @@ mod tests {
         let _theme = theme::test_guard();
         let mut app = app_at("/tmp/project");
         app.kaji_mode = mode;
+        app.icons = IconSet::Nerd;
         let expected = match mode {
             KajiMode::Approve => theme::user_color(),
             KajiMode::SmartApprove => theme::gold_color(),
@@ -340,6 +355,7 @@ mod tests {
         let _theme = theme::test_guard();
         let mut app = app_at("/tmp/project");
         app.kaji_mode = mode;
+        app.icons = IconSet::Nerd;
         let icon = icons::mode_icon(IconSet::Nerd, mode).expect("une icône par mode");
 
         let with_icon = text(&render(&app, 100));
@@ -353,32 +369,44 @@ mod tests {
         assert!(!without.contains(icon), "{mode:?} : {without:?}");
         assert!(
             without.starts_with(&format!(
-                " {}   {} ",
+                " {}  {}  {} ",
                 app::kaji_mode_seal(mode),
+                app::kaji_mode_badge(mode),
                 theme::DIR_GLYPH
             )),
-            "le repli texte rend la barre d'avant l'icône : {without:?}"
+            "the text mode keeps its label: {without:?}"
         );
     }
 
-    /// Le kanji ne se traduit pas tout seul : le mot se déplie à côté du sceau
-    /// au démarrage et à chaque changement de mode, puis s'efface.
     #[test]
-    fn an_unfolded_seal_spells_its_mode_out_next_to_the_kanji() {
+    fn a_mode_change_emphasizes_the_word_without_hiding_it_at_rest() {
         let _theme = theme::test_guard();
         let mut app = app_at("/tmp/project");
         app.kaji_mode = KajiMode::SmartApprove;
 
-        assert!(!text(&render(&app, 100)).contains("smart"));
+        let resting = render(&app, 100);
+        let word = resting
+            .spans
+            .iter()
+            .find(|span| span.content.trim() == "smart")
+            .expect("mode word");
+        assert!(!word.style.add_modifier.contains(Modifier::BOLD));
 
         app.unfold_seal();
-        let rendered = text(&render(&app, 100));
+        let changed = render(&app, 100);
+        let rendered = text(&changed);
+        let word = changed
+            .spans
+            .iter()
+            .find(|span| span.content.trim() == "smart")
+            .expect("mode word");
+        assert!(word.style.add_modifier.contains(Modifier::BOLD));
 
         assert!(rendered.starts_with(" 智 "), "{rendered:?}");
         assert!(rendered.contains("smart"), "{rendered:?}");
         assert!(
             rendered.contains(&format!("smart  {}", theme::DIR_GLYPH)),
-            "le mot se déplie hors du sceau, avant le lieu : {rendered:?}"
+            "the mode stays before the project: {rendered:?}"
         );
     }
 
@@ -553,6 +581,7 @@ mod tests {
     fn a_narrow_bar_drops_the_model_before_anything_else() {
         let _theme = theme::test_guard();
         let mut app = app_at("/tmp/project");
+        app.icons = IconSet::Nerd;
         app.git_status = Some(GitStatus {
             branch: "feat/kaji-init".to_string(),
             modified: 3,
@@ -563,11 +592,11 @@ mod tests {
         app.tokens_total_out = 4_100;
         app.cost_total = Some(1.30);
 
-        let line = render(&app, 60);
+        let line = render(&app, 72);
         let rendered = text(&line);
 
         assert!(
-            line.width() <= 60,
+            line.width() <= 72,
             "{} cellules : {rendered:?}",
             line.width()
         );
@@ -662,11 +691,31 @@ mod tests {
 
         let rendered = text(&render(&app, 130));
 
-        let icon = icons::mode_icon(IconSet::Nerd, KajiMode::Auto).expect("une icône par mode");
         assert!(
-            rendered.starts_with(&format!(" 自  {icon}  {} /tmp/project ", theme::DIR_GLYPH)),
+            rendered.starts_with(&format!(" 自  auto  {} /tmp/project ", theme::DIR_GLYPH)),
             "{rendered:?}"
         );
         assert!(!rendered.contains(theme::PLACE_SEPARATOR), "{rendered:?}");
+    }
+
+    #[test]
+    fn a_narrow_bar_keeps_activity_when_usage_no_longer_fits() {
+        let _theme = theme::test_guard();
+        let mut app = app_at("/tmp/project");
+        app.turn_active = true;
+        app.model = "a-long-model-name".to_string();
+        app.tokens_turn_in = 12_000;
+        app.tokens_turn_out = 4_100;
+        app.cost_total = Some(1.30);
+        running_tool(&mut app, "shell");
+
+        let line = render(&app, 50);
+        let rendered = text(&line);
+
+        assert!(line.width() <= 50, "{rendered}");
+        assert!(rendered.contains("auto"), "{rendered}");
+        assert!(rendered.contains("/tmp/project"), "{rendered}");
+        assert!(rendered.contains("shell"), "{rendered}");
+        assert!(!rendered.contains("tokens"), "{rendered}");
     }
 }

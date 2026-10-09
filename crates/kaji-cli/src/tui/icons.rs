@@ -1,9 +1,4 @@
-//! Icône de mode (Octicons, Nerd Fonts v3.5.0) et son repli texte.
-//!
-//! Le sceau kanji dit le mode à qui lit les kanji ; l'icône le dit à qui lit
-//! les cadenas. Les deux voyagent ensemble sur la barre d'état — sauf sur un
-//! terminal sans Nerd Font, où `KAJI_ICONS=text` rend la barre d'avant
-//! l'icône plutôt qu'un rectangle vide.
+//! Optional mode icons for terminals with Nerd Fonts; text needs no special font.
 
 use kaji::config::KajiMode;
 
@@ -28,19 +23,17 @@ pub fn mode_icon(set: IconSet, mode: KajiMode) -> Option<&'static str> {
     }
 }
 
-/// `KAJI_ICONS` — même contrat que `KAJI_EDIT_MODE` : une valeur inconnue ne
-/// bloque jamais le lancement, `nerd` s'applique et l'appelant rend
-/// l'avertissement en ligne système.
+/// An unknown icon setting falls back to text so any terminal stays readable.
 pub fn resolve(value: Option<&str>) -> (IconSet, Option<String>) {
     let Some(value) = value else {
-        return (IconSet::Nerd, None);
+        return (IconSet::Text, None);
     };
     match value.trim().to_ascii_lowercase().as_str() {
         "nerd" => (IconSet::Nerd, None),
         "text" => (IconSet::Text, None),
         _ => (
-            IconSet::Nerd,
-            Some(format!("invalid KAJI_ICONS ({value}) — nerd applied")),
+            IconSet::Text,
+            Some(format!("invalid KAJI_ICONS ({value}) — text applied")),
         ),
     }
 }
@@ -86,26 +79,26 @@ mod tests {
         }
     }
 
-    #[test_case(None; "absent")]
     #[test_case(Some("nerd"); "nerd")]
     #[test_case(Some("NERD"); "insensible_a_la_casse")]
-    fn resolve_prend_les_icones_par_defaut(value: Option<&str>) {
+    fn resolve_accepts_explicit_nerd_icons(value: Option<&str>) {
         assert_eq!(resolve(value), (IconSet::Nerd, None));
     }
 
     #[test]
     fn resolve_accepte_le_repli_texte() {
+        assert_eq!(resolve(None), (IconSet::Text, None));
         assert_eq!(resolve(Some("text")), (IconSet::Text, None));
     }
 
     #[test]
-    fn resolve_avertit_sur_une_valeur_inconnue_et_garde_les_icones() {
+    fn resolve_warns_on_unknown_values_and_keeps_text_readable() {
         let (set, warning) = resolve(Some("emoji"));
 
-        assert_eq!(set, IconSet::Nerd);
+        assert_eq!(set, IconSet::Text);
         assert_eq!(
             warning.expect("un avertissement"),
-            "invalid KAJI_ICONS (emoji) — nerd applied"
+            "invalid KAJI_ICONS (emoji) — text applied"
         );
     }
 }

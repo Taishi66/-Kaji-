@@ -70,6 +70,8 @@ clap_complete_nushell = { version = "4", default-features = false }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"], optional = true }
 kaji-core = { version = "0.1.0", path = "../kaji-core" }
 ignore.workspace = true
+quick-xml = { version = "0.41.0", default-features = false }
+image = { version = "0.24.9", default-features = false, features = ["png", "jpeg", "webp"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 anstream = { version = "1", default-features = false, features = ["wincon"] }
@@ -79,6 +81,9 @@ winapi = { workspace = true, features = [
     "winbase",
     "wincon",
 ] }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.186"
 
 [features]
 default = [

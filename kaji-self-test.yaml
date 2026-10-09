@@ -20,6 +20,7 @@ activities:
   - Test the metrics CLI surface (help exits 0, JSON parses, bad window refused)
   - Test the workflow CLI surface (help exits 0, invalid spec exits 2, unknown run exits 1)
   - Test the web tools offline (missing search backend named, private address refused)
+  - Record the terminal onboarding verification separately (requires an interactive terminal)
   - Generate comprehensive test report
 
 parameters:
@@ -156,6 +157,36 @@ instructions: |
   Not covered here: attaching an image by `@mention` (S1). That path lives in the TUI composer,
   which no recipe drives — it is covered by the unit tests of `tui::mentions` and by the
   `vision_replay_golden_test` replay golden.
+
+  Terminal onboarding is also outside recipe control. Record it as NOT RUN unless an actual
+  interactive verification is available; source inspection alone does not validate rendering.
+  Manual check: launch `kaji tui` in an 80 × 24 terminal. The welcome, message invitation,
+  `/help`, file attachment hint and permission mode must fit without scrolling. `/` opens
+  short action descriptions; `/help` shows the complete command list and shortcuts. Resume
+  an existing session and verify that onboarding is not repeated. Automated coverage lives
+  in `tui::tests::startup_fits_without_scrolling_and_keeps_the_mode_and_help_visible` and the
+  palette, loader, Unicode and turn-navigation tests in `tui::ui`.
+  Also check that the permission mode stays named after startup, default rendering needs no
+  Nerd Font, and tokens/agents/thinking have text labels. The command palette shows at most
+  six entries, keeps the selected entry visible at the end of the list, and stacks descriptions
+  in narrow columns with an explicit ellipsis. These are terminal checks, not recipe PASSes.
+  Resume a long Markdown conversation, resize the terminal and change the theme. Existing
+  responses must keep their text, colours and scroll positions; the streaming cursor must
+  disappear when the turn ends. Cache-equivalence and retention-budget checks live in
+  `tui::ui` and `tui::chatcache`; manual render timing is an explicitly ignored test.
+  Complete a file mention with Tab or Enter: the list closes and the next Enter sends.
+  Completing a directory must still expose its children. In approve mode, verify the
+  command and grant scope are readable at 80 × 24 and 40 × 24 without opening details;
+  deny a harmless tool request, then verify it has not executed. Record these checks
+  separately from recipe PASSes. Never weaken the permission mode to make a check pass.
+  Documents are also terminal checks: `/open <path>` previews code/text, UTF-16 text,
+  DOCX/ODT, PPTX slides, cached XLSX cell values, PDF text (requires local pdftotext),
+  and PNG/JPEG/WebP colour thumbnails. Previewing must not send a model request.
+  Close a loading preview, then open another: a late read must not replace the new pane.
+  A FIFO/device must be refused, oversized content limited or explicitly refused, and
+  document macros/formulas never executed. Confirm `/suggest` is off by default;
+  `/suggest on` opts into an extra request, `/suggest off` stops it. While a suggestion
+  loads, editing input or starting a new turn cancels it; failures must clear the hint.
 
   ## Success Criteria
   - Phase success: ≥80% tests pass

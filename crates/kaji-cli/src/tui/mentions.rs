@@ -384,7 +384,9 @@ fn load_image(path: &Path, mime: &str, already_attached: usize) -> Result<Mentio
             &format!("{MAX_IMAGES} images maximum par message"),
         ));
     }
-    let bytes = std::fs::metadata(path)
+    let file = super::fileio::open_regular(path).map_err(|e| refused(&name, &e.to_string()))?;
+    let bytes = file
+        .metadata()
         .map_err(|e| refused(&name, &e.to_string()))?
         .len();
     if bytes > MAX_IMAGE_BYTES {
@@ -397,7 +399,14 @@ fn load_image(path: &Path, mime: &str, already_attached: usize) -> Result<Mentio
             ),
         ));
     }
-    let raw = std::fs::read(path).map_err(|e| refused(&name, &e.to_string()))?;
+    let mut raw = Vec::new();
+    file.take(MAX_IMAGE_BYTES + 1)
+        .read_to_end(&mut raw)
+        .map_err(|e| refused(&name, &e.to_string()))?;
+    if raw.len() as u64 > MAX_IMAGE_BYTES {
+        return Err(refused(&name, "image grew beyond the per-image limit"));
+    }
+    let bytes = raw.len() as u64;
     if mime == GIF_MIME && gif_is_animated(&raw) {
         return Err(refused(
             &name,
@@ -506,7 +515,7 @@ fn skip_sub_blocks(mut cursor: &[u8]) -> Option<&[u8]> {
 /// one bounded read, not its own size in RAM. `budget` caps the whole block,
 /// wrapper included, so the caller's running total stays exact.
 fn render_file(display: &str, path: &Path, budget: usize) -> Option<String> {
-    render_file_from(std::fs::File::open(path).ok()?, display, budget)
+    render_file_from(super::fileio::open_regular(path).ok()?, display, budget)
 }
 
 /// Split from `render_file` so the bounded read can be tested against a

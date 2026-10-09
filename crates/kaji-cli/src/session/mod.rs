@@ -1580,6 +1580,9 @@ impl CliSession {
                                     - depending on the error you may be able to continue",
                                 );
                             }
+                            if !interactive {
+                                return Err(e);
+                            }
                             break;
                         }
                         None => break,
@@ -1597,6 +1600,10 @@ impl CliSession {
 
         if !is_json_mode && !is_stream_json_mode {
             output::flush_markdown_buffer_current_theme(&mut markdown_buffer);
+        }
+
+        if !interactive {
+            headless_response_result(&self.messages)?;
         }
 
         if is_json_mode {
@@ -2570,7 +2577,16 @@ fn log_tool_metrics(message: &Message, messages: &Conversation) {
     }
 }
 
-/// Handle and display an agent error
+fn headless_response_result(messages: &Conversation) -> Result<()> {
+    if let Some(error) = messages
+        .last()
+        .and_then(|message| message.content.iter().find_map(MessageContent::as_error))
+    {
+        anyhow::bail!("{}", error.message);
+    }
+    Ok(())
+}
+
 fn handle_agent_error(e: &anyhow::Error, is_stream_json_mode: bool) {
     let error_msg = e.to_string();
 
@@ -2705,6 +2721,46 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
     use test_case::test_case;
+
+    #[test]
+    fn headless_rejects_a_final_provider_error() {
+        use kaji::conversation::message::MessageErrorKind;
+
+        for kind in [
+            MessageErrorKind::Authentication,
+            MessageErrorKind::InvalidRequest,
+            MessageErrorKind::Network,
+            MessageErrorKind::Refusal,
+        ] {
+            let messages = Conversation::new_unvalidated([
+                Message::user().with_text("run the checks"),
+                Message::assistant().with_error(kind, "provider failed"),
+            ]);
+            assert_eq!(
+                headless_response_result(&messages).unwrap_err().to_string(),
+                "provider failed"
+            );
+        }
+    }
+
+    #[test]
+    fn headless_accepts_recovery_after_an_earlier_provider_error() {
+        use kaji::conversation::message::MessageErrorKind;
+
+        let messages = Conversation::new_unvalidated([
+            Message::assistant().with_error(MessageErrorKind::Network, "earlier failure"),
+            Message::assistant().with_text("checks completed"),
+        ]);
+        assert!(headless_response_result(&messages).is_ok());
+    }
+
+    #[test]
+    fn headless_does_not_treat_ordinary_error_discussion_as_failure() {
+        let messages = Conversation::new_unvalidated([
+            Message::assistant().with_text("Fixed the authentication error.")
+        ]);
+        assert!(headless_response_result(&messages).is_ok());
+    }
 
     #[test]
     fn planner_classification_excludes_user_only_content() {

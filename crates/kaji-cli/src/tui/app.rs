@@ -1,3 +1,4 @@
+use crate::tui::chatcache::ChatRenderCache;
 use crate::tui::editors::{self, EditMode, EditorSpec, EditorState, Launch, LaunchContext};
 use crate::tui::gitstatus::GitStatus;
 use crate::tui::icons::IconSet;
@@ -29,8 +30,7 @@ use std::time::{Duration, Instant};
 const SCROLL_PAGE: u16 = 10;
 const SCROLL_WHEEL: u16 = 3;
 
-/// Combien de temps le sceau garde son mot déplié — le temps de le lire au
-/// démarrage et après un Shift+Tab, pas plus : la barre revient au silence.
+/// Durée de l'accent sur le mode au démarrage et après un Shift+Tab.
 const SEAL_UNFOLD: Duration = Duration::from_secs(4);
 
 /// Rows the file finder ever paints, however many paths matched — the list is
@@ -436,6 +436,7 @@ pub enum Action {
     /// switch itself must not wait on the config write: the redraw right
     /// after this event is what the user is looking at.
     Theme(String),
+    Suggestions(bool),
     /// `/workflow <fichier>` — le chemin déjà résolu contre le répertoire de
     /// la session. L'exécuteur vit dans l'event loop : lui seul tient le
     /// `WorkflowHandle` que les touches du mission-control adressent ensuite.
@@ -477,25 +478,30 @@ impl Command {
 pub const COMMANDS: &[Command] = &[
     Command {
         name: "/sdd",
-        desc: "start an SDD pass (SPEC.md auto-detected, or --spec <file>)",
+        desc: "start a task plan from SPEC.md",
         run: |_| Action::StartPass,
     },
     Command {
         name: "/goal",
-        desc: "goal session — /goal <condition> starts the evaluated loop, /goal alone shows status, /goal clear stops it",
+        desc: "show goal progress — /goal <task> starts work",
         run: |_| Action::GoalStatus,
     },
     Command {
         name: "/files",
-        desc: "(or Ctrl+P) fuzzy file search — ⏎ opens the reader, Tab attaches @",
+        desc: "find a file to read or attach (Ctrl+P)",
         run: |app| {
             app.open_finder();
             Action::None
         },
     },
     Command {
+        name: "/open",
+        desc: "read a file or document — /open <path>",
+        run: |app| app.run_open_command(""),
+    },
+    Command {
         name: "/explorer",
-        desc: "(or Ctrl+E) file explorer — j/k move, ⏎ open, a attach @",
+        desc: "browse project files (Ctrl+E)",
         run: |app| {
             app.toggle_explorer();
             Action::None
@@ -503,7 +509,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/forge",
-        desc: "(or Ctrl+F) forge pane — ↑/↓ select, ⏎ the sheet, x cancel, f (or /forge full) fullscreen",
+        desc: "show active agents (Ctrl+F)",
         run: |app| {
             app.toggle_forge();
             Action::None
@@ -511,22 +517,22 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/workflow",
-        desc: "run a declarative workflow — /workflow <file.yaml>, driven from mission control",
+        desc: "run a saved workflow — /workflow <file.yaml>",
         run: |app| app.run_workflow_command(""),
     },
     Command {
         name: "/edit",
-        desc: "edit a file — /edit <path>[:line], or e from the reader/explorer",
+        desc: "edit a file — /edit <path>[:line]",
         run: |app| app.run_edit_command(""),
     },
     Command {
         name: "/editor",
-        desc: "pick the editor (detected) — /editor <cmd> · reset · mode <auto|suspend|remote|pane|gui>",
+        desc: "choose the app used to edit files",
         run: |app| app.run_editor_command(""),
     },
     Command {
         name: "/spec",
-        desc: "(or F2) show/hide the SPEC panel",
+        desc: "show or hide the task plan (F2)",
         run: |app| {
             app.toggle_spec_panel();
             Action::None
@@ -534,7 +540,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/think",
-        desc: "(or F3) show/hide the model's reasoning (思考中)",
+        desc: "show or hide the model's reasoning (F3)",
         run: |app| {
             app.toggle_thinking();
             Action::None
@@ -542,33 +548,38 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/cost",
-        desc: "token/cost usage — `/cost [models|day|week|month|cache|projection]`, budgets via KAJI_BUDGET_5H / KAJI_BUDGET_7J / KAJI_BUDGET_MONTHLY_USD",
+        desc: "show token usage and cost",
         run: |_| Action::Cost(report::CostView::Windows),
     },
     Command {
         name: "/context",
-        desc: "context breakdown by category",
+        desc: "show what is included in the model's context",
         run: |_| Action::Context,
     },
     Command {
         name: "/docker",
-        desc: "list the running containers",
+        desc: "list running containers",
         run: |_| Action::Docker,
     },
     Command {
         name: "/checkpoints",
-        desc: "list the snapshots taken before each turn",
+        desc: "list saved snapshots — /restore <id> restores one",
         run: |_| Action::Checkpoints,
     },
     Command {
         name: "/theme",
-        desc: "pick a theme (live preview) — /theme <name> · next",
+        desc: "choose colours with a live preview",
         run: |app| app.run_theme_command(""),
     },
     Command {
         name: "/help",
-        desc: "show the help again",
+        desc: "show commands and keyboard shortcuts",
         run: |_| Action::Help,
+    },
+    Command {
+        name: "/suggest",
+        desc: "optional next-prompt suggestions — /suggest on|off",
+        run: |app| app.run_suggest_command(""),
     },
     Command {
         name: "/quit",
@@ -744,6 +755,7 @@ pub struct App {
     /// Cycle de complétion d'argument, voir [`ArgCycle`].
     arg_completion: Option<ArgCycle>,
     pub chat: Vec<ChatLine>,
+    pub(super) chat_cache: RefCell<ChatRenderCache>,
     pub status: String,
     pub turn_active: bool,
     /// True while the setup future (`Agent::reply` up to its first yield) is
@@ -798,11 +810,9 @@ pub struct App {
     /// cycles: the badge must update on the redraw that follows the keypress,
     /// not after the agent round-trip the event loop then performs.
     pub kaji_mode: KajiMode,
-    /// Jusqu'à quand le sceau de la barre d'état déplie le mot du mode —
-    /// `None` au repos. Posé par [`App::unfold_seal`] au démarrage et à chaque
-    /// changement de mode.
+    /// Deadline for the brief emphasis on the permission mode.
     seal_unfolded_until: Option<Instant>,
-    /// `KAJI_ICONS` — env > config, défaut `Nerd`. Posé par `event_loop` au
+    /// `KAJI_ICONS` — env > config, défaut `Text`. Posé par `event_loop` au
     /// démarrage : `App::new` ne lit pas la config.
     pub icons: IconSet,
     /// Checkpoint id awaiting y/n confirmation from `/restore <id>` — mirrors
@@ -883,6 +893,9 @@ pub struct App {
     /// loop (best-effort, off critical path); a generation failure just
     /// clears both.
     pub suggestion_loading: bool,
+    pub suggestions_enabled: bool,
+    viewer_request: Option<crate::tui::viewer::Request>,
+    viewer_request_id: u64,
     /// Set once in `run()` from the `KAJI_MOUSE` kill-switch — defaults to
     /// `false` here so the ~60 existing `App::new` call sites (mostly
     /// tests) keep the legacy arrow-scroll behavior unless the caller
@@ -997,6 +1010,7 @@ impl App {
             input_cursor: 0,
             arg_completion: None,
             chat: Vec::new(),
+            chat_cache: RefCell::new(ChatRenderCache::default()),
             status: String::new(),
             turn_active: false,
             turn_pending: false,
@@ -1020,7 +1034,7 @@ impl App {
             approval_detail: None,
             kaji_mode: KajiMode::default(),
             seal_unfolded_until: None,
-            icons: IconSet::Nerd,
+            icons: IconSet::Text,
             pending_restore: None,
             pending_restore_files_only: false,
             pending_forge_cancel: None,
@@ -1039,6 +1053,9 @@ impl App {
             palette_selected: 0,
             suggestion: None,
             suggestion_loading: false,
+            suggestions_enabled: false,
+            viewer_request: None,
+            viewer_request_id: 0,
             mouse_enabled: false,
             validate_buffer: String::new(),
             last_agent_msg_id: None,
@@ -1693,6 +1710,7 @@ impl App {
             .chars()
             .count();
         self.update_mention_matches();
+        self.mention_suppressed = !completion.ends_with('/');
     }
 
     /// Opens the fuzzy file finder (`Ctrl+P`, `/files`). It reads the very
@@ -2047,21 +2065,85 @@ impl App {
     /// directory, a missing file or an unreadable one is reported as a system
     /// line instead of opening an empty pane.
     pub fn open_viewer(&mut self, path: &str) {
-        let resolved = crate::tui::mentions::resolve(path, &self.working_dir);
-        match crate::tui::viewer::load(path, &resolved) {
-            Ok(viewer) => {
+        self.queue_viewer(path, 0, false);
+        self.viewer = Some(crate::tui::viewer::Viewer {
+            path: path.to_owned(),
+            lines: vec!["Loading preview… · Esc closes".to_owned()],
+            scroll: 0,
+            truncated: false,
+            binary: true,
+            image: None,
+            layout: Default::default(),
+        });
+        self.forge_sheet_open = None;
+        self.focus = Focus::Viewer;
+    }
+
+    fn run_open_command(&mut self, path: &str) -> Action {
+        if path.is_empty() {
+            self.open_finder();
+        } else {
+            let quoted = shlex::split(path)
+                .filter(|parts| parts.len() == 1)
+                .and_then(|mut parts| parts.pop());
+            let path = quoted.as_deref().unwrap_or(path);
+            self.open_viewer(path.trim_start_matches('@'));
+        }
+        Action::None
+    }
+
+    fn queue_viewer(&mut self, display: &str, scroll: usize, reload: bool) {
+        self.viewer_request_id = self.viewer_request_id.wrapping_add(1);
+        self.viewer_request = Some(crate::tui::viewer::Request {
+            id: self.viewer_request_id,
+            display: display.to_owned(),
+            path: crate::tui::mentions::resolve(display, &self.working_dir),
+            scroll,
+            reload,
+        });
+    }
+
+    pub fn take_viewer_request(&mut self) -> Option<crate::tui::viewer::Request> {
+        self.viewer_request.take()
+    }
+
+    pub fn on_viewer_loaded(&mut self, loaded: crate::tui::viewer::Loaded) {
+        if loaded.request.id != self.viewer_request_id
+            || self
+                .viewer
+                .as_ref()
+                .is_none_or(|v| v.path != loaded.request.display)
+        {
+            return;
+        }
+        match loaded.result {
+            Ok(mut viewer) => {
+                viewer.scroll = loaded
+                    .request
+                    .scroll
+                    .min(viewer.max_scroll(self.viewer_viewport()));
                 self.viewer = Some(viewer);
-                self.forge_sheet_open = None;
-                self.focus = Focus::Viewer;
             }
-            Err(e) => {
-                self.focus = Focus::Composer;
-                self.push_system(&format!("lecture impossible : {e}"));
+            Err(error) => {
+                if !loaded.request.reload {
+                    self.close_viewer();
+                }
+                self.push_system(&format!("lecture impossible : {error}"));
             }
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn complete_viewer_load(&mut self) {
+        if let Some(request) = self.take_viewer_request() {
+            let result = crate::tui::viewer::load(&request.display, &request.path);
+            self.on_viewer_loaded(crate::tui::viewer::Loaded { request, result });
+        }
+    }
+
     pub fn close_viewer(&mut self) {
+        self.viewer_request = None;
+        self.viewer_request_id = self.viewer_request_id.wrapping_add(1);
         self.viewer = None;
         self.forge_sheet_open = None;
         self.focus = Focus::Composer;
@@ -2143,22 +2225,6 @@ impl App {
         (path.to_string(), Some(line))
     }
 
-    /// Le mécanisme partagé par `on_file_edited` et `reload_viewer` : relit
-    /// `path` sous le nom d'affichage `display`, clampe le scroll dans le
-    /// nouveau contenu. Seul ce que chaque appelant en dit au chat diffère.
-    fn reload_viewer_content(
-        &mut self,
-        display: &str,
-        path: &std::path::Path,
-        scroll: usize,
-    ) -> std::result::Result<(), String> {
-        let viewport = self.viewer_viewport();
-        let mut reloaded = crate::tui::viewer::load(display, path).map_err(|e| e.to_string())?;
-        reloaded.scroll = scroll.min(reloaded.max_scroll(viewport));
-        self.viewer = Some(reloaded);
-        Ok(())
-    }
-
     /// The editor had the terminal and the file may have changed under the
     /// panes: the viewer holds a snapshot taken at open time, the explorer a
     /// listing that a brand new file is missing from.
@@ -2167,7 +2233,7 @@ impl App {
             crate::tui::mentions::resolve(&viewer.path, &self.working_dir) == path
         });
         if let Some((display, scroll)) = stale.map(|v| (v.path.clone(), v.scroll)) {
-            let _ = self.reload_viewer_content(&display, path, scroll);
+            self.queue_viewer(&display, scroll, true);
         }
         if let Some(explorer) = self.explorer.as_mut() {
             explorer.refresh();
@@ -2190,11 +2256,8 @@ impl App {
         else {
             return;
         };
-        let resolved = crate::tui::mentions::resolve(&display, &self.working_dir);
-        match self.reload_viewer_content(&display, &resolved, scroll) {
-            Ok(()) => self.push_system(&format!("{} {display} reloaded", theme::VIEWER_GLYPH)),
-            Err(e) => self.push_system(&format!("lecture impossible : {e}")),
-        }
+        self.queue_viewer(&display, scroll, true);
+        self.push_system(&format!("{} {display} reloading…", theme::VIEWER_GLYPH));
         if let Some(explorer) = self.explorer.as_mut() {
             explorer.refresh();
         }
@@ -2262,6 +2325,14 @@ impl App {
             // read here reaches an editor, without kaji growing one. L'éditeur
             // s'ouvre là où on lisait : la première ligne visible.
             KeyCode::Char('e') if !ctrl => {
+                if self
+                    .viewer
+                    .as_ref()
+                    .is_some_and(|viewer| !viewer.editable())
+                {
+                    self.push_system("This document preview is read-only.");
+                    return Action::None;
+                }
                 let Some((path, scroll)) = self
                     .viewer
                     .as_ref()
@@ -2950,9 +3021,9 @@ impl App {
     pub fn toggle_thinking(&mut self) {
         self.show_thinking = !self.show_thinking;
         let msg = if self.show_thinking {
-            "思考中 shown — /think or F3 to hide"
+            "reasoning shown — /think or F3 to hide"
         } else {
-            "思考中 hidden — /think or F3 to show"
+            "reasoning hidden — /think or F3 to show"
         };
         self.push_system(msg);
     }
@@ -3249,8 +3320,7 @@ impl App {
         self.kaji_mode
     }
 
-    /// Déplie le mot du mode à côté du sceau : le kanji seul ne se traduit pas
-    /// tout seul la première fois qu'on le voit.
+    /// Briefly emphasize the permission mode at startup and after a change.
     pub fn unfold_seal(&mut self) {
         self.seal_unfolded_until = Some(Instant::now() + SEAL_UNFOLD);
     }
@@ -3320,7 +3390,9 @@ impl App {
     /// y/n prompt and any pre-restore chatter are dropped too; the honest
     /// success message is pushed by the caller *after* this call.
     pub fn reseed_chat(&mut self, conversation: &Conversation) {
+        self.clear_suggestion();
         self.chat.clear();
+        self.chat_cache.borrow_mut().clear();
         self.reset_agent_merge_ids();
         for message in conversation.messages() {
             self.apply_agent_event(&AgentEvent::Message(message.clone()));
@@ -3961,8 +4033,14 @@ impl App {
                     if let Some(arg) = theme_command_arg(&text) {
                         return self.run_theme_command(arg);
                     }
+                    if let Some(arg) = slash_command_arg(&text, "/suggest") {
+                        return self.run_suggest_command(arg);
+                    }
                     if let Some(arg) = editor_command_arg(&text) {
                         return self.run_editor_command(arg);
+                    }
+                    if let Some(arg) = slash_command_arg(&text, "/open") {
+                        return self.run_open_command(arg);
                     }
                     if let Some(arg) = edit_command_arg(&text) {
                         return self.run_edit_command(arg);
@@ -4065,6 +4143,38 @@ impl App {
                 Action::None
             }
         }
+    }
+
+    fn run_suggest_command(&mut self, arg: &str) -> Action {
+        match arg {
+            "on" | "off" => {
+                self.suggestions_enabled = arg == "on";
+                self.clear_suggestion();
+                self.push_system(if self.suggestions_enabled {
+                    "suggestions: on — extra model requests after replies; Tab accepts"
+                } else {
+                    "suggestions: off — no extra model request"
+                });
+                Action::Suggestions(self.suggestions_enabled)
+            }
+            "" => {
+                let state = if self.suggestions_enabled {
+                    "on"
+                } else {
+                    "off"
+                };
+                self.push_system(&format!("suggestions: {state} — /suggest on|off"));
+                Action::None
+            }
+            _ => {
+                self.push_system("usage: /suggest on|off");
+                Action::None
+            }
+        }
+    }
+
+    pub fn suggestions_ready(&self) -> bool {
+        self.suggestions_enabled && !self.turn_had_error && self.input.is_empty()
     }
 
     pub fn push_system(&mut self, text: &str) {
@@ -4178,6 +4288,9 @@ impl App {
     }
 
     fn apply_message(&mut self, message: &Message) {
+        if message.is_turn_context() {
+            return;
+        }
         if message.role == Role::Assistant {
             self.apply_assistant_message(message);
         } else if message.role == Role::User {
@@ -4413,6 +4526,8 @@ fn forge_sheet(task: &forge::ForgeTask, scroll: usize) -> crate::tui::viewer::Vi
     }
     crate::tui::viewer::Viewer {
         path: forge_sheet_title(&task.description),
+        image: None,
+        layout: Default::default(),
         lines: lines
             .iter()
             .map(|line| sanitize_for_display(line))
@@ -4445,6 +4560,8 @@ fn workflow_agent_sheet(
     }
     crate::tui::viewer::Viewer {
         path: forge_sheet_title(&format!("{stage}.{}", status.name)),
+        image: None,
+        layout: Default::default(),
         lines: lines
             .iter()
             .map(|line| sanitize_for_display(line))
@@ -4532,6 +4649,78 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn suggestions_are_opt_in_and_invalid_commands_do_not_send_prompts() {
+        let mut app = App::new(None);
+        assert!(!app.suggestions_ready());
+        assert_eq!(submit(&mut app, "/suggest on"), Action::Suggestions(true));
+        assert!(app.suggestions_ready());
+        app.suggestion = Some("stale".to_owned());
+        app.suggestion_loading = true;
+        assert_eq!(submit(&mut app, "/suggest off"), Action::Suggestions(false));
+        assert!(!app.suggestions_ready());
+        assert!(app.suggestion.is_none() && !app.suggestion_loading);
+        assert_eq!(submit(&mut app, "/suggest invalid"), Action::None);
+        assert!(last_line(&app).contains("usage:"));
+    }
+
+    #[test]
+    fn open_accepts_a_path_with_spaces_without_sending_a_prompt() {
+        let (mut app, dir) = app_with_mention_fixture();
+        std::fs::write(dir.path().join("my note.txt"), "local document").unwrap();
+        assert_eq!(submit(&mut app, "/open my note.txt"), Action::None);
+        assert!(app.viewer.as_ref().unwrap().lines[0].contains("Loading"));
+        app.complete_viewer_load();
+        assert_eq!(app.viewer.as_ref().unwrap().lines, ["local document"]);
+        assert!(app.chat.is_empty());
+        app.close_viewer();
+        assert_eq!(submit(&mut app, "/open \"my note.txt\""), Action::None);
+        app.complete_viewer_load();
+        assert_eq!(app.viewer.as_ref().unwrap().lines, ["local document"]);
+    }
+
+    #[test]
+    fn late_previews_cannot_reopen_a_closed_pane_or_replace_a_newer_read() {
+        let (mut app, dir) = app_with_mention_fixture();
+        app.open_viewer("README.md");
+        let old = app.take_viewer_request().unwrap();
+        app.close_viewer();
+        app.open_viewer("README.md");
+        let current = app.take_viewer_request().unwrap();
+        let result = crate::tui::viewer::load("README.md", &dir.path().join("README.md"));
+        app.on_viewer_loaded(crate::tui::viewer::Loaded {
+            request: old,
+            result,
+        });
+        assert!(app.viewer.as_ref().unwrap().lines[0].contains("Loading"));
+        app.close_viewer();
+        let result = crate::tui::viewer::load("README.md", &dir.path().join("README.md"));
+        app.on_viewer_loaded(crate::tui::viewer::Loaded {
+            request: current,
+            result,
+        });
+        assert!(app.viewer.is_none());
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_last_readable_snapshot() {
+        let (mut app, dir) = app_with_open_viewer();
+        std::fs::remove_file(dir.path().join("long.txt")).unwrap();
+        app.on_event(&key(KeyCode::Char('r')));
+        app.complete_viewer_load();
+        assert_eq!(app.viewer.as_ref().unwrap().lines.len(), 200);
+        assert!(last_line(&app).contains("lecture impossible"));
+    }
+
+    #[test]
+    fn a_document_preview_does_not_open_a_text_editor_on_its_container() {
+        let mut app = App::new(None);
+        app.open_viewer("document.docx");
+        app.viewer.as_mut().unwrap().binary = false;
+        assert_eq!(app.on_event(&key(KeyCode::Char('e'))), Action::None);
+        assert!(last_line(&app).contains("read-only"));
+    }
+
     use super::*;
     use kaji::agents::{SubagentTaskSnapshot, SubagentTaskStatus};
     use kaji::conversation::message::{Message, MessageErrorKind};
@@ -5285,6 +5474,11 @@ mod tests {
         }
         assert_eq!(app.on_event(&key(KeyCode::Tab)), Action::None);
         assert_eq!(app.input, "@README.md");
+        assert!(!app.mention_dropdown_visible());
+        assert_eq!(
+            app.on_event(&key(KeyCode::Enter)),
+            Action::Submit("@README.md".to_string())
+        );
     }
 
     #[test]
@@ -5296,6 +5490,11 @@ mod tests {
         let action = app.on_event(&key(KeyCode::Enter));
         assert_eq!(action, Action::None, "Enter confirms the path, no submit");
         assert_eq!(app.input, "@README.md");
+        assert!(!app.mention_dropdown_visible());
+        assert_eq!(
+            app.on_event(&key(KeyCode::Enter)),
+            Action::Submit("@README.md".to_string())
+        );
     }
 
     #[test]
@@ -5635,6 +5834,7 @@ mod tests {
         let (mut app, dir) = app_with_mention_fixture();
         std::fs::write(dir.path().join("long.txt"), "x\n".repeat(200)).unwrap();
         app.open_viewer("long.txt");
+        app.complete_viewer_load();
         app.viewer_area.set(Rect {
             x: 60,
             y: 1,
@@ -5852,6 +6052,7 @@ mod tests {
 
         std::fs::write(dir.path().join("long.txt"), "court\n").unwrap();
         app.on_file_edited(&dir.path().join("long.txt"));
+        app.complete_viewer_load();
 
         let viewer = app.viewer.as_ref().expect("le lecteur reste ouvert");
         assert_eq!(viewer.lines, vec!["court"]);
@@ -5913,6 +6114,7 @@ mod tests {
     fn opening_a_directory_reports_it_instead_of_opening_a_pane() {
         let (mut app, _dir) = app_with_mention_fixture();
         app.open_viewer("src/tui/");
+        app.complete_viewer_load();
         assert!(app.viewer.is_none());
         assert_eq!(app.focus, Focus::Composer);
         assert!(app
@@ -6340,11 +6542,12 @@ mod tests {
 
         std::fs::write(dir.path().join("long.txt"), "court\n").unwrap();
         assert_eq!(app.on_event(&key(KeyCode::Char('r'))), Action::None);
+        app.complete_viewer_load();
 
         let viewer = app.viewer.as_ref().expect("le lecteur reste ouvert");
         assert_eq!(viewer.lines, vec!["court"]);
         assert_eq!(viewer.scroll, 0, "scroll ramené dans le nouveau fichier");
-        assert!(last_line(&app).contains("reloaded"), "{}", last_line(&app));
+        assert!(last_line(&app).contains("reloading"), "{}", last_line(&app));
     }
 
     /// Un lancement non bloquant a pu toucher plus que le seul fichier
@@ -6558,6 +6761,8 @@ mod tests {
         );
 
         app.open_viewer("README.md");
+
+        app.complete_viewer_load();
         assert_eq!(app.focus, Focus::Viewer);
         app.on_event(&ctrl_key(KeyCode::Char('o')));
         assert_eq!(app.focus, Focus::Composer);
@@ -6747,7 +6952,7 @@ mod tests {
         assert_eq!(app.palette_matches().len(), COMMANDS.len());
         app.on_event(&key(KeyCode::Char('s')));
         let names: Vec<_> = app.palette_matches().iter().map(|c| c.name).collect();
-        assert_eq!(names, vec!["/sdd", "/spec"]);
+        assert_eq!(names, vec!["/sdd", "/spec", "/suggest"]);
         assert!(
             !App::new(None).palette_visible(),
             "input vide → pas de palette"
@@ -6763,9 +6968,11 @@ mod tests {
         app.on_event(&key(KeyCode::Down));
         assert_eq!(app.palette_selected, 1);
         app.on_event(&key(KeyCode::Down));
+        assert_eq!(app.palette_selected, 2);
+        app.on_event(&key(KeyCode::Down));
         assert_eq!(app.palette_selected, 0, "cyclique en bas");
         app.on_event(&key(KeyCode::Up));
-        assert_eq!(app.palette_selected, 1, "cyclique en haut");
+        assert_eq!(app.palette_selected, 2, "cyclique en haut");
         app.on_event(&key(KeyCode::Char('d')));
         assert_eq!(
             app.palette_selected, 0,
@@ -8260,7 +8467,7 @@ mod tests {
         assert!(app
             .chat
             .iter()
-            .any(|l| matches!(l.sender, Sender::System) && l.text.contains("思考中")));
+            .any(|l| matches!(l.sender, Sender::System) && l.text.contains("reasoning")));
 
         for c in "/think".chars() {
             app.on_event(&key(KeyCode::Char(c)));
@@ -10284,6 +10491,8 @@ mod tests {
         assert!(app.viewer.as_ref().expect("fiche").path.contains("auditer"));
 
         app.open_viewer("note.md");
+
+        app.complete_viewer_load();
         app.refresh_forge_sheet();
 
         let viewer = app.viewer.as_ref().expect("le fichier");
