@@ -23,6 +23,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -36,6 +37,7 @@ const MAX_COMPLETIONS: usize = 8;
 const MAX_LISTING_SCAN: usize = 500;
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_BYTES: usize = 256 * 1024;
+const MAX_REFERENCES: usize = 32;
 const MAX_DIR_ENTRIES: usize = 200;
 /// Caps S1 : au-delà, l'image n'est pas attachée et le message part quand
 /// même — ce sont les deux limites qu'un provider vision fait respecter de
@@ -309,17 +311,28 @@ pub struct MentionExpansion {
 /// never exceeds `MAX_TOTAL_BYTES`; images have their own caps and never
 /// borrow from that budget.
 pub fn expand_mentions(text: &str, cwd: &Path) -> MentionExpansion {
+    expand_cancellable(text, cwd, &AtomicBool::new(false))
+}
+
+pub(super) fn expand_cancellable(
+    text: &str,
+    cwd: &Path,
+    cancelled: &AtomicBool,
+) -> MentionExpansion {
     let mut attachments = String::new();
     let mut total = 0usize;
     let mut images = Vec::new();
     let mut notices = Vec::new();
-    for token in text.split_whitespace() {
-        let Some(raw) = token.strip_prefix('@') else {
-            continue;
-        };
-        if raw.is_empty() {
-            continue;
+    let mut budget_notice = false;
+    for (rank, raw) in mention_paths(text).enumerate() {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
         }
+        if rank >= MAX_REFERENCES {
+            notices.push(format!("At most {MAX_REFERENCES} file references can be attached; remaining references were skipped."));
+            break;
+        }
+        let raw = raw.as_ref();
         let path = resolve(raw, cwd);
         if let Some(mime) = image_mime(&path) {
             if path.is_file() {
@@ -331,14 +344,41 @@ pub fn expand_mentions(text: &str, cwd: &Path) -> MentionExpansion {
             }
         }
         if total >= MAX_TOTAL_BYTES {
+            if !budget_notice {
+                notices.push("Text attachment budget exhausted (256 KiB); remaining text files were skipped.".to_owned());
+                budget_notice = true;
+            }
             continue;
         }
         let remaining = MAX_TOTAL_BYTES - total;
         let block = if path.is_file() {
-            render_file(raw, &path, MAX_FILE_BYTES.min(remaining))
+            let budget = MAX_FILE_BYTES.min(remaining);
+            if super::documents::is_text_document(&path) {
+                match render_document(raw, &path, budget, cancelled) {
+                    Ok((block, truncated)) => {
+                        if truncated {
+                            notices.push(format!(
+                                "{raw} — attached text truncated to fit the attachment budget"
+                            ));
+                        }
+                        Some(block)
+                    }
+                    Err(error) => {
+                        notices.push(format!("{raw} — not attached: {error}"));
+                        None
+                    }
+                }
+            } else {
+                render_file(raw, &path, budget)
+            }
         } else if path.is_dir() {
             render_dir(raw, &path, remaining)
         } else {
+            if path.exists() {
+                notices.push(format!(
+                    "{raw} — not attached: only regular files and directories are supported"
+                ));
+            }
             None
         };
         if let Some(block) = block {
@@ -356,6 +396,108 @@ pub fn expand_mentions(text: &str, cwd: &Path) -> MentionExpansion {
         images,
         notices,
     }
+}
+
+pub(super) fn mention_token(path: &str) -> String {
+    if path.contains(char::is_whitespace) || path.starts_with(['\'', '"']) {
+        format!("@\"{}\"", path.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        format!("@{path}")
+    }
+}
+
+fn mention_paths(text: &str) -> impl Iterator<Item = std::borrow::Cow<'_, str>> {
+    let mut remaining = text;
+    std::iter::from_fn(move || loop {
+        remaining = remaining.trim_start();
+        if remaining.is_empty() {
+            return None;
+        }
+        if let Some(quoted) = remaining
+            .strip_prefix('@')
+            .filter(|s| s.starts_with(['\'', '"']))
+        {
+            let quote = quoted.chars().next().expect("quoted mention");
+            let mut escaped = false;
+            let end = quoted.char_indices().skip(1).find_map(|(index, glyph)| {
+                if escaped {
+                    escaped = false;
+                } else if glyph == '\\' && quote == '"' {
+                    escaped = true;
+                } else if glyph == quote {
+                    return Some(index + 1);
+                }
+                None
+            });
+            let end = end?;
+            let (token, rest) = quoted.split_at(end);
+            remaining = rest;
+            if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+                remaining = rest
+                    .split_once(char::is_whitespace)
+                    .map_or("", |(_, tail)| tail);
+                continue;
+            }
+            let decoded = shlex::split(token)
+                .and_then(|mut parts| (parts.len() == 1).then(|| parts.remove(0)));
+            if let Some(path) = decoded.filter(|s| !s.is_empty()) {
+                return Some(std::borrow::Cow::Owned(path));
+            }
+            continue;
+        }
+        let end = remaining
+            .find(char::is_whitespace)
+            .unwrap_or(remaining.len());
+        let (token, rest) = remaining.split_at(end);
+        remaining = rest;
+        if let Some(path) = token
+            .strip_prefix('@')
+            .filter(|s| !s.is_empty() && !s.starts_with(['\'', '"']))
+        {
+            return Some(std::borrow::Cow::Borrowed(path));
+        }
+    })
+}
+
+fn attribute_path(path: &str) -> String {
+    path.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\n', "&#10;")
+        .replace('\r', "&#13;")
+}
+
+fn render_document(
+    display: &str,
+    path: &Path,
+    budget: usize,
+    cancelled: &AtomicBool,
+) -> anyhow::Result<(String, bool)> {
+    let display = attribute_path(display);
+    let open = format!("\n<attached-file path=\"{display}\">\n");
+    let close = "\n</attached-file>\n";
+    const MARKER: &str = "\n… (truncated)";
+    let content_budget = budget
+        .checked_sub(open.len() + close.len())
+        .ok_or_else(|| anyhow::anyhow!("attachment budget exhausted"))?;
+    if content_budget < MARKER.len() {
+        anyhow::bail!("attachment budget exhausted");
+    }
+    let file = super::fileio::open_regular(path)?;
+    let Some(super::documents::Document::Text {
+        mut text,
+        truncated,
+    }) = super::documents::load(path, file, cancelled)?
+    else {
+        anyhow::bail!("no extractable document text");
+    };
+    let truncated = truncated || text.len() > content_budget;
+    if truncated {
+        truncate_on_char_boundary(&mut text, content_budget - MARKER.len());
+        text.push_str(MARKER);
+    }
+    Ok((format!("{open}{text}{close}"), truncated))
 }
 
 /// The mime type an image mention would carry, from its extension alone —
@@ -522,6 +664,7 @@ fn render_file(display: &str, path: &Path, budget: usize) -> Option<String> {
 /// reader that refuses to serve more than the budget — the file-based test
 /// only ever sees the trimmed output, which a full read would also produce.
 fn render_file_from(reader: impl Read, display: &str, budget: usize) -> Option<String> {
+    let display = attribute_path(display);
     let open = format!("\n<attached-file path=\"{display}\">\n");
     let close = "\n</attached-file>\n";
     let content_budget = budget.checked_sub(open.len() + close.len())?;
@@ -559,6 +702,7 @@ fn truncate_on_char_boundary(s: &mut String, max: usize) {
 }
 
 fn render_dir(display: &str, path: &Path, budget: usize) -> Option<String> {
+    let display = attribute_path(display);
     const MARKER: &str = "… (listing truncated)\n";
     let open = format!("\n<attached-directory path=\"{display}\">\n");
     let close = "</attached-directory>\n";
@@ -622,6 +766,158 @@ fn render_dir(display: &str, path: &Path, budget: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_document(path: &Path, entries: &[(&str, &str)]) {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        for (name, text) in entries {
+            writer
+                .start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(text.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    fn office_mentions_attach_extracted_text_with_sparse_cells() {
+        let dir = tempfile::tempdir().unwrap();
+        for (file, entries) in [
+            ("word.docx", vec![("word/document.xml", "<w:document><w:p><w:r><w:t>WORD_PAYLOAD</w:t></w:r></w:p></w:document>")]),
+            ("text.odt", vec![("content.xml", "<office:text><text:p>ODT_PAYLOAD</text:p></office:text>")]),
+            ("slides.pptx", vec![("ppt/slides/slide1.xml", "<a:p><a:r><a:t>SLIDE_PAYLOAD</a:t></a:r></a:p>")]),
+            ("cells.xlsx", vec![("xl/worksheets/sheet1.xml", "<worksheet><row><c r='D1' t='inlineStr'><is><t>CELL_PAYLOAD</t></is></c></row></worksheet>")]),
+        ] {
+            write_document(&dir.path().join(file), &entries);
+        }
+        let expansion = expand_mentions(
+            "read @word.docx @text.odt @slides.pptx @cells.xlsx",
+            dir.path(),
+        );
+        for expected in [
+            "WORD_PAYLOAD",
+            "ODT_PAYLOAD",
+            "SLIDE_PAYLOAD",
+            "D1: CELL_PAYLOAD",
+        ] {
+            assert!(
+                expansion.text.contains(expected),
+                "{expected}: {}",
+                expansion.text
+            );
+        }
+        assert!(expansion.notices.is_empty(), "{:?}", expansion.notices);
+        assert!(!expansion.text.contains("binary file"));
+    }
+
+    #[test]
+    fn document_mentions_share_existing_budgets_and_report_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let xml = format!(
+            "<w:document><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:document>",
+            "é".repeat(70_000)
+        );
+        for rank in 0..5 {
+            write_document(
+                &dir.path().join(format!("long{rank}.docx")),
+                &[("word/document.xml", &xml)],
+            );
+        }
+        let input = "@long0.docx @long1.docx @long2.docx @long3.docx @long4.docx";
+        let expansion = expand_mentions(input, dir.path());
+        assert!(expansion.text.len() - input.len() - 1 <= MAX_TOTAL_BYTES);
+        assert!(!expansion.text.contains('\u{fffd}'));
+        assert!(expansion.text.contains("… (truncated)"));
+        assert!(expansion
+            .notices
+            .iter()
+            .any(|notice| notice.contains("truncated")));
+        assert!(expansion
+            .notices
+            .iter()
+            .any(|notice| notice.contains("budget exhausted")));
+    }
+
+    #[test]
+    fn hostile_documents_are_refused_without_inlining_their_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_document(&dir.path().join("dtd.docx"), &[("word/document.xml", "<!DOCTYPE document [<!ENTITY secret SYSTEM 'file:///fake-secret'>]><w:t>&secret;</w:t>")]);
+        let huge = "x".repeat(512 * 1024 + 1);
+        write_document(
+            &dir.path().join("huge.docx"),
+            &[("word/document.xml", &huge)],
+        );
+        let input = "@dtd.docx @huge.docx";
+        let expansion = expand_mentions(input, dir.path());
+        assert_eq!(expansion.text, input);
+        assert_eq!(expansion.notices.len(), 2);
+        assert!(expansion
+            .notices
+            .iter()
+            .all(|notice| notice.contains("not attached")));
+        assert!(expansion.notices[0].contains("DTD"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quoted_paths_round_trip_without_shell_expansion_and_escape_attributes() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = [
+            "notes du jour.docx",
+            "a 'quote' \"double\" \\ path.docx",
+            "$(touch NEVER_EXECUTE).docx",
+            "a&<tag>.txt",
+        ];
+        for name in names {
+            if name.ends_with("docx") {
+                write_document(
+                    &dir.path().join(name),
+                    &[("word/document.xml", "<w:t>QUOTED_CONTENT</w:t>")],
+                );
+            } else {
+                std::fs::write(dir.path().join(name), "ESCAPED_PATH_CONTENT").unwrap();
+            }
+            let token = mention_token(name);
+            assert_eq!(mention_paths(&token).collect::<Vec<_>>(), [name]);
+            let expansion = expand_mentions(&token, dir.path());
+            assert!(
+                expansion.text.contains("CONTENT"),
+                "{} {:?}",
+                expansion.text,
+                expansion.notices
+            );
+            assert!(expansion.notices.is_empty());
+        }
+        let expansion = expand_mentions("@a&<tag>.txt", dir.path());
+        assert!(expansion.text.contains("path=\"a&amp;&lt;tag&gt;.txt\""));
+        assert!(!dir.path().join("NEVER_EXECUTE").exists());
+        assert!(mention_paths("mail@host @\"unterminated").next().is_none());
+        assert!(mention_paths("@\"unterminated @a&<tag>.txt")
+            .next()
+            .is_none());
+        assert_eq!(
+            mention_paths("@\"bad name\"suffix @notes.md").collect::<Vec<_>>(),
+            ["notes.md"]
+        );
+    }
+
+    #[test]
+    fn reference_count_and_cancellation_bound_submitted_context() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "SOURCE_CONTENT").unwrap();
+        let input = "@a.txt ".repeat(MAX_REFERENCES + 10);
+        let expansion = expand_mentions(&input, dir.path());
+        assert_eq!(
+            expansion.text.matches("<attached-file path=").count(),
+            MAX_REFERENCES
+        );
+        assert!(expansion
+            .notices
+            .iter()
+            .any(|notice| notice.contains("remaining references")));
+        let cancelled = expand_cancellable("@a.txt", dir.path(), &AtomicBool::new(true));
+        assert_eq!(cancelled.text, "@a.txt");
+    }
 
     #[test]
     fn active_fragment_detects_trailing_mention() {

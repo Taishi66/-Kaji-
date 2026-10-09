@@ -49,8 +49,13 @@ Office previews show extracted text, not page layout. Spreadsheet addresses are
 retained; formulas and macros are never run. Long paragraphs reflow with the
 terminal width using a bounded cached layout. Unsupported formats or exceeded
 budgets show a clear notice. `/open` reads locally and does not attach or send.
-`@` attachments still support text and still images; attaching Office/PDF contents
-as model context is a separate pending step.
+`@` attachments support text, still images and extracted Office/PDF text;
+use `@"notes du jour.docx"` for a filename with spaces. Document preparation runs
+outside the input loop; Esc cancels it before sending. Text attachments retain
+at most 64 KiB/file and 256 KiB total, with visible refusal/truncation notices.
+Preparation uses one worker with one queued request, at most 32 references and a
+six-second deadline. PDF attachments share the first-20-page text extraction;
+Office styles, layout and formula/date formatting are not reproduced.
 
 Preview reads run on a single worker. Text is capped at 256 KiB and 4,096 lines;
 Office/PDF inputs at 8 MiB, Office XML at 512 KiB, images at 5 MiB and 4 megapixels.

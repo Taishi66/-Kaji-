@@ -187,6 +187,13 @@ instructions: |
   document macros/formulas never executed. Confirm `/suggest` is off by default;
   `/suggest on` opts into an extra request, `/suggest off` stops it. While a suggestion
   loads, editing input or starting a new turn cancels it; failures must clear the hint.
+  Explicit `@file.docx`, `@file.odt`, `@file.pptx`, `@file.xlsx` and `@file.pdf`
+  attachments send extracted text with the existing 64 KiB/file and 256 KiB total
+  text budgets. Check a filename with spaces from the reader/finder gesture and
+  from a quoted mention. Input must stay responsive during preparation; Esc before
+  it completes sends no model request. Oversized/malformed documents show a refusal
+  or truncation notice; the raw user prompt stays visible. Run these checks in
+  both agent-engine modes and record them separately from recipe results.
 
   ## Success Criteria
   - Phase success: ≥80% tests pass

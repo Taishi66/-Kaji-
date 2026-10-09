@@ -1,5 +1,6 @@
 pub mod app;
 pub mod argcomplete;
+mod attachments;
 mod chatcache;
 pub mod diff;
 mod documents;
@@ -1009,6 +1010,27 @@ async fn session_working_dir(session_manager: &SessionManager, session_id: &str)
 
 type TurnStream<'a> = BoxStream<'a, anyhow::Result<AgentEvent>>;
 
+type AgentSetup<'a> = Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'a>>> + 'a>>;
+
+enum Pending<'a> {
+    Attachments(Pin<Box<dyn Future<Output = Result<mentions::MentionExpansion>> + Send>>),
+    Agent(AgentSetup<'a>),
+}
+
+enum PreparedTurn<'a> {
+    Attachments(mentions::MentionExpansion),
+    Agent(TurnStream<'a>),
+}
+
+impl<'a> Pending<'a> {
+    async fn next(&mut self) -> Result<PreparedTurn<'a>> {
+        match self {
+            Self::Attachments(future) => future.await.map(PreparedTurn::Attachments),
+            Self::Agent(future) => future.await.map(PreparedTurn::Agent),
+        }
+    }
+}
+
 async fn next_turn_event(turn: &mut Option<TurnStream<'_>>) -> Option<anyhow::Result<AgentEvent>> {
     match turn {
         Some(stream) => stream.next().await,
@@ -1084,8 +1106,8 @@ async fn event_loop(
     };
     let mut turn: Option<TurnStream<'_>> = None;
     let mut cancel: Option<CancellationToken> = None;
-    let mut pending: Option<Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'_>>> + '_>>> =
-        None;
+    let attachment_reader = attachments::Reader::new()?;
+    let mut pending: Option<Pending<'_>> = None;
     let mut suggestions = suggestions::Suggestions::default();
     let mut preview_reader = viewer::Reader::new()?;
     let (index_tx, mut index_rx) = mpsc::channel::<mentions::MentionIndex>(1);
@@ -1144,6 +1166,7 @@ async fn event_loop(
                             token.cancel();
                         }
                         if app.turn_pending {
+                            let preparing = matches!(pending.as_ref(), Some(Pending::Attachments(_)));
                             // Dropping the setup future is the interruption — nothing
                             // else observes it, so there is no completion event to
                             // wait for the way a running turn's stream provides one.
@@ -1151,9 +1174,11 @@ async fn event_loop(
                             cancel = None;
                             app.turn_pending = false;
                             app.status.clear();
-                            app.push_system(
-                                "turn start cancelled — the message sent may already be recorded on the session",
-                            );
+                            app.push_system(if preparing {
+                                "attachment preparation cancelled — nothing sent to the model"
+                            } else {
+                                "turn start cancelled — the message sent may already be recorded on the session"
+                            });
                         }
                         if app.driver != PassDriver::Idle {
                             app.pass_abort("turn cancelled — pass interrupted");
@@ -1184,11 +1209,10 @@ async fn event_loop(
                             // flush the queue straight into a fresh turn.
                             flush_steer_queue(
                                 &mut app,
-                                agent,
-                                &session_config,
                                 &mut pending,
                                 &mut cancel,
                                 &working_dir,
+                                &attachment_reader,
                             );
                         }
                         app.push_system(&format!(
@@ -1198,16 +1222,15 @@ async fn event_loop(
                     }
                     Action::Submit(text) => {
                         app.push_user(&text);
-                        let message = user_message(&mut app, &text, &working_dir);
-                        pending = Some(begin_setup(&mut app, agent, &session_config, message, &mut cancel));
+                        pending = Some(begin_submission(&mut app, &attachment_reader, &text, &working_dir, &mut cancel));
                     }
                     Action::StartPass => app.start_pass(),
                     // Goal session (item 5 ante): the first work turn starts
                     // here, every following one from `turn_end` — the same
                     // chaining the SDD pass uses.
                     Action::GoalSet(condition) => {
-                        if let Some(message) = goal_work_message(&mut app, &condition, &working_dir) {
-                            pending = Some(begin_setup(&mut app, agent, &session_config, message, &mut cancel));
+                        if let Some(prompt) = app.goal_set(&condition, goal_max_iterations()) {
+                            pending = Some(begin_submission(&mut app, &attachment_reader, &prompt, &working_dir, &mut cancel));
                         }
                     }
                     Action::GoalStatus => app.push_goal_status(),
@@ -1229,7 +1252,7 @@ async fn event_loop(
                         if let Some(prompt) = app.gate_approve() {
                             app.push_system("Exec: sending the SPEC to the agent");
                             let message = Message::user().with_text(&prompt);
-                            pending = Some(begin_setup(&mut app, agent, &session_config, message, &mut cancel));
+                            pending = Some(Pending::Agent(begin_setup(&mut app, agent, &session_config, message, &mut cancel)));
                         }
                     }
                     Action::GateReject => app.gate_reject(),
@@ -1503,10 +1526,18 @@ async fn event_loop(
             // select! that polls input_rx — every internal .await it hits
             // hands control back to the other arms, so input stays live for
             // the whole setup instead of freezing the loop for its duration.
-            res = async { pending.as_mut().unwrap().await }, if pending.is_some() => {
+            res = async { pending.as_mut().unwrap().next().await }, if pending.is_some() => {
                 pending = None;
-                let started = install_turn(&mut app, &mut turn, &mut cancel, res);
-                if !started {
+                let failed = match res {
+                    Ok(PreparedTurn::Attachments(expansion)) => {
+                        let message = prepared_message(&mut app, expansion);
+                        pending = Some(Pending::Agent(begin_setup(&mut app, agent, &session_config, message, &mut cancel)));
+                        false
+                    }
+                    Ok(PreparedTurn::Agent(stream)) => !install_turn(&mut app, &mut turn, &mut cancel, Ok(stream)),
+                    Err(error) => !install_turn(&mut app, &mut turn, &mut cancel, Err(error)),
+                };
+                if failed {
                     if app.driver != PassDriver::Idle {
                         app.pass_abort("turn failed to start — pass interrupted");
                     }
@@ -1532,14 +1563,13 @@ async fn event_loop(
                         teardown_turn(&mut app);
                         if let Some(prompt) = app.turn_end() {
                             let message = Message::user().with_text(&prompt);
-                            pending = Some(begin_setup(&mut app, agent, &session_config, message, &mut cancel));
+                            pending = Some(Pending::Agent(begin_setup(&mut app, agent, &session_config, message, &mut cancel)));
                         } else if flush_steer_queue(
                             &mut app,
-                            agent,
-                            &session_config,
                             &mut pending,
                             &mut cancel,
                             &working_dir,
+                            &attachment_reader,
                         ) {
                             // Queued steering message auto-submitted as a new
                             // turn (item 2 ante "do nothing — queued messages
@@ -1703,6 +1733,7 @@ async fn event_loop(
 /// re-expanding the condition every iteration would attach the same file over
 /// and over. The goal keeps the raw condition — it is what `/goal` reports and
 /// what the evaluator is asked about.
+#[cfg(test)]
 fn goal_work_message(app: &mut App, condition: &str, working_dir: &Path) -> Option<Message> {
     let prompt = app.goal_set(condition, goal_max_iterations())?;
     Some(user_message(app, &prompt, working_dir))
@@ -1767,8 +1798,12 @@ fn begin_setup<'a>(
 /// lands in the transcript here — a placeholder line per attached image, an
 /// error line per refusal — so what left with the message is visible without
 /// reading the message.
+#[cfg(test)]
 fn user_message(app: &mut App, text: &str, working_dir: &Path) -> Message {
-    let expansion = mentions::expand_mentions(text, working_dir);
+    prepared_message(app, mentions::expand_mentions(text, working_dir))
+}
+
+fn prepared_message(app: &mut App, expansion: mentions::MentionExpansion) -> Message {
     let mut message = Message::user().with_text(&expansion.text);
     for image in expansion.images {
         app.push_system(&image.placeholder());
@@ -1778,6 +1813,26 @@ fn user_message(app: &mut App, text: &str, working_dir: &Path) -> Message {
         app.push_error(notice);
     }
     message
+}
+
+fn begin_submission<'a>(
+    app: &mut App,
+    reader: &attachments::Reader,
+    text: &str,
+    working_dir: &Path,
+    cancel: &mut Option<CancellationToken>,
+) -> Pending<'a> {
+    let preparation = reader.prepare(text.to_owned(), working_dir.to_owned());
+    app.status = if text.contains('@') {
+        "preparing attachments…"
+    } else {
+        "starting the turn…"
+    }
+    .to_owned();
+    app.turn_pending = true;
+    app.reset_turn_visibility();
+    *cancel = None;
+    Pending::Attachments(Box::pin(async move { preparation?.finish().await }))
 }
 
 /// Consumes the resolved setup future: on success, stores the stream and
@@ -1826,18 +1881,16 @@ fn teardown_turn(app: &mut App) {
 /// turn-end auto-flush and by `Ctrl+S` when no stream is running to drain.
 fn flush_steer_queue<'a>(
     app: &mut App,
-    agent: &'a Agent,
-    session_config: &SessionConfig,
-    pending: &mut Option<Pin<Box<dyn Future<Output = anyhow::Result<TurnStream<'a>>> + 'a>>>,
+    pending: &mut Option<Pending<'a>>,
     cancel: &mut Option<CancellationToken>,
     working_dir: &Path,
+    reader: &attachments::Reader,
 ) -> bool {
     let Some(text) = app.next_steer() else {
         return false;
     };
     app.push_user(&text);
-    let message = user_message(app, &text, working_dir);
-    *pending = Some(begin_setup(app, agent, session_config, message, cancel));
+    *pending = Some(begin_submission(app, reader, &text, working_dir, cancel));
     true
 }
 
@@ -2996,6 +3049,91 @@ mod tests {
             app.goal.as_ref().expect("un but").condition,
             "corriger @notes.md"
         );
+    }
+
+    #[tokio::test]
+    async fn submitted_goal_and_queued_prompts_share_async_attachment_preparation() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("notes du jour.md"),
+            "SHARED_ATTACHMENT",
+        )
+        .unwrap();
+        let reader = attachments::Reader::new().unwrap();
+        let mut app = App::new(None);
+        app.attach_mention("notes du jour.md");
+        let text = app.input.trim().to_owned();
+        assert_eq!(text, "@\"notes du jour.md\"");
+        let mut cancel = None;
+        let mut pending = begin_submission(&mut app, &reader, &text, directory.path(), &mut cancel);
+        assert!(app.turn_pending && cancel.is_none());
+        let PreparedTurn::Attachments(expansion) = pending.next().await.unwrap() else {
+            panic!("preparation first")
+        };
+        let message = prepared_message(&mut app, expansion);
+        assert!(message.as_concat_text().contains("SHARED_ATTACHMENT"));
+
+        let condition = "read @\"notes du jour.md\"";
+        let prompt = app.goal_set(condition, 1).unwrap();
+        let mut pending =
+            begin_submission(&mut app, &reader, &prompt, directory.path(), &mut cancel);
+        let PreparedTurn::Attachments(expansion) = pending.next().await.unwrap() else {
+            panic!("preparation first")
+        };
+        assert!(prepared_message(&mut app, expansion)
+            .as_concat_text()
+            .contains("SHARED_ATTACHMENT"));
+        assert_eq!(app.goal.as_ref().unwrap().condition, condition);
+
+        app.steer_queue.push(condition.to_owned());
+        let mut pending = None;
+        assert!(flush_steer_queue(
+            &mut app,
+            &mut pending,
+            &mut cancel,
+            directory.path(),
+            &reader
+        ));
+        let PreparedTurn::Attachments(expansion) = pending.as_mut().unwrap().next().await.unwrap()
+        else {
+            panic!("preparation first")
+        };
+        assert!(expansion.text.contains("SHARED_ATTACHMENT"));
+        assert!(app.next_steer().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_dropped_preparation_cannot_publish_image_placeholders_or_refusals() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("capture.png"), PNG_FIXTURE).unwrap();
+        std::fs::write(directory.path().join("bad.docx"), "invalid ZIP").unwrap();
+        let reader = attachments::Reader::new().unwrap();
+        let mut app = App::new(None);
+        let mut cancel = None;
+        let pending = begin_submission(
+            &mut app,
+            &reader,
+            "@capture.png @bad.docx",
+            directory.path(),
+            &mut cancel,
+        );
+        drop(pending);
+        assert!(app.chat.is_empty());
+        let mut next = begin_submission(
+            &mut app,
+            &reader,
+            "plain message",
+            directory.path(),
+            &mut cancel,
+        );
+        let PreparedTurn::Attachments(expansion) = next.next().await.unwrap() else {
+            panic!("preparation first")
+        };
+        assert_eq!(
+            prepared_message(&mut app, expansion).as_concat_text(),
+            "plain message"
+        );
+        assert!(app.chat.is_empty());
     }
 
     #[test]

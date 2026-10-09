@@ -5,12 +5,12 @@ project roadmap. Historical delivery records and architectural decisions remain
 in the maintainer's vault.
 
 **Resumed at the maintainer's request, 2026-10-09.** Changes are preserved.
-The maintainer subsequently requested publication on the tracked
-`feat/kaji-init` branch. The prepared source excludes earlier forge,
+The preceding lot was published as `3b9e3189a` on the tracked
+`feat/kaji-init` branch. The published source excludes earlier forge,
 mission-control and Git-display edits and generated graph files, which stay local.
 Its isolated CLI library suite passes **1,146 tests, zero failures, two ignored**.
 Strict lean CLI clippy on all targets also passes for that isolated source.
-The latest document/suggestion lot passes the lean CLI library suite, strict
+The document preview/suggestion lot passed the lean CLI library suite, strict
 clippy and a rebuilt debug terminal. The earlier minimal-terminal baseline also
 passed default-feature tests and produced optimised executables and matched
 runtime measurements. Those executables and measurements precede this lot.
@@ -48,12 +48,12 @@ visual accents accompanied by meaningful text.
 | Suggestions off by default, `/suggest on\|off` | Validated | Current chat context, bounded streamed output, cancellation and failure cleanup; localhost terminal checks |
 
 Validation and subsequent publication were explicitly authorised on 2026-10-09.
-The latest lean CLI library suite passes: **1,157 tests, zero failures, two ignored**.
+The preceding preview/suggestion working tree passed **1,157 tests, zero failures, two ignored**.
 Strict lean CLI clippy and debug compilation pass. The previous baseline passed
 1,130 tests in both lean and default-feature configurations; default-feature and
 workspace checks have not been repeated for the latest lot.
 That 1,157 count includes 11 tests from the earlier local edits excluded from
-the prepared commit. The isolated source to publish passes 1,146 tests instead;
+the published commit. Its isolated source passes 1,146 tests instead;
 the test count difference is deliberate, not skipped tests.
 One ignored test is the explicit render timing comparison, run separately.
 Earlier local changes to the
@@ -136,7 +136,8 @@ rejected. PDF text conversion requires `pdftotext`, uses a private bounded input
 snapshot, clears inherited secrets, times out and reaps its child. Converter
 resource limits vary by platform; there is no hard converter RAM limit on macOS
 and this is not an OS sandbox. Graphics, layout, OCR and spreadsheet formatting
-are not reproduced. Office/PDF attachment-to-model support is still pending.
+are not reproduced. Explicit Office/PDF model attachments are implemented in
+the subsequent lot below.
 
 - [x] Suggestions disabled by default and explicitly selectable; current recent
   chat replaces the stale initial context. At most one owned task, cancelled on
@@ -184,10 +185,31 @@ The target is evidenced security properties, never a promise of zero vulnerabili
 
 ## Following work
 
+**Current lot:** explicit Office/PDF model attachments are implemented outside
+the terminal input loop, with a single worker, one queued request, a six-second
+deadline, quoted filenames and visible refusal/truncation. Text retains existing
+64 KiB/file and 256 KiB total limits, with at most 32 references. Cancelled
+preparation cannot publish stale notices or start a model request. Ordinary chat,
+queued steering and the first goal work prompt share the preparation path.
+Exact staged-source validation: **1,157 passed, zero failed, two ignored**;
+strict all-target CLI clippy and formatting checks pass. Working-tree validation:
+**1,168 passed, zero failed, two ignored**, including 11 earlier unrelated tests
+excluded from publication; strict CLI clippy and debug build pass. Feature recipe
+attempt remains HTTP 410 / exit 1.
+Actual terminal: **20 primary messages in the two engines**, two curations;
+extracted payloads, truncation/refusal, quoted reader gesture, responsive typing,
+Esc and whole-preparation timeout verified. Cancelled/timed-out preparations send
+zero model requests and reap their converter. Source edits do not alter past
+attachment snapshots. No new optimised runtime or RAM claim.
+Design: [document attachments](docs/superpowers/specs/2026-10-09-document-attachments-design.md).
+Evidence: [attachment validation](docs/superpowers/reports/2026-10-09-attachments-validation.md).
+
 Audit ancillary inference token-cost accounting and retries. Optional suggestions,
 current context, bounded output and cancellation are implemented and validated.
-Next, add asynchronous Office/PDF attachments to model context with explicit
-budgets and visible truncation. Evaluate native terminal image protocols and OCR
+Asynchronous Office/PDF attachments with explicit budgets and visible truncation
+are implemented. Prioritise shell/credential isolation, ancillary usage accounting
+and long-session/attachment-history profiling before a competitive claim.
+Evaluate native terminal image protocols and OCR
 only with measured costs, safe cancellation and readable fallbacks. Keep preview
 separate from model attachment, and document format/layout limitations.
 Profile shared initialisation and history allocations. Assess rendering

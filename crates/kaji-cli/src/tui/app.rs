@@ -2974,7 +2974,10 @@ impl App {
         } else {
             " "
         };
-        self.input_insert(&format!("{separator}@{path} "));
+        self.input_insert(&format!(
+            "{separator}{} ",
+            crate::tui::mentions::mention_token(path)
+        ));
         self.reset_mention_state();
     }
 
@@ -2990,7 +2993,7 @@ impl App {
         self.reset_palette_selection();
         let trimmed = flattened.trim();
         if self.pasted_path_exists(trimmed) {
-            self.input_insert(&format!("@{trimmed}"));
+            self.input_insert(&crate::tui::mentions::mention_token(trimmed));
         } else {
             self.input_insert(&flattened);
         }

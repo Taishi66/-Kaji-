@@ -1,0 +1,390 @@
+{
+  "results": [
+    {
+      "engine": "legacy",
+      "main_requests": 10,
+      "cancelled_requests": 0,
+      "responsive_input": true,
+      "converter_reaped": true,
+      "history_snapshot_checked": true,
+      "quoted_reader_gesture_checked": true,
+      "global_preparation_timeout_checked": true,
+      "timed_out_requests": 0
+    },
+    {
+      "engine": "state",
+      "main_requests": 10,
+      "cancelled_requests": 0,
+      "responsive_input": true,
+      "converter_reaped": true,
+      "history_snapshot_checked": true,
+      "quoted_reader_gesture_checked": true,
+      "global_preparation_timeout_checked": true,
+      "timed_out_requests": 0
+    }
+  ],
+  "requests": [
+    {
+      "kind": "main",
+      "engine": "legacy",
+      "turn": 1,
+      "attachments": [
+        "notes du jour.docx"
+      ],
+      "attachment_bytes": 12097,
+      "payloads": [
+        "DOC_DOCX_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "curation",
+      "engine": "legacy",
+      "turn": 10,
+      "attachments": [
+        "code.rs"
+      ],
+      "attachment_bytes": 92,
+      "payloads": [
+        "DOC_CODE_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": false
+    },
+    {
+      "kind": "main",
+      "engine": "legacy",
+      "turn": 2,
+      "attachments": [
+        "test.odt"
+      ],
+      "attachment_bytes": 72,
+      "payloads": [
+        "DOC_ODT_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "legacy",
+      "turn": 3,
+      "attachments": [
+        "test.pptx"
+      ],
+      "attachment_bytes": 76,
+      "payloads": [
+        "DOC_PPTX_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "legacy",
+      "turn": 4,
+      "attachments": [
+        "test.xlsx"
+      ],
+      "attachment_bytes": 88,
+      "payloads": [
+        "DOC_XLSX_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "legacy",
+      "turn": 5,
+      "attachments": [
+        "test.pdf"
+      ],
+      "attachment_bytes": 112,
+      "payloads": [
+        "DOC_PDF_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "legacy",
+      "turn": 6,
+      "attachments": [
+        "code.rs"
+      ],
+      "attachment_bytes": 92,
+      "payloads": [
+        "DOC_CODE_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "legacy",
+      "turn": 7,
+      "attachments": [
+        "long.docx"
+      ],
+      "attachment_bytes": 65536,
+      "payloads": [
+        "LONG_ATTACHMENT_CONTENT"
+      ],
+      "truncated": true,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "legacy",
+      "turn": 8,
+      "attachments": [],
+      "attachment_bytes": 0,
+      "payloads": [],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "legacy",
+      "turn": 9,
+      "attachments": [
+        "notes du jour.docx"
+      ],
+      "attachment_bytes": 12097,
+      "payloads": [
+        "DOC_DOCX_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "legacy",
+      "turn": 10,
+      "attachments": [],
+      "attachment_bytes": 0,
+      "payloads": [],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "state",
+      "turn": 1,
+      "attachments": [
+        "notes du jour.docx"
+      ],
+      "attachment_bytes": 12097,
+      "payloads": [
+        "DOC_DOCX_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "state",
+      "turn": 2,
+      "attachments": [
+        "test.odt"
+      ],
+      "attachment_bytes": 72,
+      "payloads": [
+        "DOC_ODT_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "state",
+      "turn": 3,
+      "attachments": [
+        "test.pptx"
+      ],
+      "attachment_bytes": 76,
+      "payloads": [
+        "DOC_PPTX_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "state",
+      "turn": 4,
+      "attachments": [
+        "test.xlsx"
+      ],
+      "attachment_bytes": 88,
+      "payloads": [
+        "DOC_XLSX_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "state",
+      "turn": 5,
+      "attachments": [
+        "test.pdf"
+      ],
+      "attachment_bytes": 112,
+      "payloads": [
+        "DOC_PDF_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "state",
+      "turn": 6,
+      "attachments": [
+        "code.rs"
+      ],
+      "attachment_bytes": 92,
+      "payloads": [
+        "DOC_CODE_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "state",
+      "turn": 7,
+      "attachments": [
+        "long.docx"
+      ],
+      "attachment_bytes": 65536,
+      "payloads": [
+        "LONG_ATTACHMENT_CONTENT"
+      ],
+      "truncated": true,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "state",
+      "turn": 8,
+      "attachments": [],
+      "attachment_bytes": 0,
+      "payloads": [],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "main",
+      "engine": "state",
+      "turn": 9,
+      "attachments": [
+        "notes du jour.docx"
+      ],
+      "attachment_bytes": 12097,
+      "payloads": [
+        "DOC_DOCX_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    },
+    {
+      "kind": "curation",
+      "engine": "state",
+      "turn": 10,
+      "attachments": [
+        "code.rs"
+      ],
+      "attachment_bytes": 92,
+      "payloads": [
+        "DOC_CODE_READY"
+      ],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": false
+    },
+    {
+      "kind": "main",
+      "engine": "state",
+      "turn": 10,
+      "attachments": [],
+      "attachment_bytes": 0,
+      "payloads": [],
+      "truncated": false,
+      "binary_skipped": false,
+      "source_replacement_seen": false,
+      "original_docx_in_history": true
+    }
+  ],
+  "date": "2026-10-09",
+  "binary_sha256": "9efec62acd30f031e2be08094dc6249c6de3527ae8bd504b087634c58d50a7fe",
+  "working_tree_tests": {
+    "passed": 1168,
+    "failed": 0,
+    "ignored": 2
+  },
+  "clippy_all_cli_targets_strict": true,
+  "build_passed": true,
+  "source": "isolated localhost synthetic fixtures; actual terminal in both engines; no external model",
+  "published_source_tests": {
+    "passed": 1157,
+    "failed": 0,
+    "ignored": 2,
+    "seconds": 4.33
+  },
+  "published_source_clippy_all_cli_targets_strict": true,
+  "published_source_rustfmt_check": true,
+  "working_tree_preexisting_tests_excluded": 11,
+  "published_source_validation": "isolated snapshot of staged files at /tmp/kaji-publish-2026-10-09",
+  "self_test_recipe": {
+    "passed": false,
+    "http_status": 410,
+    "exit_code": 1,
+    "model": "deepseek-v4-flash:0731"
+  }
+}
