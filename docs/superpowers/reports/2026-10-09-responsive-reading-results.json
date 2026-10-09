@@ -1,0 +1,161 @@
+{
+  "date": "2026-10-09",
+  "published_source_tests": {
+    "passed": 1155,
+    "failed": 0,
+    "ignored": 4,
+    "seconds": 4.35,
+    "snapshot_cli_compile_seconds": 17.63,
+    "excluded_preexisting_tests": 11,
+    "excluded_forge_test_sentinels_verified": true,
+    "source_log": "/tmp/kaji-responsive-published-tests.log"
+  },
+  "full_working_tree_tui_tests": {
+    "passed": 868,
+    "failed": 0,
+    "ignored": 3,
+    "filtered_out": 299,
+    "seconds": 4.15,
+    "includes_preexisting_forge_tests": 11,
+    "source_log": "/tmp/kaji-responsive-final-gate.log"
+  },
+  "strict_clippy": "exact published-source all-target CLI gate passed",
+  "build": {
+    "passed": true,
+    "seconds": 12.83,
+    "source_log": "/tmp/kaji-responsive-build.log",
+    "binary_sha256": "d41df09fb05a6b3e4d94423cb4a795261060883af61ceb8d15625e403d542b79",
+    "binary_path": "/tmp/kaji-ux-validation-2026-10-09/debug/kaji"
+  },
+  "real_terminal": {
+    "engine": "state-machine",
+    "synthetic_localhost_provider": true,
+    "follow_bottom_checked_widths": [
+      80,
+      120,
+      200,
+      40,
+      200
+    ],
+    "reading_anchor_results": [
+      {
+        "width": 80,
+        "passage_present": true,
+        "scrolled": true
+      },
+      {
+        "width": 40,
+        "passage_present": true,
+        "scrolled": true
+      },
+      {
+        "width": 200,
+        "passage_present": true,
+        "scrolled": true
+      },
+      {
+        "width": 40,
+        "passage_present": true,
+        "scrolled": true
+      },
+      {
+        "width": 120,
+        "passage_present": true,
+        "scrolled": true
+      },
+      {
+        "width": 80,
+        "passage_present": true,
+        "scrolled": true
+      }
+    ],
+    "other_engine_checked": false
+  },
+  "user_visual_acceptance": "pending; reopened after rejected prior rendering",
+  "agent_visual_review": "Astra/root reviewed clean zen40/120/200, light80, gruvbox120",
+  "cache": {
+    "max_entries": 256,
+    "max_retained_bytes": 1048576,
+    "prior_max_entries": 32,
+    "prior_max_retained_bytes": 131072,
+    "payload_bound_increase_bytes": 917504
+  },
+  "debug_metrics": [
+    {
+      "history": 32,
+      "width": 40,
+      "warm_ms": 3.744,
+      "hits": 640,
+      "misses": 0,
+      "retained_bytes": 90764,
+      "entries": 32
+    },
+    {
+      "history": 32,
+      "width": 200,
+      "warm_ms": 6.061,
+      "hits": 640,
+      "misses": 0,
+      "retained_bytes": 85260,
+      "entries": 32
+    },
+    {
+      "history": 128,
+      "width": 40,
+      "warm_ms": 14.432,
+      "hits": 2560,
+      "misses": 0,
+      "retained_bytes": 363172,
+      "entries": 128
+    },
+    {
+      "history": 128,
+      "width": 200,
+      "warm_ms": 23.717,
+      "hits": 2560,
+      "misses": 0,
+      "retained_bytes": 341156,
+      "entries": 128
+    },
+    {
+      "cell_bytes": 65536,
+      "width": 40,
+      "warm_ms": 19.494,
+      "hits": 20,
+      "misses": 0,
+      "retained_bytes": 380146,
+      "entries": 1
+    },
+    {
+      "cell_bytes": 65536,
+      "width": 200,
+      "warm_ms": 21.192,
+      "hits": 20,
+      "misses": 0,
+      "retained_bytes": 263917,
+      "entries": 1
+    }
+  ],
+  "benchmark_source_log": "/tmp/kaji-responsive-benchmark-final-source.log",
+  "claims": "controlled debug measurements only; no RSS, optimized-runtime or competitor claim",
+  "working_tree_strict_clippy": {
+    "passed": true,
+    "seconds": 70,
+    "source_log": "/tmp/kaji-responsive-final-clippy-gate.log"
+  },
+  "published_source_strict_clippy": {
+    "passed": true,
+    "seconds": 7.33,
+    "source_log": "/tmp/kaji-responsive-published-clippy.log"
+  },
+  "self_test_recipe": {
+    "passed": false,
+    "status": "intentionally interrupted after environment error",
+    "provider_responded": true,
+    "early_phase1_operations_observed": true,
+    "environment_error": "sccache Operation not permitted; retry used Rustup without the approved validation context",
+    "process_exit_code": 0,
+    "exit_code_is_success_evidence": false,
+    "source_log": "/tmp/kaji-self-test-responsive-2026-10-09.log"
+  }
+}

@@ -37,7 +37,7 @@ visual accents accompanied by meaningful text.
 | Standard text by default; optional Nerd Font icons | Validated | `tui/icons.rs`, `App::new`, resolver tests |
 | Labelled tokens, agents and thinking; activity preserved as the bar narrows | Validated | `tui/statusbar.rs`, `tui/ui.rs`, narrow-bar test |
 | Compact, responsive command palette | Validated | Six visible entries, stacked descriptions in narrow columns, selection/render tests |
-| Bounded Markdown render cache | Validated | At most 32 recent answers and 128 KiB of retained data; exact text/width/theme invalidation; cold/warm buffer and streaming tests |
+| Bounded Markdown render cache | Validated | At most 256 recent answers and 1 MiB of retained payload; source maps included, exact text/width/theme invalidation; explicit RAM/CPU tradeoff |
 | File completion sends on the next Enter | Validated | File dropdown closes; directory completion keeps its children |
 | Readable tool grant before approval | Validated | Command and refusal visible at 80×24 and 40×24; anti-masking tests retained |
 | Honest headless failure result | Validated | Typed provider failures exit 1 in text/JSON/stream-JSON, both engines; success still exits 0 |
@@ -232,3 +232,24 @@ Desktop Tauri v2 on ACP remains planned, after the terminal priorities.
 
 Scope and verification design:
 [2026-10-09 terminal design](docs/superpowers/specs/2026-10-09-terminal-minimal-design.md).
+
+## Responsive terminal reading — validated implementation
+
+The prior functional checks remain evidence of their own scope, while the user
+rejected the previous visual readability. Visual acceptance is reopened. Clean
+40/80/120/200-column renders received Astra/root review; user acceptance remains
+pending. Tables preserve full cell content, use available width with prose-cell
+measures ≤96 and label measures ≤28, and become readable records at 40 columns.
+Prose wraps at 88; code uses the available width. The compact single-line composer
+keeps horizontal caret scrolling. Logical source anchors preserve reading through
+resize, and scroll gestures use the effective resized position.
+
+A bounded 256-entry / 1 MiB render cache replaces 32 / 128 KiB, adding 896 KiB to
+the retained payload bound to avoid repeated history misses. Controlled debug
+128-answer warm frames measure 14.432/23.717 ms at 40/200 columns with zero cache
+misses. This is a RAM/CPU tradeoff, not an RSS, optimized-runtime or superiority
+claim. Working-tree TUI868/3 ignored, strict CLI clippy and debug build pass;
+state-machine terminal resize/follow-bottom checks pass. Exact published-source CLI tests pass **1,155/0 failed/4 ignored** and strict
+all-target clippy passes. The recipe provider responded, but the run was
+intentionally interrupted after a sccache/environment error; it has not passed.
+[Responsive reading evidence](docs/superpowers/reports/2026-10-09-responsive-reading-validation.md).

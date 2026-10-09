@@ -3509,9 +3509,6 @@ mod tests {
             welcome_line_fg(&app, "Describe a task"),
             theme::text_color(),
         );
-        assert_eq!(
-            welcome_line_fg(&app, "/help"),
-            ratatui::style::Color::DarkGray,
-        );
+        assert_eq!(welcome_line_fg(&app, "/help"), theme::active().muted,);
     }
 }

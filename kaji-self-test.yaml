@@ -252,6 +252,13 @@ prompt: |
   including refreshed custom providers. Never print or change real credentials.
   This checks environment inheritance only; shell profiles/files remain accessible.
 
+  ### Responsive Terminal Reading
+  From a kaji source checkout, verify the responsive reading fixture at 40, 80,
+  120 and 200 columns: complete table cells without ellipsis, narrow records,
+  readable prose/code, resize source anchors and repeated scroll gestures.
+  Check follow-bottom separately and record bounded cache metrics honestly;
+  agent render review does not substitute for user visual acceptance.
+
   ### Code Analysis Testing
   1. Create sample code files in Python, JavaScript, and Go
   2. Analyze each file for structure

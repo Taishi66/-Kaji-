@@ -114,7 +114,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // progress and the turn's chrono remain visible while reading.
     let column = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(5)])
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(if main_area.height < 15 { 3 } else { 4 }),
+        ])
         .split(main_area);
 
     match app.zoomed_viewer() {
@@ -188,7 +191,14 @@ fn draw_overlays(frame: &mut Frame, app: &App) {
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![
         Span::styled(theme::KAJI_GLYPH, theme::title()),
-        Span::styled(format!(" kaji · {}", app.header), theme::dim()),
+        Span::styled(
+            if app.header.is_empty() {
+                " kaji".to_string()
+            } else {
+                format!(" kaji · {}", app.header)
+            },
+            theme::text(),
+        ),
     ];
     if let Some(badge) = goal_badge(app) {
         spans.push(Span::styled(badge, theme::accent()));
@@ -232,12 +242,7 @@ fn chat_title(app: &App) -> String {
     format!(" {} ", parts.join(" · "))
 }
 
-/// Chat reading width is capped so text stays legible on ultra-wide
-/// terminals instead of running edge-to-edge across ~200 columns.
-const CHAT_MAX_WIDTH: u16 = 102;
-
-/// Horizontal breathing room so chat text doesn't collide with the block
-/// borders — applied on both sides, inside the width cap above.
+/// Base horizontal margin; wide transcripts get more breathing room.
 const CHAT_HORIZONTAL_MARGIN: u16 = 1;
 
 /// Le vide (間) que tout volet bordé garde sous sa bordure haute et au-dessus
@@ -249,19 +254,23 @@ const PANE_VERTICAL_MARGIN: u16 = 1;
 /// deux côtés sous son plafond de largeur.
 const PANE_LEFT_MARGIN: u16 = 1;
 
-fn chat_width(inner_width: u16) -> u16 {
-    inner_width.min(CHAT_MAX_WIDTH)
+fn chat_margin(width: u16) -> u16 {
+    if width >= 120 {
+        3 + width.saturating_sub(120) / 4
+    } else {
+        CHAT_HORIZONTAL_MARGIN
+    }
 }
 
-/// Applies the width cap, then the horizontal margin inside it — every
+/// Applies adaptive horizontal margins — every
 /// downstream measurement (wrapped_rows, chat_overflow) must read
 /// `chat_rect.width`/`chat_rect.height` rather than recompute them, so they
 /// stay in sync.
 fn chat_content_rect(inner: Rect) -> Rect {
     Rect {
-        x: inner.x + CHAT_HORIZONTAL_MARGIN,
+        x: inner.x + chat_margin(inner.width),
         y: inner.y + PANE_VERTICAL_MARGIN,
-        width: chat_width(inner.width).saturating_sub(CHAT_HORIZONTAL_MARGIN * 2),
+        width: inner.width.saturating_sub(chat_margin(inner.width) * 2),
         height: inner.height.saturating_sub(PANE_VERTICAL_MARGIN * 2),
     }
 }
@@ -283,15 +292,16 @@ fn scroll_offset_u16(value: usize) -> u16 {
 
 fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::border_inactive())
-        .title(chat_title(app));
+        .borders(Borders::TOP)
+        .border_style(theme::dim())
+        .title(Span::styled(chat_title(app), theme::dim()));
     let inner = block.inner(area);
     let chat_rect = chat_content_rect(inner);
 
     app.user_turn_rows.borrow_mut().clear();
     let mut running_rows: usize = 0;
     let mut lines: Vec<Line> = Vec::new();
+    let mut source_rows = Vec::new();
     let mut cache = app.chat_cache.borrow_mut();
     cache.prepare(chat_rect.width, theme::active_index(), app.chat.len());
     let streaming_idx = app.streaming_agent_line();
@@ -312,32 +322,78 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
                     rendered
                 }
             };
-            if let (Some(glyph), Some(last)) = (blade, rendered.lines.last_mut()) {
-                last.spans
-                    .push(Span::styled(glyph.to_string(), theme::accent()));
-                rendered.rows =
-                    rendered.rows - rendered.last_rows + line_wrapped_rows(last, chat_rect.width);
+            if let Some(glyph) = blade {
+                let cursor = Span::styled(glyph.to_string(), theme::accent());
+                if let Some(last) = rendered.lines.last_mut() {
+                    if last.width() + cursor.width() <= usize::from(chat_rect.width) {
+                        last.spans.push(cursor);
+                    } else {
+                        rendered.lines.push(Line::from(cursor));
+                        rendered.positions.push(Vec::new());
+                        rendered.rows = rendered.rows.saturating_add(1);
+                    }
+                }
             }
             running_rows = running_rows.saturating_add(rendered.rows).saturating_add(1);
+            source_rows.extend(
+                rendered
+                    .positions
+                    .iter()
+                    .map(|positions| positions.iter().map(|position| (i, *position)).collect()),
+            );
+            source_rows.push(Vec::new());
             lines.extend(rendered.lines);
             lines.push(Line::from(""));
             continue;
         }
         let start = lines.len();
-        push_chat_line(&mut lines, chat_line, chat_rect.width, blade);
+        let mut source_lines = Vec::new();
+        push_chat_line(&mut source_lines, chat_line, chat_rect.width, blade);
+        for (source, line) in source_lines.into_iter().enumerate() {
+            let mut offset = 0;
+            for line in markdown::wrap_line(line, chat_rect.width.min(88)) {
+                let end = offset
+                    + line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.chars().count())
+                        .sum::<usize>();
+                source_rows.push(vec![(
+                    i,
+                    markdown::SourcePosition {
+                        line: source,
+                        cell: 0,
+                        start: offset,
+                        end,
+                    },
+                )]);
+                lines.push(line);
+                offset = end;
+            }
+        }
         lines.push(Line::from(""));
+        source_rows.push(Vec::new());
         for line in &lines[start..] {
             running_rows = running_rows.saturating_add(line_wrapped_rows(line, chat_rect.width));
         }
     }
     if let Some(loader) = loader_line(app) {
         running_rows = running_rows.saturating_add(line_wrapped_rows(&loader, chat_rect.width));
+        source_rows.push(Vec::new());
         lines.push(loader);
     }
 
     let base_scroll = running_rows.saturating_sub(chat_rect.height as usize);
     app.chat_overflow.set(scroll_offset_u16(base_scroll));
-    let scroll = scroll_offset_u16(base_scroll.saturating_sub(app.scroll_offset as usize));
+    let scroll = cache.viewport.resolve(
+        &source_rows,
+        chat_rect.width,
+        chat_rect.height,
+        app.scroll_offset,
+    );
+    app.chat_effective_scroll
+        .set(scroll_offset_u16(base_scroll.saturating_sub(scroll)));
+    let scroll = scroll_offset_u16(scroll);
 
     frame.render_widget(block, area);
     let paragraph = Paragraph::new(Text::from(lines))
@@ -347,18 +403,23 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_agent_block(text: &str, width: u16) -> AgentRender {
-    let mut lines = Vec::new();
-    push_agent_lines(&mut lines, text, width, None);
+    let mut layout = markdown::render_markdown_layout(text, width);
+    layout.lines.insert(
+        0,
+        Line::from(Span::styled(
+            format!("{} kaji", theme::KAJI_GLYPH),
+            theme::agent(),
+        )),
+    );
+    layout.positions.insert(0, Vec::new());
     let mut rows: usize = 0;
-    let mut last_rows = 0;
-    for line in &lines {
-        last_rows = line_wrapped_rows(line, width);
-        rows = rows.saturating_add(last_rows);
+    for line in &layout.lines {
+        rows = rows.saturating_add(line_wrapped_rows(line, width));
     }
     AgentRender {
-        lines,
+        lines: layout.lines,
+        positions: layout.positions,
         rows,
-        last_rows,
     }
 }
 
@@ -374,7 +435,16 @@ fn push_chat_line(
 ) {
     match chat_line.sender {
         Sender::Agent => push_agent_lines(lines, &chat_line.text, width, blade),
-        Sender::User => push_plain_lines(lines, &chat_line.text, theme::USER_PREFIX, theme::user()),
+        Sender::User => {
+            for (index, raw) in chat_line.text.split('\n').enumerate() {
+                let mut spans = Vec::new();
+                if index == 0 {
+                    spans.push(Span::styled(theme::USER_PREFIX, theme::user()));
+                }
+                spans.push(Span::styled(raw.to_string(), theme::text()));
+                lines.push(Line::from(spans));
+            }
+        }
         Sender::System => push_system_line(lines, chat_line),
         Sender::Thinking => push_plain_lines(
             lines,
@@ -408,11 +478,10 @@ fn push_agent_lines(lines: &mut Vec<Line<'static>>, text: &str, width: u16, blad
     if md_lines.is_empty() {
         md_lines.push(Line::from(""));
     }
-    if let Some(first) = md_lines.first_mut() {
-        let mut spans = vec![Span::styled(theme::AGENT_PREFIX, theme::agent())];
-        spans.append(&mut first.spans);
-        *first = Line::from(spans);
-    }
+    lines.push(Line::from(Span::styled(
+        format!("{} kaji", theme::KAJI_GLYPH),
+        theme::agent(),
+    )));
     // Appended before `lines.extend` below, i.e. before `draw_chat` measures
     // wrapped rows for this block — the blade is part of what gets measured,
     // not tacked on after the fact.
@@ -519,10 +588,16 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         (title, title_style)
     };
     let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::border_inactive())
+        .borders(Borders::TOP)
+        .border_style(theme::dim())
         .title(Span::styled(title, title_style));
-    let content = pane_content_rect(block.inner(area));
+    let inner = block.inner(area);
+    let content = Rect {
+        x: inner.x + chat_margin(inner.width),
+        y: inner.y + u16::from(inner.height > 2),
+        width: inner.width.saturating_sub(chat_margin(inner.width) * 2),
+        height: inner.height.saturating_sub(u16::from(inner.height > 2)),
+    };
 
     let paragraph = if app.input.is_empty() && !app.turn_active {
         if app.suggestion_loading {
@@ -2008,10 +2083,11 @@ mod tests {
     }
 
     #[test]
-    fn chat_measure_is_capped_at_102_columns() {
-        assert_eq!(chat_width(200), 102);
-        assert_eq!(chat_width(102), 102);
-        assert_eq!(chat_width(80), 80);
+    fn chat_measure_uses_available_width_with_adaptive_margins() {
+        for width in [40, 80, 120, 200] {
+            let rect = chat_content_rect(Rect::new(0, 0, width, 20));
+            assert_eq!(rect.width, width - chat_margin(width) * 2);
+        }
     }
 
     /// Terminal scroll coordinates must clamp instead of wrapping past
@@ -2023,7 +2099,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_content_rect_applies_horizontal_margin_inside_the_width_cap() {
+    fn chat_content_rect_applies_adaptive_horizontal_margin() {
         let wide = Rect {
             x: 1,
             y: 0,
@@ -2031,8 +2107,8 @@ mod tests {
             height: 10,
         };
         let rect = chat_content_rect(wide);
-        assert_eq!(rect.x, 2);
-        assert_eq!(rect.width, 100);
+        assert_eq!(rect.x, 24);
+        assert_eq!(rect.width, 154);
 
         let narrow = Rect {
             x: 1,
@@ -2141,7 +2217,7 @@ mod tests {
 
         let mut app = App::new(None);
         app.push_user("hello");
-        let mut terminal = Terminal::new(TestBackend::new(80, 6)).expect("terminal");
+        let mut terminal = Terminal::new(TestBackend::new(80, 5)).expect("terminal");
         terminal
             .draw(|frame| draw_chat(frame, &app, frame.area()))
             .expect("draw");
@@ -2241,6 +2317,247 @@ mod tests {
             .draw(|frame| draw_chat(frame, app, frame.area()))
             .expect("draw must succeed against a TestBackend");
         terminal.backend().buffer().clone()
+    }
+
+    const CLEAN_READING: &str = include_str!("../../tests/fixtures/responsive-reading-clean.md");
+
+    const RESPONSIVE_READING: &str = include_str!("../../tests/fixtures/responsive-reading.md");
+
+    fn reading_fixture_app() -> App {
+        let mut app = App::new(None);
+        app.push_user("Review the strengths and weaknesses in complete detail.");
+        app.apply_agent_event(&text_message("reading-fixture", RESPONSIVE_READING));
+        app
+    }
+
+    #[test]
+    fn complete_reading_fixture_is_visible_at_small_and_large_widths() {
+        let _theme = theme::test_guard();
+        for width in [40, 80, 120, 200] {
+            let app = reading_fixture_app();
+            let buffer = drawn_chat_at(&app, width, 400);
+            let text: String = buffer_as_string(&buffer)
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            for marker in [
+                "COMPLETE_TOOLS",
+                "COMPLETE_PARALLEL",
+                "COMPLETE_NAVIGATION",
+                "COMPLETE_CONTEXT",
+                "COMPLETE_SECOND_TOOLS",
+                "COMPLETE_SECOND_NAVIGATION",
+                "COMPLETE_SECOND_CONTEXT",
+                "COMPLETE_DEPENDENCIES",
+                "COMPLETE_EXAMPLE",
+                "READING_FIXTURE_DONE",
+            ] {
+                assert!(text.contains(marker), "missing {marker} at {width}");
+            }
+            assert_eq!(app.chat_overflow.get(), 0);
+            assert_cached_chat_matches_fresh_render(&app, width, 400);
+        }
+    }
+
+    #[test]
+    fn reading_passage_stays_anchored_through_table_record_resize_and_scroll() {
+        let _theme = theme::test_guard();
+        let mut app = reading_fixture_app();
+        let source = RESPONSIVE_READING
+            .lines()
+            .position(|line| line.contains("SECOND_NAV_RECORD"))
+            .unwrap();
+        let first = drawn_chat_at(&app, 80, 24);
+        let content = chat_content_rect(
+            Block::default()
+                .borders(Borders::TOP)
+                .inner(Rect::new(0, 0, 80, 24)),
+        );
+        let layout = render_agent_block(RESPONSIVE_READING, content.width);
+        let target = layout
+            .positions
+            .iter()
+            .position(|positions| {
+                positions.iter().any(|position| {
+                    position.line == source && position.cell == 1 && position.start == 0
+                })
+            })
+            .unwrap()
+            + 2;
+        assert!(!buffer_as_string(&first).contains("FIRST_TOOL_RECORD"));
+        app.scroll_offset = app.chat_overflow.get().saturating_sub(target as u16);
+        for width in [80, 40, 200, 40, 120, 80] {
+            let buffer = drawn_chat_at(&app, width, 24);
+            assert!(
+                buffer_as_string(&buffer).contains("SECOND_NAV_RECORD"),
+                "lost passage at {width}: {}",
+                buffer_as_string(&buffer)
+            );
+            assert!(app.chat_effective_scroll.get() > 0);
+        }
+        let before = app.chat_effective_scroll.get();
+        app.scroll_wheel_down();
+        assert_eq!(app.scroll_offset, before.saturating_sub(3));
+        drawn_chat_at(&app, 80, 24);
+        app.scroll_end();
+        assert!(buffer_as_string(&drawn_chat_at(&app, 40, 24)).contains("READING_FIXTURE_DONE"));
+        assert_eq!(app.chat_effective_scroll.get(), 0);
+        assert!(buffer_as_string(&drawn_chat_at(&app, 200, 24)).contains("READING_FIXTURE_DONE"));
+    }
+
+    #[test]
+    fn resize_scroll_sync_preserves_turn_navigation() {
+        let _theme = theme::test_guard();
+        let mut app = reading_fixture_app();
+        app.push_user("TURN_TWO");
+        app.apply_agent_event(&text_message(
+            "tail-fixture",
+            &"tail answer words ".repeat(80),
+        ));
+        drawn_chat_at(&app, 80, 24);
+        app.scroll_home();
+        drawn_chat_at(&app, 80, 24);
+        drawn_chat_at(&app, 40, 24);
+        app.jump_next_turn();
+        let next = buffer_as_string(&drawn_chat_at(&app, 40, 24));
+        assert!(next.contains("TURN_TWO"), "{next}");
+        app.jump_prev_turn();
+        let previous = buffer_as_string(&drawn_chat_at(&app, 40, 24));
+        assert!(previous.contains("Review the strengths"), "{previous}");
+    }
+
+    #[test]
+    fn a_scroll_gesture_after_resize_is_honored_when_it_reuses_the_previous_number() {
+        let _theme = theme::test_guard();
+        let mut app = reading_fixture_app();
+        drawn_chat_at(&app, 40, 24);
+        app.scroll_offset = 5;
+        drawn_chat_at(&app, 40, 24);
+        drawn_chat_at(&app, 40, 25);
+        assert_eq!(app.chat_effective_scroll.get(), 4);
+        app.scroll_line_up();
+        assert_eq!(app.scroll_offset, 5);
+        drawn_chat_at(&app, 40, 25);
+        assert_eq!(app.chat_effective_scroll.get(), 5);
+    }
+
+    #[test]
+    #[ignore = "manual bounded responsive render timing"]
+    fn measure_responsive_reading_render_cost() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use std::time::Instant;
+        let _theme = theme::test_guard();
+        for count in [32, 128] {
+            let mut app = App::new(None);
+            for index in 0..count {
+                app.chat.push(ChatLine {
+                    sender: Sender::Agent,
+                    text: format!(
+                        "Answer {index}\n\n| Name | Description |\n| - | - |\n| record | {} |",
+                        "word ".repeat(60)
+                    ),
+                    tool: None,
+                    rendered: None,
+                });
+            }
+            for width in [40, 200] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+                terminal
+                    .draw(|frame| draw_chat(frame, &app, frame.area()))
+                    .unwrap();
+                app.chat_cache.borrow().reset_metrics();
+                let started = Instant::now();
+                for _ in 0..20 {
+                    terminal
+                        .draw(|frame| draw_chat(frame, &app, frame.area()))
+                        .unwrap();
+                }
+                println!(
+                    "debug history={count} width={width} warm={:.3} ms/frame metrics={:?}",
+                    started.elapsed().as_secs_f64() * 50.0,
+                    app.chat_cache.borrow().metrics()
+                );
+            }
+        }
+        let cell = "x".repeat(64 * 1024);
+        for width in [40, 200] {
+            let started = Instant::now();
+            let layout = markdown::render_markdown_layout(
+                &format!("| Name | Description |\n| - | - |\n| record | {cell} |"),
+                width,
+            );
+            assert_eq!(layout.lines.len(), layout.positions.len());
+            let count: usize = layout
+                .lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .map(|span| span.content.matches('x').count())
+                .sum();
+            assert_eq!(count, cell.len());
+            println!(
+                "debug 64KiB cell width={width} render={:.3} ms rows={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                layout.lines.len()
+            );
+            let mut app = App::new(None);
+            app.chat.push(ChatLine {
+                sender: Sender::Agent,
+                text: format!("| Name | Description |\n| - | - |\n| record | {cell} |"),
+                tool: None,
+                rendered: None,
+            });
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal
+                .draw(|frame| draw_chat(frame, &app, frame.area()))
+                .unwrap();
+            app.chat_cache.borrow().reset_metrics();
+            let started = Instant::now();
+            for _ in 0..20 {
+                terminal
+                    .draw(|frame| draw_chat(frame, &app, frame.area()))
+                    .unwrap();
+            }
+            println!(
+                "debug 64KiB cell width={width} warm={:.3} ms/frame metrics={:?}",
+                started.elapsed().as_secs_f64() * 50.0,
+                app.chat_cache.borrow().metrics()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "writes review artifacts"]
+    fn capture_responsive_reading_buffers() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let _theme = theme::test_guard();
+        let root = std::path::Path::new("/tmp/kaji-responsive-review-2026-10-09");
+        std::fs::create_dir_all(root).unwrap();
+        for (variant, text) in [("technical", RESPONSIVE_READING), ("clean", CLEAN_READING)] {
+            for name in ["zen", "light", "gruvbox"] {
+                theme::set_active(name).unwrap();
+                for width in [40, 80, 120, 200] {
+                    let mut app = reading_fixture_app();
+                    app.chat.last_mut().unwrap().text = text.to_string();
+                    let mut terminal = Terminal::new(TestBackend::new(width, 45)).unwrap();
+                    terminal.draw(|frame| draw(frame, &app)).unwrap();
+                    app.scroll_home();
+                    terminal.draw(|frame| draw(frame, &app)).unwrap();
+                    let buffer = terminal.backend().buffer();
+                    std::fs::write(
+                        root.join(format!("{variant}-{name}-{width}.txt")),
+                        buffer_as_string(buffer),
+                    )
+                    .unwrap();
+                    let cells: Vec<_> = (0..buffer.area.height).flat_map(|y| (0..buffer.area.width).map(move |x| {
+                    let cell = &buffer[(x, y)];
+                    serde_json::json!({ "x":x, "y":y, "text":cell.symbol(), "fg":format!("{:?}", cell.fg), "bg":format!("{:?}", cell.bg), "modifiers":format!("{:?}", cell.modifier) })
+                })).collect();
+                    std::fs::write(root.join(format!("{variant}-{name}-{width}.json")), serde_json::to_vec(&serde_json::json!({"width":width,"height":buffer.area.height,"cells":cells})).unwrap()).unwrap();
+                }
+            }
+        }
     }
 
     fn assert_cached_chat_matches_fresh_render(app: &App, width: u16, height: u16) {
@@ -2373,97 +2690,41 @@ mod tests {
 
     /// Rectangle du texte de chat pour un buffer dessiné par [`drawn_chat`] —
     /// mêmes bordures et marges que [`draw_chat`].
-    fn drawn_chat_rect(buffer: &ratatui::buffer::Buffer) -> Rect {
-        chat_content_rect(Block::default().borders(Borders::ALL).inner(buffer.area))
-    }
 
-    /// Sans la bande de fond, un prompt et une réponse sont indiscernables en
-    /// `mono`, où toutes les teintes de texte se ressemblent.
     #[test]
-    fn a_user_prompt_carries_the_palette_band_and_an_agent_line_does_not() {
+    fn user_role_is_colored_while_query_and_answer_remain_neutral_without_a_band() {
         let _theme = theme::test_guard();
-
-        for name in ["mono", "zen"] {
-            theme::set_active(name).expect("thème intégré");
+        for name in ["mono", "zen", "light"] {
+            theme::set_active(name).unwrap();
             let mut app = App::new(None);
             app.push_user("bonjour");
             app.apply_agent_event(&text_message("m1", "réponse"));
-
             let buffer = drawn_chat(&app);
-            let band = theme::active().user_bg;
-            let prompt_row = row_containing(&buffer, "bonjour");
-            let prefix_x = cell_starting_with(&buffer, prompt_row, 'v');
-            let text_x = cell_starting_with(&buffer, prompt_row, 'b');
-
-            assert_eq!(buffer[(prefix_x, prompt_row)].bg, band, "{name} : préfixe");
-            assert_eq!(buffer[(text_x, prompt_row)].bg, band, "{name} : texte");
-            assert_eq!(
-                buffer[(text_x, prompt_row)].fg,
-                theme::user_color(),
-                "{name}"
-            );
-
-            let agent_row = row_containing(&buffer, "réponse");
-            let agent_x = cell_starting_with(&buffer, agent_row, 'r');
-            assert_ne!(
-                buffer[(agent_x, agent_row)].bg,
-                band,
-                "{name} : la réponse reste hors bande"
-            );
+            let row = row_containing(&buffer, "bonjour");
+            let role = cell_starting_with(&buffer, row, 'y');
+            let body = cell_starting_with(&buffer, row, 'b');
+            assert_eq!(buffer[(role, row)].fg, theme::user_color());
+            assert_eq!(buffer[(body, row)].fg, theme::active().text);
+            assert_eq!(buffer[(role, row)].bg, ratatui::style::Color::Reset);
+            assert_eq!(buffer[(body, row)].bg, ratatui::style::Color::Reset);
         }
     }
 
-    /// `Paragraph` ne stylise que les cellules portant un grapheme (ratatui
-    /// 0.30, `render_line`) : le fond d'une `Line` ne peut pas atteindre le
-    /// bord droit du chat, la bande s'arrête donc au dernier caractère.
     #[test]
-    fn the_user_band_covers_the_prompt_text_and_stops_there() {
+    fn user_role_and_neutral_body_follow_theme_changes() {
         let _theme = theme::test_guard();
-        theme::set_active("zen").expect("zen is a built-in theme");
         let mut app = App::new(None);
         app.push_user("bonjour");
-
-        let buffer = drawn_chat(&app);
-        let band = theme::active().user_bg;
-        let row = row_containing(&buffer, "bonjour");
-        let chat_rect = drawn_chat_rect(&buffer);
-        let text_end = cell_starting_with(&buffer, row, 'b') + "bonjour".len() as u16;
-
-        for x in chat_rect.x..text_end {
-            assert_eq!(buffer[(x, row)].bg, band, "colonne {x}");
+        for name in ["zen", "light", "mono"] {
+            theme::set_active(name).unwrap();
+            let buffer = drawn_chat(&app);
+            let row = row_containing(&buffer, "bonjour");
+            let x = cell_starting_with(&buffer, row, 'b');
+            assert_eq!(buffer[(x, row)].fg, theme::active().text);
+            assert_eq!(buffer[(x, row)].bg, ratatui::style::Color::Reset);
         }
-        assert_ne!(
-            buffer[(chat_rect.x + chat_rect.width - 1, row)].bg,
-            band,
-            "la bande ne va pas jusqu'au bord du chat"
-        );
     }
 
-    #[test]
-    fn a_user_prompt_band_follows_a_theme_change_after_the_fact() {
-        let _theme = theme::test_guard();
-        theme::set_active("zen").expect("zen is a built-in theme");
-        let mut app = App::new(None);
-        app.push_user("bonjour");
-        let zen_band = theme::active().user_bg;
-
-        theme::set_active("mono").expect("mono is a built-in theme");
-
-        let buffer = drawn_chat(&app);
-        let row = row_containing(&buffer, "bonjour");
-        let x = cell_starting_with(&buffer, row, 'b');
-
-        assert_eq!(buffer[(x, row)].bg, theme::active().user_bg);
-        assert_ne!(
-            buffer[(x, row)].bg,
-            zen_band,
-            "la palette du push ne doit rien figer"
-        );
-    }
-
-    /// Un bloc `rendered` poussé sous un thème doit se re-colorer au draw
-    /// suivant : après `/theme`, la couleur figée au push serait celle de
-    /// l'ancienne palette.
     #[test]
     fn a_rendered_system_line_follows_a_theme_change_after_the_fact() {
         let _theme = theme::test_guard();
@@ -3850,7 +4111,9 @@ mod tests {
     /// The chat block's own top-left corner, which is what tells a folded chat
     /// (task 21) from the `Ctrl+O chat` hint the folded reader's footer carries.
     fn chat_frame_row(content: &str) -> Option<&str> {
-        content.lines().find(|line| line.contains("┌ chat"))
+        content
+            .lines()
+            .find(|line| line.contains(" chat ") && !line.contains("Ctrl+O chat"))
     }
 
     /// Column a needle sits at in a rendered row. Wide glyphs count as one
@@ -3894,7 +4157,7 @@ mod tests {
         assert!(row.contains(theme::EXPLORER_GLYPH), "got:\n{content}");
         assert!(row.contains(theme::VIEWER_GLYPH), "got:\n{content}");
         assert!(
-            column_of(row, theme::VIEWER_GLYPH) - column_of(row, "┌ chat") >= 90,
+            column_of(row, theme::VIEWER_GLYPH) - column_of(row, " chat ") >= 90,
             "colonne de chat trop étroite : {row:?}"
         );
     }
@@ -3917,7 +4180,7 @@ mod tests {
             "le lecteur prend la place du chat : {row:?}"
         );
         assert!(content.contains("hello"), "got:\n{content}");
-        assert!(content.contains("┌ message"), "composer, got:\n{content}");
+        assert!(content.contains(" message "), "composer, got:\n{content}");
         assert!(content.contains("Ctrl+O chat"), "got:\n{content}");
     }
 
@@ -4052,27 +4315,24 @@ mod tests {
 
         let content = rendered(&app, 100, 20);
         let rows: Vec<&str> = content.lines().collect();
-        let top = row_index(&content, "┌ chat");
+        let top = row_index(&content, " chat ");
 
         assert_eq!(between_borders(rows[top + 1]), "", "got:\n{content}");
         assert!(rows[top + 2].contains("bonjour"), "got:\n{content}");
     }
 
     #[test]
-    fn the_composer_frames_its_input_line_with_a_blank_row() {
+    fn the_composer_separates_its_input_line_with_breathing_room() {
         let app = App::new(None);
-
         let content = rendered(&app, 100, 20);
         let rows: Vec<&str> = content.lines().collect();
-        let top = row_index(&content, "┌ message");
-
+        let top = row_index(&content, " message ");
         assert_eq!(between_borders(rows[top + 1]), "", "got:\n{content}");
         assert!(
             rows[top + 2].contains("Describe a task…"),
             "got:\n{content}"
         );
         assert_eq!(between_borders(rows[top + 3]), "", "got:\n{content}");
-        assert!(rows[top + 4].contains('└'), "got:\n{content}");
     }
 
     /// Le défilement au plus bas (`End`) s'arrête sur la marge, pas sous la
@@ -4086,22 +4346,13 @@ mod tests {
 
         let content = rendered(&app, 100, 20);
         let rows: Vec<&str> = content.lines().collect();
-        let top = row_index(&content, "┌ chat");
-        let bottom = top
-            + 1
-            + rows[top + 1..]
-                .iter()
-                .position(|row| row.contains('└'))
-                .expect("bordure basse du chat");
+        let bottom = row_index(&content, " message ");
 
         assert_eq!(between_borders(rows[bottom - 1]), "", "got:\n{content}");
         assert!(content.contains("ligne50"), "got:\n{content}");
-        // Chaque ligne de chat est suivie d'une ligne vide : 50 messages font
-        // 100 rangées pour une zone de 9 (volet de 13 moins deux bordures et
-        // deux marges), donc un défilement qui démarre rangée 91 — la ligne
-        // vide de « ligne46 », dont le texte est déjà passé au-dessus.
-        assert!(!content.contains("ligne46"), "got:\n{content}");
-        assert!(content.contains("ligne47"), "got:\n{content}");
+
+        assert!(!content.contains("ligne45"), "got:\n{content}");
+        assert!(content.contains("ligne46"), "got:\n{content}");
     }
 
     #[test]

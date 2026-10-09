@@ -863,6 +863,7 @@ pub struct App {
     /// only borrows `&App`; the UI loop is single-threaded so `Cell<u16>`
     /// (Send, not Sync) is sufficient — no `Sync` bound is needed here.
     pub chat_overflow: Cell<u16>,
+    pub(super) chat_effective_scroll: Cell<u16>,
     /// Row (same coordinate space as `chat_overflow`/`scroll_offset`) at
     /// which each `Sender::User` chat line starts, measured by `draw_chat`
     /// at render time — cleared and repopulated every draw. Powers
@@ -1047,6 +1048,7 @@ impl App {
             goal_events: Vec::new(),
             scroll_offset: 0,
             chat_overflow: Cell::new(0),
+            chat_effective_scroll: Cell::new(0),
             user_turn_rows: RefCell::new(Vec::new()),
             prompt_history: Vec::new(),
             history_index: None,
@@ -3162,35 +3164,51 @@ impl App {
         self.input_cursor = head_to(&self.input, start).chars().count();
     }
 
+    fn sync_chat_scroll(&mut self) {
+        let mut cache = self.chat_cache.borrow_mut();
+        if cache.viewport.requested_offset() == Some(self.scroll_offset) {
+            self.scroll_offset = self.chat_effective_scroll.get();
+        }
+        cache.viewport.user_scroll();
+    }
+
     pub fn scroll_page_up(&mut self) {
+        self.sync_chat_scroll();
         self.scroll_offset = (self.scroll_offset + SCROLL_PAGE).min(self.max_scroll());
     }
 
     pub fn scroll_page_down(&mut self) {
+        self.sync_chat_scroll();
         self.scroll_offset = self.scroll_offset.saturating_sub(SCROLL_PAGE);
     }
 
     pub fn scroll_line_up(&mut self) {
+        self.sync_chat_scroll();
         self.scroll_offset = (self.scroll_offset + 1).min(self.max_scroll());
     }
 
     pub fn scroll_line_down(&mut self) {
+        self.sync_chat_scroll();
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
     }
 
     pub fn scroll_home(&mut self) {
+        self.sync_chat_scroll();
         self.scroll_offset = self.max_scroll();
     }
 
     pub fn scroll_end(&mut self) {
+        self.sync_chat_scroll();
         self.scroll_offset = 0;
     }
 
     pub fn scroll_wheel_up(&mut self) {
+        self.sync_chat_scroll();
         self.scroll_offset = (self.scroll_offset + SCROLL_WHEEL).min(self.max_scroll());
     }
 
     pub fn scroll_wheel_down(&mut self) {
+        self.sync_chat_scroll();
         self.scroll_offset = self.scroll_offset.saturating_sub(SCROLL_WHEEL);
     }
 
@@ -3200,6 +3218,7 @@ impl App {
     /// (`base_scroll − scroll_offset`). No-op if there is no user turn
     /// above (already at/past the first one).
     pub fn jump_prev_turn(&mut self) {
+        self.sync_chat_scroll();
         let base = self.chat_overflow.get();
         let top = base.saturating_sub(self.scroll_offset);
         let target = self
@@ -3217,6 +3236,7 @@ impl App {
     /// Mirror of [`Self::jump_prev_turn`] for the nearest user turn strictly
     /// below the current top row.
     pub fn jump_next_turn(&mut self) {
+        self.sync_chat_scroll();
         let base = self.chat_overflow.get();
         let top = base.saturating_sub(self.scroll_offset);
         let target = self

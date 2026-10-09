@@ -38,8 +38,8 @@ pub static THEMES: [Palette; 6] = [
     Palette {
         name: "zen",
         text: Color::Rgb(200, 200, 195),
-        muted: Color::DarkGray,
-        user: Color::Rgb(84, 110, 140),
+        muted: Color::Rgb(133, 142, 154),
+        user: Color::Rgb(132, 163, 196),
         user_bg: Color::Rgb(30, 34, 48),
         gold: Color::Rgb(196, 164, 106),
         accent: Color::Rgb(203, 88, 65),
@@ -218,7 +218,7 @@ pub fn test_guard() -> ThemeGuard {
 }
 
 pub const KAJI_GLYPH: &str = "鍛冶";
-pub const USER_PREFIX: &str = "vous ▸ ";
+pub const USER_PREFIX: &str = "you ▸ ";
 pub const AGENT_PREFIX: &str = "鍛冶 ▸ ";
 pub const SYSTEM_PREFIX: &str = "· ";
 pub const THINKING_PREFIX: &str = "思 ";
@@ -287,7 +287,7 @@ pub fn text() -> Style {
 
 pub fn user() -> Style {
     let palette = active();
-    Style::default().fg(palette.user).bg(palette.user_bg)
+    Style::default().fg(palette.user)
 }
 
 pub fn agent() -> Style {
@@ -366,17 +366,17 @@ pub fn border_active() -> Style {
 
 pub fn code_inline() -> Style {
     let palette = active();
-    Style::default().fg(palette.accent).bg(palette.code_bg)
+    Style::default().fg(palette.text).bg(palette.code_bg)
 }
 
 pub fn code_block() -> Style {
-    Style::default().fg(active().accent)
+    Style::default().fg(active().text)
 }
 
 pub fn heading() -> Style {
     Style::default()
-        .fg(active().gold)
-        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        .fg(active().text)
+        .add_modifier(Modifier::BOLD)
 }
 
 /// En-tête de tableau aligné (`/cost`, `/docker`) — teinte or estompée.
@@ -519,44 +519,28 @@ mod tests {
         }
     }
 
-    /// Un prompt doit rester lisiblement distinct d'une réponse et du texte
-    /// courant dans chaque palette — c'est la raison d'être de `user_bg`, et
-    /// une palette ajoutée sans lui ferait régresser `mono`, où toutes les
-    /// teintes se ressemblent.
     #[test]
-    fn every_palette_sets_a_user_band_that_differs_from_agent_and_text() {
+    fn every_palette_colors_the_user_role_without_a_selection_band() {
         let _guard = test_guard();
-
         for (index, palette) in THEMES.iter().enumerate() {
             set_active_index(index);
-            assert_eq!(
-                user().bg,
-                Some(palette.user_bg),
-                "{} : le prompt doit porter sa bande",
-                palette.name
-            );
-            assert_ne!(user(), agent(), "{}", palette.name);
-            assert_ne!(user(), text(), "{}", palette.name);
-            assert_ne!(
-                palette.user, palette.user_bg,
-                "{} : texte du prompt invisible sur sa propre bande",
-                palette.name
-            );
+            assert_eq!(user().fg, Some(palette.user));
+            assert_eq!(user().bg, None);
         }
     }
 
     #[test]
-    fn zen_palette_keeps_the_historical_colors() {
+    fn zen_palette_keeps_brand_colors_and_readable_secondary_text() {
         let zen = &THEMES[0];
         assert_eq!(zen.name, "zen");
         assert_eq!(zen.text, Color::Rgb(200, 200, 195));
-        assert_eq!(zen.user, Color::Rgb(84, 110, 140));
+        assert_eq!(zen.user, Color::Rgb(132, 163, 196));
         assert_eq!(zen.border_inactive, Color::Rgb(84, 110, 140));
         assert_eq!(zen.accent, Color::Rgb(203, 88, 65));
         assert_eq!(zen.gold, Color::Rgb(196, 164, 106));
         assert_eq!(zen.code_bg, Color::Rgb(40, 40, 38));
         assert_eq!(zen.chart_alt, Color::Rgb(139, 166, 108));
-        assert_eq!(zen.muted, Color::DarkGray);
+        assert_eq!(zen.muted, Color::Rgb(133, 142, 154));
     }
 
     #[test]
