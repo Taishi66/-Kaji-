@@ -64,8 +64,18 @@ widths, preserving existing keyboard behavior.
     `/docker details` prints the daemon error on request. Docker was not started.
   - Reader at 40 columns: focused footer `q close · Esc close · j/k scroll`;
     unfocused footer `Ctrl+O→q close`; `q` closes it.
-- Not covered by that run: resumed-session hydration and long-turn refresh
-  (both need real inference), light/dark theme comparison, the recipe run.
+- 2026-10-12, same debug build, isolated root, real inference on local
+  `ollama / qwen3.5:4b` (no key, no cost):
+  - First turn: status line `session tokens 2.0k↑ 201↓ · cost ?`.
+  - Quit, then `kaji tui --resume`: history restored and the status line reads
+    the same `2.0k↑ 201↓`; the persisted totals are not doubled.
+  - Second turn after resume: `4.1k↑ 322↓`; `/cost` reports 4,100 input and
+    322 output for the session, matching the status line.
+  - The context estimate stayed at `≈10k/?` while each turn recorded about 2k
+    input tokens. The gap between the estimate and the provider-reported input
+    on this local model is not explained.
+- Not covered: refresh during a long streamed turn, light/dark theme
+  comparison, the recipe run, any priced provider.
 - Default-feature check fails in this environment while building the vendored
   `cpp-httplib` C++ dependency (OpenSSL `X509_get_subject_name` error); the
   cause is not established and kaji sources were not reached.

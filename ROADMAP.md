@@ -277,7 +277,7 @@ all-target clippy passes. On 2026-10-12 the lean CLI check, library tests
 `ee90e4000`, and an agent-driven tmux run confirmed the status line at 40 to 200
 columns, the Docker summary and the reader controls. The default-feature build
 fails here on the vendored `cpp-httplib` dependency; cause not established.
-Resume hydration with real inference, the recipe run and exact published-source
-tests are pending. This work does not start Docker. User visual acceptance
+A local `ollama / qwen3.5:4b` run confirmed that resumed totals are not doubled
+and match `/cost`. The recipe run and exact published-source tests are pending. This work does not start Docker. User visual acceptance
 remains open.
 [Session status evidence](docs/superpowers/reports/2026-10-09-terminal-session-status-validation.md).
