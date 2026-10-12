@@ -225,9 +225,7 @@ pub fn render_telemetry(app: &App, width: u16) -> Line<'static> {
         if index > 0 {
             spans.push(Span::styled(separator, theme::dim()));
         }
-        let style = if index == 0 && pressure {
-            theme::gold()
-        } else if index == 2 && app.cost_total.is_some() {
+        let style = if (index == 0 && pressure) || (index == 2 && app.cost_total.is_some()) {
             theme::gold()
         } else {
             theme::text()
