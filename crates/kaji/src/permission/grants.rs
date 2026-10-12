@@ -1,6 +1,7 @@
 //! Call-level permission grants: `tool_name(spec)` rules, prefix derivation and matching.
 
 use std::fmt;
+use std::path::{Component, Path, PathBuf};
 
 use rmcp::model::JsonObject;
 
@@ -68,6 +69,42 @@ impl Spec {
     fn is_exactly(&self, argument: &str) -> bool {
         matches!(self, Self::Exact(text) if text == argument)
     }
+
+    fn with_normalized_path(self) -> Self {
+        match self {
+            Self::Exact(text) => Self::Exact(normalize_path(&text)),
+            Self::Prefix(prefix) => Self::Prefix(normalize_path(&prefix)),
+        }
+    }
+}
+
+/// Folds `.` and `..` segments and repeated separators without touching the file
+/// system, so a rule and a call that spell the same relative or absolute path compare
+/// equal. It does not relate a relative path to its absolute form, nor follow links.
+fn normalize_path(text: &str) -> String {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(text).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let below_a_name = matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                );
+                if below_a_name {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        normalized.to_string_lossy().into_owned()
+    }
 }
 
 impl fmt::Display for Spec {
@@ -97,6 +134,11 @@ pub struct GrantRule {
 
 impl GrantRule {
     pub fn new(tool_name: &str, spec: Option<Spec>) -> Self {
+        let spec = if is_path_tool(tool_name) {
+            spec.map(Spec::with_normalized_path)
+        } else {
+            spec
+        };
         Self {
             tool_name: tool_name.to_string(),
             spec,
@@ -155,10 +197,12 @@ pub fn primary_argument(tool_name: &str, arguments: &JsonObject) -> Option<Strin
     } else {
         return None;
     };
-    arguments
-        .get(key)?
-        .as_str()
-        .map(|value| value.trim().to_string())
+    let value = arguments.get(key)?.as_str()?.trim();
+    if is_path_tool(tool_name) {
+        Some(normalize_path(value))
+    } else {
+        Some(value.to_string())
+    }
 }
 
 /// The spec to persist when the user grants a call, or `None` for a tool-wide grant.
@@ -650,6 +694,48 @@ mod tests {
             SHELL,
             Some(&shell("cargo test"))
         ));
+    }
+
+    #[test]
+    fn a_path_denial_catches_every_spelling_of_the_path() {
+        let denied = [GrantRule::new("write", Some(Spec::exact("secrets.env")))];
+        for path in [
+            "secrets.env",
+            "./secrets.env",
+            "sub/../secrets.env",
+            "./sub/.././secrets.env",
+            "sub//../secrets.env",
+        ] {
+            assert!(
+                call_denied_by_any(&denied, "write", Some(&object!({ "path": path }))),
+                "{path} should be denied"
+            );
+        }
+        assert!(!call_denied_by_any(
+            &denied,
+            "write",
+            Some(&object!({ "path": "notes.md" }))
+        ));
+    }
+
+    #[test]
+    fn a_path_rule_is_read_in_its_normalized_form() {
+        let denied = [GrantRule::parse("write(./config/../secrets.env)")];
+        assert!(call_denied_by_any(
+            &denied,
+            "write",
+            Some(&object!({ "path": "secrets.env" }))
+        ));
+    }
+
+    #[test_case("a/./b", "a/b"; "current_dir_dropped")]
+    #[test_case("a/../b", "b"; "parent_dir_folded")]
+    #[test_case("../a", "../a"; "leading_parent_kept")]
+    #[test_case("a/../../b", "../b"; "parent_above_the_start_kept")]
+    #[test_case("/a/../../b", "/b"; "root_has_no_parent")]
+    #[test_case("./", "."; "empty_becomes_current_dir")]
+    fn normalizes_paths_lexically(path: &str, expected: &str) {
+        assert_eq!(normalize_path(path), expected);
     }
 
     #[test]
