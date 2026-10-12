@@ -282,8 +282,10 @@ fn dir_label_with(dir: &Path, home: Option<std::ffi::OsString>) -> String {
 }
 
 /// Keeps the tail of `label` — the leaf directory is what identifies it — and
-/// marks what it dropped with a leading `…`.
-fn truncate_left(label: &str, budget: usize) -> String {
+/// marks what it dropped with a leading `…`. The forge panel takes the same
+/// cut for a different reason: blades born from one template share their head,
+/// so it is their tail that names them.
+pub(crate) fn truncate_left(label: &str, budget: usize) -> String {
     if display_width(label) <= budget {
         return label.to_string();
     }

@@ -22,6 +22,8 @@ Repeated paragraph: the interface should keep the exact passage in view when the
 
 ## A concrete example
 
-A postal code was interpreted as a location in a different country. Comparing the first result with a second source exposed the mismatch; using the actual coordinates fixed the answer. The lesson is to make verification visible and keep complete explanations readable at every available width. ## Getting the best result
+A postal code was interpreted as a location in a different country. Comparing the first result with a second source exposed the mismatch; using the actual coordinates fixed the answer. The lesson is to make verification visible and keep complete explanations readable at every available width.
+
+## Getting the best result
 
 Give a concrete goal, a reference, the important constraints and an observable success condition. The transcript should make each of those easy to inspect while keeping the composer and the current status available.

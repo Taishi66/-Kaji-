@@ -394,7 +394,7 @@ pub enum Action {
     /// n'a plus qu'à interroger le ledger.
     Cost(report::CostView),
     Context,
-    Docker,
+    Docker(bool),
     Checkpoints,
     /// Parsed `/restore <id>` — carries the checkpoint id, not yet
     /// confirmed. `event_loop` opens the y/n modal on receipt; the modal
@@ -559,7 +559,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "/docker",
         desc: "list running containers",
-        run: |_| Action::Docker,
+        run: |_| Action::Docker(false),
     },
     Command {
         name: "/checkpoints",
@@ -787,6 +787,12 @@ pub struct App {
     pub tokens_total_out: i64,
     pub cost_turn: Option<f64>,
     pub cost_total: Option<f64>,
+    pub cost_partial: bool,
+    pub context_used: Option<usize>,
+    pub context_limit: Option<usize>,
+    pub context_refreshing: bool,
+    pub usage_ready: bool,
+    pub usage_refreshing: bool,
     /// Last snapshot delivered by the background read (task 15) — `None` until
     /// the first one lands, and again whenever `working_dir` is not a
     /// repository. Never computed here: `App` must not shell out to git on the
@@ -843,6 +849,11 @@ pub struct App {
     /// la même description, et le premier snapshot renomme celles qu'une
     /// notification d'outil avait nommées par leur id.
     forge_sheet_open: Option<String>,
+    /// Le fil de la lame dont la fiche est ouverte, relu sur sa session à
+    /// chaque battement. Il ne vient pas des notifications : celles-ci ne
+    /// remontent que pendant un tour du parent, et la fiche s'ouvre justement
+    /// quand il est retombé au repos.
+    forge_thread: Option<ForgeThread>,
     pub driver: PassDriver,
     /// Goal session (item 5 ante) — kept after it ends so `/goal` can still
     /// report the last outcome. [`App::goal_driver`] is what says whether it
@@ -1025,6 +1036,12 @@ impl App {
             tokens_total_out: 0,
             cost_turn: None,
             cost_total: None,
+            cost_partial: false,
+            context_used: None,
+            context_limit: None,
+            context_refreshing: true,
+            usage_ready: false,
+            usage_refreshing: true,
             git_status: None,
             git_refresh_inflight: false,
             pending_git_request: false,
@@ -1042,6 +1059,7 @@ impl App {
             pending_workflow_cancel: None,
             pending_workflow_gate: None,
             forge_sheet_open: None,
+            forge_thread: None,
             driver: PassDriver::Idle,
             goal: None,
             goal_buffer: String::new(),
@@ -2589,7 +2607,12 @@ impl App {
                 self.focus = Focus::Viewer;
             }
             Some(missioncontrol::MissionTarget::Blade { id }) => {
-                let Some(sheet) = self.forge.tasks.get(&id).map(|task| forge_sheet(task, 0)) else {
+                let Some(sheet) = self
+                    .forge
+                    .tasks
+                    .get(&id)
+                    .map(|task| forge_sheet(task, self.forge_thread.as_ref(), 0))
+                else {
                     return;
                 };
                 self.viewer = Some(sheet);
@@ -2783,11 +2806,12 @@ impl App {
     /// La fiche de la lame désignée, dans le lecteur : ce que la colonne du
     /// volet n'a pas la place de dire.
     fn open_forge_sheet(&mut self) {
-        let Some((id, sheet)) = self
-            .forge
-            .selected_task()
-            .map(|task| (task.id.clone(), forge_sheet(task, 0)))
-        else {
+        let Some((id, sheet)) = self.forge.selected_task().map(|task| {
+            (
+                task.id.clone(),
+                forge_sheet(task, self.forge_thread.as_ref(), 0),
+            )
+        }) else {
             return;
         };
         self.viewer = Some(sheet);
@@ -2795,14 +2819,31 @@ impl App {
         self.focus = Focus::Viewer;
     }
 
+    /// La lame que le lecteur suit, pour que la boucle sache quelle session
+    /// relire. `None` dès que le lecteur montre autre chose.
+    pub fn forge_sheet_id(&self) -> Option<&str> {
+        self.forge_sheet_open.as_deref()
+    }
+
+    /// Le fil relu par la boucle. Un fil d'une autre lame que celle affichée est
+    /// ignoré au rendu (`forge_sheet`), pas ici : c'est la fiche qui décide de
+    /// ce qu'elle montre, pas l'ordre d'arrivée des lectures.
+    pub fn apply_forge_thread(&mut self, thread: Option<ForgeThread>) {
+        self.forge_thread = thread;
+    }
+
     /// La fiche est une vue, pas une copie : tant que le lecteur montre celle
-    /// d'une lame encore listée, chaque tick la réécrit — titre compris, donc un
-    /// renommage suit au lieu de geler. La position de lecture reste où l'œil
-    /// l'a laissée.
+    /// d'une lame encore listée, chaque tick la réécrit — titre et fil compris,
+    /// donc un renommage suit au lieu de geler. La position de lecture reste où
+    /// l'œil l'a laissée.
     pub fn refresh_forge_sheet(&mut self) {
         let Some(sheet) = self.forge_sheet_open.as_ref().and_then(|id| {
             let task = self.forge.tasks.get(id)?;
-            Some(forge_sheet(task, self.viewer.as_ref()?.scroll))
+            Some(forge_sheet(
+                task,
+                self.forge_thread.as_ref(),
+                self.viewer.as_ref()?.scroll,
+            ))
         }) else {
             return;
         };
@@ -3983,7 +4024,8 @@ impl App {
                     && restore_command_arg(self.input.trim()).is_none()
                     && goal_command_arg(self.input.trim()).is_none()
                     && workflow_command_arg(self.input.trim()).is_none()
-                    && edit_command_arg(self.input.trim()).is_none() =>
+                    && edit_command_arg(self.input.trim()).is_none()
+                    && slash_command_arg(self.input.trim(), "/docker").is_none() =>
             {
                 let text = self.input.trim().to_string();
                 self.clear_input();
@@ -4043,6 +4085,16 @@ impl App {
                     if let Some(arg) = goal_command_arg(&text) {
                         let arg = arg.to_string();
                         return self.run_goal_command(&arg);
+                    }
+                    if let Some(arg) = slash_command_arg(&text, "/docker") {
+                        return match arg {
+                            "" => Action::Docker(false),
+                            "details" => Action::Docker(true),
+                            _ => {
+                                self.push_system("Usage: /docker [details]");
+                                Action::None
+                            }
+                        };
                     }
                     if let Some(arg) = cost_command_arg(&text) {
                         return match report::CostView::parse(arg) {
@@ -4302,11 +4354,8 @@ impl App {
         let output = i64::from(usage.usage.output_tokens.unwrap_or(0));
         self.tokens_turn_in += input;
         self.tokens_turn_out += output;
-        self.tokens_total_in += input;
-        self.tokens_total_out += output;
         if let Some(cost) = usage.cost {
             self.cost_turn = Some(self.cost_turn.unwrap_or(0.0) + cost);
-            self.cost_total = Some(self.cost_total.unwrap_or(0.0) + cost);
         }
     }
 
@@ -4524,7 +4573,95 @@ fn forge_sheet_title(description: &str) -> String {
     format!("{} {head}", theme::SUBAGENT_GLYPH)
 }
 
-fn forge_sheet(task: &forge::ForgeTask, scroll: usize) -> crate::tui::viewer::Viewer {
+/// Combien de lignes du fil la fiche garde. C'est la fenêtre qu'on lit d'un
+/// coup d'œil pour savoir où en est une lame, pas son transcript entier — le
+/// lecteur défile, mais une fiche relue chaque seconde ne peut pas grossir sans
+/// fin.
+const FORGE_THREAD_LINES: usize = 60;
+
+/// Ce que la session d'une lame raconte d'elle : ses appels d'outils, refermés
+/// par leur verdict, et le texte qu'elle a écrit entre deux.
+///
+/// L'id d'une tâche déléguée **est** l'id de sa session
+/// (`SummonClient::handle_async_delegate` : `task_id = subagent_session.id`),
+/// donc la TUI relit une lame comme n'importe quelle autre session — et
+/// l'agent y persiste ses messages au fil de son tour, pas à la fin.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForgeThread {
+    pub id: String,
+    /// Les dernières lignes du fil, de la plus ancienne à la plus récente.
+    pub lines: Vec<String>,
+    /// L'outil dont la lame attend encore la réponse — ce qui brûle vraiment,
+    /// là où la notification d'outil ne survit pas au repos du parent.
+    pub tool: Option<String>,
+    pub tokens: i64,
+}
+
+/// Le fil d'une lame, lu sur sa conversation persistée. Même lecture que le
+/// chat fait du flux du parent (`apply_assistant_message`) : un appel d'outil
+/// prend une ligne, que sa réponse referme au lieu d'en ajouter une seconde.
+pub fn forge_thread(id: &str, conversation: &Conversation, tokens: i64) -> ForgeThread {
+    let mut lines: Vec<String> = Vec::new();
+    let mut pending: HashMap<String, (usize, String)> = HashMap::new();
+    for message in conversation.messages() {
+        for block in &message.content {
+            match block {
+                MessageContentBlock::Text(text) if message.role == Role::Assistant => {
+                    lines.extend(
+                        wrap_words(text.text.trim(), FORGE_SHEET_WRAP - 2)
+                            .into_iter()
+                            .map(|chunk| format!("  {chunk}")),
+                    );
+                }
+                MessageContentBlock::ToolRequest(request) => {
+                    let name = request
+                        .tool_call
+                        .as_ref()
+                        .map(|call| call.name.to_string())
+                        .unwrap_or_else(|_| "tool".to_string());
+                    pending.insert(request.id.clone(), (lines.len(), name.clone()));
+                    lines.push(format!("{} {name}", theme::FIRE_GLYPH));
+                }
+                MessageContentBlock::ToolResponse(response) => {
+                    let Some((row, name)) = pending.remove(&response.id) else {
+                        continue;
+                    };
+                    let mark = if response.tool_result.is_ok() {
+                        "✓"
+                    } else {
+                        "✗"
+                    };
+                    lines[row] = format!("{mark} {name}");
+                }
+                _ => {}
+            }
+        }
+    }
+    // Le dernier appel resté sans réponse est celui qui brûle : les précédents
+    // ont tous été refermés au passage de leur `ToolResponse`.
+    let tool = pending
+        .values()
+        .max_by_key(|(row, _)| *row)
+        .map(|(_, name)| name.clone());
+    let dropped = lines.len().saturating_sub(FORGE_THREAD_LINES);
+    if dropped > 0 {
+        lines.drain(..dropped);
+        lines.insert(0, format!("… +{dropped} earlier"));
+    }
+    ForgeThread {
+        id: id.to_string(),
+        lines,
+        tool,
+        tokens,
+    }
+}
+
+fn forge_sheet(
+    task: &forge::ForgeTask,
+    thread: Option<&ForgeThread>,
+    scroll: usize,
+) -> crate::tui::viewer::Viewer {
+    let thread = thread.filter(|thread| thread.id == task.id);
     let mut lines = forge_sheet_field("task", &task.description);
     lines.extend(forge_sheet_field(
         "status",
@@ -4535,8 +4672,28 @@ fn forge_sheet(task: &forge::ForgeTask, scroll: usize) -> crate::tui::viewer::Vi
         ),
     ));
     lines.extend(forge_sheet_field("turns", &task.turns.to_string()));
-    if let Some(tool) = task.current_tool.as_deref() {
+    if let Some(tokens) = thread
+        .map(|thread| thread.tokens)
+        .filter(|count| *count > 0)
+    {
+        lines.extend(forge_sheet_field("tokens", &tokens.to_string()));
+    }
+    // Le fil fait autorité sur l'outil : il dit ce que la session montre à
+    // l'instant, là où la notification dit ce que le dernier tour du parent a
+    // eu le temps de voir passer.
+    let tool = thread
+        .and_then(|thread| thread.tool.as_deref())
+        .or(task.current_tool.as_deref());
+    if let Some(tool) = tool {
         lines.extend(forge_sheet_field("tool", tool));
+    }
+    if let Some(thread) = thread {
+        lines.push(String::new());
+        lines.push(format!("{:<FORGE_SHEET_LABEL$}:", "thread"));
+        if thread.lines.is_empty() {
+            lines.push("  (nothing recorded yet)".to_string());
+        }
+        lines.extend(thread.lines.iter().cloned());
     }
     if let Some((label, body)) = forge_sheet_verdict(task) {
         lines.push(String::new());
@@ -7932,7 +8089,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_event_accumulates_turn_and_total_tokens() {
+    fn usage_event_updates_turn_without_adding_to_persisted_snapshot() {
         let mut app = App::new(None);
         app.begin_turn();
         let usage = ProviderUsage::new(
@@ -7942,16 +8099,16 @@ mod tests {
         app.apply_agent_event(&AgentEvent::Usage(usage.clone()));
         assert_eq!(app.tokens_turn_in, 10);
         assert_eq!(app.tokens_turn_out, 4);
-        assert_eq!(app.tokens_total_in, 10);
-        assert_eq!(app.tokens_total_out, 4);
+        assert_eq!(app.tokens_total_in, 0);
+        assert_eq!(app.tokens_total_out, 0);
 
         app.apply_agent_event(&AgentEvent::Usage(usage));
         assert_eq!(app.tokens_turn_in, 20);
-        assert_eq!(app.tokens_total_in, 20);
+        assert_eq!(app.tokens_total_in, 0);
     }
 
     #[test]
-    fn usage_event_with_cost_accumulates_turn_and_session_cost() {
+    fn usage_event_cost_keeps_persisted_snapshot_separate() {
         use kaji::providers::base::CostSource;
 
         let mut app = App::new(None);
@@ -7964,15 +8121,15 @@ mod tests {
         .with_cost(0.10, CostSource::Estimated);
         app.apply_agent_event(&AgentEvent::Usage(usage.clone()));
         assert_eq!(app.cost_turn, Some(0.10));
-        assert_eq!(app.cost_total, Some(0.10));
+        assert_eq!(app.cost_total, None);
 
         app.apply_agent_event(&AgentEvent::Usage(usage));
         assert_eq!(app.cost_turn, Some(0.20));
-        assert_eq!(app.cost_total, Some(0.20));
+        assert_eq!(app.cost_total, None);
 
         app.begin_turn();
         assert_eq!(app.cost_turn, None, "reset per turn");
-        assert_eq!(app.cost_total, Some(0.20), "kept across turns");
+        assert_eq!(app.cost_total, None, "kept across turns");
     }
 
     #[test]
@@ -8119,12 +8276,23 @@ mod tests {
     }
 
     #[test]
+    fn docker_details_are_dispatched_while_a_turn_is_running() {
+        let mut app = App::new(None);
+        app.begin_turn();
+        for c in "/docker details".chars() {
+            app.on_event(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::Docker(true));
+        assert!(app.steer_queue.is_empty());
+    }
+
+    #[test]
     fn slash_docker_returns_docker_action() {
         let mut app = App::new(None);
         for c in "/docker".chars() {
             app.on_event(&key(KeyCode::Char(c)));
         }
-        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::Docker);
+        assert_eq!(app.on_event(&key(KeyCode::Enter)), Action::Docker(false));
         assert!(app.input.is_empty());
     }
 
@@ -10403,6 +10571,129 @@ mod tests {
         let viewer = app.viewer.as_ref().expect("fiche toujours ouverte");
         assert_eq!(viewer.scroll, 2);
         assert!(viewer.lines.join("\n").contains("done"));
+    }
+
+    /// Une conversation de lame : elle a écrit, refermé un outil, et en tient
+    /// un second ouvert — c'est celui-là qui brûle.
+    fn blade_conversation() -> Conversation {
+        Conversation::new_unvalidated([
+            Message::assistant().with_text("j'ouvre les tests du volet"),
+            Message::assistant()
+                .with_tool_request("c1", Ok(CallToolRequestParams::new("developer__shell"))),
+            Message::user().with_tool_response("c1", Ok(CallToolResult::success(vec![]))),
+            Message::assistant()
+                .with_tool_request("c2", Ok(CallToolRequestParams::new("developer__view"))),
+        ])
+    }
+
+    /// Le reproche d'usage réel : ⏎ rendait une fiche statique. Elle montre
+    /// désormais ce que la session de la lame raconte — ses outils, refermés
+    /// par leur verdict, et ce qu'elle a écrit.
+    #[test]
+    fn the_sheet_carries_the_living_thread_of_its_blade() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        app.apply_forge_thread(Some(forge_thread("t1", &blade_conversation(), 4321)));
+        app.focus = Focus::Forge;
+
+        app.on_event(&key(KeyCode::Enter));
+
+        let sheet = app.viewer.as_ref().expect("fiche").lines.join("\n");
+        for expected in [
+            "thread",
+            "j'ouvre les tests du volet",
+            "✓ developer__shell",
+            "4321",
+        ] {
+            assert!(sheet.contains(expected), "{expected} manquant :\n{sheet}");
+        }
+        assert!(
+            sheet.contains(&format!("{} developer__view", theme::FIRE_GLYPH)),
+            "l'appel encore ouvert doit brûler :\n{sheet}"
+        );
+        assert!(
+            sheet.contains("tool     : developer__view"),
+            "l'en-tête nomme ce qui brûle :\n{sheet}"
+        );
+    }
+
+    /// Le fil est relu par la boucle à chaque battement : la fiche ouverte doit
+    /// le suivre, sans perdre la position de lecture.
+    #[test]
+    fn the_tick_refreshes_the_thread_under_the_open_sheet() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        app.focus = Focus::Forge;
+        app.on_event(&key(KeyCode::Enter));
+        app.viewer.as_mut().expect("fiche").scroll = 1;
+        assert!(!app
+            .viewer
+            .as_ref()
+            .expect("fiche")
+            .lines
+            .join("\n")
+            .contains("thread"));
+
+        app.apply_forge_thread(Some(forge_thread("t1", &blade_conversation(), 0)));
+        app.refresh_forge_sheet();
+
+        let viewer = app.viewer.as_ref().expect("fiche");
+        assert_eq!(viewer.scroll, 1, "la position de lecture ne bouge pas");
+        assert!(viewer.lines.join("\n").contains("✓ developer__shell"));
+    }
+
+    /// Deux délégations d'un même fan-out se ressemblent : le fil d'une lame ne
+    /// doit jamais s'afficher sous la fiche d'une autre.
+    #[test]
+    fn a_thread_read_for_another_blade_is_never_shown() {
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "auditer les tests",
+            forge::ForgeStatus::Running,
+        )]);
+        app.apply_forge_thread(Some(forge_thread("t2", &blade_conversation(), 4321)));
+        app.focus = Focus::Forge;
+
+        app.on_event(&key(KeyCode::Enter));
+
+        let sheet = app.viewer.as_ref().expect("fiche").lines.join("\n");
+        assert!(!sheet.contains("thread"), "{sheet}");
+        assert!(!sheet.contains("developer__shell"), "{sheet}");
+    }
+
+    /// Une lame qui tourne depuis longtemps a un transcript sans fin : la fiche
+    /// en garde la queue, et dit combien elle a laissé derrière.
+    #[test]
+    fn a_long_thread_keeps_its_tail_and_says_what_it_dropped() {
+        let messages: Vec<Message> = (0..FORGE_THREAD_LINES + 10)
+            .map(|rank| {
+                Message::assistant().with_tool_request(
+                    format!("c{rank}"),
+                    Ok(CallToolRequestParams::new(format!("tool_{rank}"))),
+                )
+            })
+            .collect();
+
+        let thread = forge_thread("t1", &Conversation::new_unvalidated(messages), 0);
+
+        assert_eq!(thread.lines.len(), FORGE_THREAD_LINES + 1);
+        assert!(
+            thread.lines[0].starts_with("… +10"),
+            "{:?}",
+            thread.lines[0]
+        );
+        assert!(
+            thread.lines.last().expect("queue").ends_with("tool_69"),
+            "{:?}",
+            thread.lines.last()
+        );
+        assert_eq!(thread.tool.as_deref(), Some("tool_69"));
     }
 
     #[test]

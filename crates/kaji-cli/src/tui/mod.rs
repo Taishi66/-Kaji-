@@ -72,6 +72,7 @@ pub async fn run(
     spec: Option<SpecDoc>,
     resume: bool,
 ) -> Result<()> {
+    let agent = Arc::new(agent);
     let header = build_header(&session_id);
     let (input_tx, input_rx) = mpsc::channel::<Event>(64);
     let gate = Arc::new(InputGate::default());
@@ -177,12 +178,6 @@ fn build_header(session_id: &str) -> String {
     session_id.to_string()
 }
 
-fn model_label() -> String {
-    Config::global()
-        .get_kaji_model()
-        .unwrap_or_else(|_| "?".to_string())
-}
-
 /// Keep each help section in one message: the chat separates messages with
 /// a blank line, which should separate sections rather than every shortcut.
 fn push_help(app: &mut App) {
@@ -263,8 +258,8 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             ),
             ("", "the chat folds away when the reader takes focus"),
             (
-                "Esc/h/←",
-                "leaves the reader — back to the explorer if it is open, otherwise closes",
+                "q / Esc",
+                "q closes the focused reader; Esc/h/← returns to its explorer, or closes without one",
             ),
             (
                 "e",
@@ -280,7 +275,7 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             ),
             (
                 "status bar",
-                "named mode · 在 place ⟩ branch · 炭 tokens ↑in ↓out · $ cost · 火 running tool · 遣 active agents",
+                "mode · project/Git · activity; model · ctx estimate/configured budget · session-tree tokens ↑in ↓out · estimated/partial cost (ctx % uses configured budget; tok = session tree; * = partial)",
             ),
             ("Esc", "interrupts · Ctrl+C quits"),
             ("Option+drag", "select text"),
@@ -307,11 +302,11 @@ fn navigation_section(mouse_enabled: bool, content_role: SpanRole) -> Vec<RoledL
             "Ctrl+F forge pane (/forge) — who does what: subagents, status, running tool",
             "Ctrl+O cycles panes (composer → explorer → reader → forge)",
             "  the chat folds away when the reader takes focus",
-            "Esc/h/← leaves the reader — back to the explorer if it is open, otherwise closes",
+            "q closes the focused reader · Esc/h/← returns to the explorer if open; otherwise closes",
             "e edit ($EDITOR, host nvim, or a Zellij/tmux pane per KAJI_EDIT_MODE) · /edit <path>",
             "Ctrl+S steer: sends the queued messages into the running turn",
             "Shift+Tab cycles the mode (承 approve → 智 smart → 自 auto) — seal on the left of the status bar",
-            "status bar named mode · 在 place ⟩ branch · 炭 tokens ↑in ↓out · $ cost · 火 running tool · 遣 active agents",
+            "status bar mode · project/Git · activity; model · ctx estimate/configured budget · session-tree tokens ↑in ↓out · estimated/partial cost (ctx % uses configured budget; tok = session tree; * = partial)",
             "Esc interrupts · Ctrl+C quits",
         ] {
             lines.push(vec![RoledSpan::new(text, content_role)]);
@@ -431,27 +426,273 @@ async fn context_report_lines(
     }
 }
 
-fn docker_report() -> Vec<RoledLine> {
-    let output = std::process::Command::new("docker")
-        .args([
-            "ps",
-            "--format",
-            "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}",
-        ])
-        .output();
+struct StatusSnapshot {
+    model: Option<String>,
+    context: Option<(usize, Option<usize>)>,
+}
 
+struct StatusRead(tokio::task::JoinHandle<StatusSnapshot>);
+
+impl Drop for StatusRead {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn status_read(agent: &Arc<Agent>, session_id: &str) -> StatusRead {
+    let agent = Arc::clone(agent);
+    let session_id = session_id.to_string();
+    StatusRead(tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let manager = SessionManager::instance();
+            let config = agent.model_config_for_session(&session_id).await.ok();
+            let context = tokio::time::timeout(Duration::from_secs(10), async {
+                let session = manager.get_session(&session_id, false).await.ok()?;
+                agent
+                    .context_report(&session_id, &session.working_dir)
+                    .await
+                    .ok()
+            })
+            .await
+            .ok()
+            .flatten();
+            StatusSnapshot {
+                model: config.as_ref().map(|config| config.model_name.clone()),
+                context: context
+                    .map(|report| (report.used, config.and_then(|config| config.context_limit))),
+            }
+        })
+        .await
+        .unwrap_or(StatusSnapshot {
+            model: None,
+            context: None,
+        })
+    }))
+}
+
+fn apply_status_snapshot(app: &mut App, snapshot: StatusSnapshot) {
+    if let Some(model) = snapshot.model {
+        app.model = model;
+    }
+    app.context_refreshing = false;
+    app.context_used = snapshot.context.map(|context| context.0);
+    app.context_limit = snapshot.context.and_then(|context| context.1);
+}
+
+fn apply_usage_snapshot(
+    app: &mut App,
+    usage: Option<kaji::session::session_manager::SessionUsageTotals>,
+) {
+    app.usage_refreshing = false;
+    if let Some(usage) = usage {
+        app.tokens_total_in = i64::from(usage.accumulated_usage.input_tokens.unwrap_or(0));
+        app.tokens_total_out = i64::from(usage.accumulated_usage.output_tokens.unwrap_or(0));
+        app.cost_total = usage.accumulated_cost;
+        app.cost_partial = usage.unpriced_entries > 0 || usage.coverage_unknown;
+        app.usage_ready = true;
+    } else {
+        app.usage_ready = false;
+        app.cost_total = None;
+    }
+}
+
+struct LedgerRefresh {
+    dirty: bool,
+    generation: u64,
+    next: tokio::time::Instant,
+}
+
+impl LedgerRefresh {
+    fn new() -> Self {
+        Self {
+            dirty: true,
+            generation: 0,
+            next: tokio::time::Instant::now(),
+        }
+    }
+    fn request(&mut self) {
+        self.dirty = true;
+    }
+    fn ready(&self, now: tokio::time::Instant, inflight: bool) -> bool {
+        self.dirty && !inflight && now >= self.next
+    }
+    fn started(&mut self, generation: u64, now: tokio::time::Instant) {
+        self.generation = generation;
+        self.dirty = false;
+        self.next = now + Duration::from_millis(750);
+    }
+    fn accept(&mut self, generation: u64) -> bool {
+        if self.generation == generation {
+            true
+        } else {
+            self.dirty = true;
+            false
+        }
+    }
+}
+
+struct UsageRead(
+    tokio::task::JoinHandle<Option<kaji::session::session_manager::SessionUsageTotals>>,
+);
+impl Drop for UsageRead {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn usage_read(session_id: &str) -> UsageRead {
+    let session_id = session_id.to_string();
+    UsageRead(tokio::spawn(async move {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            SessionManager::instance().get_session_usage_totals(&session_id),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+    }))
+}
+
+fn docker_failure_summary(stderr: &str) -> &'static str {
+    if stderr.contains("colima")
+        && (stderr.contains("no such file")
+            || stderr.contains("Cannot connect")
+            || stderr.contains("failed to connect"))
+    {
+        "Docker unavailable · check Colima · /docker details"
+    } else {
+        "Docker unavailable · check the selected daemon · /docker details"
+    }
+}
+
+struct DockerOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    success: bool,
+    truncated: bool,
+}
+
+struct DockerChild(tokio::process::Child);
+impl Drop for DockerChild {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0.id() {
+            kaji::subprocess::kill_process_group(pid);
+        }
+        let _ = self.0.start_kill();
+    }
+}
+
+async fn read_docker_pipe(
+    reader: impl tokio::io::AsyncRead + Unpin,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    use tokio::io::AsyncReadExt;
+    const LIMIT: usize = 64 * 1024;
+    let mut bytes = Vec::new();
+    reader
+        .take((LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await?;
+    let truncated = bytes.len() > LIMIT;
+    bytes.truncate(LIMIT);
+    Ok((bytes, truncated))
+}
+
+async fn docker_output_command(
+    command: &mut tokio::process::Command,
+) -> std::io::Result<DockerOutput> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = DockerChild(command.spawn()?);
+    let stdout = child.0.stdout.take().expect("stdout piped");
+    let stderr = child.0.stderr.take().expect("stderr piped");
+    let mut stdout = Box::pin(read_docker_pipe(stdout));
+    let mut stderr = Box::pin(read_docker_pipe(stderr));
+    let (out, err, truncated) = tokio::select! {
+        result = &mut stdout => {
+            let (out, truncated) = result?;
+            if truncated { (out, Vec::new(), true) } else {
+                let (err, truncated) = stderr.await?;
+                (out, err, truncated)
+            }
+        }
+        result = &mut stderr => {
+            let (err, truncated) = result?;
+            if truncated { (Vec::new(), err, true) } else {
+                let (out, truncated) = stdout.await?;
+                (out, err, truncated)
+            }
+        }
+    };
+    let success = if truncated {
+        false
+    } else {
+        child.0.wait().await?.success()
+    };
+    Ok(DockerOutput {
+        stdout: out,
+        stderr: err,
+        success,
+        truncated,
+    })
+}
+
+async fn docker_output() -> std::io::Result<DockerOutput> {
+    let mut command = tokio::process::Command::new("docker");
+    command.args([
+        "ps",
+        "--format",
+        "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}",
+    ]);
+    docker_output_command(&mut command).await
+}
+
+async fn docker_report(details: bool) -> Vec<RoledLine> {
+    let output = tokio::time::timeout(Duration::from_secs(3), docker_output()).await;
     match output {
-        Ok(out) if out.status.success() => {
+        Ok(Ok(out)) if out.success => {
             report::docker_table_lines(&String::from_utf8_lossy(&out.stdout))
         }
-        Ok(out) => {
+        Ok(Ok(out)) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            let first_line = stderr.lines().next().unwrap_or("unknown error");
-            vec![vec![RoledSpan::dim(format!(
-                "docker indisponible — {first_line}"
-            ))]]
+            let mut lines = vec![vec![RoledSpan::dim(if out.truncated {
+                "Docker output exceeded the 64 KiB preview limit · /docker details"
+            } else {
+                docker_failure_summary(&stderr)
+            })]];
+            if details {
+                lines.push(vec![RoledSpan::text(
+                    "Check docker context show and your daemon status; start it only if needed.",
+                )]);
+                for line in stderr.lines().take(12) {
+                    lines.push(vec![RoledSpan::dim(ui::sanitize_for_display(line))]);
+                }
+            }
+            lines
         }
-        Err(e) => vec![vec![RoledSpan::dim(format!("docker indisponible — {e}"))]],
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            vec![vec![RoledSpan::dim(
+                "Docker unavailable · docker command not installed",
+            )]]
+        }
+        Ok(Err(_)) => vec![vec![RoledSpan::dim(
+            "Docker unavailable · unable to run docker · /docker details",
+        )]],
+        Err(_) => vec![vec![RoledSpan::dim(
+            "Docker check timed out after 3s · check the daemon · /docker details",
+        )]],
+    }
+}
+
+struct DockerRead(tokio::task::JoinHandle<Vec<RoledLine>>);
+impl Drop for DockerRead {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -897,6 +1138,21 @@ async fn agent_usage(
         .collect()
 }
 
+/// Le fil vivant de la lame dont la fiche est ouverte, lu sur sa session.
+///
+/// L'id d'une tâche déléguée **est** l'id de sa session
+/// (`SummonClient::handle_async_delegate`), et le sous-agent y persiste ses
+/// messages au fil de son tour : la fiche montre donc ce que la lame vient de
+/// faire, pas ce que la dernière notification a eu le temps de dire. Une
+/// session illisible rend `None` — la fiche retombe alors sur ce que le
+/// snapshot et les notifications savent.
+async fn forge_thread(session_manager: &SessionManager, id: &str) -> Option<app::ForgeThread> {
+    let session = session_manager.get_session(id, true).await.ok()?;
+    let conversation = session.conversation.as_ref()?;
+    let tokens = i64::from(session.accumulated_usage.total_tokens.unwrap_or(0));
+    Some(app::forge_thread(id, conversation, tokens))
+}
+
 /// Le run que la session TUI pilote : son `WorkflowHandle` — la seule prise
 /// sur les gates, les pauses et les annulations d'agents — et la tâche qui
 /// déroule le DAG.
@@ -1041,7 +1297,7 @@ async fn next_turn_event(turn: &mut Option<TurnStream<'_>>) -> Option<anyhow::Re
 #[allow(clippy::too_many_arguments)]
 async fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
-    agent: &Agent,
+    agent: &Arc<Agent>,
     session_id: &str,
     conversation: kaji::conversation::Conversation,
     spec: Option<SpecDoc>,
@@ -1052,7 +1308,15 @@ async fn event_loop(
 ) -> Result<()> {
     let mut app = App::new(spec);
     app.header = header;
-    app.model = model_label();
+    app.model = tokio::time::timeout(
+        Duration::from_secs(2),
+        agent.model_config_for_session(session_id),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .map(|config| config.model_name)
+    .unwrap_or_else(|| "?".to_string());
     app.mouse_enabled = mouse_enabled();
     app.kaji_mode = agent.kaji_mode().await;
     let session_manager = SessionManager::instance();
@@ -1126,14 +1390,59 @@ async fn event_loop(
     let mut forge_tick = tokio::time::interval(FORGE_REFRESH_INTERVAL);
     forge_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut workflow: Option<LiveWorkflow> = None;
+    let mut status_pending = Some(status_read(agent, session_id));
+    let mut status_generation = 0u64;
+    let mut status_read_generation = status_generation;
+    let mut previous_busy = false;
+    let mut docker_pending: Option<DockerRead> = None;
+    let mut usage_pending: Option<UsageRead> = None;
+    let mut usage_refresh = LedgerRefresh::new();
 
     loop {
+        let busy = app.turn_active || app.turn_pending;
+        if busy != previous_busy {
+            status_generation = status_generation.wrapping_add(1);
+            app.context_refreshing = true;
+            previous_busy = busy;
+            if !busy {
+                usage_refresh.request();
+            }
+        }
+        if !busy && status_pending.is_none() && app.context_refreshing {
+            status_read_generation = status_generation;
+            status_pending = Some(status_read(agent, session_id));
+        }
+        if usage_refresh.ready(tokio::time::Instant::now(), usage_pending.is_some()) {
+            app.usage_refreshing = true;
+            usage_pending = Some(usage_read(session_id));
+            usage_refresh.started(status_generation, tokio::time::Instant::now());
+        }
         terminal.draw(|frame| ui::draw(frame, &app))?;
         // Honored after the `select!` returns, never inside it: suspending
         // the terminal while an arm could still redraw would paint the TUI
         // over the editor.
         let mut edit_request: Option<(PathBuf, Option<usize>)> = None;
         tokio::select! {
+            _ = tokio::time::sleep_until(usage_refresh.next), if usage_refresh.dirty && usage_pending.is_none() => {}
+            usage = async { (&mut usage_pending.as_mut().expect("usage read armed").0).await }, if usage_pending.is_some() => {
+                usage_pending = None;
+                if usage_refresh.accept(status_generation) {
+                    apply_usage_snapshot(&mut app, usage.ok().flatten());
+                }
+            }
+            report = async { (&mut docker_pending.as_mut().expect("docker read armed").0).await }, if docker_pending.is_some() => {
+                docker_pending = None;
+                if let Ok(lines) = report { app.push_system_lines(lines); }
+            }
+            snapshot = async { (&mut status_pending.as_mut().expect("status read armed").0).await }, if status_pending.is_some() => {
+                status_pending = None;
+                if status_read_generation == status_generation {
+                    match snapshot {
+                        Ok(snapshot) => apply_status_snapshot(&mut app, snapshot),
+                        Err(_) => app.context_refreshing = false,
+                    }
+                }
+            }
             _ = tick.tick(), if app.turn_active || app.turn_pending || app.seal_unfolded() => {}
             _ = git_tick.tick() => app.request_git_refresh(),
             _ = forge_tick.tick(), if app.turn_active || !app.forge.tasks.is_empty() || app.forge.visible() || app.mission.open || workflow.is_some() => {
@@ -1149,6 +1458,12 @@ async fn event_loop(
                 // c'est la seule construction de plateau que `apply_workflow_snapshot`
                 // ne couvre pas, donc la sélection ne se reclampe pas toute seule.
                 app.clamp_mission_selection();
+                // La session n'est relue que sous les yeux d'une fiche ouverte :
+                // une lame au repos ne coûte rien, et la fiche est la seule vue
+                // qui montre le fil.
+                if let Some(id) = app.forge_sheet_id().map(str::to_string) {
+                    app.apply_forge_thread(forge_thread(&session_manager, &id).await);
+                }
                 app.refresh_forge_sheet();
                 // Le ledger n'est interrogé que sous les yeux du
                 // mission-control : c'est la seule vue qui lit l'usage par
@@ -1323,9 +1638,10 @@ async fn event_loop(
                         let report = context_report_lines(agent, &session_manager, session_id).await;
                         app.push_system_lines(report);
                     }
-                    Action::Docker => {
-                        let report = docker_report();
-                        app.push_system_lines(report);
+                    Action::Docker(details) => {
+                        if docker_pending.is_none() {
+                            docker_pending = Some(DockerRead(tokio::spawn(docker_report(details))));
+                        }
                     }
                     Action::Checkpoints => match &disabled_checkpoints {
                         // Sans store, le journal ne contient aucun checkpoint :
@@ -1365,6 +1681,9 @@ async fn event_loop(
                         }
                     }
                     Action::RestoreConfirm => {
+                        status_generation = status_generation.wrapping_add(1);
+                        app.context_refreshing = true;
+                        usage_refresh.request();
                         if let Some(id) = app.take_pending_restore() {
                             // The agent's own store, pinned to
                             // `session.working_dir` — see `perform_restore`.
@@ -1546,7 +1865,10 @@ async fn event_loop(
             }
             item = next_turn_event(&mut turn), if turn.is_some() => {
                 match item {
-                    Some(Ok(ev)) => app.apply_agent_event(&ev),
+                    Some(Ok(ev)) => {
+                        if matches!(ev, AgentEvent::Usage(_)) { usage_refresh.request(); }
+                        app.apply_agent_event(&ev);
+                    },
                     Some(Err(e)) => {
                         app.push_error(&format!("{e}"));
                         turn = None;
@@ -3137,6 +3459,115 @@ mod tests {
     }
 
     #[test]
+    fn ledger_refresh_keeps_events_during_reads_and_retries_stale_generations() {
+        let mut refresh = LedgerRefresh::new();
+        let start = refresh.next;
+        assert!(refresh.ready(start, false));
+        refresh.started(0, start);
+        refresh.request();
+        assert!(!refresh.ready(start + Duration::from_millis(750), true));
+        assert!(refresh.accept(0));
+        assert!(!refresh.ready(start + Duration::from_millis(749), false));
+        assert!(refresh.ready(start + Duration::from_millis(750), false));
+        refresh.started(0, start + Duration::from_millis(750));
+        assert!(!refresh.accept(1));
+        assert!(refresh.dirty);
+    }
+
+    #[tokio::test]
+    async fn oversized_docker_producer_stops_before_timeout_with_stderr_open() {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "while :; do printf '%08000d' 0; done"]);
+        let output =
+            tokio::time::timeout(Duration::from_secs(2), docker_output_command(&mut command))
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(output.truncated);
+        assert_eq!(output.stdout.len(), 64 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn docker_timeout_kills_its_descendant_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("child-survived");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args(["-c", r#"(sleep 0.3; printf alive > "$1") & wait"#, "sh"])
+            .arg(&marker);
+        assert!(tokio::time::timeout(
+            Duration::from_millis(80),
+            docker_output_command(&mut command)
+        )
+        .await
+        .is_err());
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!marker.exists(), "descendant survived timeout");
+    }
+
+    #[test]
+    fn failed_status_refresh_clears_context_without_touching_newer_usage() {
+        let mut app = App::new(None);
+        app.context_used = Some(100);
+        app.context_limit = Some(1000);
+        app.tokens_total_in = 42;
+        app.cost_total = Some(0.5);
+        apply_status_snapshot(
+            &mut app,
+            StatusSnapshot {
+                model: None,
+                context: None,
+            },
+        );
+        assert_eq!(app.context_used, None);
+        assert_eq!(app.context_limit, None);
+        assert_eq!(app.tokens_total_in, 42);
+        assert_eq!(app.cost_total, Some(0.5));
+        apply_usage_snapshot(&mut app, None);
+        assert!(!app.usage_ready);
+        assert_eq!(app.cost_total, None);
+    }
+
+    #[test]
+    fn docker_failure_summary_is_short_and_omits_socket_details() {
+        let line = docker_failure_summary(
+            "failed to connect unix:///Users/person/.colima/default/docker.sock: no such file",
+        );
+        assert!(line.contains("Colima"));
+        assert!(line.contains("/docker details"));
+        assert!(!line.contains("/Users/"));
+    }
+
+    #[test]
+    fn persisted_status_snapshots_replace_totals_and_preserve_partial_coverage() {
+        let mut app = App::new(None);
+        app.tokens_total_in = 900;
+        app.cost_total = Some(90.0);
+        let snapshot = || StatusSnapshot {
+            model: Some("actual-model".to_string()),
+            context: Some((42, None)),
+        };
+        let usage = || {
+            Some(kaji::session::session_manager::SessionUsageTotals {
+                accumulated_usage: kaji::providers::base::Usage::new(Some(100), Some(20), None),
+                accumulated_cost: Some(0.001),
+                priced_entries: 1,
+                unpriced_entries: 1,
+                coverage_unknown: false,
+            })
+        };
+        apply_usage_snapshot(&mut app, usage());
+        apply_status_snapshot(&mut app, snapshot());
+        apply_usage_snapshot(&mut app, usage());
+        assert_eq!(app.tokens_total_in, 100);
+        assert_eq!(app.cost_total, Some(0.001));
+        assert!(app.cost_partial);
+        assert_eq!(app.context_limit, None);
+        assert_eq!(app.model, "actual-model");
+    }
+
+    #[test]
     fn maybe_push_welcome_shows_banner_on_empty_chat() {
         let mut app = App::new(None);
 
@@ -3279,10 +3710,7 @@ mod tests {
                 text.contains("status bar"),
                 "souris={mouse_enabled} : {text}"
             );
-            assert!(
-                text.contains(&format!("{} running tool", theme::FIRE_GLYPH)),
-                "souris={mouse_enabled} : {text}"
-            );
+            assert!(text.contains("activity"), "souris={mouse_enabled} : {text}");
             assert!(
                 !text.chars().any(|c| ('\u{e000}'..='\u{f8ff}').contains(&c)),
                 "souris={mouse_enabled} : {text}"
@@ -3301,13 +3729,7 @@ mod tests {
             push_help(&mut app);
 
             let text = welcome_text(&app);
-            for needle in [
-                "Ctrl+F",
-                "forge pane",
-                "/forge",
-                "→ forge",
-                theme::SUBAGENT_GLYPH,
-            ] {
+            for needle in ["Ctrl+F", "forge pane", "/forge", "→ forge", "session-tree"] {
                 assert!(
                     text.contains(needle),
                     "souris={mouse_enabled} : {needle} absent de\n{text}"

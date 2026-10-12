@@ -253,3 +253,27 @@ state-machine terminal resize/follow-bottom checks pass. Exact published-source 
 all-target clippy passes. The recipe provider responded, but the run was
 intentionally interrupted after a sccache/environment error; it has not passed.
 [Responsive reading evidence](docs/superpowers/reports/2026-10-09-responsive-reading-validation.md).
+
+
+## Session status and reader controls — validation in progress
+
+The current lot separates estimated context against an explicit configured prompt
+budget from recorded session-tree input/output spending. The model identity is
+resolved from the active session. Cost coverage distinguishes unknown prices
+from a known partial subtotal, including unreconciled or historical carried-forward
+usage. Local pricing overrides now feed both legacy and state-machine usage
+enrichment without changing ledger storage or replay recording gates.
+
+The selected `ollama_cloud / deepseek-v4.1-flash` has no matching bundled price
+or configured override in the inspected local configuration. Its cost remains
+unknown unless supplied by the provider. No model, profile or price was changed.
+Unrecorded ancillary inference remains outside this accounting scope.
+
+Core targeted usage checks pass sequentially and on a repeat parallel run
+(34 tests each). The initial parallel compaction assertion failure did not recur;
+its cause has not been established. Pricing tests pass (11), and strict core
+all-target clippy passes. Strict CLI clippy, exact published-source CLI tests,
+the new debug build, terminal captures and updated recipe are pending. Docker diagnostics and
+reader close/focus discoverability are part of the same bounded UI lot; this
+work does not start Docker. User visual acceptance remains open.
+[Session status evidence](docs/superpowers/reports/2026-10-09-terminal-session-status-validation.md).

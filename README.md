@@ -73,6 +73,16 @@ The welcome explains the current permission mode. Choose **approve** when you
 want Kaji to ask before each tool call; **auto** allows it to act without asking.
 Existing permission rules still apply.
 
+The terminal status update under validation separates model/context information
+from recorded session spending. Context is an estimate against the configured
+prompt budget, not verified provider capacity. Recorded spending includes the
+session's subagent tree; auxiliary calls outside that ledger are not included.
+Unknown prices stay unknown, and a known subtotal with incomplete coverage is
+marked partial. Local `model_pricing` overrides take priority over the bundled
+catalogue for new estimated usage; existing reported costs are retained.
+See the [session status validation](docs/superpowers/reports/2026-10-09-terminal-session-status-validation.md)
+for the current verification status and limits.
+
 The status bar keeps the permission mode visible and labels tokens, active agents
 and activity. It uses standard text by default. For optional Nerd Font icons,
 set `KAJI_ICONS=nerd` in a terminal with a compatible font.

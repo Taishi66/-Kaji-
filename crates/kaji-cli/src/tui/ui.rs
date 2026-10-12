@@ -26,7 +26,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(1),
             Constraint::Min(0),
-            Constraint::Length(1),
+            Constraint::Length(if frame.area().height >= 8 { 2 } else { 1 }),
         ])
         .split(frame.area());
 
@@ -207,7 +207,15 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    frame.render_widget(Paragraph::new(statusbar::render(app, area.width)), area);
+    let lines = if area.height > 1 {
+        vec![
+            statusbar::render_project(app, area.width),
+            statusbar::render_telemetry(app, area.width),
+        ]
+    } else {
+        vec![statusbar::render_collapsed(app, area.width)]
+    };
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// Condition width in the header badge, in cells — the full text stays
@@ -1271,14 +1279,9 @@ fn forge_lines(app: &App, width: u16, rows: usize) -> Vec<Line<'static>> {
 
     let slots = rows.saturating_sub(FORGE_ROWS_PER_BLADE) / FORGE_ROWS_PER_BLADE;
     let first = app.forge.selected.saturating_sub(slots.saturating_sub(1));
-    for (rank, task) in app
-        .forge
-        .ordered()
-        .into_iter()
-        .enumerate()
-        .skip(first)
-        .take(slots)
-    {
+    let ordered = app.forge.ordered();
+    let shared = forge_shared_prefix(&ordered);
+    for (rank, task) in ordered.into_iter().enumerate().skip(first).take(slots) {
         let (mark, mut style) = forge_mark(task);
         // Deux lames vives partagent l'accent : sans le fond, celle que `x`
         // annulerait ne se distinguerait pas de ses voisines.
@@ -1289,7 +1292,7 @@ fn forge_lines(app: &App, width: u16, rows: usize) -> Vec<Line<'static>> {
             format!(
                 "{mark} {} {}",
                 theme::SUBAGENT_GLYPH,
-                forge_description(&task.description, width)
+                forge_description(&task.description, width, shared)
             ),
             style,
         )));
@@ -1352,13 +1355,53 @@ pub fn forge_duration(secs: u64) -> String {
     format!("{}m{:02}s", secs / 60, secs % 60)
 }
 
+/// Au-delà de cette part de la colonne, un préfixe commun ne distingue plus
+/// rien : cinq délégations nées du même gabarit rendent cinq fois la même tête
+/// suivie du même `…`, et le volet ne dit plus qui fait quoi.
+const FORGE_SHARED_PREFIX_SHARE: usize = 40;
+
+/// Les cellules que les lames vivantes ont en commun en tête. Une lame seule
+/// ne partage rien : il faut deux descriptions pour qu'un préfixe commun
+/// existe, et les verdicts ne comptent pas — c'est entre les lames encore en
+/// jeu que l'œil doit trancher.
+fn forge_shared_prefix(tasks: &[&ForgeTask]) -> usize {
+    let living: Vec<&str> = tasks
+        .iter()
+        .filter(|task| task.status == ForgeStatus::Running)
+        .map(|task| task.description.as_str())
+        .collect();
+    let Some((head, rest)) = living.split_first() else {
+        return 0;
+    };
+    if rest.is_empty() {
+        return 0;
+    }
+    let shared: String = head
+        .chars()
+        .enumerate()
+        .take_while(|(rank, glyph)| {
+            rest.iter()
+                .all(|description| description.chars().nth(*rank) == Some(*glyph))
+        })
+        .map(|(_, glyph)| glyph)
+        .collect();
+    gitstatus::display_width(&shared)
+}
+
 /// Le budget se compte en cellules, comme [`gitstatus::display_width`] le fait
 /// pour le lieu de la barre d'état : un kanji en vaut deux, et un budget en
 /// `chars()` laisserait une description japonaise déborder la colonne — où le
 /// `Paragraph` la rognerait en silence, sans le `…` qui signale la coupe.
-fn forge_description(description: &str, width: u16) -> String {
+///
+/// La coupe passe en queue par défaut, et en tête quand les lames vivantes
+/// partagent trop de leur début : garder une tête que toutes ont en commun,
+/// c'est rendre la même ligne autant de fois.
+fn forge_description(description: &str, width: u16, shared_prefix: usize) -> String {
     let budget = usize::from(width.saturating_sub(FORGE_BLADE_INDENT));
     let description = sanitize_for_display(&description.replace('\n', "␊"));
+    if shared_prefix * 100 > budget * FORGE_SHARED_PREFIX_SHARE {
+        return gitstatus::truncate_left(&description, budget);
+    }
     gitstatus::truncate_cells(&description, budget)
 }
 
@@ -1398,22 +1441,37 @@ fn draw_viewer(frame: &mut Frame, app: &App, viewer: &Viewer, area: Rect) {
     // Les touches de sortie sont nommées telles qu'elles agissent : avec un
     // arbre derrière, `Esc`/`h` y ramènent et `q` seul ferme ; sans arbre les
     // trois font la même chose.
-    let exits = if app.explorer.is_some() {
-        "Esc/h tree · q close"
-    } else {
-        "Esc/h/q close"
-    };
-    // `Ctrl+O` is only worth naming while the chat is folded behind the pane —
-    // it is what brings it back.
     let focused = app.focus == Focus::Viewer;
     let edit = if viewer.editable() { " · e edit" } else { "" };
-    let keys = if focused {
-        format!("j/k scroll{edit} · r reload · a attach @ · {exits} · Ctrl+O chat")
+    let primary = if focused {
+        "q close"
+    } else if area.width < 25 {
+        "Ctrl+O→q close"
     } else {
-        format!("j/k scroll{edit} · r reload · a attach @ · {exits}")
+        "Ctrl+O focus · q close"
     };
+    let mut keys = primary.to_string();
+    for action in [
+        if app.explorer.is_some() {
+            "Esc tree"
+        } else {
+            "Esc close"
+        },
+        "j/k scroll",
+        edit.trim_start_matches(" · "),
+        "r reload",
+        "a attach @",
+    ] {
+        if action.is_empty() {
+            continue;
+        }
+        let candidate = format!("{keys} · {action}");
+        if gitstatus::display_width(&candidate) <= usize::from(area.width.saturating_sub(4)) {
+            keys = candidate;
+        }
+    }
     let footer = if viewer.truncated || layout.as_ref().is_some_and(|layout| layout.truncated) {
-        format!(" … {} · {keys} ", viewer::preview_limit_label())
+        format!(" {keys} · … {} ", viewer::preview_limit_label())
     } else {
         format!(" {keys} ")
     };
@@ -2560,6 +2618,65 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "writes status review artifacts"]
+    fn capture_session_status_buffers() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let _theme = theme::test_guard();
+        let root = std::path::Path::new("/tmp/kaji-status-review-2026-10-09");
+        std::fs::create_dir_all(root).unwrap();
+        for variant in ["unknown", "micro", "partial", "reader"] {
+            for name in ["zen", "light", "gruvbox"] {
+                theme::set_active(name).unwrap();
+                for width in [40, 80, 120, 200] {
+                    let (mut app, _dir) = if variant == "reader" {
+                        let (mut app, dir) = app_with_a_focused_viewer(false);
+                        app.focus = Focus::Composer;
+                        app.viewer.as_mut().unwrap().truncated = true;
+                        (app, Some(dir))
+                    } else {
+                        let mut app = reading_fixture_app();
+                        app.chat.last_mut().unwrap().text = CLEAN_READING.to_string();
+                        (app, None)
+                    };
+                    app.header = "workspace".to_string();
+                    app.model = "deepseek-v4.1-flash".to_string();
+                    app.usage_ready = true;
+                    app.usage_refreshing = false;
+                    app.tokens_total_in = 18000;
+                    app.tokens_total_out = 2700;
+                    app.context_refreshing = false;
+                    app.context_used = Some(4200);
+                    app.context_limit = if variant == "unknown" {
+                        None
+                    } else {
+                        Some(128000)
+                    };
+                    app.cost_total = match variant {
+                        "micro" => Some(0.0012),
+                        "partial" => Some(0.00002),
+                        _ => None,
+                    };
+                    app.cost_partial = variant == "partial";
+                    let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+                    terminal.draw(|frame| draw(frame, &app)).unwrap();
+                    let buffer = terminal.backend().buffer();
+                    std::fs::write(
+                        root.join(format!("{variant}-{name}-{width}.txt")),
+                        buffer_as_string(buffer),
+                    )
+                    .unwrap();
+                    let cells: Vec<_> = (0..buffer.area.height).flat_map(|y| (0..buffer.area.width).map(move |x| {
+                        let cell = &buffer[(x, y)];
+                        serde_json::json!({ "x":x, "y":y, "text":cell.symbol(), "fg":format!("{:?}", cell.fg), "bg":format!("{:?}", cell.bg), "modifiers":format!("{:?}", cell.modifier) })
+                    })).collect();
+                    std::fs::write(root.join(format!("{variant}-{name}-{width}.json")), serde_json::to_vec(&serde_json::json!({"width":width,"height":buffer.area.height,"cells":cells})).unwrap()).unwrap();
+                }
+            }
+        }
+    }
+
     fn assert_cached_chat_matches_fresh_render(app: &App, width: u16, height: u16) {
         let cached = drawn_chat_at(app, width, height);
         let turns = app.user_turn_rows.borrow().clone();
@@ -3292,7 +3409,7 @@ mod tests {
         let content = rendered(&app, 100, 10);
         let mut rows = content.lines();
         let header = rows.next().expect("ligne de header");
-        let bar = rows.next_back().expect("status bar");
+        let bar = rows.nth_back(1).expect("project status bar");
 
         assert!(bar.contains("智"), "got:\n{content}");
         assert!(bar.contains("smart"), "got:\n{content}");
@@ -3334,7 +3451,7 @@ mod tests {
         });
 
         let content = rendered(&app, 120, 10);
-        let bar = content.lines().next_back().expect("status bar");
+        let bar = content.lines().nth_back(1).expect("project status bar");
 
         assert!(bar.contains(theme::DIR_GLYPH), "got:\n{content}");
         assert!(bar.contains("feat/kaji-init"), "got:\n{content}");
@@ -3759,6 +3876,109 @@ mod tests {
         }
     }
 
+    /// Le cas signalé en usage réel : cinq délégations nées du même gabarit,
+    /// coupées en queue, rendent cinq fois la même lame. C'est leur fin qui les
+    /// nomme, donc c'est leur tête que la coupe sacrifie.
+    #[test]
+    fn blades_that_share_a_head_are_told_apart_by_their_tails() {
+        let _theme = theme::test_guard();
+        let mut app = app_at_the_forge(vec![
+            blade(
+                "t1",
+                "Reste vivant en continu et audite les tests",
+                ForgeStatus::Running,
+            ),
+            blade(
+                "t2",
+                "Reste vivant en continu et relis le diff",
+                ForgeStatus::Running,
+            ),
+            blade(
+                "t3",
+                "Reste vivant en continu et compte les lignes",
+                ForgeStatus::Running,
+            ),
+        ]);
+        app.forge.view = crate::tui::forge::ForgeView::ForcedOpen;
+
+        let lines = forge_lines(&app, 29, 18);
+        let blades: Vec<String> = [2, 4, 6]
+            .iter()
+            .map(|row| lines[*row].to_string())
+            .collect();
+
+        for tail in ["audite les tests", "relis le diff", "compte les lignes"] {
+            assert!(
+                blades.iter().any(|line| line.contains(tail)),
+                "{tail} manquant : {blades:?}"
+            );
+        }
+        let distinct: std::collections::HashSet<&String> = blades.iter().collect();
+        assert_eq!(distinct.len(), 3, "trois lames, trois lignes : {blades:?}");
+    }
+
+    /// Une lame seule ne partage rien : elle garde sa tête, qui est ce qu'on
+    /// lit d'abord. Sans la garde, un préfixe « commun » d'une description avec
+    /// elle-même ferait basculer tout le volet en coupe de tête.
+    #[test]
+    fn a_lone_blade_keeps_its_head() {
+        let _theme = theme::test_guard();
+        let mut app = app_at_the_forge(vec![blade(
+            "t1",
+            "Reste vivant en continu et audite les tests",
+            ForgeStatus::Running,
+        )]);
+        app.forge.view = crate::tui::forge::ForgeView::ForcedOpen;
+
+        let line = forge_lines(&app, 29, 18)[2].to_string();
+
+        assert!(line.contains("Reste vivant"), "{line:?}");
+        assert!(line.trim_end().ends_with('…'), "{line:?}");
+    }
+
+    /// Deux verdicts au même préfixe ne font pas basculer la coupe : le tri met
+    /// les lames vivantes en tête, et c'est entre elles que l'œil doit trancher.
+    #[test]
+    fn finished_blades_do_not_drive_the_cut() {
+        let _theme = theme::test_guard();
+        let mut app = app_at_the_forge(vec![
+            blade(
+                "t1",
+                "Reste vivant en continu et audite les tests",
+                ForgeStatus::Done,
+            ),
+            blade(
+                "t2",
+                "Reste vivant en continu et relis le diff",
+                ForgeStatus::Done,
+            ),
+        ]);
+        app.forge.view = crate::tui::forge::ForgeView::ForcedOpen;
+
+        let line = forge_lines(&app, 29, 18)[2].to_string();
+
+        assert!(line.contains("Reste vivant"), "{line:?}");
+    }
+
+    /// La ligne d'activité dit ce que la lame brûle, pas seulement qu'elle
+    /// pense : c'est la seule chose qui sépare deux lames au même libellé.
+    #[test]
+    fn the_activity_line_names_the_burning_tool() {
+        let _theme = theme::test_guard();
+        let mut app =
+            app_at_the_forge(vec![blade("t1", "auditer les tests", ForgeStatus::Running)]);
+        app.forge.view = crate::tui::forge::ForgeView::ForcedOpen;
+
+        let idle = forge_lines(&app, 29, 18)[3].to_string();
+        assert!(idle.contains(theme::THINKING_GLYPH), "{idle:?}");
+
+        app.forge.tasks.get_mut("t1").unwrap().current_tool = Some("developer__shell".to_string());
+        let burning = forge_lines(&app, 29, 18)[3].to_string();
+
+        assert!(burning.contains(theme::FIRE_GLYPH), "{burning:?}");
+        assert!(burning.contains("developer__shell"), "{burning:?}");
+    }
+
     /// Le pied du volet est un titre de bloc : ratatui le rogne en silence
     /// s'il dépasse, et la touche qui ouvre le plein écran disparaîtrait sans
     /// que rien ne le dise.
@@ -4018,7 +4238,7 @@ mod tests {
             "le cas ne prouve rien si le compte de caractères tronque déjà"
         );
 
-        let cut = forge_description(description, 29);
+        let cut = forge_description(description, 29, 0);
 
         assert!(cut.ends_with('…'), "{cut:?}");
         assert!(
@@ -4147,6 +4367,16 @@ mod tests {
     }
 
     #[test]
+    fn truncated_unfocused_reader_keeps_focus_and_close_controls_at_40() {
+        let _theme = theme::test_guard();
+        let (mut app, _dir) = app_with_a_focused_viewer(false);
+        app.focus = Focus::Composer;
+        app.viewer.as_mut().unwrap().truncated = true;
+        let content = rendered(&app, 40, 25);
+        assert!(content.contains("Ctrl+O→q close"), "{content}");
+    }
+
+    #[test]
     fn the_three_columns_stand_while_the_composer_holds_the_focus() {
         let (mut app, _dir) = app_with_a_focused_viewer(true);
         app.focus = Focus::Composer;
@@ -4181,7 +4411,7 @@ mod tests {
         );
         assert!(content.contains("hello"), "got:\n{content}");
         assert!(content.contains(" message "), "composer, got:\n{content}");
-        assert!(content.contains("Ctrl+O chat"), "got:\n{content}");
+        assert!(content.contains("q close"), "got:\n{content}");
     }
 
     /// Le pied du lecteur est la seule surface qui dit comment en sortir, et il
@@ -4191,11 +4421,11 @@ mod tests {
     fn the_reader_footer_names_the_keys_that_get_out_of_it() {
         let (with_tree, _dir) = app_with_a_focused_viewer(true);
         let content = rendered(&with_tree, 200, 40);
-        assert!(content.contains("Esc/h tree · q close"), "got:\n{content}");
+        assert!(content.contains("q close · Esc tree"), "got:\n{content}");
 
         let (alone, _dir) = app_with_a_focused_viewer(false);
         let content = rendered(&alone, 200, 40);
-        assert!(content.contains("Esc/h/q close"), "got:\n{content}");
+        assert!(content.contains("q close · Esc close"), "got:\n{content}");
     }
 
     #[test]
@@ -4417,12 +4647,12 @@ mod tests {
         let mut app = App::new(None);
         app.push_user("bonjour");
 
-        for height in [8u16, 10, 12] {
+        for height in [4u16, 6, 8, 10, 12] {
             let content = rendered(&app, 80, height);
             let rows: Vec<&str> = content.lines().collect();
             assert_eq!(rows.len(), usize::from(height));
             assert!(
-                rows[usize::from(height) - 1]
+                rows[usize::from(height) - if height >= 8 { 2 } else { 1 }]
                     .contains(crate::tui::app::kaji_mode_seal(app.kaji_mode)),
                 "barre d'état @ {height}, got:\n{content}"
             );

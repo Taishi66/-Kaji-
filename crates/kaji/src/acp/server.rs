@@ -2717,6 +2717,7 @@ print(\"hello, world\")
         let totals = SessionUsageTotals {
             accumulated_usage: session.accumulated_usage,
             accumulated_cost: session.accumulated_cost,
+            ..SessionUsageTotals::default()
         };
         let updates =
             build_usage_updates(&session, &totals).expect("usage updates should be present");

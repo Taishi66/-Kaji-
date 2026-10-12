@@ -80,7 +80,6 @@ const TIMELINE_DURATION_CELLS: usize = 8;
 const DETAILS_LABEL_CELLS: usize = 9;
 
 const BAR_FULL: char = '█';
-const BAR_EMPTY: char = '░';
 
 /// Le tracé d'une carte. Le lourd marque la sélection — une bordure accent
 /// épaisse se voit sans couleur, donc aussi en thème `mono`.
@@ -624,6 +623,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_timeline(
             frame,
             &board,
+            app.mission.stage,
             Rect {
                 y: left.y + cards_height,
                 height: bars,
@@ -1221,12 +1221,17 @@ fn timeline_rows(board: &Board, height: u16) -> u16 {
     (STAGE_FRAME_ROWS + bars + overflow) as u16
 }
 
-fn draw_timeline(frame: &mut Frame, board: &Board, area: Rect) {
+/// Ce que le titre dit de la maille, et qui n'est pas décoratif : sans lui, une
+/// barre à moitié pleine se lit comme une progression, alors qu'elle dit la
+/// durée d'un stage sur l'échelle du plus long.
+const TIMELINE_TITLE: &str = "timeline (start → end)";
+
+fn draw_timeline(frame: &mut Frame, board: &Board, selected: usize, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::border_inactive())
         .title(Span::styled(
-            format!(" {} timeline ", theme::ELAPSED_GLYPH),
+            format!(" {} {TIMELINE_TITLE} ", theme::ELAPSED_GLYPH),
             theme::title(),
         ));
     let inner = block.inner(area);
@@ -1237,6 +1242,7 @@ fn draw_timeline(frame: &mut Frame, board: &Board, area: Rect) {
     frame.render_widget(
         Paragraph::new(Text::from(timeline_lines(
             board,
+            selected,
             usize::from(inner.width),
             usize::from(inner.height),
         ))),
@@ -1244,11 +1250,23 @@ fn draw_timeline(frame: &mut Frame, board: &Board, area: Rect) {
     );
 }
 
-/// Une barre par stage, proportionnelle au plus long. Un stage qui court porte
-/// une lame animée en tête de barre ; un stage qui n'a rien mesuré n'a pas de
-/// barre du tout — un tiret et `0s`, parce qu'une barre vide se lirait comme
-/// une durée nulle mesurée.
-pub fn timeline_lines(board: &Board, width: usize, rows: usize) -> Vec<Line<'static>> {
+/// Une barre par stage, du début à la fin, proportionnelle au plus long. Un
+/// stage qui court porte une lame animée en tête de barre ; un stage qui n'a
+/// rien mesuré n'a pas de barre du tout — un tiret et `0s`, parce qu'une barre
+/// vide se lirait comme une durée nulle mesurée.
+///
+/// Aucune barre ne traîne de piste vide derrière elle : un `░` jusqu'au bord
+/// rendait le bandeau comme une jauge de progression, où un stage court et
+/// fini se lisait « pas terminé ». Ce que la barre dit, c'est sa durée ; ce que
+/// le fond disait, c'est le vide entre elle et la plus longue. La sélection,
+/// elle, se porte sur le libellé et le chrono — jamais sur la couleur de la
+/// barre, qui ne dit que l'issue du stage.
+pub fn timeline_lines(
+    board: &Board,
+    selected: usize,
+    width: usize,
+    rows: usize,
+) -> Vec<Line<'static>> {
     if rows == 0 {
         return Vec::new();
     }
@@ -1271,14 +1289,16 @@ pub fn timeline_lines(board: &Board, width: usize, rows: usize) -> Vec<Line<'sta
     };
 
     let mut lines = Vec::new();
-    for column in board.columns.iter().take(shown) {
+    for (rank, column) in board.columns.iter().take(shown).enumerate() {
         let elapsed = column.elapsed_secs();
         let label = gitstatus::truncate_cells(&column.name, TIMELINE_LABEL_CELLS);
         let pad = TIMELINE_LABEL_CELLS.saturating_sub(gitstatus::display_width(&label));
-        let mut spans = vec![Span::styled(
-            format!("{label}{} ", " ".repeat(pad)),
-            theme::dim(),
-        )];
+        let side = if rank == selected {
+            theme::accent().bg(theme::user_bg_color())
+        } else {
+            theme::dim()
+        };
+        let mut spans = vec![Span::styled(format!("{label}{} ", " ".repeat(pad)), side)];
 
         // Un stage qui n'a rien mesuré n'a pas de barre : une barre vide se
         // lirait comme une durée nulle mesurée, et un stage en attente de sa
@@ -1313,17 +1333,14 @@ pub fn timeline_lines(board: &Board, width: usize, rows: usize) -> Vec<Line<'sta
                     theme::accent().add_modifier(Modifier::BOLD),
                 ));
             }
-            spans.push(Span::styled(
-                BAR_EMPTY.to_string().repeat(bar_cells - filled),
-                theme::dim(),
-            ));
+            spans.push(Span::raw(" ".repeat(bar_cells - filled)));
         }
         spans.push(Span::styled(
             pad_cells(
                 &format!(" {}", forge_duration(elapsed)),
                 TIMELINE_DURATION_CELLS,
             ),
-            theme::dim(),
+            side,
         ));
         lines.push(Line::from(spans));
     }
@@ -2087,7 +2104,7 @@ mod tests {
             ],
         };
 
-        let lines = timeline_lines(&board, 60, 4);
+        let lines = timeline_lines(&board, 0, 60, 4);
 
         let long = lines[0].to_string().matches(BAR_FULL).count();
         let short = lines[1].to_string().matches(BAR_FULL).count();
@@ -2129,13 +2146,12 @@ mod tests {
             ],
         };
 
-        let lines = timeline_lines(&board, 60, 5);
+        let lines = timeline_lines(&board, 0, 60, 5);
 
         for (rank, name) in [(1, "later"), (2, "gated")] {
             let bar = lines[rank].to_string();
             assert!(bar.contains(name), "{bar:?}");
             assert!(!bar.contains(BAR_FULL), "{bar:?}");
-            assert!(!bar.contains(BAR_EMPTY), "{bar:?}");
             assert!(bar.contains('─'), "{bar:?}");
             assert!(bar.contains("0s"), "{bar:?}");
         }
@@ -2162,7 +2178,7 @@ mod tests {
             ],
         };
 
-        let bar = timeline_lines(&board, 100, 5)[1].to_string();
+        let bar = timeline_lines(&board, 0, 100, 5)[1].to_string();
 
         assert!(bar.contains("fresh"), "{bar:?}");
         assert!(
@@ -2173,6 +2189,94 @@ mod tests {
             bar.contains(theme::blade_frame(std::time::Duration::from_secs(0))),
             "la lame manque : {bar:?}"
         );
+    }
+
+    /// Le reproche d'usage réel : les barres se lisaient comme une jauge de
+    /// progression — « pas pleine, mais tout est fini ? ». Deux stages terminés
+    /// de durées différentes portent la même couleur, et aucune piste vide ne
+    /// traîne derrière la courte pour suggérer un reste à faire.
+    #[test]
+    fn two_finished_stages_wear_the_same_bar_whatever_their_length() {
+        let _theme = theme::test_guard();
+        let board = Board {
+            title: "review".to_string(),
+            columns: vec![
+                column("long", CardMark::Done, vec![card("a", CardMark::Done, 300)]),
+                column("short", CardMark::Done, vec![card("b", CardMark::Done, 20)]),
+            ],
+        };
+
+        let lines = timeline_lines(&board, 9, 60, 4);
+
+        for line in &lines {
+            let bar = line
+                .spans
+                .iter()
+                .find(|span| span.content.contains(BAR_FULL))
+                .expect("chaque stage mesuré porte sa barre");
+            assert_eq!(
+                bar.style,
+                CardMark::Done.style(),
+                "une barre done = une couleur : {line:?}"
+            );
+        }
+        for line in &lines {
+            assert!(
+                !line.to_string().contains('░'),
+                "aucune piste vide derrière la barre : {line:?}"
+            );
+        }
+        assert!(lines[0].to_string().contains("5m00s"), "{:?}", lines[0]);
+        assert!(lines[1].to_string().contains("20s"), "{:?}", lines[1]);
+    }
+
+    /// La sélection se porte sur le libellé et le chrono, pas sur la barre : le
+    /// stage désigné doit se distinguer sans que sa couleur de barre change de
+    /// sens.
+    #[test]
+    fn the_selected_stage_carries_the_accent_on_its_sides_only() {
+        let _theme = theme::test_guard();
+        let board = Board {
+            title: "review".to_string(),
+            columns: vec![
+                column("first", CardMark::Done, vec![card("a", CardMark::Done, 30)]),
+                column(
+                    "second",
+                    CardMark::Done,
+                    vec![card("b", CardMark::Done, 30)],
+                ),
+            ],
+        };
+
+        let lines = timeline_lines(&board, 1, 60, 4);
+
+        assert_eq!(lines[0].spans[0].style, theme::dim());
+        assert_eq!(
+            lines[1].spans[0].style,
+            theme::accent().bg(theme::user_bg_color())
+        );
+        assert_eq!(
+            lines[0].spans[1].style, lines[1].spans[1].style,
+            "la barre ne dit que l'issue du stage"
+        );
+    }
+
+    /// Le titre nomme la maille : sans lui, une barre proportionnelle se lit
+    /// comme une progression.
+    #[test]
+    fn the_timeline_title_says_what_the_bars_measure() {
+        let _theme = theme::test_guard();
+        let mut app = app_with(workflow(vec![stage(
+            "brainstorm",
+            StageState::Done,
+            vec![agent("a", AgentState::Done)],
+        )]));
+        app.mission.open = true;
+
+        let content = rendered(&app, 140, 40);
+
+        assert!(content.contains("timeline (start"), "got:\n{content}");
+        assert!(content.contains("end)"), "got:\n{content}");
     }
 
     #[test]
@@ -2190,7 +2294,7 @@ mod tests {
                 .collect(),
         };
 
-        let lines = timeline_lines(&board, 60, 4);
+        let lines = timeline_lines(&board, 0, 60, 4);
 
         assert_eq!(lines.len(), 4, "le bandeau tient dans la hauteur donnée");
         assert!(lines[3].to_string().contains("+5"), "{:?}", lines[3]);
@@ -2216,7 +2320,7 @@ mod tests {
             };
             let rows = usize::from(timeline_rows(&board, 40)).saturating_sub(STAGE_FRAME_ROWS);
 
-            assert_eq!(timeline_lines(&board, 60, rows).len(), rows, "{stages}");
+            assert_eq!(timeline_lines(&board, 0, 60, rows).len(), rows, "{stages}");
         }
     }
 

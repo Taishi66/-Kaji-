@@ -987,16 +987,19 @@ impl Agent {
         usage: &ProviderUsage,
         provider_name: Option<&str>,
     ) -> (Option<f64>, Option<CostSource>) {
-        if let Some(cost) = usage.cost {
-            return (Some(cost), Some(CostSource::ProviderReported));
-        }
-        match provider_name
-            .and_then(|pn| crate::providers::canonical::maybe_get_canonical_model(pn, &usage.model))
-            .and_then(|canonical| canonical.cost.estimate_cost(&usage.usage))
-        {
-            Some(cost) => (Some(cost), Some(CostSource::Estimated)),
-            None => (None, None),
-        }
+        Self::resolve_chunk_cost_with_prices(
+            usage,
+            provider_name,
+            &crate::metrics::pricing::ConfiguredPrices::load(Config::global()),
+        )
+    }
+
+    fn resolve_chunk_cost_with_prices(
+        usage: &ProviderUsage,
+        provider_name: Option<&str>,
+        prices: &dyn crate::metrics::PriceBook,
+    ) -> (Option<f64>, Option<CostSource>) {
+        crate::metrics::pricing::resolve_usage_cost(usage, provider_name, prices)
     }
 }
 
@@ -1063,6 +1066,38 @@ mod tests {
     use rmcp::object;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
+    fn custom_prices() -> crate::metrics::pricing::ConfiguredPrices {
+        crate::metrics::pricing::ConfiguredPrices::new(
+            crate::metrics::pricing::ModelPricingOverrides::new(std::collections::HashMap::from([
+                (
+                    "custom-priced".to_owned(),
+                    crate::providers::canonical::Pricing {
+                        input: Some(2.0),
+                        output: Some(4.0),
+                        cache_read: Some(0.5),
+                        cache_write: Some(3.0),
+                    },
+                ),
+            ])),
+        )
+    }
+
+    #[test]
+    fn legacy_usage_prices_custom_model_and_preserves_provider_cost() {
+        let prices = custom_prices();
+        let usage = ProviderUsage::new(
+            "custom-priced".into(),
+            Usage::new(Some(1000), Some(100), None).with_cache_tokens(Some(400), Some(100)),
+        );
+        let (cost, source) = Agent::resolve_chunk_cost_with_prices(&usage, Some("custom"), &prices);
+        assert!((cost.unwrap() - 0.0019).abs() < 1e-12);
+        assert_eq!(source, Some(CostSource::Estimated));
+        let reported = usage.with_cost(0.25, CostSource::ProviderReported);
+        assert_eq!(
+            Agent::resolve_chunk_cost_with_prices(&reported, Some("custom"), &prices),
+            (Some(0.25), Some(CostSource::ProviderReported))
+        );
+    }
 
     #[derive(Clone)]
     struct MockProvider;

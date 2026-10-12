@@ -36,6 +36,12 @@ parameters:
     default: "standard"
     description: "Testing depth: quick (smoke tests), standard (normal coverage), deep (exhaustive)"
 
+  - key: verification_artifacts
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Paths to existing build/test/lint/render reports for quick review; never rerun compilation in quick mode"
+
   - key: workspace_dir
     input_type: string
     requirement: optional
@@ -63,6 +69,15 @@ instructions: |
   This is meta-testing in the truest sense: not unit tests or external test harnesses, but you using your tools
   to validate your own functionality from within your active session. You can only test what you can observe and
   control from inside your running instance - your tools, your behaviors, your error handling, your consistency.
+
+  {% if test_depth == "quick" %}
+  ## Quick Verification Boundary
+  Exercise available tools and inspect existing verification reports: {{ verification_artifacts }}.
+  Do not invoke cargo, rustup, rustc, sccache, Hermit setup, or rebuild any binary in quick mode.
+  Build/test/lint gates run separately under maintainer coordination; read their supplied logs instead.
+  If an artifact or interactive terminal proof is unavailable, record SKIPPED with its reason.
+  Never claim a passing UI/build gate from an unavailable report, and never start Docker or Colima.
+  {% endif %}
 
   ## Core Testing Philosophy
   - You ARE the system under test AND the tester
@@ -258,6 +273,17 @@ prompt: |
   readable prose/code, resize source anchors and repeated scroll gestures.
   Check follow-bottom separately and record bounded cache metrics honestly;
   agent render review does not substitute for user visual acceptance.
+
+  ### Session Status and Reader Controls
+  Verify the real TUI at 40, 80, 120 and 200 columns using isolated fixtures:
+  - Model stays visible; context is an estimate against an explicitly configured budget, or unknown.
+  - Resumed session-tree token/cost snapshots hydrate persisted values without double counting.
+  - Long turns refresh recorded usage without rebuilding/tokenizing context on every chunk.
+  - Unknown pricing stays unknown; partial coverage is labelled; a positive micro-cost never reads $0.00.
+  - The reader shows q to close and Ctrl+O to focus when needed, including truncated previews at 40 columns.
+  - Docker diagnostics remain optional, concise, bounded in time/output, and clean up child processes.
+  Use fake local commands/providers for diagnostic failures; never start Docker, Colima or change host configuration.
+  Agent visual reviews remain distinct from user acceptance.
 
   ### Code Analysis Testing
   1. Create sample code files in Python, JavaScript, and Go

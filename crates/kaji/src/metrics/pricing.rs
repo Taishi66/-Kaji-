@@ -16,6 +16,27 @@ use super::{CanonicalPrices, LedgerBucket, PriceBook};
 
 pub const MODEL_PRICING_KEY: &str = "model_pricing";
 
+pub(crate) fn resolve_usage_cost(
+    usage: &crate::providers::base::ProviderUsage,
+    provider: Option<&str>,
+    prices: &dyn PriceBook,
+) -> (Option<f64>, Option<crate::providers::base::CostSource>) {
+    use crate::providers::base::CostSource;
+    if let Some(cost) = usage.cost {
+        return (
+            Some(cost),
+            Some(usage.cost_source.unwrap_or(CostSource::ProviderReported)),
+        );
+    }
+    match prices
+        .pricing(provider, Some(&usage.model))
+        .and_then(|pricing| pricing.estimate_cost(&usage.usage))
+    {
+        Some(cost) => (Some(cost), Some(CostSource::Estimated)),
+        None => (None, None),
+    }
+}
+
 /// Tarifs de la config, indexés sur le nom de modèle.
 ///
 /// Une entrée n'est retenue que si elle porte **à la fois** `input` et
@@ -110,6 +131,42 @@ pub fn estimate_bucket_cost(pricing: &Pricing, bucket: &LedgerBucket) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_usage_preserves_unknown_zero_and_micro_costs() {
+        use crate::providers::base::{CostSource, ProviderUsage, Usage};
+        let prices = ConfiguredPrices::new(overrides(&[
+            ("micro", pricing(Some(1.0), Some(1.0), None)),
+            ("zero", pricing(Some(0.0), Some(0.0), None)),
+        ]));
+        let usage =
+            |model: &str| ProviderUsage::new(model.into(), Usage::new(Some(1), Some(1), None));
+        let estimated = usage("unknown").with_cost(0.01, CostSource::Estimated);
+        assert_eq!(
+            resolve_usage_cost(&estimated, None, &prices),
+            (Some(0.01), Some(CostSource::Estimated))
+        );
+        assert_eq!(
+            resolve_usage_cost(&usage("unknown"), Some("custom"), &prices),
+            (None, None)
+        );
+        assert_eq!(
+            resolve_usage_cost(&usage("zero"), Some("custom"), &prices),
+            (Some(0.0), Some(CostSource::Estimated))
+        );
+        assert_eq!(
+            resolve_usage_cost(&usage("micro"), Some("custom"), &prices),
+            (Some(0.000002), Some(CostSource::Estimated))
+        );
+        assert_eq!(
+            resolve_usage_cost(
+                &usage("unknown").with_cost(0.0, CostSource::ProviderReported),
+                None,
+                &prices
+            ),
+            (Some(0.0), Some(CostSource::ProviderReported))
+        );
+    }
+
     use crate::config::Config;
     use crate::metrics::{fold_buckets, ConfiguredPrices, LedgerBucket, PriceBook};
     use std::collections::HashMap;

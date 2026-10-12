@@ -184,6 +184,9 @@ pub struct SessionInsights {
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionUsageTotals {
+    pub priced_entries: u64,
+    pub unpriced_entries: u64,
+    pub coverage_unknown: bool,
     pub accumulated_usage: Usage,
     pub accumulated_cost: Option<f64>,
 }
@@ -2679,6 +2682,9 @@ impl SessionStorage {
                 Option<i64>,
                 Option<i64>,
                 Option<f64>,
+                i64,
+                i64,
+                i64,
             ),
         >(
             r#"
@@ -2691,7 +2697,10 @@ impl SessionStorage {
                 s.accumulated_input_tokens, s.accumulated_output_tokens, s.accumulated_total_tokens,
                 s.accumulated_cache_read_tokens, s.accumulated_cache_write_tokens, s.accumulated_cost,
                 SUM(u.input_tokens), SUM(u.output_tokens), SUM(u.total_tokens),
-                SUM(u.cache_read_tokens), SUM(u.cache_write_tokens), SUM(u.cost)
+                SUM(u.cache_read_tokens), SUM(u.cache_write_tokens), SUM(u.cost),
+                COUNT(CASE WHEN u.cost IS NOT NULL THEN u.id END),
+                COUNT(CASE WHEN u.cost IS NULL THEN u.id END),
+                COUNT(CASE WHEN u.cost_source = 'carried_forward' THEN u.id END)
             FROM sessions s
             LEFT JOIN usage_ledger u ON u.session_id = s.id
             WHERE s.id IN (SELECT id FROM tree)
@@ -2702,6 +2711,9 @@ impl SessionStorage {
         .fetch_all(pool)
         .await?;
 
+        let mut priced_entries = 0u64;
+        let mut unpriced_entries = 0u64;
+        let mut coverage_unknown = false;
         let mut input = 0i64;
         let mut output = 0i64;
         let mut total = 0i64;
@@ -2726,7 +2738,20 @@ impl SessionStorage {
                 l_cr,
                 l_cw,
                 l_cost,
+                priced,
+                unpriced,
+                carried_forward,
             ) = row;
+            priced_entries += priced as u64;
+            unpriced_entries += unpriced as u64;
+            coverage_unknown |= (priced + unpriced == 0 && acc_cost.is_some())
+                || carried_forward > 0
+                || acc_in.unwrap_or(0) > l_in.unwrap_or(0)
+                || acc_out.unwrap_or(0) > l_out.unwrap_or(0)
+                || acc_total.unwrap_or(0) > l_total.unwrap_or(0)
+                || acc_cr.unwrap_or(0) > l_cr.unwrap_or(0)
+                || acc_cw.unwrap_or(0) > l_cw.unwrap_or(0)
+                || acc_cost.unwrap_or(0.0) > l_cost.unwrap_or(0.0) + 1e-9;
             input += larger(acc_in, l_in);
             output += larger(acc_out, l_out);
             total += larger(acc_total, l_total);
@@ -2740,6 +2765,9 @@ impl SessionStorage {
 
         let opt = |v: i64| Some(i32::try_from(v).unwrap_or(i32::MAX));
         Ok(SessionUsageTotals {
+            priced_entries,
+            unpriced_entries,
+            coverage_unknown,
             accumulated_usage: Usage::new(opt(input), opt(output), opt(total))
                 .with_cache_tokens(opt(cache_read), opt(cache_write)),
             accumulated_cost: cost,
@@ -5289,6 +5317,120 @@ mod tests {
         insert_usage_ledger_row(&mut tx, session_id, None, usage).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn usage_coverage_counts_unknown_and_zero_cost_tree_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let parent = new_session(&sm).await;
+        let child = new_session(&sm).await;
+        sm.update(&child)
+            .parent_session_id(Some(parent.clone()))
+            .apply()
+            .await
+            .unwrap();
+        let empty = sm.get_session_usage_totals(&parent).await.unwrap();
+        assert_eq!(
+            (
+                empty.priced_entries,
+                empty.unpriced_entries,
+                empty.coverage_unknown
+            ),
+            (0, 0, false)
+        );
+        seed_ledger(&sm, &parent, &message_usage(100, 20, 0.0, false))
+            .await
+            .unwrap();
+        let mut unknown = message_usage(40, 8, 0.0, false);
+        unknown.cost = None;
+        unknown.cost_source = None;
+        seed_ledger(&sm, &child, &unknown).await.unwrap();
+        let totals = sm.get_session_usage_totals(&parent).await.unwrap();
+        assert_eq!(
+            (
+                totals.priced_entries,
+                totals.unpriced_entries,
+                totals.coverage_unknown
+            ),
+            (1, 1, false)
+        );
+        assert_eq!(totals.accumulated_cost, Some(0.0));
+        sm.update(&child)
+            .accumulated_usage(Usage::new(Some(400), Some(80), Some(480)))
+            .accumulated_cost(Some(0.2))
+            .apply()
+            .await
+            .unwrap();
+        assert!(
+            sm.get_session_usage_totals(&parent)
+                .await
+                .unwrap()
+                .coverage_unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_coverage_reconciled_historical_row_stays_unknown() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let session = new_session(&sm).await;
+        seed_ledger(&sm, &session, &message_usage(100, 20, 0.1, false))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE usage_ledger SET cost_source = 'carried_forward' WHERE session_id = ?")
+            .bind(&session)
+            .execute(sm.storage().pool().await.unwrap())
+            .await
+            .unwrap();
+        sm.update(&session)
+            .accumulated_usage(Usage::new(Some(100), Some(20), Some(120)))
+            .accumulated_cost(Some(0.1))
+            .apply()
+            .await
+            .unwrap();
+        let totals = sm.get_session_usage_totals(&session).await.unwrap();
+        assert_eq!(
+            (
+                totals.priced_entries,
+                totals.unpriced_entries,
+                totals.coverage_unknown
+            ),
+            (1, 0, true)
+        );
+        assert_eq!(totals.accumulated_cost, Some(0.1));
+    }
+
+    #[tokio::test]
+    async fn usage_coverage_legacy_fallback_is_unknown() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let session = new_session(&sm).await;
+        sm.update(&session)
+            .accumulated_usage(Usage::new(Some(100), Some(20), Some(120)))
+            .accumulated_cost(Some(0.1))
+            .apply()
+            .await
+            .unwrap();
+        let totals = sm.get_session_usage_totals(&session).await.unwrap();
+        assert_eq!(
+            (
+                totals.priced_entries,
+                totals.unpriced_entries,
+                totals.coverage_unknown
+            ),
+            (0, 0, true)
+        );
+        assert_eq!(totals.accumulated_cost, Some(0.1));
+        let zero = new_session(&sm).await;
+        sm.update(&zero)
+            .accumulated_cost(Some(0.0))
+            .apply()
+            .await
+            .unwrap();
+        let totals = sm.get_session_usage_totals(&zero).await.unwrap();
+        assert!(totals.coverage_unknown);
+        assert_eq!(totals.accumulated_cost, Some(0.0));
     }
 
     #[tokio::test]
