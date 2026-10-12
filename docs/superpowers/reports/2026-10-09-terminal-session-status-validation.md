@@ -1,6 +1,6 @@
 # Terminal session status validation
 
-Status: implementation in progress; publication gates pending.
+Status: lean CLI gates and agent terminal run passed 2026-10-12; recipe, default-feature build and user visual acceptance pending.
 Baseline: `40e79dc92b11ab8c05faa037ae738efa50af7253`.
 
 ## Scope and contracts
@@ -45,10 +45,33 @@ widths, preserving existing keyboard behavior.
 - Repeat parallel usage gate: 34 passed, zero failed, 1.48 seconds, including
   compaction; root relay session39175 exit0. The initial failure did not recur;
   its cause has not been established.
-- UI tests, strict CLI lint, isolated debug build, terminal widths/themes and
-  updated recipe: pending.
-- Exact published-source gate and visual review: pending. Agent review does not
-  constitute user visual acceptance.
+- 2026-10-12, commit `ee90e4000`, lean features
+  (`--no-default-features --features tui,rustls-tls,system-keyring,update`),
+  compiler cache wrapper disabled:
+  - CLI all-target check: passed.
+  - CLI library tests: 1,170 passed, zero failed, five ignored
+    (`capture_session_status_buffers` is ignored on purpose).
+  - Strict CLI all-target clippy: passed after merging two identical style
+    branches in `statusbar::render_telemetry`.
+  - Debug build: passed; `kaji --version` reports 1.45.0.
+- 2026-10-12, agent-driven terminal run of that debug build in tmux, isolated
+  `KAJI_PATH_ROOT`, keyring disabled, placeholder provider key, no inference:
+  - 200, 120 and 80 columns: status line reads
+    `deepseek-v4.1-flash · ctx ≈10k/? · session tokens 0↑ 0↓ · cost ?`.
+  - 40 columns: `deepseek-v4.1-fl… · ctx≈10k/? tok0↑0↓ $?`; model, context,
+    tokens and cost all remain.
+  - Welcome shows `Docker unavailable · check Colima · /docker details`;
+    `/docker details` prints the daemon error on request. Docker was not started.
+  - Reader at 40 columns: focused footer `q close · Esc close · j/k scroll`;
+    unfocused footer `Ctrl+O→q close`; `q` closes it.
+- Not covered by that run: resumed-session hydration and long-turn refresh
+  (both need real inference), light/dark theme comparison, the recipe run.
+- Default-feature check fails in this environment while building the vendored
+  `cpp-httplib` C++ dependency (OpenSSL `X509_get_subject_name` error); the
+  cause is not established and kaji sources were not reached.
+- Core `kaji` tests and clippy were not rerun on 2026-10-12.
+- Exact published-source gate, recipe run and user visual review: pending.
+  Agent review does not constitute user visual acceptance.
 
 Validation uses a separate CoW cache `/tmp/kaji-status-validation-2026-10-09`.
 The user-tested previous executable remains untouched, SHA256

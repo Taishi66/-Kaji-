@@ -272,8 +272,12 @@ Unrecorded ancillary inference remains outside this accounting scope.
 Core targeted usage checks pass sequentially and on a repeat parallel run
 (34 tests each). The initial parallel compaction assertion failure did not recur;
 its cause has not been established. Pricing tests pass (11), and strict core
-all-target clippy passes. Strict CLI clippy, exact published-source CLI tests,
-the new debug build, terminal captures and updated recipe are pending. Docker diagnostics and
-reader close/focus discoverability are part of the same bounded UI lot; this
-work does not start Docker. User visual acceptance remains open.
+all-target clippy passes. On 2026-10-12 the lean CLI check, library tests
+(1,170 passed, zero failed, five ignored), strict clippy and debug build pass on
+`ee90e4000`, and an agent-driven tmux run confirmed the status line at 40 to 200
+columns, the Docker summary and the reader controls. The default-feature build
+fails here on the vendored `cpp-httplib` dependency; cause not established.
+Resume hydration with real inference, the recipe run and exact published-source
+tests are pending. This work does not start Docker. User visual acceptance
+remains open.
 [Session status evidence](docs/superpowers/reports/2026-10-09-terminal-session-status-validation.md).
