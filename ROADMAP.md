@@ -278,6 +278,7 @@ all-target clippy passes. On 2026-10-12 the lean CLI check, library tests
 columns, the Docker summary and the reader controls. The default-feature build
 fails here on the vendored `cpp-httplib` dependency; cause not established.
 A local `ollama / qwen3.5:4b` run confirmed that resumed totals are not doubled
-and match `/cost`. The recipe run and exact published-source tests are pending. This work does not start Docker. User visual acceptance
+and match `/cost`. The quick self-test recipe passes on that build (62 passed,
+zero failed, seven skipped, one not run). Exact published-source tests are pending. This work does not start Docker. User visual acceptance
 remains open.
 [Session status evidence](docs/superpowers/reports/2026-10-09-terminal-session-status-validation.md).

@@ -1,6 +1,6 @@
 # Terminal session status validation
 
-Status: lean CLI gates and agent terminal run passed 2026-10-12; recipe, default-feature build and user visual acceptance pending.
+Status: lean CLI gates and agent terminal run and quick recipe passed 2026-10-12; default-feature build and user visual acceptance pending.
 Baseline: `40e79dc92b11ab8c05faa037ae738efa50af7253`.
 
 ## Scope and contracts
@@ -74,13 +74,26 @@ widths, preserving existing keyboard behavior.
   - The context estimate stayed at `≈10k/?` while each turn recorded about 2k
     input tokens. The gap between the estimate and the provider-reported input
     on this local model is not explained.
+- 2026-10-12, `kaji run --recipe kaji-self-test.yaml`, `test_depth=quick`, all
+  phases, debug build first in `PATH`, isolated root, `ollama /
+  deepseek-v4.1-flash:cloud` through the local daemon: exit 0, 62 passed, zero
+  failed, seven skipped, one not run, about seven minutes.
+  - Skipped: local vision (no model), thinking preservation (no Cerebras key),
+    Azure AI Foundry, the `shell_environment_security` cargo test (quick mode
+    never compiles) and others listed in `kajiselftest/detailed_report.md`.
+    Not run: undo, which has no CLI surface.
+  - Issues the run reported, not investigated here: delegate "turns taken"
+    counts stream events (435 for a ten-turn task); a cancelled delegate
+    returns no partial output; in-message sync delegates run concurrently.
+  - The `write` tool followed `./kajiselftest/../../escape_probe.txt` outside
+    the working directory in auto mode; the probe file was deleted.
 - Not covered: refresh during a long streamed turn, light/dark theme
-  comparison, the recipe run, any priced provider.
+  comparison, any priced provider.
 - Default-feature check fails in this environment while building the vendored
   `cpp-httplib` C++ dependency (OpenSSL `X509_get_subject_name` error); the
   cause is not established and kaji sources were not reached.
 - Core `kaji` tests and clippy were not rerun on 2026-10-12.
-- Exact published-source gate, recipe run and user visual review: pending.
+- Exact published-source gate and user visual review: pending.
   Agent review does not constitute user visual acceptance.
 
 Validation uses a separate CoW cache `/tmp/kaji-status-validation-2026-10-09`.
